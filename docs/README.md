@@ -31,6 +31,7 @@ function by function into Rust (`crates/engine*`), started on the player's own e
 | [MODS.md](MODS.md) | Plugins, archives and load order as the game handles them |
 | [PERFORMANCE.md](PERFORMANCE.md) | Frame-time measurements |
 | [FIXES.md](FIXES.md) | The fixes preset: what differs from the original by default, how to pin vanilla |
+| [plans/roadmap-big-items.md](plans/roadmap-big-items.md) | Proposal: the roadmap's big items assessed for the Lhomer/nv-rs fork, and a first Linux milestone |
 | [VR.md](VR.md) | VR plans |
 
 ## Method and research
