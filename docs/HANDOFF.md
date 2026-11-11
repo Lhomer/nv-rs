@@ -7,6 +7,12 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-11 (mouse look as the original's: `NV_MOUSE_LOOK`)
+
+- **Reported:** the preview's notes say "hold right mouse to look". No such gate was found in the code: the real window's raw mouse already fed the game's DirectInput mouse with no button held, the right button already reached the game as button 1, and the translated look (`009445b0` mode 0 through `00a239e0`) has no button gate. What differed from the original was when the cursor was taken: only on `WA_ACTIVE` or a click in the client area, so a window brought to the front by its title bar (`WA_CLICKACTIVE`) or one that could not take the focus at start-up kept a free, visible cursor until a click (a right click, say), and motion reached the game during a move of the window.
+- **Changed** (`crates/engine-platform/src/mouse_look.rs`, `d3d9real.rs`'s window procedure): the original's way is the default (DirectInput exclusive and foreground): the cursor is also taken on `WM_EXITSIZEMOVE` with the window in front and on the first raw movement once the window is in front with no button down; movement during a move or size of the window doesn't reach the game; a minimised window lets go. `NV_MOUSE_LOOK=hold` is a debugging aid (free cursor, look only while the right button is held, which then doesn't reach the game). Documented in docs/PLAYTESTING.md and the READ ME's new Controls section.
+- **Tested:** the policy's unit tests (Linux and CI); the window procedure compiles and passes clippy for Windows (`--target x86_64-pc-windows-gnu`). **Not checked in game** (no Windows here): start-up capture, title-bar activation, Alt+Tab out and back, Esc / Pip-Boy / dialogue / console with the game's own cursor, right button aiming. **Next action:** that check on the play PC.
+
 ### Claude, 2026-11-08 (render thread, NV_D3D9 backends, the device state apart from the kernel)
 
 - **The call stream** (`crates/d3d9-stream`, #339): every Direct3D 9 call the platform model forwards is a command (`Cmd`) for a `Backend`, carried out on the calling thread or on a render thread of its own (`Stream::threaded`, at most one frame in flight). `NV_D3D9_RECORD` writes it to a file, `wire::replay` plays it into any backend, `NV_D3D9_STREAM_CHECK` hashes it on both sides. Design and measurements: `build43-scratch/measure/render-thread/DESIGN.md`.

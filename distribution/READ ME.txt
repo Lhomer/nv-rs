@@ -59,6 +59,20 @@ instead, choose Window under Display mode in Settings.cmd. That is bBorderless=0
 the window is borderless.
 
 
+Controls
+--------
+Keyboard and mouse, as in the original. The mouse always turns the view: no button needs to be held.
+The right mouse button is the game's own (aim with a weapon out, block), and every key can be
+changed in the game's Controls menu. While the game's window is in front, the mouse pointer is
+hidden and kept in it; the game shows its own pointer in its menus (Esc, the Pip-Boy, dialogue).
+Alt+Tab, or another window coming to the front, lets go of the mouse; clicking in the game's window,
+or moving the mouse once it is back in front, takes it again.
+
+For testing only: with the variable NV_MOUSE_LOOK=hold set before Play.exe starts (in a Command
+Prompt: set NV_MOUSE_LOOK=hold, then Play.exe), the mouse pointer stays free and the view turns only
+while the right mouse button is held, which then doesn't aim. This is not how the original plays.
+
+
 Bug fixes
 ---------
 Bug fixes are on by default. With them, the frame rate isn't held to the original's limit, the game's

@@ -103,6 +103,7 @@ pub mod ini;
 pub mod library;
 pub mod mixer;
 pub mod mmio;
+pub mod mouse_look;
 pub mod nls;
 pub mod nvapi;
 pub mod process;

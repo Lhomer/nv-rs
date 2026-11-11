@@ -38,6 +38,7 @@
 //! game's x87 precision switch is modelled (`crate::direct3d_device_created`,
 //! from the game's own flags), and the backend's thread's floating-point state is not the game's.
 
+use crate::mouse_look::MouseLook;
 use crate::Engine;
 use d3d9_stream::{Cmd, Data, Reply, Stream};
 use std::collections::{HashMap, HashSet};
@@ -378,25 +379,44 @@ extern "system" fn window_procedure(
         crate::run_exit_hooks();
         crate::end_process(0);
     }
+    let look = MouseLook::asked();
     match message {
         WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP
         | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_XBUTTONDOWN
         | WM_XBUTTONUP | WM_MOUSEWHEEL => {
-            if matches!(message, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) {
-                hold_cursor(window);
+            if let Some((button, down)) = mouse_button_of(message, wparam) {
+                if down && look.takes_on_click(button) {
+                    hold_cursor(window);
+                } else if !down && look.lets_go_on_release(button) {
+                    let_go_of_cursor();
+                }
             }
             window_input(window, message, wparam, lparam)
         }
-        WM_INPUT => raw_mouse(lparam),
-        // While the window is active the cursor stays in it, hidden (the game's DirectInput
-        // mouse is exclusive and foreground: Windows hides and holds the cursor for it). It is
-        // taken on a keyboard activation (Alt+Tab, WA_ACTIVE) or a click in the client area
-        // (above); a click that activates the window elsewhere (WA_CLICKACTIVE, e.g. on the
-        // title bar) leaves it free, and so does moving or sizing the window: holding it in the
-        // client area there pulled the cursor below the title bar, the move loop followed it,
-        // and the window slid down the screen (playtest, 2026-10-30).
-        WM_ACTIVATE if wparam.0 & 0xffff == WA_ACTIVE as usize => hold_cursor(window),
-        WM_ENTERSIZEMOVE => let_go_of_cursor(),
+        WM_INPUT => raw_mouse(window, lparam),
+        // While the window is in front the cursor stays in it, hidden, and every movement of the
+        // mouse turns the view (the game's DirectInput mouse is exclusive and foreground: Windows
+        // hides and holds the cursor for it, menus or not; the game draws its own cursor in its
+        // menus: `super::mouse_look`). It is taken on a keyboard activation (Alt+Tab, WA_ACTIVE),
+        // a click in the client area (above), the end of a move or size with the window in front,
+        // and the first movement once the window is in front with no button down
+        // ([`raw_mouse`]: a click on the title bar, WA_CLICKACTIVE, or a start that could not take
+        // the focus). Moving or sizing the window leaves it free: holding it in the client area
+        // there pulled the cursor below the title bar, the move loop followed it, and the window
+        // slid down the screen (playtest, 2026-10-30).
+        WM_ACTIVATE if wparam.0 & 0xffff == WA_ACTIVE as usize && look.takes_on_activation() => {
+            hold_cursor(window)
+        }
+        WM_ENTERSIZEMOVE => {
+            MOVING.store(true, std::sync::atomic::Ordering::Relaxed);
+            let_go_of_cursor();
+        }
+        WM_EXITSIZEMOVE => {
+            MOVING.store(false, std::sync::atomic::Ordering::Relaxed);
+            if look.takes_on_activation() && in_front(window) {
+                hold_cursor(window);
+            }
+        }
         WM_SIZE | WM_MOVE if cursor_held() => hold_cursor(window),
         WM_SETCURSOR if cursor_held() && lparam.0 as u32 & 0xffff == HTCLIENT => {
             unsafe { SetCursor(None) };
@@ -478,11 +498,60 @@ fn cursor_held() -> bool {
     CURSOR_HELD.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether Windows is moving or sizing the game's window (between `WM_ENTERSIZEMOVE` and
+/// `WM_EXITSIZEMOVE`): the cursor stays free and its movement doesn't reach the game.
+static MOVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn moving() -> bool {
+    MOVING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether the window `window` belongs to (its top-level window) is the one in front.
+fn in_front(window: HWND) -> bool {
+    unsafe {
+        let root = GetAncestor(window, GA_ROOT);
+        !root.is_invalid() && GetForegroundWindow() == root
+    }
+}
+
+/// Whether any of the mouse's buttons is down (as the mouse has them, swapped or not).
+fn any_mouse_button_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2,
+    };
+    [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2]
+        .into_iter()
+        .any(|key| unsafe { GetAsyncKeyState(i32::from(key.0)) } as u16 & 0x8000 != 0)
+}
+
+/// A mouse button message's DirectInput button (left, right, middle, X1, X2) and whether it went
+/// down; `None` for other messages.
+fn mouse_button_of(message: u32, wparam: WPARAM) -> Option<(usize, bool)> {
+    let x = if (wparam.0 >> 16) & 0xffff == 2 { 4 } else { 3 };
+    match message {
+        WM_LBUTTONDOWN => Some((0, true)),
+        WM_LBUTTONUP => Some((0, false)),
+        WM_RBUTTONDOWN => Some((1, true)),
+        WM_RBUTTONUP => Some((1, false)),
+        WM_MBUTTONDOWN => Some((2, true)),
+        WM_MBUTTONUP => Some((2, false)),
+        WM_XBUTTONDOWN => Some((x, true)),
+        WM_XBUTTONUP => Some((x, false)),
+        _ => None,
+    }
+}
+
 /// Holds the cursor in the window's client area and hides it there, as Windows does for a
 /// program whose DirectInput mouse is exclusive and in the foreground (the game's:
-/// `SetCooperativeLevel` with `DISCL_EXCLUSIVE | DISCL_FOREGROUND`).
+/// `SetCooperativeLevel` with `DISCL_EXCLUSIVE | DISCL_FOREGROUND`). A minimised window has no
+/// client area to hold it in: the cursor is let go of, and taken again when it is restored and
+/// activated or moved over.
 fn hold_cursor(window: HWND) {
     unsafe {
+        if IsIconic(GetAncestor(window, GA_ROOT)).as_bool() {
+            let_go_of_cursor();
+            return;
+        }
         let mut rect = RECT::default();
         if GetClientRect(window, &mut rect).is_err() {
             return;
@@ -536,8 +605,11 @@ fn register_raw_mouse(window: HWND) {
         unsafe { RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32) };
 }
 
-/// A raw input message: a mouse's relative motion is added to the frame's.
-fn raw_mouse(lparam: LPARAM) {
+/// A raw input message (only while the window is in front: the device is registered without
+/// `RIDEV_INPUTSINK`): a mouse's relative motion is added to the frame's ([`MouseLook`] decides
+/// whether it reaches the game), and with the original's way the first one takes the cursor if
+/// the window has not taken it yet (`MouseLook::takes_on_motion`).
+fn raw_mouse(window: HWND, lparam: LPARAM) {
     let mut raw = RAWINPUT::default();
     let mut size = std::mem::size_of::<RAWINPUT>() as u32;
     let read = unsafe {
@@ -554,6 +626,16 @@ fn raw_mouse(lparam: LPARAM) {
     }
     let mouse = unsafe { raw.data.mouse };
     if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 {
+        return;
+    }
+    let look = MouseLook::asked();
+    // Held already (nearly every message): no need to ask Windows about the buttons and the front.
+    if !cursor_held()
+        && look.takes_on_motion(false, moving(), any_mouse_button_down(), in_front(window))
+    {
+        hold_cursor(window);
+    }
+    if !look.motion_reaches_game(cursor_held(), moving()) {
         return;
     }
     if let Ok(mut i) = input().lock() {
@@ -615,7 +697,12 @@ fn dik(lparam: isize) -> Option<u8> {
 /// [`raw_mouse`]).
 fn window_input(_window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) {
     let Ok(mut i) = input().lock() else { return };
-    let button = |i: &mut Input, b: usize, down: bool| i.buttons[b] = down;
+    let look = MouseLook::asked();
+    let button = |i: &mut Input, b: usize, down: bool| {
+        if look.button_reaches_game(b) {
+            i.buttons[b] = down;
+        }
+    };
     match message {
         WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
             // F12 (the first press, not its repeats): a report for the player to send
