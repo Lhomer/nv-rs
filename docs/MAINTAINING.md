@@ -28,10 +28,13 @@ decides on a release: agents build and test locally, and tag, upload and post no
    `./scripts/package-playtest.ps1 -Version YYYY-MM-DD.N -Game '<your FalloutNV.exe>'`.
    It builds with the lockfile, a static C runtime and no build paths in the programs, stages only
    the list below, runs `scripts/package-check` over it and makes the ZIP and its `.sha256`. The 32-bit
-   tools need a toolchain with `i686-pc-windows-msvc` (`-Toolchain32`, default `stable`). `-Game` is required: the
-   check that none of the game's bytes are in the programs fails the package. The script refuses a
+   tools need a toolchain with `i686-pc-windows-msvc` (`-Toolchain32`, default `stable`). `-Game` is required for a
+   release: the check that none of the game's bytes are in the programs fails the package. The script refuses a
    release ZIP unless HEAD is on origin (BUILD.txt links to it); `-TestBuild` makes a test package
-   instead, marked "test build, not for release" in BUILD.txt and in its name.
+   instead, marked "test build, not for release" in BUILD.txt and in its name. Only a test package may leave
+   `-Game` out (that check is then skipped, and BUILD.txt says so): the `Play package` workflow
+   (`.github/workflows/play-package.yml`) builds one that way on every push to main or a `claude/` branch
+   (or by hand), as the artifact `nvrs-play-<branch>-<short sha>`. It is for trying a branch, never a release.
 3. Test the extracted ZIP from a fresh folder, a path with spaces and another drive: first start,
    Save or New Game, a couple of minutes in the world, no game folder, a wrong exe, tables deleted
    (`docs/PREVIEW_TESTERS.md` is the checklist for other PCs). Verify SHA256 and BUILD.txt.

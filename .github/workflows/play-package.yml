@@ -1,0 +1,72 @@
+name: Play package
+# Builds the Windows play package (Play.exe, app\FalloutNV.exe = nv-viewer, the tools, the READ ME)
+# with scripts/package-playtest.ps1 and uploads it as the artifact nvrs-play-<branch>-<short sha>.
+# No game files exist here, so the package is a test build (-TestBuild) made without -Game: the
+# script skips package-check's scan for the game program's bytes and BUILD.txt says so. A release
+# package is still made by the maintainer with -Game (docs/MAINTAINING.md).
+on:
+  push:
+    branches: [main, 'claude/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  # A newer push to the same branch cancels the older package build.
+  group: play-package-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  package:
+    name: package
+    runs-on: windows-latest
+    timeout-minutes: 240
+    env:
+      CARGO_INCREMENTAL: 0
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the pinned Rust tools (rust-toolchain.toml) and the 32-bit target
+        run: |
+          rustup toolchain install
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The pinned toolchain builds the two 32-bit tools too (-Toolchain32 below).
+          $toolchain = (rustup show active-toolchain) -split ' ' | Select-Object -First 1
+          rustup target add i686-pc-windows-msvc --toolchain $toolchain
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "TOOLCHAIN=$toolchain" >> $env:GITHUB_ENV
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: '. -> target'
+          shared-key: play-package
+          # The package's build (release, static C runtime) differs from CI's: its own cache.
+          cache-all-crates: true
+      - name: Name the build
+        run: |
+          $branch = '${{ github.ref_name }}' -replace '[^A-Za-z0-9._-]', '-'
+          $short = '${{ github.sha }}'.Substring(0, 7)
+          "ARTIFACT=nvrs-play-$branch-$short" >> $env:GITHUB_ENV
+          "PACKAGE_VERSION=ci-$branch-$short" >> $env:GITHUB_ENV
+      - name: Build the package (scripts/package-playtest.ps1 -TestBuild, no game data)
+        id: package
+        run: |
+          ./scripts/package-playtest.ps1 -Version $env:PACKAGE_VERSION -TestBuild -Toolchain32 $env:TOOLCHAIN | Format-List
+          # The script's staged folder (the ZIP's contents): dist/nv-rs-preview-<version>-windows-x64-test.
+          "STAGE=dist/nv-rs-preview-$env:PACKAGE_VERSION-windows-x64-test" >> $env:GITHUB_ENV
+      - name: Upload the package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ env.STAGE }}
+          if-no-files-found: error
+      # If packaging stops after the programs were built (a check, a copy), the programs still come
+      # out, under the same name, so a build can be tried.
+      - name: Upload the programs alone (the package step failed)
+        if: ${{ failure() && steps.package.conclusion == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: |
+            target/release/Play.exe
+            target/release/nv-viewer.exe
+          if-no-files-found: ignore

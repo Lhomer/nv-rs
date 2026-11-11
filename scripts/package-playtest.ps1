@@ -4,6 +4,8 @@
 #
 #   ./scripts/package-playtest.ps1 -Version 2026-11-06.1
 #       -Game 'path of the game's FalloutNV.exe, only read: the check that no data of it is in the programs'
+#                        (may be left out only with -TestBuild, e.g. on a CI machine without the game:
+#                        that check is then skipped and BUILD.txt says so)
 #       [-TestBuild]     a package for testing, from a commit that is not on GitHub (yet): its BUILD.txt
 #                        says "test build, not for release" and its name ends in -test. Without this
 #                        flag the script refuses unless HEAD is on origin's main (BUILD.txt links to it).
@@ -15,7 +17,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9._-]+$')][string]$Version,
-    [Parameter(Mandatory)][string]$Game,
+    [string]$Game,
     [switch]$TestBuild,
     [switch]$UseBuilt,
     [string]$Target,
@@ -32,7 +34,8 @@ try {
     if ($LASTEXITCODE) { throw 'Package from a committed Git checkout.' }
     $dirty = git status --porcelain --untracked-files=normal
     if ($dirty) { throw 'Commit or remove untracked changes before packaging.' }
-    if (!(Test-Path -LiteralPath $Game -PathType Leaf)) { throw "-Game must be the game's FalloutNV.exe, and this file is not there: $Game" }
+    if (!$Game -and !$TestBuild) { throw "-Game (the game's FalloutNV.exe) is required for a release package; only -TestBuild may leave it out." }
+    if ($Game -and !(Test-Path -LiteralPath $Game -PathType Leaf)) { throw "-Game must be the game's FalloutNV.exe, and this file is not there: $Game" }
     # BUILD.txt links to the commit, so a release package is only made from one GitHub has.
     if (!$TestBuild) {
         git fetch --quiet origin
@@ -108,7 +111,9 @@ try {
     }
     $sha = (Get-FileHash -LiteralPath (Join-Path $stage 'app/FalloutNV.exe') -Algorithm SHA256).Hash
     $source = if ($TestBuild) { 'test build, not for release' } else { "Source: https://github.com/slaterain/nv-rs/tree/$commit" }
-    @("nv-rs Windows preview $Version", "Source commit: $commit", "app\FalloutNV.exe SHA256: $sha", 'Platform: Windows x64', $source) |
+    $buildLines = @("nv-rs Windows preview $Version", "Source commit: $commit", "app\FalloutNV.exe SHA256: $sha", 'Platform: Windows x64', $source)
+    if (!$Game) { $buildLines += 'Not checked for the game program''s bytes (built without FalloutNV.exe)' }
+    $buildLines |
         Set-Content -LiteralPath (Join-Path $stage 'BUILD.txt') -Encoding ascii
 
     # What must not be in it: the file types first, then the build machine's traces and game data.
@@ -122,7 +127,11 @@ try {
     $checkArguments = @($stage) + ($needles | ForEach-Object { '--needle'; $_ }) + ($programNeedles | ForEach-Object { '--program-needle'; $_ })
     # Required: no run of the game's bytes longer than the C runtime's own tables (the longest seen
     # is about 2 KB) in any program.
-    $checkArguments += @('--game', $Game, '--max-run', '4096')
+    if ($Game) {
+        $checkArguments += @('--game', $Game, '--max-run', '4096')
+    } else {
+        Write-Warning 'No -Game given (test build): the check for the game program''s bytes in the programs is skipped.'
+    }
     & (Join-Path $x64 'package-check.exe') @checkArguments
     if ($LASTEXITCODE) { throw 'package-check found something that must not be in the package.' }
 
