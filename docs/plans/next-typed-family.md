@@ -368,7 +368,33 @@ reaches the typed code when the family is on.
 
 On `ec8ffe9` (upstream main), Linux x86-64, the pinned toolchain 1.99.1, without game data:
 
-RESULTS_PLACEHOLDER
+| Check (what CI runs) | Result here |
+| --- | --- |
+| `cargo fmt --all -- --check` | passed |
+| `cargo build --locked --workspace` (dev profile, with debug info) | passed, 3 min 35 s |
+| `cargo test --locked --manifest-path scripts/ledger/Cargo.toml` | passed, 22 tests |
+| `cargo test --locked --workspace --no-fail-fast`, run as CI does (`CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0`), `-j 2` | 110 test binaries: **56,388 passed, 6 failed**, 47 ignored, in 64 min |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings` (same settings, `-j 2`) | fails on Linux, in `engine-platform` only: 7 warnings in the library and 1 more in its tests, items and variables only the Windows paths use (`files.rs` 5, `d3dx.rs`, `d3d9resource.rs`, `d3d9device.rs`). Every other crate is clean (the warnings-allowed run finished in 6.5 min). |
+
+The six test failures, none in code these plans touch, are Linux-specific or a race (CI runs only on Windows):
+
+- `engine-core`, `cxx_exception::tests::a_stop_does_reach_the_panic_hook`: **flaky**. It passed 3 of 3 times alone
+  and failed 2 of 3 runs of the whole `engine-core` lib suite (`left: 2, right: 1`). Its counting panic hook can end up
+  chained on another counting hook when `static_init`'s test swaps the global hook and puts an older one back, so one
+  panic counts twice. A test race, not an engine bug.
+- `engine-platform`, three `files.rs` searches (`a_search_whose_folder_changed_since_it_began_stops`,
+  `a_wildcard_search_lists_then_runs_out`, `find_close_after_a_search_that_found_nothing_answers_false`): `FindFirstFileA`
+  stops with "file times are only provided on Windows" (`files.rs:730`, a `cfg(not(windows))` panic).
+- `engine-platform`, `a_read_only_open_reads_the_players_file_in_place`: opens `CARGO.TOML` expecting Windows'
+  case-insensitive lookup; Linux's file system is case-sensitive.
+- `nvse`, `commands::math::tests::the_results_match_the_real_game_bit_for_bit`: `tan` and `tanh` give other last bits
+  on Linux (`dTan90`: -2.2877334e7 against the real game's -2.2877332e7; `dTanh30` likewise): the commands call Rust's
+  `f32::tan`/`tanh`, which use the platform's maths library (the MSVC runtime on Windows, glibc here).
+
+Two notes for anyone repeating this on a 4-core, 15 GB Linux machine: four parallel rustc jobs ran out of memory on
+`engine-havok`'s test build (SIGKILL), so use `-j 2`; and the first build with debug info and incremental state used
+up the session's disk (about 30 GB free at the start), so set `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0` as
+Windows CI does.
 
 The plan itself was made from the repository only: `research/engine-map/frame.tsv` and `engine_map.tsv`,
 the translations' markers and bodies (call targets read by a throwaway script over the `Translated from`
