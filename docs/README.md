@@ -31,6 +31,7 @@ function by function into Rust (`crates/engine*`), started on the player's own e
 | [MODS.md](MODS.md) | Plugins, archives and load order as the game handles them |
 | [PERFORMANCE.md](PERFORMANCE.md) | Frame-time measurements |
 | [FIXES.md](FIXES.md) | The fixes preset: what differs from the original by default, how to pin vanilla |
+| [plans/next-typed-family.md](plans/next-typed-family.md) | Proposal: the next typed families, the step after the frame is shown |
 | [VR.md](VR.md) | VR plans |
 
 ## Method and research
