@@ -319,7 +319,7 @@ pub fn jobs(e: &Engine, watch: &mut Watch, dir: Option<&Path>, prefs: Option<&Pa
                 dir: None,
                 target: file.to_path_buf(),
                 temporary: file.with_extension("ini.part"),
-                bytes: bytes.clone(),
+                bytes: with_preferred(bytes, &lock_preferred()),
                 copied: None,
             },
             _ => continue,
@@ -342,6 +342,73 @@ pub fn jobs(e: &Engine, watch: &mut Watch, dir: Option<&Path>, prefs: Option<&Pa
         }
     }
     jobs
+}
+
+/// `FalloutPrefs.ini` lines chosen in play (`(section, key, value)`, the Settings menu's graphics
+/// rows: `crate::graphics_settings`), set in every copy of the settings file from then on
+/// ([`prefer`]). The game writes its file from its settings in memory, which keep the values the
+/// run started with (the run goes on at its own resolution), so without them its next write
+/// would put the old ones back.
+static PREFERRED: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new());
+
+fn lock_preferred() -> std::sync::MutexGuard<'static, Vec<(String, String, String)>> {
+    PREFERRED.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// `bytes` (the settings file) with the `preferred` lines set, every other byte as it was.
+pub fn with_preferred(bytes: &[u8], preferred: &[(String, String, String)]) -> Vec<u8> {
+    if preferred.is_empty() {
+        return bytes.to_vec();
+    }
+    let keys: Vec<(&str, &str, &str)> = preferred
+        .iter()
+        .map(|(s, k, v)| (s.as_str(), k.as_str(), v.as_str()))
+        .collect();
+    crate::game_ini::set_keys_in_bytes(bytes, &keys)
+}
+
+/// `keys` (`(section, key, value)`) into the run's `FalloutPrefs.ini` (`NV_PREFS_OUT`, the
+/// profile's): kept for every later copy of the game's file ([`PREFERRED`]), and the file written
+/// now, from the game's latest bytes (or, before the game wrote any, the file's own), by the
+/// copy-out's thread after the copies already handed to it. False when there is no such file
+/// (not a launcher's play run) or nothing to start from.
+pub fn prefer(e: &Engine, keys: &[(&str, &str, String)]) -> bool {
+    let Some(file) = prefs_file() else {
+        return false;
+    };
+    let mut preferred = lock_preferred();
+    for (section, key, value) in keys {
+        match preferred
+            .iter_mut()
+            .find(|(s, k, _)| s.eq_ignore_ascii_case(section) && k.eq_ignore_ascii_case(key))
+        {
+            Some(line) => line.2 = value.clone(),
+            None => preferred.push((section.to_string(), key.to_string(), value.clone())),
+        }
+    }
+    let disk = &engine_platform::state(&e.kernel.platform).disk;
+    let (key, bytes) = match disk.files.iter().find(|(key, _)| is_prefs(key)) {
+        Some((key, bytes)) => (key.clone(), bytes.clone()),
+        None => match std::fs::read(file) {
+            Ok(bytes) => (b"falloutprefs.ini".to_vec(), bytes),
+            Err(_) => return false,
+        },
+    };
+    let bytes = with_preferred(&bytes, &preferred);
+    drop(preferred);
+    STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    hand(
+        writer(),
+        Job::Write {
+            key,
+            dir: None,
+            target: file.to_path_buf(),
+            temporary: file.with_extension("ini.part"),
+            bytes,
+            copied: None,
+        },
+    );
+    true
 }
 
 /// Does `job`'s disk work: the log line when there is one (`Ok`), or the line saying why a
@@ -728,6 +795,35 @@ mod tests {
 
     /// The thread: jobs sent are done by the time [`flush`] answers, in the order sent (a save
     /// written and then removed is gone). What a run that ends right after a save relies on.
+    /// The lines chosen in play go into each copy of the game's settings file, every other byte
+    /// as the game wrote it; with none chosen the copy is the game's bytes.
+    #[test]
+    fn the_settings_chosen_in_play_go_into_every_copy() {
+        let game = b"[General]\r\nsA=\xe9\r\n[Display]\r\niSize W=1280\r\niSize H=720\r\niMultiSample=0\r\n";
+        assert_eq!(with_preferred(game, &[]), game.to_vec());
+        let preferred = [
+            (
+                "Display".to_string(),
+                "iSize W".to_string(),
+                "1920".to_string(),
+            ),
+            (
+                "Display".to_string(),
+                "iSize H".to_string(),
+                "1080".to_string(),
+            ),
+            (
+                "Display".to_string(),
+                "iMaxAnisotropy".to_string(),
+                "15".to_string(),
+            ),
+        ];
+        assert_eq!(
+            with_preferred(game, &preferred),
+            b"[General]\r\nsA=\xe9\r\n[Display]\r\niMaxAnisotropy=15\r\niSize W=1920\r\niSize H=1080\r\niMultiSample=0\r\n".to_vec()
+        );
+    }
+
     #[test]
     fn a_flush_waits_for_every_job_sent() {
         let dir = std::env::temp_dir().join(format!("nv-save-flush-{}", std::process::id()));

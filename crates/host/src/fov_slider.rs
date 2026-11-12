@@ -235,7 +235,7 @@ fn world_fov(e: &Engine) -> f32 {
 
 /// Makes the row and appends it to `pUserOptionsA`, as `CreateMenuElements` appends its own (a
 /// failed allocation appends nothing here: the original appends a null).
-fn add_row(e: &mut Engine) {
+pub fn add_row(e: &mut Engine) {
     let text = e.call(OPERATOR_NEW, &args![LABEL_SIZE]).u32();
     let block = e.call(OPERATOR_NEW, &args![USER_OPTION_SIZE]).u32();
     if text == 0 || block == 0 {

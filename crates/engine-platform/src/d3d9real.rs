@@ -489,6 +489,10 @@ extern "system" fn window_procedure(
     if message == WM_DISPLAYCHANGE {
         refit_borderless(window);
     }
+    if message == WM_WINDOW_MODE {
+        unsafe { restyle(window, wparam.0 != 0) };
+        return LRESULT(0);
+    }
     let look = MouseLook::asked();
     match message {
         WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP
@@ -1064,6 +1068,186 @@ fn refit_borderless(window: HWND) {
     }
 }
 
+/// The game's own top-level window and the child it draws in (the first of each made), the
+/// top-level window's styles as the game asked for them, and the rectangles the game last gave each
+/// (`CreateWindowExA`, then `SetWindowPos`, the borderless window's too): what the window takes
+/// again when the player switches to a window in play ([`switch_window_mode`]).
+static GAME_TOP: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static GAME_CHILD: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static GAME_TOP_STYLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static GAME_TOP_EX_STYLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static GAME_TOP_RECT: std::sync::Mutex<[i32; 4]> = std::sync::Mutex::new([0; 4]);
+static GAME_CHILD_RECT: std::sync::Mutex<[i32; 4]> = std::sync::Mutex::new([0; 4]);
+
+/// The message [`switch_window_mode`] posts to the game's top-level window (`WM_APP` + 0x4e5),
+/// `wparam` 1 for the borderless window, 0 for a window: done on the window thread
+/// ([`restyle`]), in its DPI awareness, as [`refit_borderless`] is.
+const WM_WINDOW_MODE: u32 = WM_APP + 0x4e5;
+
+/// `rect` (left, top, right, bottom) after a `SetWindowPos` to `moved` with `flags`: the position
+/// kept with `SWP_NOMOVE`, the size kept with `SWP_NOSIZE`.
+pub(crate) fn rect_after_move(rect: [i32; 4], moved: [i32; 4], flags: u32) -> [i32; 4] {
+    let (mut left, mut top) = (rect[0], rect[1]);
+    let (mut width, mut height) = (rect[2].wrapping_sub(rect[0]), rect[3].wrapping_sub(rect[1]));
+    if flags & SWP_NOMOVE.0 == 0 {
+        left = moved[0];
+        top = moved[1];
+    }
+    if flags & SWP_NOSIZE.0 == 0 {
+        width = moved[2].wrapping_sub(moved[0]);
+        height = moved[3].wrapping_sub(moved[1]);
+    }
+    [
+        left,
+        top,
+        left.wrapping_add(width),
+        top.wrapping_add(height),
+    ]
+}
+
+fn lock_rect(rect: &std::sync::Mutex<[i32; 4]>) -> std::sync::MutexGuard<'_, [i32; 4]> {
+    rect.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Whether the game's window is the borderless one now (made so at the start, or switched in play).
+pub fn is_borderless() -> bool {
+    let top = GAME_TOP.load(std::sync::atomic::Ordering::Relaxed);
+    if top == 0 {
+        return borderless();
+    }
+    BORDERLESS_WINDOW.load(std::sync::atomic::Ordering::Relaxed) == top
+}
+
+/// Switches the game's window, in play, to the borderless window over the primary monitor (`on`)
+/// or to a window at the place and size the game gave it (its own frame and styles), on the window
+/// thread ([`restyle`]). The game draws on as before: Direct3D 9 stretches the back buffer over
+/// the window's area and wgpu fits its swap chain to it each frame. False when it can't be done
+/// now: no real window, or no size of the game's to go back to.
+pub fn switch_window_mode(on: bool) -> bool {
+    let top = GAME_TOP.load(std::sync::atomic::Ordering::Relaxed);
+    if top == 0 {
+        return false;
+    }
+    let [left, top_edge, right, bottom] = *lock_rect(&GAME_TOP_RECT);
+    if !on && (right <= left || bottom <= top_edge) {
+        return false;
+    }
+    use std::sync::atomic::Ordering::Relaxed;
+    let before = (
+        BORDERLESS_WINDOW.load(Relaxed),
+        BORDERLESS_CHILD.load(Relaxed),
+    );
+    // Said at once ([`is_borderless`]); the window thread sets them again as it restyles.
+    let child = GAME_CHILD.load(Relaxed);
+    let (window, filling) = if on { (top, child) } else { (0, 0) };
+    BORDERLESS_WINDOW.store(window, Relaxed);
+    BORDERLESS_CHILD.store(filling, Relaxed);
+    let posted = unsafe {
+        PostMessageA(
+            HWND(top as *mut _),
+            WM_WINDOW_MODE,
+            WPARAM(usize::from(on)),
+            LPARAM(0),
+        )
+        .is_ok()
+    };
+    if posted {
+        want_borderless(on);
+    } else {
+        BORDERLESS_WINDOW.store(before.0, Relaxed);
+        BORDERLESS_CHILD.store(before.1, Relaxed);
+    }
+    posted
+}
+
+/// [`switch_window_mode`] on the window thread: `top` (the game's top-level window) and the child
+/// it draws in take the borderless window's style and the monitor's size, or the game's own styles
+/// and rectangles. Its visibility stays as it is (a scripted run's hidden window stays hidden).
+unsafe fn restyle(top: HWND, on: bool) {
+    let child = GAME_CHILD.load(std::sync::atomic::Ordering::Relaxed);
+    let visible = if IsWindowVisible(top).as_bool() {
+        WS_VISIBLE.0
+    } else {
+        0
+    };
+    let flags = SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE;
+    let place = |w: isize, [left, top, right, bottom]: [i32; 4], flags| {
+        let _ = SetWindowPos(
+            HWND(w as *mut _),
+            None,
+            left,
+            top,
+            right.wrapping_sub(left),
+            bottom.wrapping_sub(top),
+            flags,
+        );
+    };
+    if on {
+        let screen = [
+            0,
+            0,
+            GetSystemMetrics(SM_CXSCREEN),
+            GetSystemMetrics(SM_CYSCREEN),
+        ];
+        BORDERLESS_WINDOW.store(top.0 as isize, std::sync::atomic::Ordering::Relaxed);
+        BORDERLESS_CHILD.store(child, std::sync::atomic::Ordering::Relaxed);
+        SetWindowLongA(top, GWL_EXSTYLE, 0);
+        SetWindowLongA(top, GWL_STYLE, (WS_POPUP.0 | visible) as i32);
+        place(top.0 as isize, screen, flags);
+        if child != 0 {
+            place(child, screen, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    } else {
+        BORDERLESS_WINDOW.store(0, std::sync::atomic::Ordering::Relaxed);
+        BORDERLESS_CHILD.store(0, std::sync::atomic::Ordering::Relaxed);
+        let style = GAME_TOP_STYLE.load(std::sync::atomic::Ordering::Relaxed) & !WS_VISIBLE.0;
+        let ex_style = GAME_TOP_EX_STYLE.load(std::sync::atomic::Ordering::Relaxed);
+        SetWindowLongA(top, GWL_EXSTYLE, ex_style as i32);
+        SetWindowLongA(top, GWL_STYLE, (style | visible) as i32);
+        place(top.0 as isize, *lock_rect(&GAME_TOP_RECT), flags);
+        if child != 0 {
+            place(
+                child,
+                *lock_rect(&GAME_CHILD_RECT),
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+    // wgpu asks its window for a frame at once, at the new size.
+    d3d9_wgpu::window_changed();
+}
+
+/// V-sync on or off in play, whatever the game's `iPresentInterval`: true when it applies at once
+/// (wgpu draws: its swap chain takes the present mode at its next frame,
+/// `d3d9_wgpu::want_vsync`); the real Direct3D 9 device has its interval from its creation, so
+/// there it applies at the next start (false).
+pub fn want_vsync(on: bool) -> bool {
+    if !wgpu_draws() {
+        return false;
+    }
+    d3d9_wgpu::want_vsync(on);
+    true
+}
+
+/// The primary monitor's resolution in pixels (its current display mode, whatever the display
+/// scaling), `None` when Windows doesn't say.
+pub fn native_size() -> Option<(u32, u32)> {
+    use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
+    let mut mode = DEVMODEW {
+        dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    let found = unsafe {
+        EnumDisplaySettingsW(
+            windows::core::PCWSTR::null(),
+            ENUM_CURRENT_SETTINGS,
+            &mut mode,
+        )
+    };
+    (found.as_bool() && mode.dmPelsWidth > 0 && mode.dmPelsHeight > 0)
+        .then_some((mode.dmPelsWidth, mode.dmPelsHeight))
+}
+
 unsafe fn run_window_thread(rx: std::sync::mpsc::Receiver<Request>) {
     let module = GetModuleHandleA(None).unwrap_or_default();
     let class = WNDCLASSA {
@@ -1132,6 +1316,14 @@ unsafe fn run_window_thread(rx: std::sync::mpsc::Receiver<Request>) {
                     if fills {
                         BORDERLESS_CHILD.store(w.0 as isize, std::sync::atomic::Ordering::Relaxed);
                     }
+                    record_game_window(
+                        w.0 as isize,
+                        request.style,
+                        request.ex_style,
+                        request.rect,
+                        request.parent,
+                        child,
+                    );
                     if !child && request.style & WS_VISIBLE.0 != 0 {
                         match request.show {
                             Showing::Activated => {
@@ -1171,6 +1363,29 @@ unsafe fn run_window_thread(rx: std::sync::mpsc::Receiver<Request>) {
             let _ = TranslateMessage(&msg);
             DispatchMessageA(&msg);
         }
+    }
+}
+
+/// The game's first top-level window and the first child of it ([`GAME_TOP`], [`GAME_CHILD`]): its
+/// styles and the rectangle the game made it with.
+fn record_game_window(
+    window: isize,
+    style: u32,
+    ex_style: u32,
+    rect: [i32; 4],
+    parent: isize,
+    child: bool,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let top = GAME_TOP.load(Relaxed);
+    if !child && top == 0 {
+        GAME_TOP.store(window, Relaxed);
+        GAME_TOP_STYLE.store(style, Relaxed);
+        GAME_TOP_EX_STYLE.store(ex_style, Relaxed);
+        *lock_rect(&GAME_TOP_RECT) = rect;
+    } else if child && top != 0 && parent == top && GAME_CHILD.load(Relaxed) == 0 {
+        GAME_CHILD.store(window, Relaxed);
+        *lock_rect(&GAME_CHILD_RECT) = rect;
     }
 }
 
@@ -1249,6 +1464,13 @@ pub fn window_moved(e: &mut Engine, handle: u32, rect: [i32; 4], flags: u32) {
     let Some(window) = real_window(e, handle) else {
         return;
     };
+    // The game's rectangles, kept for a switch to a window in play (the borderless window's too).
+    for (game, kept) in [(&GAME_TOP, &GAME_TOP_RECT), (&GAME_CHILD, &GAME_CHILD_RECT)] {
+        if game.load(std::sync::atomic::Ordering::Relaxed) == window {
+            let mut kept = lock_rect(kept);
+            *kept = rect_after_move(*kept, rect, flags);
+        }
+    }
     let borderless = BORDERLESS_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
     // The borderless window and the child filling it keep the monitor's size.
     if borderless != 0
@@ -3814,6 +4036,27 @@ pub(crate) fn real_texture(e: &mut Engine, texture: u32) -> Option<IDirect3DBase
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's rectangle kept for a switch to a window: `SWP_NOMOVE` keeps the place,
+    /// `SWP_NOSIZE` the size, neither takes both.
+    #[test]
+    fn a_moved_rectangle_keeps_what_the_flags_keep() {
+        let kept = [10, 20, 810, 620];
+        let moved = [100, 50, 1380, 770];
+        assert_eq!(rect_after_move(kept, moved, 0), moved);
+        assert_eq!(
+            rect_after_move(kept, moved, SWP_NOMOVE.0),
+            [10, 20, 1290, 740]
+        );
+        assert_eq!(
+            rect_after_move(kept, moved, SWP_NOSIZE.0),
+            [100, 50, 900, 650]
+        );
+        assert_eq!(
+            rect_after_move(kept, moved, SWP_NOMOVE.0 | SWP_NOSIZE.0),
+            kept
+        );
+    }
 
     /// With real threads, a kernel-locked function that reaches the device's state takes the device
     /// lock first: `SetWindowPos` (an import, run under the kernel lock) moves the real window

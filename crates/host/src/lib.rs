@@ -28,6 +28,7 @@ pub mod frame_log;
 pub mod full_screen;
 pub mod game_file;
 pub mod game_ini;
+pub mod graphics_settings;
 pub mod half_loaded_move;
 pub mod menu_tiles;
 pub mod mod_fit_worn;

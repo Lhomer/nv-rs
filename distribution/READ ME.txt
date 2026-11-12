@@ -93,6 +93,15 @@ original's, and Settings.cmd still has its slider. After a cinematic kill cam yo
 keep the slider's view (until this build they went back to the original's until you opened the
 Pip-Boy).
 
+The game's own menu also has the launcher's graphics settings: Settings, then Display, after Field of
+View: Resolution, Anti-Aliasing, Anisotropic Filtering, Window Mode and V-Sync. They offer what
+Settings.cmd offers and save to the same lines, so each shows what the other saved. Window Mode
+(Borderless or Window) changes at once. V-Sync changes at once with the Vulkan renderer and at the
+next start with Direct3D 9. Resolution, anti-aliasing and anisotropic filtering are saved and take
+effect at the next start; until then their line says (next start). There is no exclusive full
+screen and no choice of graphics card, as in Settings.cmd. They come with the fixes: with Vanilla
+the game's menu is the original's.
+
 
 Controls
 --------

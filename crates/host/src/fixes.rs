@@ -56,6 +56,7 @@ pub static FIXES: &[Fix] = &[
     crate::cell_entry_wait::FIX,
     crate::perk_every_level::FIX,
     crate::fov_slider::FIX,
+    crate::graphics_settings::FIX,
     crate::quick_loot::FIX,
     crate::compact_menus::FIX,
     crate::pickpocket_chance::FIX,
@@ -905,6 +906,16 @@ pub fn install(e: &mut Engine, choice: &Choice) {
             crate::patch_data::strip_load_with_cell_offsets,
         );
     }
+    // Two rows add to the Settings menu's options (`StartMenu::CreateMenuElements`, 007cc6e0): with
+    // both on, one function makes the game's options, the Field of View row and the graphics rows.
+    if choice.is_on(&crate::fov_slider::FIX) && choice.is_on(&crate::graphics_settings::FIX) {
+        e.register(crate::fov_slider::CREATE_MENU_ELEMENTS, |e, _| {
+            engine::units::fallout_interface::startmenu::start_menu_create_menu_elements(e);
+            crate::fov_slider::add_row(e);
+            crate::graphics_settings::add_rows(e);
+            Ret::default()
+        });
+    }
 }
 
 /// The settings file: `NV_SETTINGS` when set; else `settings.ini` beside the program or in the
@@ -945,9 +956,10 @@ mod tests {
     }
 
     /// Two rows replacing the same exe address would each drop the other's change when both are
-    /// on: the only address two rows share is `TESWorldSpace::Load`, which `install` gives one
-    /// function doing both (`patch_data::strip_load_with_cell_offsets`). A new shared address
-    /// needs the same.
+    /// on: the addresses two rows share are `TESWorldSpace::Load` and the Settings menu's
+    /// `CreateMenuElements`, which `install` gives one function doing both
+    /// (`patch_data::strip_load_with_cell_offsets`; the Field of View and graphics rows). A new
+    /// shared address needs the same.
     #[test]
     fn rows_share_an_address_only_where_install_joins_them() {
         let mut seen = std::collections::HashMap::new();
@@ -961,11 +973,18 @@ mod tests {
         }
         assert_eq!(
             shared,
-            vec![(
-                crate::patch_data::WORLD_SPACE_LOAD,
-                crate::cell_offsets::FIX.name,
-                crate::patch_data::STRIP_LOD_WATER.name
-            )]
+            vec![
+                (
+                    crate::fov_slider::CREATE_MENU_ELEMENTS,
+                    crate::fov_slider::FIX.name,
+                    crate::graphics_settings::FIX.name
+                ),
+                (
+                    crate::patch_data::WORLD_SPACE_LOAD,
+                    crate::cell_offsets::FIX.name,
+                    crate::patch_data::STRIP_LOD_WATER.name
+                )
+            ]
         );
     }
 

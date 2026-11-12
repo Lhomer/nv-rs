@@ -109,6 +109,30 @@ pub fn window_changed() {
     CHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The player's V-sync choice in play (the game's Settings menu, host `graphics_settings`): 0 the
+/// game's own present interval, 1 on, 2 off ([`want_vsync`]); and how many times one was made, so
+/// a window takes it at its next frame.
+static VSYNC: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static VSYNC_CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// V-sync on or off from the next frame on, whatever the game's present interval says: the swap
+/// chain is configured again in the present mode for it, as after the device's `Reset`
+/// ([`Window::reset`]). The game's device and its parameters stay as they are.
+pub fn want_vsync(on: bool) {
+    VSYNC.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+    VSYNC_CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The interval a window's present mode is chosen for: the game's `interval` unless the player
+/// chose ([`VSYNC`]'s `choice`): on is the game's 1, off `D3DPRESENT_INTERVAL_IMMEDIATE`.
+pub(crate) fn chosen_interval(interval: u32, choice: u8) -> u32 {
+    match choice {
+        1 => 1,
+        2 => INTERVAL_IMMEDIATE,
+        _ => interval,
+    }
+}
+
 /// The game's window and its swap chain.
 pub(crate) struct Window {
     /// The window (an `HWND`).
@@ -136,6 +160,8 @@ pub(crate) struct Window {
     rest: Backoff,
     /// The [`CHANGED`] count last seen.
     seen_changes: u64,
+    /// The [`VSYNC_CHANGES`] count last seen.
+    seen_vsync: u64,
     /// While frames are not shown, the time between them is at least `refresh` (the display's
     /// refresh interval) and `paced` the last one: a minimised window does not run the game as
     /// fast as the machine can, for nothing on screen.
@@ -228,6 +254,7 @@ impl Window {
             suboptimal_at: None,
             rest: Backoff::new(),
             seen_changes: CHANGED.load(std::sync::atomic::Ordering::Relaxed),
+            seen_vsync: VSYNC_CHANGES.load(std::sync::atomic::Ordering::Relaxed),
             refresh: refresh_interval(),
             paced: None,
             asked: 0,
@@ -280,7 +307,8 @@ impl Window {
         if crate::device::refused_for_tests(self.adapter.get_info().backend) {
             c.format = wgpu::TextureFormat::R8Unorm;
         }
-        c.present_mode = present_mode(self.interval, &caps);
+        let choice = VSYNC.load(std::sync::atomic::Ordering::Relaxed);
+        c.present_mode = present_mode(chosen_interval(self.interval, choice), &caps);
         c.alpha_mode = caps
             .alpha_modes
             .first()
@@ -395,6 +423,13 @@ impl Window {
         if changes != self.seen_changes {
             self.seen_changes = changes;
             self.rest.shown();
+        }
+        // V-sync chosen in play: the swap chain is configured again in its present mode.
+        let vsync = VSYNC_CHANGES.load(std::sync::atomic::Ordering::Relaxed);
+        if vsync != self.seen_vsync {
+            self.seen_vsync = vsync;
+            self.choose();
+            self.stale = true;
         }
         if self.rest.resting(Instant::now()) {
             return Err(NoFrame::Resting);
@@ -654,6 +689,16 @@ mod tests {
             present_mode(INTERVAL_IMMEDIATE, &fifo),
             wgpu::PresentMode::AutoNoVsync
         );
+    }
+
+    /// The player's choice wins over the game's interval; with none made the game's stands.
+    #[test]
+    fn the_players_vsync_choice_picks_the_interval() {
+        assert_eq!(chosen_interval(INTERVAL_IMMEDIATE, 0), INTERVAL_IMMEDIATE);
+        assert_eq!(chosen_interval(1, 0), 1);
+        assert_eq!(chosen_interval(INTERVAL_IMMEDIATE, 1), 1);
+        assert_eq!(chosen_interval(1, 2), INTERVAL_IMMEDIATE);
+        assert_eq!(chosen_interval(0, 2), INTERVAL_IMMEDIATE);
     }
 
     /// A window that gives no frame rests: 100 ms, then twice as long each time in a row, up to

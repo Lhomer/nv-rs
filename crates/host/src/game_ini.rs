@@ -255,6 +255,35 @@ pub fn set_key(text: &str, section: &str, key: &str, value: &str) -> String {
     format!("{text}{gap}[{section}]{eol}{key}={value}{eol}")
 }
 
+/// `bytes`, an INI file's, with each `(section, key, value)` of `keys` set in turn ([`set_key`]).
+/// The file is held one character per byte, so every byte outside those lines comes back as it
+/// was (Settings.cmd reads and writes the files the same way).
+pub fn set_keys_in_bytes(bytes: &[u8], keys: &[(&str, &str, &str)]) -> Vec<u8> {
+    let mut text: String = bytes.iter().map(|&b| char::from(b)).collect();
+    for (section, key, value) in keys {
+        text = set_key(&text, section, key, value);
+    }
+    text.chars().map(|c| c as u32 as u8).collect()
+}
+
+/// The file at `path` with `keys` set ([`set_keys_in_bytes`]): written beside it and renamed over
+/// it, so a reader never sees half of it; not written when nothing changes.
+pub fn write_keys(path: &Path, keys: &[(&str, &str, &str)]) -> std::io::Result<()> {
+    let bytes = std::fs::read(path)?;
+    let out = set_keys_in_bytes(&bytes, keys);
+    if out == bytes {
+        return Ok(());
+    }
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".nv-rs-part");
+    let temporary = PathBuf::from(temporary);
+    std::fs::write(&temporary, &out)?;
+    std::fs::rename(&temporary, path).map_err(|why| {
+        let _ = std::fs::remove_file(&temporary);
+        why
+    })
+}
+
 /// The run's `Fallout.ini`: `My Games\FalloutNV\Fallout.ini` in the Documents folder the run's
 /// adapter table gives the game (`crate::adapter_table_path`), where the game reads it.
 /// A folder whose bytes can't be read is named once in the log ([`path_from_table`]).
