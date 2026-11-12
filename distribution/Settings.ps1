@@ -146,7 +146,7 @@ function Save-Files($writes) {
 }
 
 $own = "Game's setting"
-$known = @('Renderer', 'Borderless', 'Resolution', 'AntiAliasing', 'Anisotropy', 'VSync', 'Preset', 'FrameLimit', 'MenuFrameLimit', 'NV_THREADS', 'NV_RENDER_THREAD')
+$known = @('Renderer', 'Borderless', 'Resolution', 'AntiAliasing', 'Anisotropy', 'VSync', 'FOV', 'Preset', 'FrameLimit', 'MenuFrameLimit', 'NV_THREADS', 'NV_RENDER_THREAD')
 # Play.exe makes the game's NV_PRESET, NV_FRAME_LIMIT and NV_MENU_FRAME_LIMIT from Preset, FrameLimit and
 # MenuFrameLimit, and NV_FIXES was never one of the game's switches: such lines would only look as if
 # they did something.
@@ -178,6 +178,7 @@ if ($seeded) {
     $cur['AntiAliasing'] = & $times (Get-IniValue $prefs 'Display' 'iMultiSample')
     $cur['Anisotropy'] = & $times (Get-IniValue $prefs 'Display' 'iMaxAnisotropy')
     $cur['VSync'] = switch (Get-IniValue $ini 'Display' 'iPresentInterval') { '1' { 'On' } '0' { 'Off' } default { $own } }
+    $cur['FOV'] = Get-IniValue $ini 'Display' 'fDefaultWorldFOV'
     $cur['Preset'] = Get-IniValue $ini 'nv-rs General' 'sPreset'
     $cur['FrameLimit'] = Get-IniValue $ini 'nv-rs Display' 'iFrameLimit'
     $cur['MenuFrameLimit'] = Get-IniValue $ini 'nv-rs Display' 'iMenuFrameLimit'
@@ -185,6 +186,7 @@ if ($seeded) {
     $cur['NV_RENDER_THREAD'] = if ((Get-IniValue $ini 'nv-rs Threads' 'bRenderThread') -eq '0') { '0' } else { '' }
     foreach ($name in @($cur.Keys)) { if ($null -eq $cur[$name]) { $cur.Remove($name) } }
 }
+$pendingFov = $null
 if ($pending) {
     foreach ($line in [IO.File]::ReadAllLines($file)) {
         if ($line -match '^\s*([^=#;]+?)\s*=\s*(.*)$') {
@@ -196,6 +198,7 @@ if ($pending) {
             if ($name -eq 'NV_THREADS' -and @('stepped', 'real') -notcontains $value) { continue }
             if ($name -eq 'NV_RENDER_THREAD' -and @('0', '1') -notcontains $value) { continue }
             if ($name -eq 'Renderer' -and @('vulkan', 'd3d9') -notcontains $value.ToLower()) { continue }
+            if ($name -eq 'FOV') { $pendingFov = $value }
             $cur[$name] = $value
         }
     }
@@ -211,7 +214,7 @@ $form.Text = 'nv-rs settings'
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
 $form.StartPosition = 'CenterScreen'
-$form.ClientSize = New-Object System.Drawing.Size(360, 506)
+$form.ClientSize = New-Object System.Drawing.Size(360, 558)
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 
 $y = 16
@@ -260,6 +263,37 @@ $af = New-Combo @($own, 'Off', '2x', '4x', '8x', '15x') (Get-Setting 'Anisotropy
 Add-Row 'Anisotropic filtering' $af
 $vs = New-Combo @($own, 'On', 'Off') (Get-Setting 'VSync' $own)
 Add-Row 'V-sync' $vs
+# The world's field of view in play: Fallout.ini's [Display] fDefaultWorldFOV, which the game reads
+# from Fallout.ini (the setting at 0120315c, in the INI collection 011f96a0) and the player's
+# character steers its view to (PlayerCharacter's 0095de30; the weapon and arms keep
+# fDefault1stPersonFOV). The original's default is 75, the slider's when the file has no number. A
+# number outside the slider's range is shown at its nearest end and left as it is unless the slider
+# is moved.
+function Get-Fov($value) {
+    $n = 0.0
+    if (-not [double]::TryParse("$value", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$n)) { return 75 }
+    [int][Math]::Max(70, [Math]::Min(120, [Math]::Round($n)))
+}
+$fovRow = New-Object System.Windows.Forms.Panel
+$fovRow.Height = 28
+$fov = New-Object System.Windows.Forms.TrackBar
+$fov.Minimum = 70
+$fov.Maximum = 120
+$fov.SmallChange = 1
+$fov.LargeChange = 5
+$fov.TickStyle = 'None'
+$fov.AutoSize = $false
+$fov.Location = New-Object System.Drawing.Point(0, 0)
+$fov.Size = New-Object System.Drawing.Size(132, 28)
+$fov.Value = Get-Fov (Get-Setting 'FOV' '75')
+$fovRow.Controls.Add($fov)
+$fovText = New-Object System.Windows.Forms.Label
+$fovText.Location = New-Object System.Drawing.Point(136, 4)
+$fovText.AutoSize = $true
+$fovText.Text = "$($fov.Value)$([char]0xB0)"
+$fovRow.Controls.Add($fovText)
+$fov.Add_ValueChanged({ $fovText.Text = "$($fov.Value)$([char]0xB0)" })
+Add-Row 'Field of view' $fovRow
 $pr = New-Combo @('Fixes (recommended)', 'Vanilla (the original game)') $(if ((Get-Setting 'Preset' 'fixes') -eq 'vanilla') { 'Vanilla (the original game)' } else { 'Fixes (recommended)' })
 Add-Row 'Game fixes' $pr
 $limit = Get-Setting 'FrameLimit' '0'
@@ -284,20 +318,20 @@ $rt = New-Combo @($ownThread, $mainThread) $(if ((Get-Setting 'NV_RENDER_THREAD'
 Add-Row 'Drawing thread' $rt
 
 $note = New-Object System.Windows.Forms.Label
-$note.Text = "`"$own`" keeps what the game has now.`nBorderless fullscreen covers the main monitor."
+$note.Text = "`"$own`" keeps what the game has now.`nBorderless fullscreen covers the main monitor.`nField of view: 75 is the original's."
 $note.Location = New-Object System.Drawing.Point(16, $y)
-$note.Size = New-Object System.Drawing.Size(330, 36)
+$note.Size = New-Object System.Drawing.Size(330, 52)
 $form.Controls.Add($note)
 
 $save = New-Object System.Windows.Forms.Button
 $save.Text = 'Save'
-$save.Location = New-Object System.Drawing.Point(184, 466)
+$save.Location = New-Object System.Drawing.Point(184, 518)
 $save.DialogResult = 'OK'
 $form.Controls.Add($save)
 $form.AcceptButton = $save
 $cancel = New-Object System.Windows.Forms.Button
 $cancel.Text = 'Cancel'
-$cancel.Location = New-Object System.Drawing.Point(268, 466)
+$cancel.Location = New-Object System.Drawing.Point(268, 518)
 $cancel.DialogResult = 'Cancel'
 $form.Controls.Add($cancel)
 $form.CancelButton = $cancel
@@ -311,6 +345,7 @@ function Get-Choices {
         AntiAliasing     = "$($aa.SelectedItem)"
         Anisotropy       = "$($af.SelectedItem)"
         VSync            = "$($vs.SelectedItem)"
+        FOV              = "$($fov.Value)"
         Preset           = $(if ($pr.SelectedIndex -eq 1) { 'vanilla' } else { 'fixes' })
         FrameLimit       = $(if ($fl.SelectedIndex -eq 0) { '0' } else { "$($fl.SelectedItem)" })
         MenuFrameLimit   = $(if ($ml.SelectedIndex -eq 0) { '0' } else { "$($ml.SelectedItem)" })
@@ -355,6 +390,7 @@ if ($noWindow -or $form.ShowDialog() -eq 'OK') {
                     'AntiAliasing' { $newPrefs = Set-IniKey $newPrefs 'Display' 'iMultiSample' (& $sizes $v) }
                     'Anisotropy' { $newPrefs = Set-IniKey $newPrefs 'Display' 'iMaxAnisotropy' (& $sizes $v) }
                     'VSync' { $newIni = Set-IniKey $newIni 'Display' 'iPresentInterval' $(if ($v -eq 'On') { '1' } else { '0' }) }
+                    'FOV' { if ($v -match '^\d+$') { $newIni = Set-IniKey $newIni 'Display' 'fDefaultWorldFOV' "$v.0000" } }
                     'Preset' { $newIni = Set-IniKey $newIni 'nv-rs General' 'sPreset' $v }
                     'FrameLimit' { $newIni = Set-IniKey $newIni 'nv-rs Display' 'iFrameLimit' $v }
                     'MenuFrameLimit' { $newIni = Set-IniKey $newIni 'nv-rs Display' 'iMenuFrameLimit' $v }
@@ -375,6 +411,10 @@ if ($noWindow -or $form.ShowDialog() -eq 'OK') {
         foreach ($name in @('Renderer', 'Borderless', 'Resolution', 'AntiAliasing', 'Anisotropy', 'VSync', 'Preset', 'FrameLimit', 'MenuFrameLimit')) {
             $lines += "$name=$($chosen[$name])"
         }
+        # The field of view only when the slider was moved, or as settings.ini had it: an unmoved
+        # slider leaves the file's own value (one outside the slider's range included).
+        if ($chosen['FOV'] -ne $shown['FOV']) { $lines += "FOV=$($chosen['FOV'])" }
+        elseif ($null -ne $pendingFov) { $lines += "FOV=$pendingFov" }
         $lines += "NV_THREADS=$(if ($chosen['NV_THREADS'] -eq 'stepped') { 'stepped' } else { 'real' })"
         $lines += "NV_RENDER_THREAD=$(if ($chosen['NV_RENDER_THREAD'] -eq '0') { '0' } else { '1' })"
         $lines += $kept

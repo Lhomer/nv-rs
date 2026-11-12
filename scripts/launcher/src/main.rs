@@ -2749,7 +2749,10 @@ mod tests {
     #[test]
     fn settings_cmd_before_the_first_start_writes_settings_ini_for_play_exe_to_move() {
         let files = Files::new("settings-first", None);
-        settings_window(&files, "Preset=vanilla;FrameLimit=60;NV_RENDER_THREAD=0");
+        settings_window(
+            &files,
+            "Preset=vanilla;FrameLimit=60;NV_RENDER_THREAD=0;FOV=100",
+        );
         let written = std::fs::read_to_string(&files.package.settings).unwrap();
         assert!(
             written.contains("\r\nPreset=vanilla\r\n") && written.contains("\r\nFrameLimit=60\r\n")
@@ -2767,6 +2770,10 @@ mod tests {
         assert_eq!(
             settings::ini_value(&ini, "nv-rs Threads", "bRenderThread"),
             Some("0")
+        );
+        assert_eq!(
+            settings::ini_value(&ini, "Display", "fDefaultWorldFOV"),
+            Some("100.0000")
         );
         assert!(!files.package.settings.exists());
     }
@@ -2790,7 +2797,7 @@ mod tests {
         std::fs::set_permissions(mods.fallout_ini(), p).unwrap();
         settings_window(
             &files,
-            "Borderless=0;Preset=vanilla;FrameLimit=144;VSync=Off;Resolution=1280x720;AntiAliasing=Off;NV_THREADS=stepped",
+            "Borderless=0;Preset=vanilla;FrameLimit=144;VSync=Off;FOV=90;Resolution=1280x720;AntiAliasing=Off;NV_THREADS=stepped",
         );
         for (profile, (ini, prefs)) in before.iter().enumerate() {
             // The same lines as Play.exe's own set_key makes, everything else as it was.
@@ -2798,6 +2805,7 @@ mod tests {
             for (section, key, value) in [
                 ("nv-rs Display", "bBorderless", "0"),
                 ("Display", "iPresentInterval", "0"),
+                ("Display", "fDefaultWorldFOV", "90.0000"),
                 ("nv-rs General", "sPreset", "vanilla"),
                 ("nv-rs Display", "iFrameLimit", "144"),
                 ("nv-rs Threads", "bSteppedThreads", "1"),

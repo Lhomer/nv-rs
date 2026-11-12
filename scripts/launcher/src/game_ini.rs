@@ -407,7 +407,8 @@ pub fn set_key(text: &str, section: &str, key: &str, value: &str) -> String {
 /// `settings` is a `settings.ini` being moved in, when there is one. Each line it has wins over
 /// what the file says, the same rule Settings.cmd follows while that file exists; a key no line
 /// names keeps the file's value. V-sync goes to `[Display] iPresentInterval`, where the original
-/// reads it.
+/// reads it, and the field of view (`FOV=`, whole degrees) to `[Display] fDefaultWorldFOV`, the
+/// original's own world field of view (Settings.ps1 says where the game reads it).
 ///
 /// Play.exe has no values of its own: a key nothing chose keeps what the file says, the
 /// generated sections' value (the host table's default) for a key added just now. A key the
@@ -479,6 +480,9 @@ pub fn apply_choices(fallout_ini: &str, settings: Option<&Settings>) -> (String,
         Some("Off") => text = set_key(&text, "Display", "iPresentInterval", "0"),
         _ => {}
     }
+    if let Some(fov) = line("FOV").and_then(world_fov) {
+        text = set_key(&text, "Display", "fDefaultWorldFOV", &fov);
+    }
     let unused = settings
         .0
         .keys()
@@ -486,6 +490,16 @@ pub fn apply_choices(fallout_ini: &str, settings: Option<&Settings>) -> (String,
         .cloned()
         .collect();
     (text, unused)
+}
+
+/// A `FOV=` line's value as the game's `fDefaultWorldFOV` writes it (`75.0000`): whole degrees, 1 to
+/// 179 (a view needs an angle under 180); anything else chooses nothing.
+fn world_fov(value: &str) -> Option<String> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|n| (1..180).contains(n))
+        .map(|n| format!("{n}.0000"))
 }
 
 /// What Play.exe does with the game's variables for the player's options at one start.
@@ -931,6 +945,29 @@ mod tests {
         let (out, unused) = apply_choices(stepped, Some(&Settings::parse("NV_THREADS=slice\n")));
         assert!(out.starts_with(stepped));
         assert_eq!(unused, ["NV_THREADS"]);
+    }
+
+    /// Settings.cmd's field of view goes to the game's own world field of view, as the game writes
+    /// a float; a value that is not whole degrees a view can have chooses nothing.
+    #[test]
+    fn the_field_of_view_moves_into_the_games_world_fov() {
+        let fresh = with_sections(MADE_UP).unwrap().text;
+        let (out, unused) = apply_choices(&fresh, Some(&Settings::parse("FOV=95\n")));
+        assert_eq!(
+            ini_value(&out, "Display", "fDefaultWorldFOV"),
+            Some("95.0000")
+        );
+        assert!(unused.is_empty());
+        let had = "[Display]\r\nfDefaultWorldFOV=75.0000\r\nfDefault1stPersonFOV=55.0000\r\n";
+        let (out, _) = apply_choices(had, Some(&Settings::parse("FOV=110\n")));
+        assert_eq!(
+            out,
+            "[Display]\r\nfDefaultWorldFOV=110.0000\r\nfDefault1stPersonFOV=55.0000\r\n"
+        );
+        for nothing in ["", "wide", "90.5", "0", "180", "-75"] {
+            let settings = Settings::parse(&format!("FOV={nothing}\n"));
+            assert_eq!(apply_choices(had, Some(&settings)).0, had, "{nothing:?}");
+        }
     }
 
     /// While a settings.ini exists it wins, line by line, over a file that already has the
