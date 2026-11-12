@@ -64,6 +64,7 @@ pub mod invref;
 pub mod lambda;
 pub mod mt19937;
 pub mod names;
+pub mod plugins;
 pub mod saveload;
 pub mod table;
 pub mod tick;
@@ -215,6 +216,8 @@ pub struct Nvse {
     pub tick: tick::State,
     /// The co-save's file list mapping (I-10).
     pub saveload: saveload::State,
+    /// The plugins built in, as xNVSE knows its plugins (their messages and co-save sections).
+    pub plugins: plugins::State,
     /// The event manager (I-9).
     pub events: events::State,
     /// The inventory references (I-12), and the stacks `GetFirstRefForItem` listed per script.
@@ -229,6 +232,8 @@ pub struct Nvse {
     pub game: commands::game::State,
     /// The mods whose scripts' debug lines print (`SetDebugMode`).
     pub console: commands::console::State,
+    /// The data mods keep in memory across loaded saves (`SetModLocalData`).
+    pub mod_data: commands::mod_data::State,
     /// The DirectInput hook's keys and the input commands' controls (I-11).
     pub input: input::State,
     /// The first frame recorded the main thread (`s_recordedMainThreadID`): xNVSE prints to the

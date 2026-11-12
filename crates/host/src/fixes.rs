@@ -39,6 +39,8 @@ pub static FIXES: &[Fix] = &[
     crate::mod_fit_worn::FIX,
     crate::topic_index::FIX,
     KEEP_COSAVE_PLUGINS,
+    JIP_COSAVE_FIXES,
+    JIP_VANILLA_COMMANDS,
     SCRIPT_ERROR_GUARD,
     IMOD_EVENT_FORM_CHECK,
     INVENTORY_REFERENCE_CHECKS,
@@ -189,12 +191,45 @@ pub const KEEP_COSAVE_PLUGINS: Fix = Fix {
     env: "NV_COSAVE_KEEP",
     addresses: &[],
     summary:
-        "a co-save's sections of plugins not built in (JIP LN NVSE's) are written back while the same files are loaded",
+        "a co-save's sections of plugins not built in (JohnnyGuitar NVSE's, ShowOff's, ...) are written back while the same files are loaded",
     install: install_keep_cosave_plugins,
 };
 
 fn install_keep_cosave_plugins(e: &mut Engine) {
     nvse::saveload::set_keep_other_plugins(e, true);
+}
+
+/// JohnnyGuitar NVSE's corrections of JIP LN NVSE's co-save (`SerializationFixes`), a flag
+/// `crates/jip` reads: JIP's extra data written with the right sizes as version 2, JIP's own
+/// version 1 not read, an unloaded owner's script variables skipped whole.
+pub const JIP_COSAVE_FIXES: Fix = Fix {
+    name: "JIP co-save fixes",
+    env: "NV_JIP_COSAVE_FIX",
+    addresses: &[],
+    summary:
+        "JIP LN NVSE's co-save as JohnnyGuitar NVSE corrects it: extra data with the right sizes (version 2), the damaged version 1 not read",
+    install: install_jip_cosave_fixes,
+};
+
+fn install_jip_cosave_fixes(e: &mut Engine) {
+    jip::cosave::set_johnny_guitar_fixes(e, true);
+}
+
+/// JIP LN NVSE's versions of seven of the game's own commands (`InitCmdPatches`: `MenuMode`,
+/// `GetItemCount`, `GetContainer`, `IsInList`, `GetHitLocation`, `HasPerk`, `GetNVSEVersionFull` at
+/// `0x127D`), a flag `crates/jip` reads: they change vanilla commands, so they are a row (ADR-0016
+/// §5). They take effect only once JIP answers "installed" (`jip::ANSWERS_INSTALLED`, step 3.10).
+pub const JIP_VANILLA_COMMANDS: Fix = Fix {
+    name: "JIP vanilla commands",
+    env: "NV_JIP_VANILLA_CMDS",
+    addresses: &[],
+    summary:
+        "JIP LN NVSE's versions of seven of the game's commands (MenuMode, GetItemCount, IsInList, HasPerk for followers, ...), once JIP is built in",
+    install: install_jip_vanilla_commands,
+};
+
+fn install_jip_vanilla_commands(e: &mut Engine) {
+    jip::overrides::set_vanilla_commands(e, true);
 }
 
 /// The driver compiles a Direct3D 9 shader at its first draw: the first shot's frame took 25-46 ms
@@ -315,6 +350,8 @@ fn install_script_list_guard(e: &mut Engine) {
 const NO_ADDRESS: &[&str] = &[
     crate::uncap::MENU_FIX.name,
     KEEP_COSAVE_PLUGINS.name,
+    JIP_COSAVE_FIXES.name,
+    JIP_VANILLA_COMMANDS.name,
     SCRIPT_ERROR_GUARD.name,
     IMOD_EVENT_FORM_CHECK.name,
     INVENTORY_REFERENCE_CHECKS.name,
