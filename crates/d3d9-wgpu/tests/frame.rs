@@ -2546,9 +2546,9 @@ fn the_pipeline_cache_file_is_kept_and_a_bad_one_is_ignored() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The backend's own loading screen: black at the corners and the logo lit in the middle; the
-/// bar filled to the fraction done (a quarter against three quarters: some row has the fill's
-/// colour at three quarters where it has the empty bar's grey at a quarter); and (on Windows,
+/// The backend's own loading screen, a sepia test card: the logo in its first ring; the bar
+/// filled to the fraction done (a quarter against three quarters: some row has the ink fill at
+/// three quarters where it has the paper inside the bar at a quarter); and (on Windows,
 /// where GDI draws the text) another status line changes pixels. A window narrower than the bar
 /// still draws.
 #[test]
@@ -2572,20 +2572,26 @@ fn the_loading_screen_shows_the_logo_the_text_and_the_bar() {
         let i = ((y * w + x) * 4) as usize;
         [px[i], px[i + 1], px[i + 2]]
     };
-    for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
-        assert_eq!(at(&quarter, x, y), [0, 0, 0], "corner {x},{y}");
-    }
-    let lit = (h / 4..h / 2)
-        .flat_map(|y| (w / 3..2 * w / 3).map(move |x| (x, y)))
-        .filter(|&(x, y)| at(&quarter, x, y).iter().any(|&c| c > 64))
+    // The card: sepia paper (red well above blue) over most of it.
+    let sepia = quarter
+        .chunks_exact(4)
+        .filter(|p| p[2] > 80 && p[2] > p[0].saturating_add(30))
         .count();
-    assert!(lit > 500, "{lit} pixels of the logo lit");
-    // The bar: from x = w/3, w/3 wide; at x = w/3 + w/6 (half of it) the fill (B G R about 89, 191,
-    // 230) at three quarters, the empty bar's grey (about 64) at a quarter, in the same row.
-    let x = w / 3 + w / 6;
-    let fill = |c: [u8; 3]| c[2] > 180 && c[1] > 140 && c[0] < 140;
-    let grey = |c: [u8; 3]| c.iter().all(|&v| (40..=90).contains(&v));
-    let row = (0..h).find(|&y| fill(at(&most, x, y)) && grey(at(&quarter, x, y)));
+    assert!(sepia > (w * h / 2) as usize, "{sepia} sepia pixels");
+    // The logo in the first ring (the card has no ink there): dark pixels near the centre.
+    let (cx, cy, r) = (w / 2, h * 44 / 100, h / 2 * 30 / 100);
+    let dark = (cy - r..cy + r)
+        .flat_map(|y| (cx - r..cx + r).map(move |x| (x, y)))
+        .filter(|&(x, y)| x.abs_diff(cx).pow(2) + y.abs_diff(cy).pow(2) < r * r)
+        .filter(|&(x, y)| at(&quarter, x, y).iter().all(|&c| c < 90))
+        .count();
+    assert!(dark > 200, "{dark} dark pixels of the logo");
+    // The bar, centred under the banner: in its middle column the ink fill (dark) at three
+    // quarters where a quarter shows the paper inside it, in the same row.
+    let x = w / 2;
+    let fill = |c: [u8; 3]| c.iter().all(|&v| v < 90);
+    let paper = |c: [u8; 3]| c[2] > 150;
+    let row = (0..h).find(|&y| fill(at(&most, x, y)) && paper(at(&quarter, x, y)));
     assert!(
         row.is_some(),
         "no row with the bar filled at 3/4 and empty at 1/4"
@@ -2604,6 +2610,35 @@ fn the_loading_screen_shows_the_logo_the_text_and_the_bar() {
     }
     #[cfg(not(windows))]
     let _ = other;
+    // NV_LOADING_PICTURE=<file.bmp>: the card at 1920 by 1080 with some of a run's lines, to
+    // look at.
+    if let Some(file) = std::env::var_os("NV_LOADING_PICTURE") {
+        d3d9_wgpu::loading::show_lines(&[
+            "NV_D3D9 wgpu: pipeline cache wgpu_pipeline_cache_vulkan.bin: 18908 KB read",
+            "NV_D3D9 wgpu: pipeline list: 272 entries (272 shipped, 0 more; 0 lines not read)",
+            "NV_D3D9 wgpu: the game's device on the adapter (Vulkan) (1920x1080, format 22)",
+            "NV_D3D9 wgpu: Loading: Preparing shaders 263 of 1038 (25%)",
+            "NV_D3D9 wgpu: Loading: Preparing shaders 508 of 1038 (49%)",
+        ]);
+        let (w, h) = (1920u32, 1080u32);
+        let px = d.progress_pixels(w, h, &p("Preparing shaders 508 of 1038", 0.49));
+        d3d9_wgpu::loading::show_lines(&[]);
+        let mut bmp = b"BM".to_vec();
+        for v in [
+            54 + w * h * 4,
+            0,
+            54,
+            40,
+            w,
+            (h as i32).wrapping_neg() as u32,
+        ] {
+            bmp.extend_from_slice(&v.to_le_bytes());
+        }
+        bmp.extend_from_slice(&[1, 0, 32, 0]);
+        bmp.extend_from_slice(&[0; 24]);
+        bmp.extend_from_slice(&px);
+        std::fs::write(file, bmp).expect("the picture");
+    }
 }
 
 /// The pipelines a run made are listed in the cache folder; the next run makes them at the first
@@ -2660,6 +2695,88 @@ fn listed_pipelines_are_made_before_the_draws_that_need_them() {
     let (third, made_third) = run(&dir).unwrap();
     assert_eq!(third, first);
     assert_eq!(made_third, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// With pipeline libraries, a cold start (no pipeline cache file) makes every shader's library
+/// ahead; a warm one (the file the cold run wrote, read back) only the listed shaders' (the pair
+/// the cold run drew), and a pair no list names makes its libraries on its first draw (from the
+/// driver's cache: about a millisecond each).
+#[test]
+fn a_warm_start_makes_only_the_listed_shaders_libraries() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("warm-start-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // A run: the harness's pair drawn first (the start), with another pair made before it; that
+    // pair drawn after (`other`). The cache note, the jobs the start waited for, and the library
+    // counts after the start and at the end.
+    type Run = (String, usize, (u64, u64), (u64, u64));
+    let run = |other: bool| -> Option<Run> {
+        let mut g = Gpu::with_cache(4, 1, Some(dir.clone()))?;
+        texcoord_pair(&mut g, VS + 12, PS + 20);
+        for (pixel, shader) in [(false, VS), (true, PS)] {
+            g.run(Cmd::SetShader {
+                device: DEVICE,
+                pixel,
+                shader,
+            });
+        }
+        g.colour([1.0, 1.0, 1.0, 1.0]);
+        g.clear(3, 0, 1.0);
+        g.cover(0.5);
+        let d = g.b.device().expect("the device");
+        let note = d.pipeline_cache_note().unwrap_or_default();
+        let waited = d.start_waited_for();
+        let start = library_counts(d)?;
+        if other {
+            for (pixel, shader) in [(false, VS + 12), (true, PS + 20)] {
+                g.run(Cmd::SetShader {
+                    device: DEVICE,
+                    pixel,
+                    shader,
+                });
+            }
+            let vertices: Vec<u8> = floats(
+                &TRIANGLE
+                    .iter()
+                    .flat_map(|p| [p[0], p[1], 0.5, 1.0, 0.2, 0.4, 0.6, 1.0])
+                    .collect::<Vec<f32>>(),
+            );
+            g.clear(3, 0, 1.0);
+            draw_with(
+                &mut g,
+                DECL + 10,
+                &[(0, 3, 0, 0), (16, 3, 5, 0)],
+                &vertices,
+                32,
+            );
+            assert_eq!(g.pixels(), vec![[153, 102, 51, 255]; 16]);
+        }
+        let end = library_counts(g.b.device().expect("the device"))?;
+        Some((note, waited, start, end))
+        // The device goes: the list and the pipeline cache file are written.
+    };
+    let Some((note, waited, start, end)) = run(false) else {
+        eprintln!("no pipeline libraries here, so the case is not reached");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    // Cold: every shader's library at the start: the four and the stand-ins (two vertex shaders
+    // for the two pixel shaders' varyings, one pixel shader).
+    assert!(note.starts_with("none yet"), "{note}");
+    assert_eq!((waited, start, end), (4, (4, 3), (4, 3)), "cold");
+    let (note, waited, start, end) = run(true).expect("the second run");
+    // Warm: the listed pair's libraries and their stand-ins' only (the other pair's modules
+    // are still made ahead); its draw makes the other pair's two.
+    assert!(note.ends_with("KB read"), "{note}");
+    assert_eq!(waited, 4, "every module waited for");
+    assert_eq!(
+        start,
+        (2, 2),
+        "warm: the listed pair's and their stand-ins'"
+    );
+    assert_eq!(end, (3, 3), "the other pair's on its first draw");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3377,5 +3494,66 @@ fn a_refused_library_leaves_its_pipelines_whole_with_the_same_pixels() {
         g.pixels(),
         linked,
         "the whole path draws the linked path's pixels"
+    );
+}
+
+/// A shader's header (the registers but the float constants, written only when it changes) is
+/// written again between two draws of one batch when only a header value changed, with no
+/// read-back between the draws: the pixel shader's alpha reference, the vertex shader's clip
+/// planes, and a draw after only the other stage's header changed (the unchanged one kept).
+#[test]
+fn a_header_change_between_two_draws_of_one_batch_reaches_the_second() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    // The pixel shader's header: alpha 0.5 is GREATER than 0x40, not than 0xC0. The halves have
+    // the same viewport size, so the vertex shader's header is the same for both.
+    g.colour([1.0, 1.0, 1.0, 0.5]);
+    g.clear(3, 0, 1.0);
+    g.state(ALPHATESTENABLE, 1);
+    g.state(ALPHAFUNC, 5);
+    g.state(ALPHAREF, 0x40);
+    g.viewport(0, 0, 2, 4, 0.0, 1.0);
+    g.cover(0.5);
+    g.state(ALPHAREF, 0xC0);
+    g.viewport(2, 0, 2, 4, 0.0, 1.0);
+    g.cover(0.5);
+    assert_eq!(
+        g.reds(),
+        [255, 255, 0, 0].repeat(4),
+        "the alpha reference changed between the draws"
+    );
+    // The vertex shader's header: plane 0 on for the second draw only (kept where x - 0.25 w is
+    // at least 0: the last column), red under green.
+    g.state(ALPHATESTENABLE, 0);
+    g.viewport(0, 0, 4, 4, 0.0, 1.0);
+    g.run(Cmd::SetClipPlane {
+        device: DEVICE,
+        index: 0,
+        plane: [1.0f32, 0.0, 0.0, -0.25].map(f32::to_bits),
+    });
+    g.clear(3, 0, 1.0);
+    g.colour([1.0, 0.0, 0.0, 1.0]);
+    g.cover(0.5);
+    g.state(CLIPPLANEENABLE, 1);
+    g.colour([0.0, 1.0, 0.0, 1.0]);
+    g.cover(0.25);
+    assert_eq!(
+        g.reds(),
+        [255, 255, 255, 0].repeat(4),
+        "the clip planes changed between the draws"
+    );
+    // Only the vertex shader's header changes (the planes) between two draws the pixel
+    // shader's alpha test refuses: its header stays, and nothing is drawn.
+    g.state(CLIPPLANEENABLE, 0);
+    g.clear(3, 0, 1.0);
+    g.state(ALPHATESTENABLE, 1);
+    g.state(ALPHAREF, 0xC0);
+    g.colour([1.0, 1.0, 1.0, 0.5]);
+    g.cover(0.5);
+    g.state(CLIPPLANEENABLE, 1);
+    g.cover(0.25);
+    assert_eq!(
+        g.reds(),
+        vec![0; 16],
+        "the pixel shader's header kept while the planes changed"
     );
 }
