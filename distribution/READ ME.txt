@@ -89,7 +89,9 @@ as you are back in the game, and it is kept for the next start. Settings.cmd has
 fDefault1stPersonFOV in Fallout.ini's [Display] section, so each shows what the other saved; if the
 two keys say different numbers there, saving in Settings.cmd makes the arms and weapon's the
 world's. The slider in the game's menu comes with the fixes: with Vanilla the game's menu is the
-original's, and Settings.cmd still has its slider.
+original's, and Settings.cmd still has its slider. After a cinematic kill cam your arms and weapon
+keep the slider's view (until this build they went back to the original's until you opened the
+Pip-Boy).
 
 
 Controls

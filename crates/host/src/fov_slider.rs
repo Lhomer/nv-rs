@@ -37,9 +37,23 @@
 //! `%.4f`, as Settings.cmd writes them; `crate::game_ini::set_key`, Play.exe's rule), so the next
 //! start has them.
 //! The game itself never writes Fallout.ini, only FalloutPrefs.ini.
+//!
+//! **After a kill cam** (Patrick, 2026-11-12: "Whenever I get a cinematic kill cam, my viewmodel
+//! returns to the original viewmodel and undoes the changes that the FOV slider did. This persists
+//! until I enter the pip boy"). `0095de30` has one branch that keeps the world's field of view on
+//! its setting (`00950610`) but leaves the arms' `f1stPersonFOV` where it is: while the free (vanity)
+//! camera byte `011e07b8` and the "settled" byte `011a3b31` are both set it does that and returns.
+//! The kill cam's playback (VATS mode 4) sets `011a3b31`; a cinematic that leaves `011e07b8` set
+//! keeps the arms at whatever the kill cam left until the Pip-Boy (`0095de30`'s first branch writes
+//! `f1stPersonFOV` itself, and the steering takes over from there). So `0095de30` is wrapped here:
+//! in that branch, and only while the arms are on the screen (VATS mode 0, first person, no Pip-Boy,
+//! no iron sights: [`arms_left_behind`]), the arms get `fDefault1stPersonFOV` at once, the value the
+//! steering would end at. Every other branch, the kill cam itself and `fPipboy1stPersonFOV` are
+//! untouched.
 
 use crate::fixes::Fix;
 use engine::prelude::*;
+use engine::units::fallout_ai::playercharacter_p3::fn_0095de30;
 use engine::units::fallout_interface::startmenu::start_menu_create_menu_elements;
 
 /// `StartMenu::CreateMenuElements` (Ghidra name).
@@ -49,7 +63,7 @@ pub const CREATE_MENU_ELEMENTS: u32 = 0x007c_c6e0;
 pub const FIX: Fix = Fix {
     name: "field of view in the game's settings",
     env: "NV_FOV_SLIDER",
-    addresses: &[CREATE_MENU_ELEMENTS],
+    addresses: &[CREATE_MENU_ELEMENTS, FOV_UPDATE],
     summary: "the game's Settings menu has a Field of View slider on its Display page (fDefaultWorldFOV and fDefault1stPersonFOV, 70 to 120)",
     install,
 };
@@ -103,6 +117,15 @@ const TRAIT_STRING: u32 = 4036;
 
 /// Registers `CreateMenuElements` and the row's change function.
 pub fn install(e: &mut Engine) {
+    e.register(FOV_UPDATE, |e, a| {
+        let player = a[0];
+        let left_behind = player != 0 && arms_left_behind(arms_state(e, player));
+        fn_0095de30(e, Ptr::new(player), f32::from_bits(a[1]));
+        if left_behind {
+            restore_arms(e, player);
+        }
+        Ret::default()
+    });
     e.register(CREATE_MENU_ELEMENTS, |e, _| {
         start_menu_create_menu_elements(e);
         add_row(e);
@@ -112,6 +135,78 @@ pub fn install(e: &mut Engine) {
         change(e, Ptr::new(a[0]));
         Ret::default()
     });
+}
+
+/// `PlayerCharacter`'s per-frame field of view update (`0095de30`).
+pub const FOV_UPDATE: u32 = 0x0095_de30;
+
+/// What [`arms_left_behind`] reads before `0095de30` runs.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ArmsState {
+    /// The Fallout.ini bool `0095de30` needs (`011e097c`).
+    pub enabled: bool,
+    /// The free (vanity) camera byte `011e07b8` and the settled byte `011a3b31`.
+    pub free_camera: bool,
+    pub settled: bool,
+    /// The VATS mode (the word at `011f2250 + 8`): 0 none, 2 menu, 3 scan, 4 the kill cam.
+    pub vats_mode: i32,
+    pub third_person: bool,
+    pub pipboy: bool,
+    pub iron_sights: bool,
+}
+
+/// Whether `0095de30` is about to take its world-only branch while the arms are shown: enabled,
+/// the free camera and settled bytes set, no VATS, first person, no Pip-Boy, no iron sights (the
+/// zoomed arms' own target is left to the game).
+pub fn arms_left_behind(state: ArmsState) -> bool {
+    state.enabled
+        && state.free_camera
+        && state.settled
+        && state.vats_mode == 0
+        && !state.third_person
+        && !state.pipboy
+        && !state.iron_sights
+}
+
+/// The game's words [`arms_state`] reads.
+const FOV_ENABLED_SETTING: u32 = 0x011e_097c;
+const SETTING_BOOL_POINTER: u32 = 0x0040_8d60;
+const FREE_CAMERA: u32 = 0x011e_07b8;
+const FOV_SETTLED: u32 = 0x011a_3b31;
+const VATS_MODE: u32 = 0x011f_2250 + 8;
+const THIRD_PERSON: u32 = 0x64a;
+const PLAYER_IS_PIPBOY_ACTIVE: u32 = 0x0096_7ae0;
+const ACTOR_GET_IRON_SIGHTS: u32 = 0x008b_bc10;
+/// `fDefault1stPersonFOV`'s value and the player's `f1stPersonFOV`.
+const FIRST_PERSON_DEFAULT: u32 = 0x0120_3168 + 4;
+const ARMS_FOV: u32 = 0x674;
+
+/// The state before `0095de30` runs (the calls only when the cheap bytes already say so).
+fn arms_state(e: &mut Engine, player: u32) -> ArmsState {
+    let free_camera = e.mem.u8(FREE_CAMERA) != 0;
+    let settled = e.mem.u8(FOV_SETTLED) != 0;
+    let mut state = ArmsState {
+        free_camera,
+        settled,
+        vats_mode: e.mem.i32(VATS_MODE),
+        third_person: e.mem.u8(player + THIRD_PERSON) != 0,
+        ..ArmsState::default()
+    };
+    if free_camera && settled && state.vats_mode == 0 && !state.third_person {
+        let enabled = e
+            .call(SETTING_BOOL_POINTER, &args![FOV_ENABLED_SETTING])
+            .u32();
+        state.enabled = enabled != 0 && e.mem.u8(enabled) != 0;
+        state.pipboy = e.call(PLAYER_IS_PIPBOY_ACTIVE, &args![player]).bool();
+        state.iron_sights = e.call(ACTOR_GET_IRON_SIGHTS, &args![player]).bool();
+    }
+    state
+}
+
+/// The arms back on `fDefault1stPersonFOV`, the value `0095de30`'s steering ends at.
+fn restore_arms(e: &mut Engine, player: u32) {
+    let default = e.mem.f32(FIRST_PERSON_DEFAULT);
+    e.mem.set_f32(player + ARMS_FOV, default);
 }
 
 /// The slider's step for `degrees` (kept inside the slider) and the degrees of a step.
@@ -266,6 +361,88 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    fn after_kill_cam() -> ArmsState {
+        ArmsState {
+            enabled: true,
+            free_camera: true,
+            settled: true,
+            vats_mode: 0,
+            ..ArmsState::default()
+        }
+    }
+
+    #[test]
+    fn the_arms_left_behind_by_a_kill_cam_get_the_slider_again() {
+        // The world-only branch with the arms on the screen: restored.
+        assert!(arms_left_behind(after_kill_cam()));
+        // The kill cam itself and VATS: the game's own.
+        for mode in [2, 3, 4] {
+            assert!(!arms_left_behind(ArmsState {
+                vats_mode: mode,
+                ..after_kill_cam()
+            }));
+        }
+        // No free camera or not settled: the steering already runs.
+        assert!(!arms_left_behind(ArmsState {
+            free_camera: false,
+            ..after_kill_cam()
+        }));
+        assert!(!arms_left_behind(ArmsState {
+            settled: false,
+            ..after_kill_cam()
+        }));
+        // Third person, the Pip-Boy (fPipboy1stPersonFOV stays its own), iron sights, or the
+        // update off: left as they are.
+        for state in [
+            ArmsState {
+                third_person: true,
+                ..after_kill_cam()
+            },
+            ArmsState {
+                pipboy: true,
+                ..after_kill_cam()
+            },
+            ArmsState {
+                iron_sights: true,
+                ..after_kill_cam()
+            },
+            ArmsState {
+                enabled: false,
+                ..after_kill_cam()
+            },
+        ] {
+            assert!(!arms_left_behind(state), "{state:?}");
+        }
+    }
+
+    /// The bytes as a kill cam leaves them: the arms go to fDefault1stPersonFOV, the Pip-Boy's
+    /// setting is not read.
+    #[test]
+    fn the_arms_take_fdefault1stpersonfov() {
+        let mut e = Engine::new();
+        e.mem.map(0x011a_3000, 0x1000);
+        e.mem.map(0x011e_0000, 0x1000);
+        e.mem.map(0x011f_2000, 0x1000);
+        e.mem.map(0x0120_3000, 0x1000);
+        e.mem.map(0x1000, 0x1000);
+        let player = 0x1000;
+        e.mem.set_u8(FREE_CAMERA, 1);
+        e.mem.set_u8(FOV_SETTLED, 1);
+        e.mem.set_i32(VATS_MODE, 0);
+        e.mem.set_f32(FIRST_PERSON_DEFAULT, 95.0);
+        e.mem.set_f32(0x0120_3174 + 4, 47.0);
+        e.mem.set_f32(player + ARMS_FOV, 55.0);
+        let cell = 0x1800;
+        e.mem.set_u8(cell, 1);
+        e.register_double(SETTING_BOOL_POINTER, move |_, _| cell.into_ret());
+        e.register(PLAYER_IS_PIPBOY_ACTIVE, |_, _| 0u32.into_ret());
+        e.register(ACTOR_GET_IRON_SIGHTS, |_, _| 0u32.into_ret());
+        let state = arms_state(&mut e, player);
+        assert!(arms_left_behind(state), "{state:?}");
+        restore_arms(&mut e, player);
+        assert_eq!(e.mem.f32(player + ARMS_FOV), 95.0);
+    }
 
     #[test]
     fn steps_cover_70_to_120_and_the_original_is_75() {
