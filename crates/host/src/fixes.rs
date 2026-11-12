@@ -52,6 +52,7 @@ pub static FIXES: &[Fix] = &[
     crate::thread_races::FIX,
     TEXTURE_READ_FIRST,
     crate::cell_entry_wait::FIX,
+    crate::perk_every_level::FIX,
 ];
 
 /// The IO manager's wait for queued loads (`00c3dfa0`: main at a cell border, a load, a save) sleeps

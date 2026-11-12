@@ -7,6 +7,12 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-12 (field of view slider; a perk every level)
+
+- **Field of view** (Settings.cmd, `distribution/Settings.ps1`; Play.exe's `apply_choices` for settings.ini's `FOV=`): a slider, 70 to 120, writing the game's own `[Display] fDefaultWorldFOV` in both profiles' Fallout.ini (the setting `0120315c`, in the INI collection `011f96a0`, default 75; `PlayerCharacter`'s `0095de30` steers the view to it). `fDefault1stPersonFOV` and `fDefaultFOV` left alone. The names come from the gaps between their strings (`010c289c`..`010c290c`), not read from the exe here: if the slider changes nothing in play, that is the first thing to check.
+- **A perk every level** (`crates/host/src/perk_every_level.rs`, the `[nv-rs Fixes]` row `bPerkEveryLevel`, on in the fixes preset): a gameplay change Patrick asked for, not a fix. `LevelUpMenu::Create` (`00784c80`) runs with `iLevelsPerPerk` (`011cd074`, its only reader) at 1 when it holds the original's 2, put back after.
+- **Not run here:** the Settings.cmd tests (Windows only) and either change in the game. **Next action:** Patrick's playtest: the slider's effect in play, and a perk at an odd level.
+
 ### Claude, 2026-11-11 (mouse look as the original's: `NV_MOUSE_LOOK`)
 
 - **Reported:** the preview's notes say "hold right mouse to look". No such gate was found in the code: the real window's raw mouse already fed the game's DirectInput mouse with no button held, the right button already reached the game as button 1, and the translated look (`009445b0` mode 0 through `00a239e0`) has no button gate. What differed from the original was when the cursor was taken: only on `WA_ACTIVE` or a click in the client area, so a window brought to the front by its title bar (`WA_CLICKACTIVE`) or one that could not take the focus at start-up kept a free, visible cursor until a click (a right click, say), and motion reached the game during a move of the window.

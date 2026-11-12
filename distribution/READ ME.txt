@@ -85,6 +85,13 @@ time keeps pace with real time at high frame rates (the original runs fast there
 lands on the floor after a jump instead of hovering a little above it. Menus run at up to 120 frames a
 second (loading screens as fast as they can), and a dragged body is pulled as hard at any frame rate.
 
+One change is not a bug fix but a choice of how to play: with the fixes on, you get a perk at every
+level, not every second level as in the original. It counts from your next level-up, in new and old
+saves alike (levels you already gained are not made up for), and a mod that sets its own
+iLevelsPerPerk keeps its value. Vanilla gives a perk every second level, as the original does; to
+keep the other fixes and still get a perk every second level, find the line ;bPerkEveryLevel=1 in
+Fallout.ini's [nv-rs Fixes] section and make it bPerkEveryLevel=0 (without the ;).
+
 To play the original game's behaviour instead, open Settings.cmd and choose "Vanilla (the original
 game)" under Game fixes. Settings.cmd can also set a frame limit (60, 120, 144 and so on) or no limit,
 which is the default, and a frame limit in menus (120 unless you choose another, or none). The frame
