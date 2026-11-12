@@ -119,8 +119,7 @@ pub unsafe fn create_texture(o: &mut impl Write, module: *mut c_void, dir: &str)
                     let bytes = if fmt == 0x3154_5844 { 8 } else { 16 };
                     (h.div_ceil(4), w.div_ceil(4) * bytes)
                 } else {
-                    let bpp = match fmt { 20 => 3, 21 | 22 => 4, 23 | 25 | 26 => 2, _ => 4 };
-                    (h, w * bpp)
+                    (h, w * pixel_bytes(fmt).unwrap_or(4))
                 };
                 let mut packed = Vec::with_capacity(rows * row);
                 for r in 0..rows {
@@ -170,6 +169,20 @@ unsafe fn device() -> *mut c_void {
     device
 }
 
+/// Bytes per pixel of the non-block formats D3DX makes textures of (`None`: a block or packed
+/// YUV format, or one without a known size).
+fn pixel_bytes(fmt: u32) -> Option<usize> {
+    Some(match fmt {
+        20 => 3,
+        21 | 22 | 31..=35 | 62..=64 | 67 | 112 | 114 => 4,
+        23..=26 | 29 | 30 | 40 | 51 | 60 | 61 | 81 | 111 | 117 => 2,
+        27 | 28 | 41 | 50 | 52 => 1,
+        36 | 110 | 113 | 115 => 8,
+        116 => 16,
+        _ => return None,
+    })
+}
+
 /// The bytes of one locked level (rows packed), its desc words and the lock's answer.
 unsafe fn level_bytes(desc: &[u32; 8], pitch: usize, bits: *const u8) -> Vec<u8> {
     let (fmt, w, h) = (desc[0], desc[6] as usize, desc[7] as usize);
@@ -178,13 +191,7 @@ unsafe fn level_bytes(desc: &[u32; 8], pitch: usize, bits: *const u8) -> Vec<u8>
         let bytes = if fmt == 0x3154_5844 { 8 } else { 16 };
         (h.div_ceil(4), w.div_ceil(4) * bytes)
     } else {
-        let bpp = match fmt {
-            20 => 3,
-            21 | 22 => 4,
-            23 | 25 | 26 => 2,
-            28 | 50 => 1,
-            other => panic!("level format {other:#x}: no size known"),
-        };
+        let bpp = pixel_bytes(fmt).unwrap_or_else(|| panic!("level format {fmt:#x}: no size known"));
         (h, w * bpp)
     };
     let mut packed = Vec::with_capacity(rows * row);
@@ -205,15 +212,24 @@ fn read_u32(input: &mut impl std::io::Read) -> Option<u32> {
 /// 3 `D3DXGetImageInfoFromFileInMemory`; the data's length u32; the data) and answers each on
 /// stdout: the HRESULT, then for 3 the image info's seven words; for 1 and 2 the level count,
 /// the face count (1, or 6 for a cube), then for each face and level its format, width,
-/// height, byte count and the level's bytes (rows packed). Ends at the end of stdin.
+/// height, byte count and the level's bytes (rows packed). Request 6 is
+/// `D3DXLoadSurfaceFromMemory` into a scratch surface of the source's size (the codecs' encoders
+/// with or without dither, `d3dx-tex-verify --capture-rows`). Ends at the end of stdin.
 ///
 /// `on_thread`: the device is made on this thread and the calls are made on a new thread, at
 /// the control word a thread starts with (0x27f, 53-bit precision), as the game's loading
 /// threads (`BSTaskThread`, 00c42da0) call D3DX while its main thread made the device; otherwise
 /// all on this thread, at the single precision the device sets. The control word the calls
 /// start at, and any change a call leaves, go to stderr.
-pub unsafe fn serve(module: *mut c_void, on_thread: bool) {
-    let device = device();
+/// `proxy`: the calls go to a proxy of the device (`crate::proxy`): request 4 gives it the formats it
+/// takes (the count of texture formats, the formats, the count of cube formats, the formats;
+/// answered with 0), request 5 asks D3DX's picks on it for every format of its table (answered
+/// per format: `D3DXCheckTextureRequirements`' answer and format, then the cube one's).
+pub unsafe fn serve(module: *mut c_void, on_thread: bool, proxy: bool) {
+    let mut device = device();
+    if proxy {
+        device = crate::proxy::proxy(device);
+    }
     if !on_thread {
         return serve_calls(module as usize, device as usize);
     }
@@ -246,6 +262,34 @@ unsafe fn serve_calls(module: usize, device: usize) {
         let len = read_u32(&mut input).expect("a length") as usize;
         let mut data = vec![0u8; len];
         std::io::Read::read_exact(&mut input, &mut data).expect("the data");
+        if kind == 4 {
+            let words: Vec<u32> = data.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+            let n = words[0] as usize;
+            let texture = words[1..1 + n].to_vec();
+            let m = words[1 + n] as usize;
+            let cube = words[2 + n..2 + n + m].to_vec();
+            crate::proxy::set_lists(texture, cube);
+            out.write_all(&0u32.to_le_bytes()).unwrap();
+            out.flush().unwrap();
+            continue;
+        }
+        if kind == 5 {
+            type TexReq = unsafe extern "system" fn(*mut c_void, *mut u32, *mut u32, *mut u32, u32, *mut u32, u32) -> u32;
+            type CubeReq = unsafe extern "system" fn(*mut c_void, *mut u32, *mut u32, u32, *mut u32, u32) -> u32;
+            let tex_req: TexReq = std::mem::transmute(crate::GetProcAddress(module, b"D3DXCheckTextureRequirements\0".as_ptr()));
+            let cube_req: CubeReq = std::mem::transmute(crate::GetProcAddress(module, b"D3DXCheckCubeTextureRequirements\0".as_ptr()));
+            for &f in TABLE_FORMATS {
+                let (mut w, mut h, mut levels, mut tf) = (64u32, 64u32, 0u32, f);
+                let tr = tex_req(device, &mut w, &mut h, &mut levels, 0, &mut tf, 1);
+                let (mut s, mut cl, mut cf) = (64u32, 0u32, f);
+                let cr = cube_req(device, &mut s, &mut cl, 0, &mut cf, 1);
+                for word in [tr, tf, cr, cf] {
+                    out.write_all(&word.to_le_bytes()).unwrap();
+                }
+            }
+            out.flush().unwrap();
+            continue;
+        }
         if kind == 3 {
             // `D3DXGetImageInfoFromFileInMemory`: the answer, then the seven words.
             type Info = unsafe extern "system" fn(*const u8, u32, *mut u32) -> u32;
@@ -255,6 +299,46 @@ unsafe fn serve_calls(module: usize, device: usize) {
             for w in words {
                 out.write_all(&w.to_le_bytes()).unwrap();
             }
+            out.flush().unwrap();
+            continue;
+        }
+        if kind == 6 {
+            // `D3DXLoadSurfaceFromMemory` into the level of a one-level scratch texture of the
+            // source's size (D3DPOOL_SCRATCH takes any format): the words destination format,
+            // source format, width, height and filter, then the source's rows, packed. Answered
+            // with the HRESULT, the level's byte count and its bytes (rows packed).
+            type Load = unsafe extern "system" fn(*mut c_void, *const c_void, *const u32, *const u8, u32, u32, *const c_void, *const u32, u32, u32) -> u32;
+            type CreateTexture = unsafe extern "system" fn(*mut c_void, u32, u32, u32, u32, u32, u32, *mut *mut c_void, *mut c_void) -> u32;
+            type SurfaceLevel = unsafe extern "system" fn(*mut c_void, u32, *mut *mut c_void) -> u32;
+            let word = |i: usize| u32::from_le_bytes(data[4 * i..4 * i + 4].try_into().unwrap());
+            let (dst, src, w, h, filter) = (word(0), word(1), word(2), word(3), word(4));
+            let load: Load = std::mem::transmute(crate::GetProcAddress(module, b"D3DXLoadSurfaceFromMemory\0".as_ptr()));
+            let mut texture: *mut c_void = std::ptr::null_mut();
+            let cr = (std::mem::transmute::<usize, CreateTexture>(vt(device, 23)))(device, w, h, 1, 0, dst, 3, &mut texture, std::ptr::null_mut());
+            assert_eq!(cr, 0, "a scratch texture of format {dst}");
+            let mut surface: *mut c_void = std::ptr::null_mut();
+            let sr = (std::mem::transmute::<usize, SurfaceLevel>(vt(texture, 18)))(texture, 0, &mut surface);
+            assert_eq!(sr, 0, "GetSurfaceLevel");
+            let pitch = w * pixel_bytes(src).expect("a source format of known size") as u32;
+            let rect = [0u32, 0, w, h];
+            let hr = load(surface, std::ptr::null(), std::ptr::null(), data[20..].as_ptr(), src, pitch, std::ptr::null(), rect.as_ptr(), filter, 0);
+            let now = crate::x87_control_word();
+            if now != start && !changed {
+                eprintln!("serve: a call left the control word at {now:04x} (was {start:04x})");
+                changed = true;
+            }
+            (std::mem::transmute::<usize, Release>(vt(surface, 2)))(surface);
+            let mut desc = [0u32; 8];
+            (std::mem::transmute::<usize, Desc>(vt(texture, 17)))(texture, 0, desc.as_mut_ptr());
+            let mut locked = [0u32; 2];
+            let lr = (std::mem::transmute::<usize, Lock>(vt(texture, 19)))(texture, 0, locked.as_mut_ptr(), std::ptr::null(), 0x10);
+            assert_eq!(lr, 0, "LockRect");
+            let bytes = level_bytes(&desc, locked[0] as usize, locked[1] as usize as *const u8);
+            (std::mem::transmute::<usize, Unlock>(vt(texture, 20)))(texture, 0);
+            (std::mem::transmute::<usize, Release>(vt(texture, 2)))(texture);
+            out.write_all(&hr.to_le_bytes()).unwrap();
+            out.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
+            out.write_all(&bytes).unwrap();
             out.flush().unwrap();
             continue;
         }
@@ -393,5 +477,48 @@ pub unsafe fn thread_texture(module: *mut c_void) {
         .join()
         .unwrap();
         println!("{line}");
+    }
+}
+
+/// Every format of D3DX's format table (`d3dx9_38.dll` 0x406b10), in its order: the formats
+/// `D3DXCheckTextureRequirements` chooses among when the device does not take the one asked for.
+const TABLE_FORMATS: &[u32] = &[
+    20, 21, 22, 23, 24, 40, 41, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 50, 51, 52, 81, 60,
+    61, 62, 63, 64, 67, 110, 117, 0x5956_5955, 0x4742_4752, 0x3259_5559, 0x4247_5247, 0x3154_5844,
+    0x3254_5844, 0x3354_5844, 0x3454_5844, 0x3554_5844, 70, 82, 71, 73, 75, 80, 77, 79, 83, 111, 112,
+    113, 114, 115, 116, 0x3631_4c41, 0x3631_5220,
+];
+
+/// `formats`: what the device behind `serve`'s calls takes. For every format of D3DX's table,
+/// one line: the format, `IDirect3D9::CheckDeviceFormat`'s answers for a texture and for a cube
+/// texture (usage 0, the device's adapter and type, the display mode's format, as D3DX asks:
+/// 0x60d069), then `D3DXCheckTextureRequirements` and `D3DXCheckCubeTextureRequirements`
+/// (64 texels, the whole chain, usage 0, `D3DPOOL_MANAGED`): each answer and the format it picks.
+pub unsafe fn formats(module: *mut c_void) {
+    let device = device();
+    type GetDirect3D = unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> u32;
+    type GetDisplayMode = unsafe extern "system" fn(*mut c_void, u32, *mut u32) -> u32;
+    type CheckFormat = unsafe extern "system" fn(*mut c_void, u32, u32, u32, u32, u32, u32) -> u32;
+    type TexReq =
+        unsafe extern "system" fn(*mut c_void, *mut u32, *mut u32, *mut u32, u32, *mut u32, u32) -> u32;
+    type CubeReq = unsafe extern "system" fn(*mut c_void, *mut u32, *mut u32, u32, *mut u32, u32) -> u32;
+    let mut d3d: *mut c_void = std::ptr::null_mut();
+    assert_eq!((std::mem::transmute::<usize, GetDirect3D>(vt(device, 6)))(device, &mut d3d), 0);
+    let mut mode = [0u32; 4];
+    assert_eq!((std::mem::transmute::<usize, GetDisplayMode>(vt(device, 8)))(device, 0, mode.as_mut_ptr()), 0);
+    let check: CheckFormat = std::mem::transmute(vt(d3d, 10));
+    let tex_req = crate::GetProcAddress(module, b"D3DXCheckTextureRequirements\0".as_ptr());
+    let cube_req = crate::GetProcAddress(module, b"D3DXCheckCubeTextureRequirements\0".as_ptr());
+    assert!(!tex_req.is_null() && !cube_req.is_null());
+    let (tex_req, cube_req): (TexReq, CubeReq) = (std::mem::transmute(tex_req), std::mem::transmute(cube_req));
+    println!("# display format {}; per format: format, CheckDeviceFormat texture, cube; D3DXCheckTextureRequirements answer and format; D3DXCheckCubeTextureRequirements answer and format", mode[3]);
+    for &f in TABLE_FORMATS {
+        let t = check(d3d, 0, 1, mode[3], 0, 3, f);
+        let c = check(d3d, 0, 1, mode[3], 0, 5, f);
+        let (mut w, mut h, mut levels, mut tf) = (64u32, 64u32, 0u32, f);
+        let tr = tex_req(device, &mut w, &mut h, &mut levels, 0, &mut tf, 1);
+        let (mut s, mut cl, mut cf) = (64u32, 0u32, f);
+        let cr = cube_req(device, &mut s, &mut cl, 0, &mut cf, 1);
+        println!("{f:#x}\t{t:08x}\t{c:08x}\t{tr:08x}\t{tf:#x}\t{cr:08x}\t{cf:#x}");
     }
 }

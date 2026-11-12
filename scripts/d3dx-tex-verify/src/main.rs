@@ -539,6 +539,11 @@ fn time_both(
 /// back), one line each: name, call, answer, levels, faces, then per surface `format,width,height,
 /// fnv1a64 of the bytes`. `crates/d3dx-tex/data/synthetic_32bit.tsv` is this output;
 /// `synthetic_32bit_double.tsv` with `--double` (the DLL on a thread at 53 bits).
+/// `--capture-formats <out.tsv> --serve <d3dx-measure.exe>`: the same for
+/// `d3dx_tex::synthetic::formats` (the formats translated for mods' textures):
+/// `crates/d3dx-tex/data/formats_32bit.tsv`, `formats_32bit_double.tsv` with `--double`.
+/// `--capture-npot <out.tsv> --serve <d3dx-measure.exe>`: the same for `d3dx_tex::synthetic::npot`
+/// (files D3DX resamples): `crates/d3dx-tex/data/npot_32bit.tsv`, `npot_32bit_double.tsv`.
 /// `--capture-headers <out.tsv> --serve <d3dx-measure.exe>`: `d3dx_tex::synthetic::header_files`
 /// (headers that push D3DX's DDS loader's sizes) through the 32-bit DLL's image info and create
 /// calls, each file in a process of its own, so a crash ends only its own answer. One line each:
@@ -611,8 +616,38 @@ fn capture_headers(out: &std::path::Path, serve: &str) {
     std::fs::write(out, text).unwrap();
 }
 
-fn capture_synthetic(out: &std::path::Path, serve: &str) {
+/// `--time-npot`: d3dx-tex's create call on `d3dx_tex::synthetic::large_npot`'s 1920x1080 files
+/// (DXT5 and A8R8G8B8, one level: a 2048x2048 texture, its top level resampled) at both
+/// precisions, on one thread: the best of five, in milliseconds.
+fn time_npot() {
+    let caps = d3dx_tex::Caps::default();
+    for f in d3dx_tex::synthetic::large_npot() {
+        for (p, name) in [
+            (d3dx_tex::Precision::Single, "single"),
+            (d3dx_tex::Precision::Double, "double"),
+        ] {
+            let best = (0..5)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    let made = d3dx_tex::create_texture_from_file_in_memory(&f.data, &caps, p);
+                    std::hint::black_box(made.expect("made"));
+                    start.elapsed()
+                })
+                .min()
+                .unwrap();
+            println!("{}\t{name}\t{:.1} ms", f.name, best.as_secs_f64() * 1e3);
+        }
+    }
+}
+
+fn capture_synthetic(out: &std::path::Path, serve: &str, set: &str) {
     use std::io::Read;
+    let files = match set {
+        "files" => d3dx_tex::synthetic::files(),
+        "formats" => d3dx_tex::synthetic::formats(),
+        "npot" => d3dx_tex::synthetic::npot(),
+        other => panic!("no synthetic set {other}"),
+    };
     let mut child = std::process::Command::new(serve)
         .arg("serve")
         .args(DOUBLE.load(Ordering::Relaxed).then_some("thread"))
@@ -620,8 +655,8 @@ fn capture_synthetic(out: &std::path::Path, serve: &str) {
         .stdout(std::process::Stdio::piped())
         .spawn()
         .expect("d3dx-measure serve");
-    let mut text = format!("# d3dx_tex::synthetic::files() through the 32-bit d3dx9_38.dll (d3dx-measure serve, x87 control word {:#x}): name, call, answer, levels, faces, then per surface format,width,height,fnv1a64\n", control_word());
-    for f in d3dx_tex::synthetic::files() {
+    let mut text = format!("# d3dx_tex::synthetic::{set}() through the 32-bit d3dx9_38.dll (d3dx-measure serve, x87 control word {:#x}): name, call, answer, levels, faces, then per surface format,width,height,fnv1a64\n", control_word());
+    for f in files {
         let stdin = child.stdin.as_mut().unwrap();
         stdin
             .write_all(&(if f.cube { 2u32 } else { 1 }).to_le_bytes())
@@ -654,6 +689,286 @@ fn capture_synthetic(out: &std::path::Path, serve: &str) {
             if f.cube { "cube" } else { "texture" },
             parts.join(";")
         );
+    }
+    drop(child.stdin.take());
+    child.wait().unwrap();
+    std::fs::write(out, text).unwrap();
+}
+
+/// `--capture-proxy <out.tsv> --serve <d3dx-measure.exe>`: D3DX on devices that take other formats
+/// than this machine's (`d3dx-measure serve proxy`: a proxy of the device whose `CheckDeviceFormat`
+/// answers from given lists; textures of formats the real one lacks made in the scratch pool).
+/// Seven devices: one taking only the 16-bit and DXT formats (its cube list without R5G6B5 and
+/// X4R4G4B4), one taking every format of D3DX's table, four with random lists (each format taken
+/// with probability 1/2, as a texture and as a cube apart), one taking X8R8G8B8, L8 and DXT only
+/// (L16 files made L8, with the dither). For each: a `device` line (its lists),
+/// a `pick` line per format of D3DX's table (`D3DXCheckTextureRequirements`' answer and format,
+/// the cube one's), and a `file` line per synthetic file (`files` and `formats`: the create call's
+/// answer, levels, faces, surfaces as `--capture-synthetic` writes them).
+/// `crates/d3dx-tex/data/proxy_32bit.tsv` (`proxy_32bit_double.tsv` with `--double`).
+fn capture_proxy(out: &std::path::Path, serve: &str) {
+    use std::io::Read;
+    let mut child = std::process::Command::new(serve)
+        .arg("serve")
+        .arg("proxy")
+        .args(DOUBLE.load(Ordering::Relaxed).then_some("thread"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("d3dx-measure serve proxy");
+    fn rd(o: &mut impl Read) -> u32 {
+        let mut b = [0u8; 4];
+        o.read_exact(&mut b).unwrap();
+        u32::from_le_bytes(b)
+    }
+    fn ask(child: &mut std::process::Child, kind: u32, data: &[u8]) {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(&kind.to_le_bytes()).unwrap();
+        stdin.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
+        stdin.write_all(data).unwrap();
+        stdin.flush().unwrap();
+    }
+    let table: Vec<u32> = d3dx_tex::table_formats().collect();
+    let cc = |s: &[u8; 4]| u32::from_le_bytes(*s);
+    let sixteen = vec![23, 24, 25, 26, 30, cc(b"DXT1"), cc(b"DXT3"), cc(b"DXT5")];
+    let sixteen_cube = vec![24, 25, 26, cc(b"DXT1"), cc(b"DXT3"), cc(b"DXT5")];
+    let mut devices = vec![(sixteen, sixteen_cube), (table.clone(), table.clone())];
+    let mut seed = 0x5eed_0000_d3d9_0476u64;
+    let mut coin = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed >> 63 == 1
+    };
+    for _ in 0..4 {
+        let tex: Vec<u32> = table.iter().copied().filter(|_| coin()).collect();
+        let cube: Vec<u32> = table.iter().copied().filter(|_| coin()).collect();
+        devices.push((tex, cube));
+    }
+    // One taking L8 and X8R8G8B8 (and DXT) but none of the formats nearer L16 (L16,
+    // A16B16G16R16, A2R10G10B10, A2B10G10R10): D3DX makes L16 files L8 with its dither.
+    let l8 = vec![22, 50, cc(b"DXT1"), cc(b"DXT3"), cc(b"DXT5")];
+    devices.push((l8.clone(), l8));
+    let files: Vec<d3dx_tex::synthetic::File> = d3dx_tex::synthetic::files()
+        .into_iter()
+        .chain(d3dx_tex::synthetic::formats())
+        .collect();
+    let list = |v: &[u32]| {
+        v.iter()
+            .map(|f| format!("{f:x}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut text = format!("# D3DX on proxy devices taking the formats listed (d3dx-measure serve proxy, x87 control word {:#x}): device N, texture formats, cube formats; pick N, format, texture answer and format, cube answer and format; file N, name, call, answer, levels, faces, per surface format,width,height,fnv1a64\n", control_word());
+    for (n, (tex, cube)) in devices.iter().enumerate() {
+        let mut words = vec![tex.len() as u32];
+        words.extend(tex);
+        words.push(cube.len() as u32);
+        words.extend(cube);
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        ask(&mut child, 4, &bytes);
+        assert_eq!(rd(child.stdout.as_mut().unwrap()), 0, "the lists");
+        text += &format!("device\t{n}\t{}\t{}\n", list(tex), list(cube));
+        ask(&mut child, 5, &[]);
+        for &f in &table {
+            let o = child.stdout.as_mut().unwrap();
+            let (tr, tf, cr, cf) = (rd(o), rd(o), rd(o), rd(o));
+            text += &format!("pick\t{n}\t{f:x}\t{tr:08x}\t{tf:x}\t{cr:08x}\t{cf:x}\n");
+        }
+        for f in &files {
+            ask(&mut child, if f.cube { 2 } else { 1 }, &f.data);
+            let o = child.stdout.as_mut().unwrap();
+            let (hr, levels, faces) = (rd(o), rd(o), rd(o));
+            let mut parts = Vec::new();
+            for _ in 0..levels * faces {
+                let (format, w, h, len) = (rd(o), rd(o), rd(o), rd(o));
+                let mut bytes = vec![0u8; len as usize];
+                o.read_exact(&mut bytes).unwrap();
+                parts.push(format!(
+                    "{format:x},{w},{h},{:016x}",
+                    d3dx_tex::synthetic::fnv(&bytes)
+                ));
+            }
+            text += &format!(
+                "file\t{n}\t{}\t{}\t{hr:08x}\t{levels}\t{faces}\t{}\n",
+                f.name,
+                if f.cube { "cube" } else { "texture" },
+                parts.join(";")
+            );
+        }
+    }
+    drop(child.stdin.take());
+    child.wait().unwrap();
+    std::fs::write(out, text).unwrap();
+}
+
+/// `--compare <folder> --serve <d3dx-measure.exe> [--double]`: every DDS texture of a mod folder
+/// (its BSAs' entries and its loose files, read only) through the 32-bit DLL (`d3dx-measure
+/// serve`, on this machine's device; the cube call for a cube map, as the game picks by the image
+/// info) and through `d3dx-tex` (with the reference device's lists: this machine's), compared
+/// level by level: answer, level and face counts, every surface's format, size and bytes. Prints
+/// the counts and each file that is not the same.
+fn compare_folder(dir: &std::path::Path, serve: &str) {
+    use std::io::Read;
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    let mut items: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut paths = Vec::new();
+    walk(dir, &mut paths);
+    paths.sort();
+    let is_dds = |p: &str| p.to_ascii_lowercase().ends_with(".dds");
+    for p in &paths {
+        let rel = p.strip_prefix(dir).unwrap().to_string_lossy().to_string();
+        if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("bsa")) {
+            let archive = bsa::Archive::open(p).expect("an archive");
+            for e in archive.files().iter().filter(|e| is_dds(&e.path)) {
+                items.push((
+                    format!("{rel}:{}", e.path),
+                    archive.read(e).expect("an entry"),
+                ));
+            }
+        } else if is_dds(&rel) {
+            items.push((rel, std::fs::read(p).unwrap()));
+        }
+    }
+    let mut child = std::process::Command::new(serve)
+        .arg("serve")
+        .args(DOUBLE.load(Ordering::Relaxed).then_some("thread"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("d3dx-measure serve");
+    fn rd(o: &mut impl Read) -> u32 {
+        let mut b = [0u8; 4];
+        o.read_exact(&mut b).unwrap();
+        u32::from_le_bytes(b)
+    }
+    fn send(child: &mut std::process::Child, kind: u32, data: &[u8]) {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(&kind.to_le_bytes()).unwrap();
+        stdin.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
+        stdin.write_all(data).unwrap();
+        stdin.flush().unwrap();
+    }
+    let caps = d3dx_tex::Caps::default();
+    let (mut same, mut left, mut differ) = (0, 0, Vec::new());
+    for (name, data) in &items {
+        send(&mut child, 3, data);
+        let o = child.stdout.as_mut().unwrap();
+        let hr = rd(o);
+        let words: Vec<u32> = (0..7).map(|_| rd(o)).collect();
+        let cube = hr == 0 && words[5] == 5;
+        send(&mut child, if cube { 2 } else { 1 }, data);
+        let o = child.stdout.as_mut().unwrap();
+        let (hr, levels, faces) = (rd(o), rd(o), rd(o));
+        let mut theirs = Vec::new();
+        for _ in 0..levels * faces {
+            let (format, w, h, len) = (rd(o), rd(o), rd(o), rd(o));
+            let mut bytes = vec![0u8; len as usize];
+            o.read_exact(&mut bytes).unwrap();
+            theirs.push((format, w, h, bytes));
+        }
+        let ours = if cube {
+            d3dx_tex::create_cube_texture_from_file_in_memory(data, &caps, precision())
+        } else {
+            d3dx_tex::create_texture_from_file_in_memory(data, &caps, precision())
+        };
+        match ours {
+            Err(d3dx_tex::Error::NotProvided(_, why)) => {
+                left += 1;
+                println!("left to the DLL: {name}: {why} (the DLL: {hr:#x})");
+            }
+            Err(d3dx_tex::Error::D3dx(ours)) if ours == hr => same += 1,
+            Err(d3dx_tex::Error::D3dx(ours)) => {
+                differ.push(format!("{name}: ours {ours:#x}, the DLL's {hr:#x}"))
+            }
+            Ok(t) => {
+                let ok = hr == 0
+                    && (t.levels, t.faces) == (levels, faces)
+                    && t.surfaces.iter().zip(&theirs).all(|(s, (f, w, h, b))| {
+                        (s.format, s.width, s.height) == (*f, *w, *h) && s.bytes == *b
+                    });
+                if ok {
+                    same += 1;
+                } else {
+                    differ.push(format!(
+                        "{name}: {}x{} format {:#x}, {} levels",
+                        t.surfaces[0].width, t.surfaces[0].height, t.surfaces[0].format, t.levels
+                    ));
+                }
+            }
+        }
+    }
+    drop(child.stdin.take());
+    child.wait().unwrap();
+    for d in &differ {
+        println!("DIFFERS: {d}");
+    }
+    println!(
+        "{} textures at x87 control word {:#x}: {same} the same as the DLL's, {left} left to the DLL, {} different",
+        items.len(),
+        control_word(),
+        differ.len()
+    );
+}
+
+/// `--capture-rows <out.tsv> --serve <d3dx-measure.exe>`: D3DX's same-size conversion of
+/// `d3dx_tex::synthetic::rows_source` (A8R8G8B8, colours that are not grey) into each luminance
+/// and alpha format (`d3dx-measure serve` request 6: `D3DXLoadSurfaceFromMemory` into a scratch
+/// surface with `D3DX_FILTER_NONE`, and with `D3DX_FILTER_DITHER` too), one line each: format,
+/// dither, answer, byte count, fnv1a64 of the bytes. `crates/d3dx-tex/data/rows_32bit.tsv`
+/// (`rows_32bit_double.tsv` with `--double`).
+fn capture_rows(out: &std::path::Path, serve: &str) {
+    use std::io::Read;
+    let mut child = std::process::Command::new(serve)
+        .arg("serve")
+        .args(DOUBLE.load(Ordering::Relaxed).then_some("thread"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("d3dx-measure serve");
+    fn rd(o: &mut impl Read) -> u32 {
+        let mut b = [0u8; 4];
+        o.read_exact(&mut b).unwrap();
+        u32::from_le_bytes(b)
+    }
+    let (w, h) = d3dx_tex::synthetic::ROWS_SIZE;
+    let source = d3dx_tex::synthetic::rows_source();
+    let mut text = format!("# d3dx_tex::synthetic::rows_source() (A8R8G8B8, {w}x{h}) through the 32-bit d3dx9_38.dll's D3DXLoadSurfaceFromMemory into a scratch surface of each format, D3DX_FILTER_NONE without and with D3DX_FILTER_DITHER (d3dx-measure serve, x87 control word {:#x}): format, dither, answer, byte count, fnv1a64\n", control_word());
+    use d3dx_tex::format::{A4L4, A8, A8L8, A8R8G8B8, L16, L8};
+    for format in [L8, A8L8, A4L4, L16, A8] {
+        for dither in [false, true] {
+            let filter = 1 | if dither { 0x8_0000 } else { 0 };
+            let mut request: Vec<u8> = [format, A8R8G8B8, w, h, filter]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            request.extend_from_slice(&source);
+            let stdin = child.stdin.as_mut().unwrap();
+            stdin.write_all(&6u32.to_le_bytes()).unwrap();
+            stdin
+                .write_all(&(request.len() as u32).to_le_bytes())
+                .unwrap();
+            stdin.write_all(&request).unwrap();
+            stdin.flush().unwrap();
+            let o = child.stdout.as_mut().unwrap();
+            let (hr, len) = (rd(o), rd(o));
+            let mut bytes = vec![0u8; len as usize];
+            o.read_exact(&mut bytes).unwrap();
+            text += &format!(
+                "{format:x}\t{}\t{hr:08x}\t{len}\t{:016x}\n",
+                u32::from(dither),
+                d3dx_tex::synthetic::fnv(&bytes)
+            );
+        }
     }
     drop(child.stdin.take());
     child.wait().unwrap();
@@ -1089,7 +1404,7 @@ fn main() {
     let mut oracle_exe: Option<String> = None;
     let mut fuzz_n: Option<usize> = None;
     let mut time_mode = false;
-    let mut capture_synth: Option<PathBuf> = None;
+    let mut capture_synth: Option<(PathBuf, &str)> = None;
     let mut capture_hdr: Option<PathBuf> = None;
     let mut capture_blk: Option<PathBuf> = None;
     let mut serve_exe: Option<String> = None;
@@ -1103,7 +1418,31 @@ fn main() {
             }
             "--time" => time_mode = true,
             "--capture-synthetic" => {
-                capture_synth = Some(PathBuf::from(&args[i + 1]));
+                capture_synth = Some((PathBuf::from(&args[i + 1]), "files"));
+                i += 1;
+            }
+            "--capture-formats" => {
+                capture_synth = Some((PathBuf::from(&args[i + 1]), "formats"));
+                i += 1;
+            }
+            "--compare" => {
+                capture_synth = Some((PathBuf::from(&args[i + 1]), "compare"));
+                i += 1;
+            }
+            "--capture-npot" => {
+                capture_synth = Some((PathBuf::from(&args[i + 1]), "npot"));
+                i += 1;
+            }
+            "--time-npot" => {
+                time_npot();
+                return;
+            }
+            "--capture-proxy" => {
+                capture_synth = Some((PathBuf::from(&args[i + 1]), "proxy"));
+                i += 1;
+            }
+            "--capture-rows" => {
+                capture_synth = Some((PathBuf::from(&args[i + 1]), "rows"));
                 i += 1;
             }
             "--capture-blocks" => {
@@ -1151,6 +1490,43 @@ fn main() {
         }
         i += 1;
     }
+    // The captures of synthetic files need neither the game's files nor a texture cache.
+    if let Some(out) = capture_hdr {
+        capture_headers(
+            &out,
+            serve_exe.as_deref().expect("--serve <d3dx-measure.exe>"),
+        );
+        return;
+    }
+    if let Some((dir, "compare")) = &capture_synth {
+        compare_folder(
+            dir,
+            serve_exe.as_deref().expect("--serve <d3dx-measure.exe>"),
+        );
+        return;
+    }
+    if let Some((out, "proxy")) = &capture_synth {
+        capture_proxy(
+            out,
+            serve_exe.as_deref().expect("--serve <d3dx-measure.exe>"),
+        );
+        return;
+    }
+    if let Some((out, "rows")) = &capture_synth {
+        capture_rows(
+            out,
+            serve_exe.as_deref().expect("--serve <d3dx-measure.exe>"),
+        );
+        return;
+    }
+    if let Some((out, set)) = capture_synth {
+        capture_synthetic(
+            &out,
+            serve_exe.as_deref().expect("--serve <d3dx-measure.exe>"),
+            set,
+        );
+        return;
+    }
     // The textures the capture took, by archive path (index.tsv: key, archive, path, ...).
     let index = std::fs::read_to_string(cache.join("index.tsv")).expect("the cache's index.tsv");
     let wanted: std::collections::HashSet<(String, String)> = index
@@ -1173,20 +1549,6 @@ fn main() {
     archives.sort();
     if time_mode {
         time_both(&archives, &wanted, &only);
-        return;
-    }
-    if let Some(out) = capture_hdr {
-        capture_headers(
-            &out,
-            serve_exe.as_deref().expect("--serve <d3dx-measure.exe>"),
-        );
-        return;
-    }
-    if let Some(out) = capture_synth {
-        capture_synthetic(
-            &out,
-            serve_exe.as_deref().expect("--serve <d3dx-measure.exe>"),
-        );
         return;
     }
     if let Some(out) = capture_blk {

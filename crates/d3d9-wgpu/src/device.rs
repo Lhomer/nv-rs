@@ -74,6 +74,10 @@ pub(crate) struct Shader {
     fregs: u32,
     /// Its inputs' varyings (a pixel shader's link to the vertex shader).
     varyings: Vec<wgsl::Semantic>,
+    /// A pixel shader whose varyings all have a fixed location ([`wgsl::fixed_slot`]): its
+    /// module serves every vertex shader ([`Device::module_tasks`]). Every pixel shader of the
+    /// game's packages.
+    fixed: bool,
     /// Its bytecode and the bytecode's hash, the same in every run ([`prepare::bytecode_hash`]).
     tokens: Vec<u32>,
     stable: u64,
@@ -312,6 +316,20 @@ struct Made {
     over_16ms: u32,
     /// The longest time between two presents on the device's thread (the render thread).
     longest_frame: std::time::Duration,
+    /// The pipeline work on the device's thread since the last present: pipelines made on draws
+    /// with their modules, and listed ones made ahead ([`Device::prepare_listed`]).
+    work: std::time::Duration,
+    /// The most of it one present held, and that present; the presents that held more than
+    /// 20 ms of it; the pipelines made on draws that took more than 1 ms. The first-use gate
+    /// (measure/wgpu/FAST-LINK.md): none over 20 ms in a present, none over 1 ms on a draw.
+    worst_work: std::time::Duration,
+    worst_at: u64,
+    work_over_20ms: u32,
+    over_1ms: u32,
+    /// Shaders the game created after its start ([`Device::wait_for_start`]): made in the
+    /// background or on the draw that needs them (a mod's, mid-game). One made again with
+    /// bytecode the device has makes nothing and is not counted.
+    late_shaders: u32,
 }
 
 impl Made {
@@ -325,8 +343,23 @@ impl Made {
         self.pipeline += pipeline;
         self.longest = self.longest.max(all);
         self.whole += all;
+        self.work += all;
         if all.as_millis() > 16 {
             self.over_16ms += 1;
+        }
+        if all > std::time::Duration::from_millis(1) {
+            self.over_1ms += 1;
+        }
+    }
+    /// Present `present` is done: the pipeline work it held counted.
+    fn end_present(&mut self, present: u64) {
+        let work = std::mem::take(&mut self.work);
+        if work > self.worst_work {
+            self.worst_work = work;
+            self.worst_at = present;
+        }
+        if work > std::time::Duration::from_millis(20) {
+            self.work_over_20ms += 1;
         }
     }
 }
@@ -452,21 +485,27 @@ impl Listed {
 
     /// `e` listed (it was made on a draw at present `presents`), unless it is already.
     fn add(&mut self, e: prepare::Entry, presents: u64) {
-        let line = e.line();
         let samples = 1u32 << e.samples.min(31);
-        if self.list.add(e) {
-            self.done.push(samples);
-            if !self.dirty {
-                self.first_added_at = presents;
-            }
-            self.dirty = true;
-            self.added_at = presents;
-            self.shared
-                .lines
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(line);
+        if !self.list.add(e) {
+            return;
         }
+        // Its line, formatted only for a new entry (the list's last).
+        let line = self
+            .list
+            .entries
+            .last()
+            .map_or_else(String::new, prepare::Entry::line);
+        self.done.push(samples);
+        if !self.dirty {
+            self.first_added_at = presents;
+        }
+        self.dirty = true;
+        self.added_at = presents;
+        self.shared
+            .lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(line);
     }
 
     /// Writes the list 300 presents after the last new entry (or every 3600 while they keep
@@ -495,7 +534,8 @@ impl Listed {
 struct PassBinds {
     pipeline: Option<wgpu::RenderPipeline>,
     blocks: Option<(u32, u32)>,
-    group: Option<wgpu::BindGroup>,
+    /// The pixel shader's sampler group (bind group 1) and the vertex shader's (2).
+    groups: [Option<wgpu::BindGroup>; 2],
     viewport: Option<[u32; 6]>,
     scissor: Option<(u32, u32, u32, u32)>,
     stencil: Option<u32>,
@@ -625,17 +665,20 @@ pub struct Device {
     blocks: (u32, u32),
     /// The float constants each stage's last written block carries.
     block_fregs: [u32; 2],
+    /// A pair's sampler layouts by its samplers' key ([`Device::sampler_layout`]): the pixel
+    /// shader's group and the vertex shader's, and the pipeline layout of the two.
     #[allow(clippy::type_complexity)]
-    sampler_layouts: Map<Vec<(u32, u8, bool)>, (wgpu::BindGroupLayout, wgpu::PipelineLayout)>,
-    pipelines: Map<PipeKey, Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>>,
-    /// The last draw's pipeline key and pipeline, its bind group's key and group, its vertex
-    /// link; the vertex links by shader and declaration; what the open pass was given.
-    #[allow(clippy::type_complexity)]
-    last_pipeline: Option<(
-        PipeKey,
-        Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
-    )>,
-    last_group: (GroupKey, Option<wgpu::BindGroup>),
+    sampler_layouts: Map<Vec<(u32, u8, bool)>, ([wgpu::BindGroupLayout; 2], wgpu::PipelineLayout)>,
+    /// The pipelines by key (none: refused), each with the plane states its draws were listed
+    /// with this run (bit 0 none on, bit 1 one on; [`clip_code`]).
+    pipelines: Map<PipeKey, (Option<Pipe>, u8)>,
+    /// The last draw's pipeline key and pipeline, each stage's sampler group's key and group
+    /// (the pixel shader's first), its vertex link; the vertex links by shader and declaration;
+    /// what the open pass was given.
+    last_pipeline: Option<(PipeKey, Option<Pipe>, bool)>,
+    last_groups: [(GroupKey, Option<wgpu::BindGroup>); 2],
+    /// Each stage's empty sampler group (a stage without samplers).
+    empty_groups: [Option<wgpu::BindGroup>; 2],
     last_link: Option<((u64, u64), Arc<VertexLink>)>,
     vertex_links: Map<(u64, u64), Arc<VertexLink>>,
     binds: PassBinds,
@@ -662,8 +705,7 @@ pub struct Device {
     listed_new: bool,
     made: Made,
     vs_modules: Map<VKey, Option<wgpu::ShaderModule>>,
-    #[allow(clippy::type_complexity)]
-    ps_modules: Map<(u64, Vec<wgsl::Semantic>, bool, wgsl::Clip), Option<wgpu::ShaderModule>>,
+    ps_modules: Map<PKey, Option<wgpu::ShaderModule>>,
     samplers: Map<SamplerKey, wgpu::Sampler>,
     groups: Map<GroupKey, wgpu::BindGroup>,
     blit: Map<(wgpu::TextureFormat, bool), wgpu::RenderPipeline>,
@@ -721,6 +763,37 @@ pub struct Device {
     pub(crate) skipped: u64,
     /// Pipelines made on the draw that needed them (not ahead from the list).
     made_on_draws: u64,
+    /// Entries the draws offered the pipeline list: each pipeline once for each plane state it
+    /// was drawn with this run.
+    list_offers: u64,
+    /// Shader modules made on the device's thread for a draw or a listed pipeline (not ahead on
+    /// the module threads; tests).
+    modules_here: u64,
+    /// The module threads: each shader's modules made when the game creates it
+    /// ([`Device::queue_modules`]); started with the first.
+    modules_ahead: Option<crate::ahead::Queue<ModKey, ModuleMade>>,
+    /// The modules the module threads made since their queue last ran empty, and their time
+    /// (said in one line when it does: [`Device::collect_modules`]); of them, those whose
+    /// pipeline library was made too.
+    ahead_burst: (u32, std::time::Duration, u32),
+    /// Whether each shader's pipeline libraries are made with its modules (FAST-LINK step 3):
+    /// where wgpu-hal links render pipelines from libraries (Vulkan with
+    /// `VK_EXT_graphics_pipeline_library`; [`Device::library_ahead`]).
+    libraries: bool,
+    /// The game's start is over: its first draw or `Present` after its first shaders
+    /// ([`Device::wait_for_start`]); shaders created after it are counted as late.
+    start_done: bool,
+    late_shaders: u64,
+    /// How many module jobs the start waited for ([`Device::start_waited_for`]).
+    start_jobs: usize,
+    /// Libraries are still made ahead: a refused one stops it (said once), so no shader makes
+    /// a pipeline for nothing. Shared with the module jobs.
+    libraries_ahead: Arc<std::sync::atomic::AtomicBool>,
+    /// The stand-in partners those are made with (or why wgpu refused one): a vertex shader for
+    /// each set of varyings and clip code ([`wgsl::stand_in_vertex`]), and the pixel shader
+    /// ([`wgsl::STAND_IN_PIXEL`]). Kept: wgpu-hal forgets a module's libraries when it goes.
+    stand_in_vertex: Map<(Vec<wgsl::Semantic>, wgsl::Clip), Result<wgpu::ShaderModule, String>>,
+    stand_in_pixel: Option<Result<wgpu::ShaderModule, String>>,
     /// Where the occlusion counts are posted for the game's threads ([`QueryAnswers`]), and the
     /// `END`s (query, number) whose counts are awaited.
     pub(crate) answers: Option<Arc<QueryAnswers>>,
@@ -961,6 +1034,9 @@ impl Device {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // SAFETY: the hal device is only asked a capability it keeps (no Vulkan call).
+        let libraries = unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }
+            .is_some_and(|hal| hal.uses_pipeline_libraries());
         let mut d = Device {
             device,
             queue,
@@ -1014,11 +1090,23 @@ impl Device {
             sampler_layouts: Map::default(),
             pipelines: Map::default(),
             last_pipeline: None,
-            last_group: (Vec::new(), None),
+            last_groups: [(Vec::new(), None), (Vec::new(), None)],
+            empty_groups: [None, None],
             last_link: None,
             vertex_links: Map::default(),
             binds: PassBinds::default(),
             made_on_draws: 0,
+            list_offers: 0,
+            modules_here: 0,
+            modules_ahead: None,
+            ahead_burst: (0, std::time::Duration::ZERO, 0),
+            libraries,
+            start_done: false,
+            late_shaders: 0,
+            start_jobs: 0,
+            libraries_ahead: Arc::new(std::sync::atomic::AtomicBool::new(libraries)),
+            stand_in_vertex: Map::default(),
+            stand_in_pixel: None,
             pipeline_cache,
             last_present: None,
             loading: None,
@@ -1442,13 +1530,15 @@ impl Device {
                 let sig = wgsl::signature(&program);
                 let id = self.id();
                 let fregs = wgsl::float_constants_read(&program);
-                let varyings = sig.inputs.iter().map(|(_, s)| *s).collect();
+                let varyings: Vec<wgsl::Semantic> = sig.inputs.iter().map(|(_, s)| *s).collect();
+                let fixed = varyings.iter().all(|s| wgsl::fixed_slot(*s).is_some());
                 let s = Arc::new(Shader {
                     program,
                     sig,
                     id,
                     fregs,
                     varyings,
+                    fixed,
                     tokens: tokens.to_vec(),
                     stable,
                 });
@@ -1456,8 +1546,13 @@ impl Device {
                     .entry(stable)
                     .or_default()
                     .push(s.clone());
-                self.objects.insert(shader, Obj::Shader(s));
+                self.objects.insert(shader, Obj::Shader(s.clone()));
                 self.listed_new = true;
+                self.queue_modules(&s);
+                if self.start_done {
+                    self.made.late_shaders += 1;
+                    self.late_shaders += 1;
+                }
             }
             Err(e) => self.warn(format!("a shader the converter cannot read: {e}")),
         }
@@ -1550,8 +1645,10 @@ impl Device {
         let gone = std::mem::take(&mut self.destroyed);
         let holds = |k: &GroupKey| k.iter().any(|e| gone.contains(&e.2));
         self.groups.retain(|k, _| !holds(k));
-        if holds(&self.last_group.0) {
-            self.last_group = (Vec::new(), None);
+        for last in &mut self.last_groups {
+            if holds(&last.0) {
+                *last = (Vec::new(), None);
+            }
         }
         self.depth_parts.retain(|k, _| !gone.contains(&k.0));
     }
@@ -2087,21 +2184,28 @@ impl Device {
         }
     }
 
-    /// The clip code a draw takes on a target of `samples`: none without a plane on; the
-    /// hardware's clip distances where the adapter has them; else the pixel shader's discard,
-    /// per sample on a multisampled target, which is where the hardware cuts.
+    /// The clip code a draw takes on a target of `samples`: the hardware's clip distances where
+    /// the adapter has them, planes on or off (a plane that is off is zero and cuts nothing), so
+    /// a shader's modules and pipelines do not depend on the planes; else none without a plane
+    /// on, and the pixel shader's discard with one, per sample on a multisampled target, which
+    /// is where the hardware cuts.
     fn clip_link(&self, samples: u32) -> wgsl::Clip {
-        let on = self.st.rs[RS_CLIPPING] != 0
-            && self.st.rs[rs::CLIPPLANEENABLE] & ((1 << wgsl::CLIP_PLANES) - 1) != 0;
-        if !on {
+        if self.clip_distances {
+            return wgsl::Clip::Distances;
+        }
+        if !self.planes_on() {
             wgsl::Clip::Off
-        } else if self.clip_distances {
-            wgsl::Clip::Distances
         } else {
             wgsl::Clip::Discard {
                 per_sample: samples > 1,
             }
         }
+    }
+
+    /// Whether a user clip plane is on (`D3DRS_CLIPPING` and a bit of `D3DRS_CLIPPLANEENABLE`).
+    fn planes_on(&self) -> bool {
+        self.st.rs[RS_CLIPPING] != 0
+            && self.st.rs[rs::CLIPPLANEENABLE] & ((1 << wgsl::CLIP_PLANES) - 1) != 0
     }
 
     /// Whether NVIDIA's alpha to coverage stands in for the alpha test ([`ATOC`]).
@@ -2755,75 +2859,166 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
 
     // Draws.
 
+    /// A `D3DDECLTYPE`'s vertex format, and how the vertex shader takes it: by its kind only
+    /// (float, unsigned, signed), always four components. A format with fewer is filled with
+    /// 0, 0 and 1 by the hardware (Vulkan's and Direct3D 12's vertex input rule), which is
+    /// Direct3D 9's own expansion of each type (`FLOAT2` to (x, y, 0, 1), `SHORT2` likewise), and
+    /// wgpu matches a format to the shader by kind alone; so a vertex shader has one module for
+    /// every declaration of the same kinds (FAST-LINK step 1A).
     fn input_of(ty: u8) -> Option<(wgpu::VertexFormat, wgsl::Input)> {
         use wgpu::VertexFormat as V;
         use wgsl::Input as I;
         Some(match ty {
-            0 => (V::Float32, I::Float(1)),
-            1 => (V::Float32x2, I::Float(2)),
-            2 => (V::Float32x3, I::Float(3)),
+            0 => (V::Float32, I::Float(4)),
+            1 => (V::Float32x2, I::Float(4)),
+            2 => (V::Float32x3, I::Float(4)),
             3 => (V::Float32x4, I::Float(4)),
             4 => (V::Unorm8x4Bgra, I::Float(4)),
             5 => (V::Uint8x4, I::Uint4),
-            6 => (V::Sint16x2, I::Sint(2)),
+            6 => (V::Sint16x2, I::Sint(4)),
             7 => (V::Sint16x4, I::Sint(4)),
             8 => (V::Unorm8x4, I::Float(4)),
-            9 => (V::Snorm16x2, I::Float(2)),
+            9 => (V::Snorm16x2, I::Float(4)),
             10 => (V::Snorm16x4, I::Float(4)),
-            11 => (V::Unorm16x2, I::Float(2)),
+            11 => (V::Unorm16x2, I::Float(4)),
             12 => (V::Unorm16x4, I::Float(4)),
-            15 => (V::Float16x2, I::Float(2)),
+            15 => (V::Float16x2, I::Float(4)),
             16 => (V::Float16x4, I::Float(4)),
             _ => return None,
         })
     }
 
+    /// The bind group of one stage's samplers (`k`: 0 the pixel shader's, 1 the vertex
+    /// shader's) as `key` and `samplers` give them: the last draw's again, else the cache's, else
+    /// a new one in `layout`, each binding numbered within the stage's group.
+    fn stage_group(
+        &mut self,
+        k: usize,
+        key: &[(u32, u8, u64, Option<SamplerKey>)],
+        samplers: &[((u32, u8, bool), usize)],
+        copies: &[Option<Arc<Tex>>; 20],
+        layout: &wgpu::BindGroupLayout,
+    ) -> wgpu::BindGroup {
+        if let (last, Some(g)) = &self.last_groups[k] {
+            if last.as_slice() == key {
+                return g.clone();
+            }
+        }
+        let group = if key.is_empty() {
+            // A stage without samplers (most vertex shaders): one empty group, made once.
+            if self.empty_groups[k].is_none() {
+                self.empty_groups[k] =
+                    Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout,
+                        entries: &[],
+                    }));
+            }
+            self.empty_groups[k].clone().expect("made above")
+        } else {
+            if !self.groups.contains_key(key) {
+                if self.groups.len() > 8192 {
+                    self.groups.clear();
+                }
+                let mut views = Vec::new();
+                let mut samps = Vec::new();
+                for &((binding, dim, filterable), slot) in samplers {
+                    let view = match copies[slot].as_ref().or(self.st.textures[slot].as_ref()) {
+                        Some(t) if (dim == 1) == t.cube => t.view.clone(),
+                        _ => self.dummy[dim as usize].clone(),
+                    };
+                    let sk = SamplerKey::new(&self.st.samplers[slot], filterable);
+                    views.push((binding % 32, view));
+                    samps.push((binding % 32 + 1, self.sampler(sk)));
+                }
+                let mut entries = Vec::new();
+                for (b, v) in &views {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: *b,
+                        resource: wgpu::BindingResource::TextureView(v),
+                    });
+                }
+                for (b, s) in &samps {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: *b,
+                        resource: wgpu::BindingResource::Sampler(s),
+                    });
+                }
+                let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout,
+                    entries: &entries,
+                });
+                self.groups.insert(key.to_vec(), group);
+            }
+            self.groups[key].clone()
+        };
+        self.last_groups[k].0.clear();
+        self.last_groups[k].0.extend_from_slice(key);
+        self.last_groups[k].1 = Some(group.clone());
+        group
+    }
+
+    /// The pipeline layout of a pair whose samplers are `key` ([`Device::sampler_bindings`]):
+    /// the registers' group (0), the pixel shader's samplers' (1) and the vertex shader's (2),
+    /// each stage's numbered from 0 in its own group ([`wgsl::sampler_group`]).
     fn sampler_layout(&mut self, key: &[(u32, u8, bool)]) -> wgpu::PipelineLayout {
         if let Some((_, p)) = self.sampler_layouts.get(key) {
             return p.clone();
         }
-        let mut entries = Vec::new();
-        for &(binding, dim, filterable) in key {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable },
-                    view_dimension: match dim {
-                        1 => wgpu::TextureViewDimension::Cube,
-                        2 => wgpu::TextureViewDimension::D3,
-                        _ => wgpu::TextureViewDimension::D2,
-                    },
-                    multisampled: false,
-                },
-                count: None,
-            });
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: binding + 1,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Sampler(if filterable {
-                    wgpu::SamplerBindingType::Filtering
+        let layouts = [false, true].map(|vertex| {
+            let mut entries = Vec::new();
+            for &(binding, dim, filterable) in key.iter().filter(|k| (k.0 >= 32) == vertex) {
+                let binding = binding % 32;
+                let visibility = if vertex {
+                    wgpu::ShaderStages::VERTEX
                 } else {
-                    wgpu::SamplerBindingType::NonFiltering
-                }),
-                count: None,
-            });
-        }
-        let layout = self
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: None,
-                entries: &entries,
-            });
+                    wgpu::ShaderStages::FRAGMENT
+                };
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable },
+                        view_dimension: match dim {
+                            1 => wgpu::TextureViewDimension::Cube,
+                            2 => wgpu::TextureViewDimension::D3,
+                            _ => wgpu::TextureViewDimension::D2,
+                        },
+                        multisampled: false,
+                    },
+                    count: None,
+                });
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: binding + 1,
+                    visibility,
+                    ty: wgpu::BindingType::Sampler(if filterable {
+                        wgpu::SamplerBindingType::Filtering
+                    } else {
+                        wgpu::SamplerBindingType::NonFiltering
+                    }),
+                    count: None,
+                });
+            }
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: None,
+                    entries: &entries,
+                })
+        });
         let pipeline_layout = self
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[Some(&self.uniform_layout), Some(&layout)],
+                bind_group_layouts: &[
+                    Some(&self.uniform_layout),
+                    Some(&layouts[0]),
+                    Some(&layouts[1]),
+                ],
                 immediate_size: 0,
             });
         self.sampler_layouts
-            .insert(key.to_vec(), (layout, pipeline_layout.clone()));
+            .insert(key.to_vec(), (layouts, pipeline_layout.clone()));
         pipeline_layout
     }
 
@@ -3142,64 +3337,78 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             clip: self.clip_link(samples),
         };
         // The last draw's pipeline again (most draws), else the cache's, else a new one.
+        // With a list, the plane state too: one pipeline with the clip distances serves draws
+        // with a plane on and with none, but an adapter without them needs one for each, so each
+        // state its draws have is listed ([`clip_code`]).
+        let planes = self.list.is_some() && self.planes_on();
         let made = match &self.last_pipeline {
-            Some((k, p)) if *k == key => p.clone(),
+            Some((k, p, on)) if *k == key && *on == planes => p.clone(),
             _ => {
-                if !self.pipelines.contains_key(&key) {
-                    // Bounded: render states with continuous values (depth bias) could grow it
-                    // without end.
-                    if self.pipelines.len() >= 4096 {
-                        self.pipelines.clear();
+                // Listed, so the next start makes it before play ([`prepare`]): once for each
+                // plane state its draws have (a bit for each beside the pipeline). One lookup
+                // when the cache has it.
+                let bit = 1u8 << u8::from(planes);
+                let (p, unlisted) = match self.pipelines.get_mut(&key) {
+                    Some((p, m)) => {
+                        let new = *m & bit == 0;
+                        *m |= bit;
+                        (p.clone(), new)
                     }
-                    let sampler_keys: Vec<(u32, u8, bool)> =
-                        samplers.iter().map(|(k, _)| *k).collect();
-                    let pipeline = self.make_pipeline(
-                        &key,
-                        &vs,
-                        &ps,
-                        &link.inputs,
-                        &ps.varyings,
-                        attributes,
-                        topology,
-                        &sampler_keys,
-                    );
-                    self.pipelines.insert(key.clone(), pipeline);
-                    // Listed, so the next start makes it before play ([`prepare`]).
-                    if self.list.is_some() {
-                        let entry = prepare::Entry {
-                            vs: vs.stable,
-                            ps: ps.stable,
-                            decl: decl
-                                .elements
-                                .iter()
-                                .map(|e| (e.stream, e.offset, e.ty, e.usage, e.index))
-                                .collect(),
-                            strides,
-                            topology: kind as u8,
-                            index32,
-                            colours: std::array::from_fn(|i| {
-                                self.st.rt[i].as_ref().map(|s| s.format.d3d)
-                            }),
-                            depth: depth.as_ref().map(|d| d.format.d3d),
-                            states: key.states,
-                            samples,
-                            filterable,
-                            atoc,
-                            count: key.count,
-                            clip: clip_code(key.clip),
-                        };
-                        let presents = self.presents;
-                        if let Some(l) = &mut self.list {
-                            l.add(entry, presents);
+                    None => {
+                        // Bounded: render states with continuous values (depth bias) could grow
+                        // it without end.
+                        if self.pipelines.len() >= 4096 {
+                            self.pipelines.clear();
                         }
+                        let sampler_keys: Vec<(u32, u8, bool)> =
+                            samplers.iter().map(|(k, _)| *k).collect();
+                        let p = self.make_pipeline(
+                            &key,
+                            &vs,
+                            &ps,
+                            &link.inputs,
+                            attributes,
+                            topology,
+                            &sampler_keys,
+                        );
+                        self.pipelines.insert(key.clone(), (p.clone(), bit));
+                        (p, true)
+                    }
+                };
+                if unlisted && self.list.is_some() {
+                    self.list_offers += 1;
+                    let entry = prepare::Entry {
+                        vs: vs.stable,
+                        ps: ps.stable,
+                        decl: decl
+                            .elements
+                            .iter()
+                            .map(|e| (e.stream, e.offset, e.ty, e.usage, e.index))
+                            .collect(),
+                        strides,
+                        topology: kind as u8,
+                        index32,
+                        colours: std::array::from_fn(|i| {
+                            self.st.rt[i].as_ref().map(|s| s.format.d3d)
+                        }),
+                        depth: depth.as_ref().map(|d| d.format.d3d),
+                        states: key.states,
+                        samples,
+                        filterable,
+                        atoc,
+                        count: key.count,
+                        clip: clip_code(key.clip, planes),
+                    };
+                    let presents = self.presents;
+                    if let Some(l) = &mut self.list {
+                        l.add(entry, presents);
                     }
                 }
-                let p = self.pipelines.get(&key).cloned().flatten();
-                self.last_pipeline = Some((key, p.clone()));
+                self.last_pipeline = Some((key, p.clone(), planes));
                 p
             }
         };
-        let Some((pipeline, group_layout)) = made else {
+        let Some((pipeline, group_layouts)) = made else {
             self.skipped += 1;
             return;
         };
@@ -3230,51 +3439,28 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             *g = (binding, dim, tex_id, Some(sk));
         }
         let group_key = &group_key[..samplers.len()];
-        let group = match &self.last_group {
-            (k, Some(g)) if k.as_slice() == group_key => g.clone(),
-            _ => {
-                if !self.groups.contains_key(group_key) {
-                    if self.groups.len() > 8192 {
-                        self.groups.clear();
-                    }
-                    let mut views = Vec::new();
-                    let mut samps = Vec::new();
-                    for &((binding, dim, filterable), slot) in samplers {
-                        let view = match copies[slot].as_ref().or(self.st.textures[slot].as_ref()) {
-                            Some(t) if (dim == 1) == t.cube => t.view.clone(),
-                            _ => self.dummy[dim as usize].clone(),
-                        };
-                        let sk = SamplerKey::new(&self.st.samplers[slot], filterable);
-                        views.push((binding, view));
-                        samps.push((binding + 1, self.sampler(sk)));
-                    }
-                    let mut entries = Vec::new();
-                    for (b, v) in &views {
-                        entries.push(wgpu::BindGroupEntry {
-                            binding: *b,
-                            resource: wgpu::BindingResource::TextureView(v),
-                        });
-                    }
-                    for (b, s) in &samps {
-                        entries.push(wgpu::BindGroupEntry {
-                            binding: *b,
-                            resource: wgpu::BindingResource::Sampler(s),
-                        });
-                    }
-                    let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: None,
-                        layout: &group_layout,
-                        entries: &entries,
-                    });
-                    self.groups.insert(group_key.to_vec(), group);
-                }
-                let group = self.groups[group_key].clone();
-                self.last_group.0.clear();
-                self.last_group.0.extend_from_slice(group_key);
-                self.last_group.1 = Some(group.clone());
-                group
-            }
-        };
+        // Each stage's own group ([`wgsl::sampler_group`]): the vertex shader's samplers come
+        // first in the pair's list ([`Device::sampler_bindings`]).
+        let vertex = samplers
+            .iter()
+            .take_while(|((b, _, _), _)| *b >= 32)
+            .count();
+        let groups = [
+            self.stage_group(
+                0,
+                &group_key[vertex..],
+                &samplers[vertex..],
+                &copies,
+                &group_layouts[0],
+            ),
+            self.stage_group(
+                1,
+                &group_key[..vertex],
+                &samplers[..vertex],
+                &copies,
+                &group_layouts[1],
+            ),
+        ];
         // Vertices from DrawPrimitiveUP go into the batch's ring.
         let up_offset = if let Some((bytes, _)) = up {
             if self.up.len() + bytes.len() > UP_RING as usize {
@@ -3407,9 +3593,11 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             pass.set_bind_group(0, &self.ring_group, &[blocks.0, blocks.1]);
             b.blocks = Some(blocks);
         }
-        if b.group.as_ref() != Some(&group) {
-            pass.set_bind_group(1, &group, &[]);
-            b.group = Some(group);
+        for (k, group) in groups.into_iter().enumerate() {
+            if b.groups[k].as_ref() != Some(&group) {
+                pass.set_bind_group(1 + k as u32, &group, &[]);
+                b.groups[k] = Some(group);
+            }
         }
         if b.viewport != Some(viewport) {
             let f = viewport.map(f32::from_bits);
@@ -3533,12 +3721,13 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             filterable: e.filterable,
             atoc: e.atoc,
             count: e.count,
-            // Planes on or off is the entry's; how they are cut is this adapter's (a list made on
-            // Direct3D 12 serves Vulkan too).
-            clip: if e.clip == 0 {
-                wgsl::Clip::Off
-            } else if self.clip_distances {
+            // How the planes are cut is this adapter's ([`Device::clip_link`]: with clip distances
+            // every draw takes them, planes on or off); without them, planes on or off is the
+            // entry's (a list made on one API serves the other).
+            clip: if self.clip_distances {
                 wgsl::Clip::Distances
+            } else if e.clip == 0 {
+                wgsl::Clip::Off
             } else {
                 wgsl::Clip::Discard {
                     per_sample: e.samples > 1,
@@ -3567,13 +3756,12 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             return;
         }
         self.listed_new = false;
-        let Some(mut l) = self.list.take() else {
-            return;
-        };
+        let mut list = self.list.take();
         let started = std::time::Instant::now();
         let mut ready = Vec::new();
         let mut ahead = HashSet::new();
-        for i in 0..l.list.entries.len() {
+        for i in 0..list.as_ref().map_or(0, |l| l.list.entries.len()) {
+            let Some(l) = &mut list else { break };
             let e = &l.list.entries[i];
             let want = if e.samples > 1 {
                 self.sample_mask & !0b11
@@ -3610,38 +3798,54 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                 }
             }
         }
+        // The game's start (once): every shader's module and library first, the listed
+        // pipelines below then only link; one progress bar for both.
+        let before = self.wait_for_start(ready.len());
+        let Some(l) = list else {
+            return;
+        };
         if ready.is_empty() {
             self.list = Some(l);
             return;
         }
         let threads = worker_threads();
-        let mut tasks = Vec::new();
-        let mut keys = Vec::new();
-        for r in &ready {
-            let (vk, pk, t) =
-                self.module_tasks(&r.key, &r.vs, &r.ps, &r.link.inputs, &r.ps.varyings);
-            tasks.extend(t);
-            keys.push((vk, pk));
-        }
-        let modules = {
+        // The listed pipelines' modules the module threads have not made yet (the game's
+        // shaders, created just before): those still queued are taken back and made on the
+        // worker threads here, all at once; those a thread is making are waited for, each alone.
+        // The game's other shaders' modules stay with the module threads.
+        self.collect_modules();
+        let mut wanted = Vec::new();
+        let mut taken = Vec::new();
+        {
             let mut seen = HashSet::new();
-            tasks.iter().filter(|t| seen.insert(t.key.clone())).count()
-        };
+            for r in &ready {
+                let (vk, pk) = self.module_keys(&r.key, &r.vs, &r.ps, &r.link.inputs);
+                for k in [ModKey::V(vk), ModKey::P(pk)] {
+                    if seen.insert(k.clone()) {
+                        wanted.push(k);
+                    }
+                }
+            }
+            if let Some(q) = &mut self.modules_ahead {
+                for k in &wanted {
+                    if let Some(job) = q.take_queued(k) {
+                        taken.push((k.clone(), std::sync::Mutex::new(Some(job))));
+                    }
+                }
+            }
+        }
         // The loading screen while it runs, when it is a long step (the start's; a few pipelines
-        // ready later, after a new sample count, are made without it).
-        let total = modules + ready.len();
-        let shown = total >= 32;
+        // ready later, after a new sample count, are made without it): the modules taken back,
+        // then any other the pipelines need, then the pipelines.
+        let total = std::cell::Cell::new(before + taken.len() + ready.len());
+        let shown = before > 0 || total.get() >= 32;
         let mut surface = self.surface.take();
         let mut screen = self.loading.take();
         let (device, queue) = (self.device.clone(), self.queue.clone());
         let mut shots = self.shots.take();
         let mut step = |done: usize| {
             if shown {
-                let p = loading::Progress {
-                    title: "Loading".into(),
-                    status: format!("Preparing shaders {} of {}", done.min(total), total),
-                    done: Some(done as f32 / total.max(1) as f32),
-                };
+                let p = shader_progress(before + done, total.get());
                 show_on(
                     &mut surface,
                     &mut screen,
@@ -3653,7 +3857,42 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             }
         };
         let t = std::time::Instant::now();
-        self.make_modules(tasks, threads, false, &mut step);
+        let back = taken.len();
+        if back > 0 {
+            self.modules_here += back as u64;
+            let made = on_workers(
+                &taken,
+                threads,
+                |(_, job)| {
+                    let job = job.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    job.map(|job| job())
+                },
+                &mut step,
+            );
+            for ((k, _), m) in taken.into_iter().zip(made) {
+                if let Some(m) = m {
+                    self.library_made(&m.library);
+                    self.keep_module(k, m.module);
+                }
+            }
+        }
+        for k in &wanted {
+            self.settle_module(k);
+        }
+        let mut tasks = Vec::new();
+        let mut keys = Vec::new();
+        for r in &ready {
+            let (vk, pk, t) = self.module_tasks(&r.key, &r.vs, &r.ps, &r.link.inputs);
+            tasks.extend(t);
+            keys.push((vk, pk));
+        }
+        let modules = {
+            let mut seen = HashSet::new();
+            tasks.iter().filter(|t| seen.insert(t.key.clone())).count()
+        };
+        total.set(total.get() + modules);
+        self.make_modules(tasks, threads, false, &mut |d| step(back + d));
+        let modules = back + modules;
         let modules_took = t.elapsed();
         let mut jobs = Vec::new();
         for (r, (vk, pk)) in ready.iter().zip(&keys) {
@@ -3676,7 +3915,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             |(_, j)| build_pipeline(&device, cache, j),
             &mut |d| step(modules + d),
         );
-        step(total);
+        step(total.get() - before);
         drop(step);
         self.surface = surface;
         self.loading = screen;
@@ -3685,19 +3924,23 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         let made = jobs.len();
         for ((key, j), b) in jobs.into_iter().zip(built) {
             match b {
+                // No draw has listed it in a plane state yet: the first draw in each state adds
+                // that state's line if the list lacks it (a list may name it in one state only:
+                // the shipped list was written before both were listed).
                 Ok(p) => {
-                    self.pipelines.insert(key, Some((p, j.group_layout)));
+                    self.pipelines.insert(key, (Some((p, j.group_layouts)), 0));
                 }
                 Err(e) => {
                     refused += 1;
                     self.warn(format!("a pipeline wgpu refuses: {e}"));
-                    self.pipelines.insert(key, None);
+                    self.pipelines.insert(key, (None, 0));
                 }
             }
         }
         if let Some(c) = &self.pipeline_cache {
             c.touched(self.presents);
         }
+        self.made.work += started.elapsed();
         let left = l.done.iter().filter(|&&d| d == 0).count();
         eprintln!(
             "NV_D3D9 wgpu: made ahead: {made} pipelines and {modules} shader modules in {:.0} ms (modules {:.0} ms) on {threads} threads, {refused} refused; {left} listed not yet possible (present {})",
@@ -3708,30 +3951,531 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         self.list = Some(l);
     }
 
-    /// The cache keys of the two modules a pipeline of `key` takes, and the work to make each
-    /// one not made yet (its WGSL converted here, the module made by [`Device::make_modules`]).
-    fn module_tasks(
+    /// The game's start, its first draw or `Present` after its first shaders: with pipeline
+    /// libraries (FAST-LINK step 3), every shader's module and library the module threads have
+    /// queued is waited for, behind the loading screen and with the threads at normal priority,
+    /// so none is made during play. A library made in the background during play cost frames
+    /// up to about 130 ms while the driver made it (d1, driver cold), whatever the number of
+    /// threads. Shaders the game creates later are made in the background or on the draw that
+    /// needs them, and counted ([`Made::late_shaders`]).
+    ///
+    /// The start uses every core at normal priority: the jobs no module thread has started are
+    /// taken back and made here on [`all_cores`] threads (the game waits at its next frame
+    /// anyway), the ones a module thread is doing are waited for with the threads raised. The
+    /// loading screen counts them with the `then` listed pipelines that follow, one bar. How
+    /// many it waited for (`0`: none).
+    fn wait_for_start(&mut self, then: usize) -> usize {
+        // Not before the game has a shader (a multisampled target made first asks for this too).
+        if self.start_done || self.shader_bytecode.is_empty() {
+            return 0;
+        }
+        self.start_done = true;
+        let waiting = self.modules_ahead.as_ref().map_or(0, |q| q.pending());
+        if !self.libraries || waiting == 0 {
+            return 0;
+        }
+        self.start_jobs = waiting;
+        let started = std::time::Instant::now();
+        let total = waiting + then;
+        let cores = all_cores();
+        let mut surface = self.surface.take();
+        let mut screen = self.loading.take();
+        let mut shots = self.shots.take();
+        let (device, queue) = (self.device.clone(), self.queue.clone());
+        let mut show = |done: usize| {
+            let p = shader_progress(done, total);
+            show_on(
+                &mut surface,
+                &mut screen,
+                &device,
+                &queue,
+                shots.as_mut(),
+                &p,
+            );
+        };
+        let taken: Vec<(
+            ModKey,
+            std::sync::Mutex<Option<crate::ahead::Job<ModuleMade>>>,
+        )> = match &mut self.modules_ahead {
+            Some(q) => {
+                q.boost(true);
+                q.take_all_queued()
+                    .into_iter()
+                    .map(|(k, job)| (k, std::sync::Mutex::new(Some(job))))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        let made = on_workers(
+            &taken,
+            cores,
+            |(_, job)| {
+                let job = job.lock().unwrap_or_else(|e| e.into_inner()).take();
+                job.map(|job| job())
+            },
+            &mut show,
+        );
+        // Where the threads' time went (the log line below): converting, modules, libraries.
+        let mut spent = [std::time::Duration::ZERO; 3];
+        let mut add = |m: &ModuleMade| {
+            spent[0] += m.convert;
+            spent[1] += m.made;
+            spent[2] += m
+                .library
+                .as_ref()
+                .map_or(std::time::Duration::ZERO, |l| l.0);
+        };
+        for ((k, _), m) in taken.into_iter().zip(made) {
+            if let Some(m) = m {
+                add(&m);
+                self.library_made(&m.library);
+                self.keep_module(k, m.module);
+            }
+        }
+        // The ones the module threads were doing; the loading screen about four times a second.
+        let deadline = START_DEADLINE_FOR_TESTS.load(Ordering::Relaxed);
+        let mut last: Option<std::time::Instant> = None;
+        loop {
+            let (done, left) = match &mut self.modules_ahead {
+                Some(q) => (q.finished(), q.pending()),
+                None => (Vec::new(), 0),
+            };
+            for (k, m) in done {
+                add(&m);
+                self.ahead_burst.0 += 1;
+                self.ahead_burst.1 += m.convert + m.made;
+                self.keep_library(&m.library);
+                self.keep_module(k, m.module);
+            }
+            if !matches!(last, Some(t) if t.elapsed().as_millis() < 250) {
+                show(waiting - left);
+                last = Some(std::time::Instant::now());
+            }
+            if left == 0 {
+                break;
+            }
+            assert!(
+                deadline == 0 || started.elapsed().as_millis() < u128::from(deadline),
+                "the start waited over {deadline} ms (tests)"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if let Some(q) = &self.modules_ahead {
+            q.boost(false);
+        }
+        drop(show);
+        self.surface = surface;
+        self.loading = screen;
+        self.shots = shots;
+        self.made.work += started.elapsed();
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        eprintln!(
+            "NV_D3D9 wgpu: the start: {waiting} shader modules and their pipeline libraries, {:.0} ms on {cores} cores (threads' time: converting {:.0} ms, modules {:.0} ms, libraries {:.0} ms)",
+            ms(started.elapsed()),
+            ms(spent[0]),
+            ms(spent[1]),
+            ms(spent[2])
+        );
+        waiting
+    }
+
+    /// How many shader modules (with their libraries) the game's start waited for (tests).
+    pub fn start_waited_for(&self) -> usize {
+        self.start_jobs
+    }
+
+    /// How many shader modules the module threads have not handed out yet (tests).
+    pub fn modules_pending(&self) -> usize {
+        self.modules_ahead.as_ref().map_or(0, |q| q.pending())
+    }
+
+    /// The module threads' priorities now (`0` normal, `-1` below normal; tests).
+    #[cfg(windows)]
+    pub fn module_thread_priorities(&self) -> Vec<i32> {
+        self.modules_ahead
+            .as_ref()
+            .map_or_else(Vec::new, |q| q.priorities())
+    }
+
+    /// Shaders the game created after its start (tests; the report says how many in each
+    /// stretch).
+    pub fn shaders_created_after_start(&self) -> u64 {
+        self.late_shaders
+    }
+
+    /// Queues the modules a draw of shader `s` will most likely take, for the module threads to
+    /// make before any draw needs them (FAST-LINK step 1A; the game creates its shaders before
+    /// its first frame): a pixel shader's own module where its varyings have fixed locations,
+    /// and a vertex shader's for float inputs and every pixel shader that reads only what it
+    /// writes; each with the clip code the adapter gives a draw without planes, no occlusion
+    /// count. Any other variant is made when a draw first needs it.
+    fn queue_modules(&mut self, s: &Arc<Shader>) {
+        let clip = if self.clip_distances {
+            wgsl::Clip::Distances
+        } else {
+            wgsl::Clip::Off
+        };
+        let (key, link) = match s.program.stage {
+            Stage::Pixel => {
+                if !s.fixed {
+                    return;
+                }
+                let link = wgsl::Link {
+                    inputs: Vec::new(),
+                    centroid: wgsl::centroid_everywhere(s.varyings.len()),
+                    varyings: s.varyings.clone(),
+                    clip,
+                    count: false,
+                    fixed: true,
+                };
+                let key = ModKey::P((s.id, s.varyings.clone(), false, clip, true));
+                (key, link)
+            }
+            Stage::Vertex => {
+                let mut inputs = vec![wgsl::Input::Missing; 16];
+                for (r, _) in &s.sig.inputs {
+                    if let Some(i) = inputs.get_mut(r.n as usize) {
+                        *i = wgsl::Input::Float(4);
+                    }
+                }
+                let varyings = own_varyings(s);
+                let link = wgsl::Link {
+                    inputs: inputs.clone(),
+                    centroid: wgsl::centroid_everywhere(varyings.len()),
+                    varyings: varyings.clone(),
+                    clip,
+                    count: false,
+                    fixed: true,
+                };
+                (ModKey::V((s.id, inputs, varyings, clip, true)), link)
+            }
+        };
+        let made = match &key {
+            ModKey::V(k) => self.vs_modules.contains_key(k),
+            ModKey::P(k) => self.ps_modules.contains_key(k),
+        };
+        if made {
+            return;
+        }
+        // Its library too, until the start: after it, a shader's library is made on the draw that
+        // first needs it, never in the background during play (the driver held frames up to about
+        // 130 ms while making one); none once wgpu refused one.
+        let library =
+            if self.libraries && !self.start_done && self.libraries_ahead.load(Ordering::Relaxed) {
+                self.library_ahead(s, &link)
+            } else {
+                None
+            };
+        let device = self.device.clone();
+        let q = self
+            .modules_ahead
+            .get_or_insert_with(|| crate::ahead::Queue::new(worker_threads(), "nv-wgpu-modules"));
+        let ahead = self.libraries_ahead.clone();
+        q.push(key, module_job(device, s.clone(), link, library, ahead));
+    }
+
+    /// What making `s`'s pipeline library takes, right after its module (made with `link`) on
+    /// the module thread (FAST-LINK step 3, DXVK's way): a pipeline of the module and a stand-in
+    /// for the other stage, made and dropped. wgpu-hal keeps the shader's library (it depends on
+    /// the module, its entry point and the groups its stage sees), so the draws' pipelines with
+    /// that module link it, about a command's cost, instead of compiling it. The layout is a
+    /// draw's when the shader's textures are filterable (most draws; a draw with another takes a
+    /// library of its own). The stand-in's library is made once.
+    fn library_ahead(&mut self, s: &Shader, link: &wgsl::Link) -> Option<LibraryAhead> {
+        let stage = s.program.stage;
+        // The shader's samplers in its stage's group, as [`Device::sampler_bindings`] numbers them.
+        let samplers: Vec<(u32, u8, bool)> = s
+            .sig
+            .samplers
+            .iter()
+            .filter(|&&(n, _)| match stage {
+                Stage::Pixel => n < 16,
+                Stage::Vertex => n < 4,
+            })
+            .map(|&(n, dim)| (wgsl::texture_binding(stage, n), dim_code(dim), true))
+            .collect();
+        let layout = self.sampler_layout(&samplers);
+        let group_layouts = self.sampler_layouts[&samplers[..]].0.clone();
+        let target = Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        });
+        let (partner, buffers, targets, depth_stencil): (Result<_, String>, _, _, _) = match stage {
+            Stage::Vertex => {
+                let device = &self.device;
+                let partner = self
+                    .stand_in_pixel
+                    .get_or_insert_with(|| create_module(device, wgsl::STAND_IN_PIXEL.into()))
+                    .clone();
+                // Each input the module reads (all of them, as floats: [`Device::queue_modules`]).
+                let attributes: Vec<wgpu::VertexAttribute> = s
+                    .sig
+                    .inputs
+                    .iter()
+                    .filter(|(r, _)| r.n < 16)
+                    .enumerate()
+                    .map(|(i, (r, _))| wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 16 * i as u64,
+                        shader_location: r.n,
+                    })
+                    .collect();
+                let buffers = if attributes.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Some((16 * attributes.len() as u64, attributes))]
+                };
+                (partner, buffers, vec![target], None)
+            }
+            Stage::Pixel => {
+                let device = &self.device;
+                let partner = self
+                    .stand_in_vertex
+                    .entry((link.varyings.clone(), link.clip))
+                    .or_insert_with(|| create_module(device, wgsl::stand_in_vertex(link)))
+                    .clone();
+                // A target for each colour it writes (the module writes target 0 when it writes
+                // none and no depth), a depth target when it writes depth.
+                let mut targets: Vec<Option<wgpu::ColorTargetState>> = (0..4)
+                    .map(|k| {
+                        if s.sig.colours & (1 << k) != 0 {
+                            target.clone()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if s.sig.colours == 0 && !s.sig.depth {
+                    targets[0] = target;
+                }
+                while targets.last().is_some_and(|t| t.is_none()) {
+                    targets.pop();
+                }
+                let depth_stencil = s.sig.depth.then(|| wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                });
+                (partner, Vec::new(), targets, depth_stencil)
+            }
+        };
+        // A stand-in wgpu refused (said once): the draws make the library.
+        let partner = match partner {
+            Ok(p) => p,
+            Err(e) => {
+                self.warn(format!("a stand-in shader for pipeline libraries: {e}"));
+                return None;
+            }
+        };
+        Some(LibraryAhead {
+            layout,
+            group_layouts,
+            partner,
+            buffers,
+            targets,
+            depth_stencil,
+            cache: self.pipeline_cache.as_ref().map(|c| c.cache.clone()),
+        })
+    }
+
+    /// The modules the module threads have made so far, kept ([`Device::queue_modules`]).
+    fn collect_modules(&mut self) {
+        let Some(q) = &mut self.modules_ahead else {
+            return;
+        };
+        let done = q.finished();
+        let empty = q.pending() == 0;
+        for (k, m) in done {
+            self.ahead_burst.0 += 1;
+            self.ahead_burst.1 += m.convert + m.made;
+            self.keep_library(&m.library);
+            self.keep_module(k, m.module);
+        }
+        // One line for each burst (the game's shaders at its start; a mod's later).
+        if empty && self.ahead_burst.0 > 0 {
+            let (n, t, libraries) = std::mem::take(&mut self.ahead_burst);
+            let libraries = if self.libraries {
+                format!(", {libraries} with their pipeline library")
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "NV_D3D9 wgpu: {n} shader modules made ahead on the module threads{libraries} ({:.0} ms of their time; present {})",
+                t.as_secs_f64() * 1000.0,
+                self.presents
+            );
+        }
+    }
+
+    /// Notes a shader's pipeline library the module threads made with its module
+    /// ([`Device::library_ahead`]): its time in this burst's, then as [`Device::library_made`].
+    fn keep_library(&mut self, library: &Option<(std::time::Duration, Result<(), String>)>) {
+        if let Some((took, made)) = library {
+            self.ahead_burst.1 += *took;
+            if made.is_ok() {
+                self.ahead_burst.2 += 1;
+            }
+        }
+        self.library_made(library);
+    }
+
+    /// Notes a shader's pipeline library made with its module, wherever: the driver's cache to
+    /// be saved (it holds the library), a pipeline wgpu refused said once (the draws then make
+    /// the library).
+    fn library_made(&mut self, library: &Option<(std::time::Duration, Result<(), String>)>) {
+        match library {
+            Some((_, Ok(()))) => {
+                if let Some(c) = &self.pipeline_cache {
+                    c.touched(self.presents);
+                }
+            }
+            Some((_, Err(e))) => {
+                self.libraries_ahead.store(false, Ordering::Relaxed);
+                self.warn(format!(
+                    "a shader's pipeline library made ahead: {e}; no more are made ahead"
+                ));
+            }
+            None => {}
+        }
+    }
+
+    /// The module of `k` when the module threads have it: taken back and made here if no thread
+    /// has started it, else waited for (that one alone), then kept.
+    fn settle_module(&mut self, k: &ModKey) {
+        let Some(q) = &mut self.modules_ahead else {
+            return;
+        };
+        if !q.has(k) {
+            return;
+        }
+        match q.take(k) {
+            // Its library too, if any: its time is the draw's, as the draw's pipeline would
+            // have made it.
+            crate::ahead::Taken::Job(job) => {
+                let m = job();
+                self.modules_here += 1;
+                self.made.add_module(m.convert, m.made);
+                self.library_made(&m.library);
+                self.keep_module(k.clone(), m.module);
+            }
+            crate::ahead::Taken::Done(m) => {
+                self.ahead_burst.0 += 1;
+                self.ahead_burst.1 += m.convert + m.made;
+                self.keep_library(&m.library);
+                self.keep_module(k.clone(), m.module);
+            }
+            // Its job panicked on a thread: made the usual way.
+            crate::ahead::Taken::None => {}
+        }
+    }
+
+    /// Keeps a module made (none: refused, said once).
+    fn keep_module(&mut self, k: ModKey, m: Result<wgpu::ShaderModule, String>) {
+        let what = match k {
+            ModKey::V(_) => "a vertex shader",
+            ModKey::P(_) => "a pixel shader",
+        };
+        let m = match m {
+            Ok(m) => Some(m),
+            Err(e) => {
+                self.warn(format!("{what}: the converted shader is not valid: {e}"));
+                None
+            }
+        };
+        match k {
+            ModKey::V(k) => {
+                self.vs_modules.insert(k, m);
+            }
+            ModKey::P(k) => {
+                self.ps_modules.insert(k, m);
+            }
+        }
+    }
+
+    /// The module threads start no module while `on`, then go on (tests: a draw that needs a
+    /// module no thread has started takes it back).
+    pub fn hold_modules(&mut self, on: bool) {
+        self.modules_ahead
+            .get_or_insert_with(|| crate::ahead::Queue::new(worker_threads(), "nv-wgpu-modules"))
+            .hold(on);
+    }
+
+    /// Waits until the module threads have made every module queued, and keeps them (tests).
+    pub fn wait_for_modules(&mut self) {
+        if let Some(q) = &mut self.modules_ahead {
+            let pending = q.wait_all();
+            for (k, m) in pending {
+                self.ahead_burst.0 += 1;
+                self.ahead_burst.1 += m.convert + m.made;
+                self.keep_library(&m.library);
+                self.keep_module(k, m.module);
+            }
+        }
+    }
+
+    /// Shader modules made on the device's thread (for a draw or a listed pipeline) rather than
+    /// ahead on the module threads (tests).
+    pub fn modules_made_here(&self) -> u64 {
+        self.modules_here
+    }
+
+    /// The cache keys of the two modules a pipeline of `key` takes. With fixed varying locations
+    /// (a pixel shader whose varyings all have one, [`wgsl::fixed_slot`]), the pixel module is
+    /// the shader's own whatever its partner, and the vertex module the shader's own for every
+    /// pixel shader that reads only what it writes ([`pair_varyings`]); else both are made for
+    /// the pair, as the pixel shader's varyings.
+    fn module_keys(
         &self,
         key: &PipeKey,
         vs: &Shader,
         ps: &Shader,
         inputs: &[wgsl::Input],
-        varyings: &[wgsl::Semantic],
+    ) -> (VKey, PKey) {
+        let fixed = ps.fixed;
+        let ps_varyings = ps.varyings.clone();
+        let vs_varyings = if fixed {
+            pair_varyings(vs, ps)
+        } else {
+            ps_varyings.clone()
+        };
+        (
+            (vs.id, inputs.to_vec(), vs_varyings, key.clip, fixed),
+            (ps.id, ps_varyings, key.count, key.clip, fixed),
+        )
+    }
+
+    /// The modules of a pipeline of `key`, as [`Device::module_keys`] keys them, and the work to
+    /// make each one not made yet (its WGSL converted here, the module made by
+    /// [`Device::make_modules`]).
+    fn module_tasks(
+        &mut self,
+        key: &PipeKey,
+        vs: &Shader,
+        ps: &Shader,
+        inputs: &[wgsl::Input],
     ) -> (VKey, PKey, Vec<ModuleTask>) {
-        // Every varying at the centroid, whatever the pixel shader declares: no varying is
-        // extrapolated outside a thin triangle on a multisampled target (the white orbs; the
-        // converter's module documentation).
-        let centroid = wgsl::centroid_everywhere(varyings.len());
-        let vkey = (vs.id, inputs.to_vec(), varyings.to_vec(), key.clip);
-        let pkey = (ps.id, varyings.to_vec(), key.count, key.clip);
+        let fixed = ps.fixed;
+        let (vkey, pkey) = self.module_keys(key, vs, ps, inputs);
+        let (vs_varyings, ps_varyings) = (vkey.2.clone(), pkey.1.clone());
+        // Made ahead, or being made, on the module threads ([`Device::queue_modules`]).
+        self.collect_modules();
+        self.settle_module(&ModKey::V(vkey.clone()));
+        self.settle_module(&ModKey::P(pkey.clone()));
         let mut tasks = Vec::new();
         if !self.vs_modules.contains_key(&vkey) {
+            // Every varying at the centroid, whatever the pixel shader declares: no varying is
+            // extrapolated outside a thin triangle on a multisampled target (the white orbs; the
+            // converter's module documentation).
             let link = wgsl::Link {
                 inputs: inputs.to_vec(),
-                varyings: varyings.to_vec(),
-                centroid: centroid.clone(),
+                centroid: wgsl::centroid_everywhere(vs_varyings.len()),
+                varyings: vs_varyings,
                 clip: key.clip,
                 count: false,
+                fixed,
             };
             let t = std::time::Instant::now();
             let source = wgsl::convert(&vs.program, &link);
@@ -3744,10 +4488,11 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         if !self.ps_modules.contains_key(&pkey) {
             let link = wgsl::Link {
                 inputs: Vec::new(),
-                varyings: varyings.to_vec(),
-                centroid,
+                centroid: wgsl::centroid_everywhere(ps_varyings.len()),
+                varyings: ps_varyings,
                 clip: key.clip,
                 count: key.count,
+                fixed,
             };
             let t = std::time::Instant::now();
             let source = wgsl::convert(&ps.program, &link);
@@ -3773,6 +4518,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
     ) {
         let mut seen = HashSet::new();
         tasks.retain(|t| seen.insert(t.key.clone()));
+        self.modules_here += tasks.len() as u64;
         let device = self.device.clone();
         let made = on_workers(
             &tasks,
@@ -3829,7 +4575,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         let vm = self.vs_modules.get(vkey)?.clone()?;
         let pm = self.ps_modules.get(pkey)?.clone()?;
         let layout = self.sampler_layout(samplers);
-        let group_layout = self.sampler_layouts[samplers].0.clone();
+        let group_layouts = self.sampler_layouts[samplers].0.clone();
         // One layout per stream slot up to the last used (a slot's index is its stream's number).
         let last = attributes
             .iter()
@@ -3893,7 +4639,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         );
         Some(PipelineJob {
             layout,
-            group_layout,
+            group_layouts,
             vm,
             pm,
             buffers,
@@ -3929,14 +4675,13 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         vs: &Shader,
         ps: &Shader,
         inputs: &[wgsl::Input],
-        varyings: &[wgsl::Semantic],
         attributes: &[Vec<wgpu::VertexAttribute>; 8],
         topology: wgpu::PrimitiveTopology,
         samplers: &[(u32, u8, bool)],
-    ) -> Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)> {
+    ) -> Option<Pipe> {
         self.made_on_draws += 1;
         let started = std::time::Instant::now();
-        let (vkey, pkey, tasks) = self.module_tasks(key, vs, ps, inputs, varyings);
+        let (vkey, pkey, tasks) = self.module_tasks(key, vs, ps, inputs);
         self.make_modules(tasks, 1, true, &mut |_| {});
         let job = self.pipeline_job(key, ps, &vkey, &pkey, attributes, topology, samplers)?;
         let t = std::time::Instant::now();
@@ -3960,7 +4705,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             );
         }
         match made {
-            Ok(p) => Some((p, job.group_layout)),
+            Ok(p) => Some((p, job.group_layouts)),
             Err(e) => {
                 self.warn(format!("a pipeline wgpu refuses: {e}"));
                 None
@@ -4918,6 +5663,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         self.prepare_listed();
         self.end_pass();
         self.presents += 1;
+        self.made.end_present(self.presents);
+        self.collect_modules();
         // The start is over once the game has shown a picture (the GPU's gate already stopped
         // the screen), or at the backstop.
         if let Some(why) = self
@@ -4969,6 +5716,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         }
         let mut frame_texture = None;
         let mut window_shot = None;
+        // In the window's DPI awareness from the frame's size to its present ([`crate::window`]).
+        let _dpi = self.surface.as_ref().map(crate::window::Window::dpi_scope);
         // The window's frame at its size now ([`crate::window`]); none while it is minimised,
         // gives none in time or is lost (the frame is skipped, as Direct3D 9's Present then shows
         // nothing, and the game goes on).
@@ -5133,6 +5882,35 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             m.over_16ms,
             ms(m.longest_frame)
         );
+        eprintln!(
+            "NV_D3D9 wgpu: pipeline work since the last report: at most {:.1} ms in one present (present {}), {} presents over 20 ms, {} pipelines made on draws over 1 ms; {} shaders the game created after its start",
+            ms(m.worst_work),
+            m.worst_at,
+            m.work_over_20ms,
+            m.over_1ms,
+            m.late_shaders
+        );
+        if let Some(line) = self.pipeline_library_report() {
+            eprintln!("NV_D3D9 wgpu: {line}");
+        }
+    }
+
+    /// The Vulkan backend's pipeline libraries (vendor/wgpu-hal, pipeline_library.rs) in one line,
+    /// where it links pipelines from them: what was made since the device was, and what linking
+    /// cost. `None` where render pipelines are made whole (another backend, a driver without
+    /// libraries, or `NV_WGPU_LIBRARIES=off`).
+    pub fn pipeline_library_report(&self) -> Option<String> {
+        // SAFETY: the hal device is only read (its counters), on the device's own thread.
+        unsafe { self.device.as_hal::<wgpu::hal::api::Vulkan>() }
+            .and_then(|hal| hal.pipeline_library_report())
+    }
+
+    /// Whether the Vulkan backend links this device's render pipelines from pipeline libraries
+    /// ([`Device::pipeline_library_report`]).
+    pub fn uses_pipeline_libraries(&self) -> bool {
+        // SAFETY: as in `pipeline_library_report`: a capability read on the device's own thread.
+        unsafe { self.device.as_hal::<wgpu::hal::api::Vulkan>() }
+            .is_some_and(|hal| hal.uses_pipeline_libraries())
     }
 
     /// What the device made of its pipeline cache file ("N KB read", "none yet...", "...: ignored...");
@@ -5154,6 +5932,12 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
     /// The adapter and its graphics API, as the log names them ("NVIDIA ... (Vulkan)"; tests).
     pub fn adapter_name(&self) -> &str {
         &self.adapter_name
+    }
+
+    /// Whether the adapter has the hardware's clip distances, which every draw then takes
+    /// ([`Device::clip_link`]; tests).
+    pub fn has_clip_distances(&self) -> bool {
+        self.clip_distances
     }
 
     /// Loses the device, as a driver reset (TDR) or a removed graphics card does: from now on
@@ -5240,6 +6024,22 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
     /// How many pipelines were made on the draw that needed them, not ahead from the list (tests).
     pub fn pipelines_made_on_draws(&self) -> u64 {
         self.made_on_draws
+    }
+
+    /// How many entries the draws offered the pipeline list: each pipeline once for each plane
+    /// state it was drawn with this run, however often (tests).
+    pub fn list_offers(&self) -> u64 {
+        self.list_offers
+    }
+
+    /// How many vertex and pixel shader modules the device has made, not counting any wgpu or
+    /// the converter refused (tests).
+    pub fn module_counts(&self) -> (usize, usize) {
+        let made = |m: &Option<wgpu::ShaderModule>| m.is_some();
+        (
+            self.vs_modules.values().filter(|m| made(m)).count(),
+            self.ps_modules.values().filter(|m| made(m)).count(),
+        )
     }
 
     /// The pixels of a back buffer or render target as wgpu holds them, rows packed (tests).
@@ -5693,11 +6493,58 @@ pub(crate) fn surface_for(
     Err("windows of other platforms come with the window layer's port".into())
 }
 
-/// A vertex module's cache key: the shader, the inputs its declaration gives, the varyings of the
-/// pixel shader it feeds (each at the centroid), the clip code.
-type VKey = (u64, Vec<wgsl::Input>, Vec<wgsl::Semantic>, wgsl::Clip);
-/// A pixel module's cache key: the shader, its varyings, the occlusion count, the clip code.
-type PKey = (u64, Vec<wgsl::Semantic>, bool, wgsl::Clip);
+/// A pipeline and the layouts of its two sampler groups (the pixel shader's, the vertex
+/// shader's).
+type Pipe = (wgpu::RenderPipeline, [wgpu::BindGroupLayout; 2]);
+
+/// A vertex module's cache key: the shader, the inputs its declaration gives, the varyings it
+/// writes (each at the centroid; [`Device::module_tasks`]), the clip code, whether at fixed
+/// locations.
+type VKey = (u64, Vec<wgsl::Input>, Vec<wgsl::Semantic>, wgsl::Clip, bool);
+/// A pixel module's cache key: the shader, its varyings, the occlusion count, the clip code,
+/// whether at fixed locations.
+type PKey = (u64, Vec<wgsl::Semantic>, bool, wgsl::Clip, bool);
+
+/// The varyings a vertex shader writes for a pixel shader with fixed varying locations
+/// ([`Shader::fixed`]), in location order: every one it writes that has a fixed location (the
+/// same for every pixel shader that reads only those), and any the pixel shader reads that it
+/// does not write, written with the real Direct3D 9's value for it ([`wgsl::unwritten`]; the pair's
+/// own module then).
+fn pair_varyings(vs: &Shader, ps: &Shader) -> Vec<wgsl::Semantic> {
+    let mut v = own_varyings(vs);
+    for s in &ps.varyings {
+        if !v.contains(s) {
+            v.push(*s);
+        }
+    }
+    v.sort_by_key(|s| wgsl::fixed_slot(*s));
+    v.dedup();
+    v
+}
+
+/// The varyings a vertex shader writes that have a fixed location, in location order: its
+/// varyings for every pixel shader that reads only what it writes ([`pair_varyings`]). One of
+/// shader model 1 or 2 always writes COLOR0 and COLOR1, as Direct3D 9's value where it does not
+/// ([`wgsl::unwritten`]): its two colours are there whatever it writes, so a pixel shader that
+/// reads a colour it does not write takes its own module, not one for the pair.
+fn own_varyings(vs: &Shader) -> Vec<wgsl::Semantic> {
+    let mut v: Vec<wgsl::Semantic> = vs
+        .sig
+        .outputs
+        .iter()
+        .map(|(_, s)| *s)
+        .filter(|s| wgsl::fixed_slot(*s).is_some())
+        .collect();
+    if vs.program.major < 3 {
+        v.extend((0..2).map(|index| wgsl::Semantic {
+            usage: sm::usage::COLOR,
+            index,
+        }));
+    }
+    v.sort_by_key(|s| wgsl::fixed_slot(*s));
+    v.dedup();
+    v
+}
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum ModKey {
@@ -5715,13 +6562,117 @@ struct Ready {
     samplers: Vec<(u32, u8, bool)>,
 }
 
-/// The clip code as the list writes it ([`prepare::Entry::clip`]).
-fn clip_code(c: wgsl::Clip) -> u8 {
+/// The clip code as the list writes it ([`prepare::Entry::clip`]) for a draw cut as `c`, with a
+/// plane on or not (`on`): 0 for none on, also with the clip distances every draw takes where
+/// the adapter has them, so a list written there predicts right on an adapter without them.
+fn clip_code(c: wgsl::Clip, on: bool) -> u8 {
     match c {
+        _ if !on => 0,
         wgsl::Clip::Off => 0,
         wgsl::Clip::Distances => 1,
         wgsl::Clip::Discard { per_sample: false } => 2,
         wgsl::Clip::Discard { per_sample: true } => 3,
+    }
+}
+
+/// A module made on a module thread ([`Device::queue_modules`]): the module or why there is
+/// none, and what converting and making it took; with pipeline libraries, what making the
+/// shader's library took and whether wgpu made its pipeline ([`Device::library_ahead`]).
+struct ModuleMade {
+    module: Result<wgpu::ShaderModule, String>,
+    convert: std::time::Duration,
+    made: std::time::Duration,
+    library: Option<(std::time::Duration, Result<(), String>)>,
+}
+
+/// What making a shader's pipeline library takes besides its module ([`Device::library_ahead`]):
+/// the pipeline's layout, the stand-in for the other stage, a vertex shader's inputs, a pixel
+/// shader's targets.
+struct LibraryAhead {
+    layout: wgpu::PipelineLayout,
+    group_layouts: [wgpu::BindGroupLayout; 2],
+    partner: wgpu::ShaderModule,
+    buffers: Vec<Option<(u64, Vec<wgpu::VertexAttribute>)>>,
+    targets: Vec<Option<wgpu::ColorTargetState>>,
+    depth_stencil: Option<wgpu::DepthStencilState>,
+    cache: Option<wgpu::PipelineCache>,
+}
+
+/// A sampler's dimension as [`Device::sampler_layout`]'s keys code it.
+fn dim_code(dim: wgsl::Dim) -> u8 {
+    match dim {
+        wgsl::Dim::D2 => 0,
+        wgsl::Dim::Cube => 1,
+        wgsl::Dim::D3 => 2,
+    }
+}
+
+/// The job of making `program`'s module linked as `link`, on a module thread.
+fn module_job(
+    device: wgpu::Device,
+    shader: Arc<Shader>,
+    link: wgsl::Link,
+    library: Option<LibraryAhead>,
+    ahead: Arc<std::sync::atomic::AtomicBool>,
+) -> crate::ahead::Job<ModuleMade> {
+    Box::new(move || {
+        let delay = MODULE_DELAY_FOR_TESTS.load(Ordering::Relaxed);
+        if delay > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(u64::from(delay)));
+        }
+        let t = std::time::Instant::now();
+        let source = wgsl::convert(&shader.program, &link);
+        let convert = t.elapsed();
+        let t = std::time::Instant::now();
+        let module = match source {
+            Ok(s) => create_module(&device, s),
+            Err(e) => Err(e.to_string()),
+        };
+        let made = t.elapsed();
+        // The shader's pipeline library: a pipeline of the module and the stand-in, dropped
+        // (wgpu-hal keeps the library).
+        // None once one was refused (said once by the device): no pipeline made for nothing.
+        let library = match (&module, library) {
+            (Ok(m), Some(l)) if ahead.load(Ordering::Relaxed) => {
+                let t = std::time::Instant::now();
+                let (vm, pm) = match shader.program.stage {
+                    Stage::Vertex => (m.clone(), l.partner),
+                    Stage::Pixel => (l.partner, m.clone()),
+                };
+                let job = PipelineJob {
+                    layout: l.layout,
+                    group_layouts: l.group_layouts,
+                    vm,
+                    pm,
+                    buffers: l.buffers,
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: l.depth_stencil,
+                    multisample: wgpu::MultisampleState::default(),
+                    targets: l.targets,
+                };
+                let made = build_pipeline(&device, l.cache.as_ref(), &job).map(drop);
+                if made.is_err() {
+                    ahead.store(false, Ordering::Relaxed);
+                }
+                Some((t.elapsed(), made))
+            }
+            _ => None,
+        };
+        ModuleMade {
+            module,
+            convert,
+            made,
+            library,
+        }
+    })
+}
+
+/// The loading screen's words while the start prepares the shaders: `done` of `total`.
+fn shader_progress(done: usize, total: usize) -> loading::Progress {
+    loading::Progress {
+        title: "Loading".into(),
+        status: format!("Preparing shaders {} of {}", done.min(total), total),
+        done: Some(done as f32 / total.max(1) as f32),
     }
 }
 
@@ -5735,7 +6686,8 @@ struct ModuleTask {
 /// Everything a render pipeline is made from, owned, so worker threads can make it.
 struct PipelineJob {
     layout: wgpu::PipelineLayout,
-    group_layout: wgpu::BindGroupLayout,
+    /// The pixel shader's and the vertex shader's sampler group layouts.
+    group_layouts: [wgpu::BindGroupLayout; 2],
     vm: wgpu::ShaderModule,
     pm: wgpu::ShaderModule,
     /// Each stream slot up to the last used: its stride and attributes.
@@ -5977,7 +6929,9 @@ fn show_on(
         return;
     };
     // As a `Present` does ([`crate::window`]): the window's frame at its size now, none while it
-    // is minimised, gives none in time or is lost (not drawn then).
+    // is minimised, gives none in time or is lost (not drawn then), in the window's DPI awareness
+    // to its present.
+    let _dpi = window.dpi_scope();
     let Some(frame) = window.frame(device) else {
         return;
     };
@@ -6121,9 +7075,10 @@ fn build_pipeline(
     }
 }
 
-/// `f` of each of `items`, on up to `threads` worker threads below normal priority (1: on this
-/// thread), the results in the items' order. `tick` runs on this thread meanwhile, about four
-/// times a second, with how many are done (the loading screen).
+/// `f` of each of `items`, on up to `threads` worker threads (1: on this thread), the results in
+/// the items' order. `tick` runs on this thread meanwhile, about four times a second, with how
+/// many are done (the loading screen). The threads keep normal priority: the game waits for them
+/// (its start, behind the loading screen).
 fn on_workers<T: Sync, R: Send>(
     items: &[T],
     threads: usize,
@@ -6151,15 +7106,12 @@ fn on_workers<T: Sync, R: Send>(
     std::thread::scope(|s| {
         let mut workers = Vec::new();
         for _ in 0..threads.min(items.len()) {
-            workers.push(s.spawn(|| {
-                lower_priority();
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(item) = items.get(i) else { break };
-                    let r = f(item);
-                    *results[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
-                    done.fetch_add(1, Ordering::Relaxed);
-                }
+            workers.push(s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(i) else { break };
+                let r = f(item);
+                *results[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                done.fetch_add(1, Ordering::Relaxed);
             }));
         }
         // Until every worker is out (also one that panicked: the scope then passes it on).
@@ -6187,27 +7139,26 @@ fn on_workers<T: Sync, R: Send>(
         .collect()
 }
 
-/// The worker threads making pipelines ahead run below normal priority, so the game's own
-/// threads and the menus keep theirs.
-fn lower_priority() {
-    #[cfg(windows)]
-    {
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetCurrentThread() -> isize;
-            fn SetThreadPriority(thread: isize, priority: i32) -> i32;
-        }
-        /// `THREAD_PRIORITY_BELOW_NORMAL`.
-        const BELOW_NORMAL: i32 = -1;
-        // SAFETY: the current thread's pseudo handle and a documented priority value.
-        unsafe {
-            SetThreadPriority(GetCurrentThread(), BELOW_NORMAL);
-        }
-    }
-}
-
 /// How many worker threads make pipelines ahead: fewer than the machine's cores (two left for
 /// the game's main thread and the render thread), at least one.
+/// Every core (the logical processors), for the game's start while it waits ([`Device::wait_for_start`]).
+fn all_cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// Tests only: each module job waits this many milliseconds before it starts (jobs in flight
+/// across the game's start), and the start fails past this many (a wait that would not end).
+static MODULE_DELAY_FOR_TESTS: AtomicU32 = AtomicU32::new(0);
+static START_DEADLINE_FOR_TESTS: AtomicU32 = AtomicU32::new(0);
+
+/// Tests only: [`MODULE_DELAY_FOR_TESTS`] and [`START_DEADLINE_FOR_TESTS`] in milliseconds
+/// (0: none).
+#[doc(hidden)]
+pub fn module_timing_for_tests(delay_ms: u32, start_deadline_ms: u32) {
+    MODULE_DELAY_FOR_TESTS.store(delay_ms, Ordering::Relaxed);
+    START_DEADLINE_FOR_TESTS.store(start_deadline_ms, Ordering::Relaxed);
+}
+
 fn worker_threads() -> usize {
     std::thread::available_parallelism()
         .map_or(1, |n| n.get())
@@ -6325,6 +7276,42 @@ impl Drop for Device {
 mod tests {
     use super::*;
     use wgpu::TextureFormat as F;
+
+    /// The list records whether a plane was on, not only how the adapter cut: the clip
+    /// distances every draw takes where the adapter has them write 0 with no plane on, so a list
+    /// written there predicts the right pipelines on an adapter without them (Direct3D 12).
+    #[test]
+    fn the_list_records_a_plane_on_whatever_cuts_it() {
+        use wgsl::Clip;
+        assert_eq!(clip_code(Clip::Distances, false), 0);
+        assert_eq!(clip_code(Clip::Distances, true), 1);
+        assert_eq!(clip_code(Clip::Off, false), 0);
+        assert_eq!(clip_code(Clip::Discard { per_sample: false }, true), 2);
+        assert_eq!(clip_code(Clip::Discard { per_sample: true }, true), 3);
+    }
+
+    /// The first-use gate's counts: the pipeline work a present held (pipelines made on its draws,
+    /// with their modules, and listed ones made ahead), the most in one present and where, the
+    /// presents over 20 ms, the pipelines over 1 ms; a present with none counts nothing.
+    #[test]
+    fn the_pipeline_work_each_present_held_is_counted_for_the_gate() {
+        let ms = std::time::Duration::from_millis;
+        let mut m = Made::default();
+        m.add_pipeline(ms(10), ms(12));
+        m.add_pipeline(ms(9), ms(12));
+        m.end_present(5);
+        m.add_pipeline(ms(0), std::time::Duration::from_micros(500));
+        m.end_present(6);
+        m.work += ms(21);
+        m.end_present(7);
+        m.end_present(8);
+        assert_eq!(m.worst_work, ms(24));
+        assert_eq!(m.worst_at, 5);
+        assert_eq!(m.work_over_20ms, 2, "presents 5 and 7");
+        assert_eq!(m.over_1ms, 2, "the two 12 ms pipelines");
+        assert_eq!(m.work, std::time::Duration::ZERO);
+        assert_eq!(m.pipelines, 3);
+    }
 
     /// A render target and its depth surface, asked for 8x apart, get the same count: the
     /// largest that both (and the rest of the game's multisampled formats and the occlusion

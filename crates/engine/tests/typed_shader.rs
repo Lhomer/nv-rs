@@ -17,11 +17,12 @@
 use engine as _;
 use engine_core::prelude::*;
 use engine_core::typed::diff::{Case, Diff, Input};
+use engine_core::typed::{MAIN_THREAD, OTHER_THREADS};
 use engine_core::{entry, Engine};
 use engine_typed::shader::{
     self, accumulator as acc, batch, constants, geometry, lighting, state, textures,
 };
-use engine_typed::{crt, culling, dispatch, pathing, render};
+use engine_typed::{crt, culling, pathing, render};
 
 /// The stand-in virtual functions, one per slot, and the table of what each answers.
 const VT_FN: u32 = 0x00ff_2000;
@@ -59,6 +60,56 @@ fn set(e: &mut Engine, at: u32, value: u32) {
 
 fn bits(case: &Case, i: usize) -> u32 {
     case.f32(i).to_bits()
+}
+
+/// A float as play has it on the paths whose maths is native (ADR-0014's float rule): its magnitude
+/// folded into 2^-12 to 2^12, its sign and mantissa kept; zeros and infinities as they come; a NaN the
+/// quiet NaN 0x7fc00000. On the main thread that maths is plain `f32`, which rounds as the exe's 24-bit
+/// x87 code does while every step stays inside the float range, where the x87 keeps a wider exponent:
+/// from these values no step of the set-ups leaves it, and a product of five stays within 2^-60 to
+/// 2^60, where the comparison reads words as floats. Play has no signalling NaNs or NaN payloads: the
+/// exe quiets a signalling NaN it copies through the x87 stack where native code copies it as it is.
+fn play(bits: u32) -> u32 {
+    let exponent = (bits >> 23) & 0xff;
+    if exponent == 0xff && bits & 0x007f_ffff != 0 {
+        return 0x7fc0_0000;
+    }
+    if exponent == 0xff || bits & 0x7fff_ffff == 0 || (115..139).contains(&exponent) {
+        return bits;
+    }
+    (bits & 0x807f_ffff) | ((115 + exponent % 24) << 23)
+}
+
+/// The case's float `i` as play has it ([`play`]).
+fn play_bits(case: &Case, i: usize) -> u32 {
+    play(bits(case, i))
+}
+
+/// How the native maths is compared with its translation (ADR-0014's float rule).
+trait Native {
+    /// Code only the main thread runs (plain `f32`): under the main thread's control word, floats
+    /// within `ulps`, or bit for bit (NaN payloads aside) with 0. The native maths rounds as the exe
+    /// does there, but a step with a `double` operand rounds twice natively (to 53 bits, then to a
+    /// float) where the x87 rounds once: one ulp where the first rounding lands exactly halfway.
+    fn main_thread(self, ulps: u32) -> Diff;
+    /// Code that also runs on the other game threads (`f64` rounded where the exe stores a float):
+    /// under their control word, bit for bit (NaN payloads aside).
+    fn other_threads(self) -> Diff;
+}
+
+impl Native for Diff {
+    fn main_thread(self, ulps: u32) -> Diff {
+        let d = self.control_words(&[MAIN_THREAD]);
+        if ulps == 0 {
+            d.allow_nan_payloads()
+        } else {
+            d.float_ulps(ulps)
+        }
+    }
+
+    fn other_threads(self) -> Diff {
+        self.control_words(&[OTHER_THREADS]).allow_nan_payloads()
+    }
 }
 
 /// A vtable of 0x200 bytes of stand-ins, with `real` slots pointing at real functions.
@@ -1108,10 +1159,27 @@ fn alpha_test_of() {
         .assert_same();
 }
 
+/// The range runs on the main thread and another game thread: its difference is `f64` rounded at the
+/// store. Under the other threads' word bit for bit (NaN payloads aside: the stores no longer quiet a
+/// signalling NaN), every input; under the main thread's within one ulp (the difference of two floats
+/// far apart in size rounds to 53 bits, then to a float, where the exe's 24-bit `FSUB` rounds once).
 #[test]
 fn range() {
     Diff::new(entry!(0x00e8_8730, state::set_range(Ptr<_>, f32, f32)))
         .common()
+        .other_threads()
+        .inputs(&[Input::F32, Input::F32])
+        .translation_calls_plainly(&[])
+        .float_sweep(FLOAT_SWEEP)
+        .setup(|_e, c| {
+            let w = world(_e);
+            vec![w.cache, bits(c, 0), bits(c, 1)]
+        })
+        .run()
+        .assert_same();
+    Diff::new(entry!(0x00e8_8730, state::set_range(Ptr<_>, f32, f32)))
+        .common()
+        .main_thread(1)
         .inputs(&[Input::F32, Input::F32])
         .translation_calls_plainly(&[])
         .float_sweep(FLOAT_SWEEP)
@@ -2036,6 +2104,8 @@ fn add_to_group() {
         Input::F32,
         Input::Of(&[0, 0x0040_0000]),
         Input::Of(&[0, 1, 2]),
+        // The fade alpha: opaque, or below 1 (the blocked test's second half).
+        Input::Of(&[ONE, HALF]),
     ])
     .translation_calls_plainly(&[
         0x00b9_8e20,
@@ -2057,6 +2127,7 @@ fn add_to_group() {
             i => w.passes[i as usize],
         };
         set(e, w.property + 0x28, bits(c, 2));
+        set(e, w.property + 0x2c, c.word(5));
         set(e, w.property + 0x24, c.word(3));
         // The alpha property: blends without bit 0, or none.
         match c.word(4) {
@@ -2364,6 +2435,52 @@ fn make_matrix() {
     .assert_same();
 }
 
+/// `set_world_transform`'s words: every rotation entry and the scale from the case (as they came, or
+/// folded by `fold`), and the renderer's directions' second components (the world's first and third
+/// are 1, 2 and 1/3, -1): all eighteen products of the model directions' sums nonzero. Entries 0, 4
+/// and 8 are the case's floats 0, 3 and 4; the others its floats 5, 6 and 7, each used twice with its
+/// low mantissa bits changed (entries 1 and 5 from float 5, 2 and 6 from 6, 3 and 7 from 7).
+fn world_transform_words(e: &mut Engine, c: &Case, fold: fn(u32) -> u32) -> Vec<u32> {
+    let w = world(e);
+    set(e, w.transform, fold(bits(c, 0)));
+    set(e, w.transform + 0x10, fold(bits(c, 3)));
+    set(e, w.transform + 0x20, fold(bits(c, 4)));
+    for (entry, input) in [(1u32, 5), (2, 6), (3, 7), (5, 5), (6, 6), (7, 7)] {
+        set(
+            e,
+            w.transform + 4 * entry,
+            fold(bits(c, input) ^ (entry << 3)),
+        );
+    }
+    set(e, w.transform + 0x30, fold(bits(c, 1)));
+    set(e, w.renderer + 0x638, fold(bits(c, 3)));
+    set(e, w.renderer + 0x644, fold(bits(c, 4)));
+    vec![w.renderer, w.transform, c.word(2)]
+}
+
+/// A float as a rotation's entry, a direction's component or a scale has it in play: its magnitude
+/// folded into 2^-4 to 4 (sign and mantissa kept; zeros and infinities as they come; a NaN the quiet
+/// NaN 0x7fc00000, as [`play`]).
+fn unit(bits: u32) -> u32 {
+    let exponent = (bits >> 23) & 0xff;
+    if exponent == 0xff && bits & 0x007f_ffff != 0 {
+        return 0x7fc0_0000;
+    }
+    if exponent == 0xff || bits & 0x7fff_ffff == 0 || (123..129).contains(&exponent) {
+        return bits;
+    }
+    (bits & 0x807f_ffff) | ((123 + exponent % 6) << 23)
+}
+
+/// The world transform runs on the main thread and another game thread: `f64` sums rounded at the
+/// stores. Every rotation entry comes from the case, so each of the six sums has its three products
+/// nonzero ([`world_transform_words`]). Under the other threads' word bit for bit (NaN payloads
+/// aside), every input. Under the main thread's the exe rounds each of the three products and two
+/// sums of a direction to 24 bits where the native sums round once at the store: floats within 3
+/// ulps, or else within 2^-14 in value. The two part by at most 11 * 2^-24 of the largest product (the
+/// exe's five roundings and the native one), which is many ulps of a result where the sums cancel to
+/// near zero; with the rotation, the scale and the directions as play has them ([`unit`]: below 4, so
+/// every product is below 2^6) it is below 2^-14.
 #[test]
 fn world_transform() {
     Diff::new(entry!(
@@ -2371,29 +2488,62 @@ fn world_transform() {
         acc::set_world_transform(Ptr<_>, Ptr<_>, u8)
     ))
     .common()
+    .other_threads()
     .inputs(&[
         Input::F32,
         Input::F32,
         Input::Of(BYTES),
         Input::F32Swept(HALF),
         Input::F32Swept(ONE),
+        Input::F32Swept(0x3eaa_aaab),
+        Input::F32Swept(0xbf00_0000),
+        Input::F32Swept(0x3e80_0000),
     ])
     .translation_calls_plainly(&[])
     .float_sweep(FLOAT_SWEEP)
-    .setup(|e, c| {
-        let w = world(e);
-        set(e, w.transform, bits(c, 0));
-        set(e, w.transform + 0x10, bits(c, 3));
-        set(e, w.transform + 0x20, bits(c, 4));
-        set(e, w.transform + 0x30, bits(c, 1));
-        set(e, w.renderer + 0x638, bits(c, 3));
-        set(e, w.renderer + 0x644, bits(c, 4));
-        vec![w.renderer, w.transform, c.word(2)]
-    })
+    .setup(|e, c| world_transform_words(e, c, |b| b))
     .run()
     .assert_same();
+    let report = Diff::new(entry!(
+        0x00e6_fbb0,
+        acc::set_world_transform(Ptr<_>, Ptr<_>, u8)
+    ))
+    .common()
+    .main_thread(3)
+    .float_abs(2f32.powi(-14))
+    .inputs(&[
+        Input::F32,
+        Input::F32,
+        Input::Of(BYTES),
+        Input::F32Swept(HALF),
+        Input::F32Swept(ONE),
+        Input::F32Swept(0x3eaa_aaab),
+        Input::F32Swept(0xbf00_0000),
+        Input::F32Swept(0x3e80_0000),
+    ])
+    .translation_calls_plainly(&[])
+    .float_sweep(FLOAT_SWEEP)
+    .setup(|e, c| world_transform_words(e, c, unit))
+    .run();
+    println!("world_transform on the main thread: {report}");
+    report.assert_same();
 }
 
+/// `set_world_view_constants`' words: the transform's scale from the case, as it came or folded by
+/// `fold`.
+fn world_view_words(e: &mut Engine, c: &Case, fold: fn(u32) -> u32) -> Vec<u32> {
+    let w = world(e);
+    let this = e.mem.alloc(0x20);
+    set(e, this + 0x18, w.renderer);
+    set(e, w.transform + 0x30, fold(bits(c, 0)));
+    vec![this, c.word(1), w.transform]
+}
+
+/// The world-view constants' world transform is `f64` (it also runs on another game thread): under the
+/// other threads' word bit for bit, every input; under the main thread's with the scale as play has it
+/// ([`play`]: a denormal scale makes denormal entries, which the exe rounds twice and which compare
+/// exactly), within 3 ulps, where the exe rounds each product and sum of the model directions to 24
+/// bits (the world's rotation and directions keep the sums from cancelling: see `world_transform`).
 #[test]
 fn world_view_constants() {
     Diff::new(entry!(
@@ -2401,16 +2551,23 @@ fn world_view_constants() {
         acc::set_world_view_constants(u32, u32, u32)
     ))
     .common()
+    .other_threads()
     .inputs(&[Input::F32, Input::Word])
     .translation_calls_plainly(&[])
     .float_sweep(0)
-    .setup(|e, c| {
-        let w = world(e);
-        let this = e.mem.alloc(0x20);
-        set(e, this + 0x18, w.renderer);
-        set(e, w.transform + 0x30, bits(c, 0));
-        vec![this, c.word(1), w.transform]
-    })
+    .setup(|e, c| world_view_words(e, c, |b| b))
+    .run()
+    .assert_same();
+    Diff::new(entry!(
+        0x00b7_c750,
+        acc::set_world_view_constants(u32, u32, u32)
+    ))
+    .common()
+    .main_thread(3)
+    .inputs(&[Input::F32, Input::Word])
+    .translation_calls_plainly(&[])
+    .float_sweep(0)
+    .setup(|e, c| world_view_words(e, c, play))
     .run()
     .assert_same();
 }
@@ -2487,10 +2644,13 @@ fn light_color() {
         .assert_same();
 }
 
+/// The tint copies its floats: bit for bit under either word, but a signalling NaN is no longer quieted
+/// (the exe copies through the x87 stack), so NaN payloads may differ.
 #[test]
 fn tint() {
     Diff::new(entry!(0x00c0_2d90, acc::set_tint(u32, Ptr<_>, u32, u32)))
         .common()
+        .allow_nan_payloads()
         .inputs(&[
             Input::Of(&[0, 0x20]),
             Input::Of(&[0, 1, 0x100]),
@@ -2539,10 +2699,13 @@ fn check_create_pass_array() {
     .assert_same();
 }
 
+/// The alpha is compared and stored: bit for bit under either word, but a signalling NaN is no longer
+/// quieted by its store (the exe's goes through the x87 stack), so NaN payloads may differ.
 #[test]
 fn set_alpha() {
     Diff::new(entry!(0x00ba_8ab0, acc::set_alpha(Ptr<_>, f32)))
         .common()
+        .allow_nan_payloads()
         .inputs(&[Input::F32, Input::F32])
         .translation_calls_plainly(&[])
         .float_sweep(FLOAT_SWEEP)
@@ -2661,8 +2824,75 @@ fn compare_by_depth_stores_before_the_radius() {
         .assert_same();
 }
 
+/// The alpha sort's depth as the main thread sums it (the native maths is plain `f32` there):
+/// `(x dx + y dy) + z dz`, each sum rounded to 24 bits before the next. With the camera along
+/// (1, 1, 1), a bound at (1, y, z) of radius 1 against one on the x axis at the exe's depth of it,
+/// radius 1 too. With y = z = 2^-24 each sum is a tie that goes to the even 1.0: depth 1.0, where
+/// `x + (y + z)` or the sum rounded once gives 1 + 2^-23. With y = 2^-24 and z = 3 * 2^-25 the first
+/// sum goes to 1.0 and the second to 1 + 2^-23, where `(x + z) + y` gives 1 + 2^-22 (its second sum a
+/// tie to even). The two compare equal in both orders, with the radius taken off and not; each other
+/// order, and the sum rounded once, fails in one of the two. On the main thread's word only, where
+/// the code runs.
+#[test]
+fn compare_by_depth_at_24_bits_rounds_each_sum() {
+    Diff::new(entry!(0x00b9_8b20, batch::compare_by_depth(u32, u32) -> i32))
+        .common()
+        .control_words(&[MAIN_THREAD])
+        .inputs(&[
+            Input::Of(TWO_WAYS),
+            Input::Of(TWO_WAYS),
+            Input::Of(TWO_WAYS),
+        ])
+        .setup(|e, c| {
+            let w = world(e);
+            set(e, w.camera + 0x68, ONE);
+            set(e, w.camera + 0x74, ONE);
+            set(e, w.camera + 0x80, ONE);
+            e.mem.set_u8(0x011f_fe35, c.word(1) as u8);
+            set(e, 0x011f_fe38, w.camera);
+            // 2^-24; 3 * 2^-25; and the exe's depth of (1, y, z): 1.0, or 1 + 2^-23.
+            let (z, depth) = if c.word(2) == 0 {
+                (0x3380_0000, ONE)
+            } else {
+                (0x33c0_0000, ONE + 1)
+            };
+            let mut items = [0u32; 2];
+            for (item, centre) in items.iter_mut().zip([[ONE, 0x3380_0000, z], [depth, 0, 0]]) {
+                let bound = e.mem.alloc(0x10);
+                for (i, v) in (0u32..).zip(centre.iter().chain(&[ONE])) {
+                    set(e, bound + 4 * i, *v);
+                }
+                let geometry = e.mem.alloc(0xc4);
+                set(e, geometry + 0x20, bound);
+                let pass = e.mem.alloc(8);
+                set(e, pass, geometry);
+                *item = e.mem.alloc(4);
+                set(e, *item, pass);
+            }
+            if c.word(0) != 0 {
+                items.swap(0, 1);
+            }
+            vec![items[0], items[1]]
+        })
+        .run()
+        .assert_same();
+}
+
+/// `world_transform_typed_slot`'s words: the cache's slot 0x30 the typed `00e879e0`, the transform's
+/// first rotation entry and its scale from the case, as they came or folded by `fold`.
+fn world_transform_slot_words(e: &mut Engine, c: &Case, fold: fn(u32) -> u32) -> Vec<u32> {
+    let w = world(e);
+    let vt = vtable(e, &[(0x68, 0x00e8_8780), (0x30, 0x00e8_79e0)]);
+    set(e, w.cache, vt);
+    set(e, w.transform, fold(bits(c, 0)));
+    set(e, w.transform + 0x30, fold(bits(c, 1)));
+    vec![w.renderer, w.transform, c.word(2)]
+}
+
 /// `set_world_transform` with the render state cache's slot 0x30 holding the typed `00e879e0`: that call
-/// made direct (the plain world has a stand-in there).
+/// made direct (the plain world has a stand-in there). Under the other threads' word bit for bit, every
+/// input; under the main thread's with the floats as play has them ([`play`]), within 3 ulps (the
+/// world's rotation and directions keep the sums from cancelling).
 #[test]
 fn world_transform_typed_slot() {
     Diff::new(entry!(
@@ -2670,17 +2900,23 @@ fn world_transform_typed_slot() {
         acc::set_world_transform(Ptr<_>, Ptr<_>, u8)
     ))
     .common()
+    .other_threads()
     .inputs(&[Input::F32, Input::F32, Input::Of(BYTES)])
     .translation_calls_plainly(&[])
     .float_sweep(0)
-    .setup(|e, c| {
-        let w = world(e);
-        let vt = vtable(e, &[(0x68, 0x00e8_8780), (0x30, 0x00e8_79e0)]);
-        set(e, w.cache, vt);
-        set(e, w.transform, bits(c, 0));
-        set(e, w.transform + 0x30, bits(c, 1));
-        vec![w.renderer, w.transform, c.word(2)]
-    })
+    .setup(|e, c| world_transform_slot_words(e, c, |b| b))
+    .run()
+    .assert_same();
+    Diff::new(entry!(
+        0x00e6_fbb0,
+        acc::set_world_transform(Ptr<_>, Ptr<_>, u8)
+    ))
+    .common()
+    .main_thread(3)
+    .inputs(&[Input::F32, Input::F32, Input::Of(BYTES)])
+    .translation_calls_plainly(&[])
+    .float_sweep(0)
+    .setup(|e, c| world_transform_slot_words(e, c, play))
     .run()
     .assert_same();
 }
@@ -2950,9 +3186,10 @@ fn set_shader_constants() {
 
 /// A bit pattern near `seed`, for the fields one swept float fills: `k` picks which (0 is the seed
 /// itself; the others differ in the mantissa, the lowest exponent bit and, for some, the sign), so sums
-/// and products of a group's fields round.
+/// and products of a group's fields round. As play has it ([`play`]): a zero seed's fields would be
+/// denormals, an infinite one's next to the float's largest, and the set-ups' maths is native.
 fn near(seed: u32, k: u32) -> u32 {
-    seed ^ ((k.wrapping_mul(0x9e37_79b1) >> 8) & 0x00ff_ffff) ^ ((k & 4) << 29)
+    play(seed ^ ((k.wrapping_mul(0x9e37_79b1) >> 8) & 0x00ff_ffff) ^ ((k & 4) << 29))
 }
 
 /// The floats a [`Shape`] holds, each the seed of a group of fields ([`near`]): a light's colour; the
@@ -3378,10 +3615,22 @@ fn geometry_world(e: &mut Engine, c: &Case) -> Geo {
     geometry_shape(e, &Shape::of(c))
 }
 
-/// The world of the set-up tests: [`world`] with everything the set-ups read made from `s`. The tests
+/// The world of the set-up tests: [`world`] with everything the set-ups read made from `s`, its floats
+/// as play has them ([`play`]: the set-ups' maths is native, plain `f32` on the main thread). The tests
 /// name the render and dispatch families ([`Geometry::set_ups`]), so their functions are the real ones.
 fn geometry_shape(e: &mut Engine, s: &Shape) -> Geo {
+    let s = &Shape {
+        floats: s.floats.map(play),
+        ..*s
+    };
     let w = world_named(e, true, true);
+    // The renderer's two directions zero: the world-view constants' world transform then turns them into
+    // model-space directions of zero on both sides. Its sums are `f64` (it also runs on another thread),
+    // which on the main thread's word differ from the exe's 24-bit steps in the last bits, more where
+    // they cancel: its own tests compare them (`world_transform`, `world_view_constants`).
+    for k in 0..6u32 {
+        set(e, w.renderer + 0x634 + 4 * k, 0);
+    }
     geometry_stand_ins(e);
     e.map(0, 0x1000);
     for (addr, len) in [
@@ -3694,6 +3943,13 @@ fn geometry_shape(e: &mut Engine, s: &Shape) -> Geo {
     }
 }
 
+/// The dispatch family's functions the set-ups call (the 4x4 inverse, the normalisation): by address in
+/// the set-ups' tests, to their translations on both sides. Their maths is native, rounding a sum of
+/// products once where the exe's 24-bit code rounds each step, so on the main thread's word, the only
+/// one the set-ups run on, they part from the exe in the last bits (the dispatch family's own tests
+/// compare them there, within their tolerance; the render family's tests run them direct).
+const SET_UP_DISPATCH: &[u32] = &[0x00c4_c2d0, 0x004a_0c10];
+
 /// What the translations of the dispatch and pathing callees the set-ups now reach for real call
 /// plainly (a Rust call, not logged), as typed_dispatch.rs lists them: the model matrix's (`00c4c2d0`)
 /// matrix row, columns and entry helpers (`00476930`, `00476980`, `004769c0`) and the square roots
@@ -3730,9 +3986,9 @@ impl Geometry for Diff {
     fn set_ups(self) -> Diff {
         self.family(&shader::SHADER)
             .family(&leaf::LEAVES)
-            .family(&dispatch::DISPATCH)
             .family(&pathing::PATHING)
             .family(&render::RENDER)
+            .goes_by_address(SET_UP_DISPATCH)
             .translation_calls_plainly(SET_UP_PLAIN)
             // The draw family's partition draw, skinned packer and strip lists, land toggles, fog
             // property and D3DX thunks, as in `common`.
@@ -3755,6 +4011,11 @@ impl Geometry for Diff {
             .goes_by_address(DRAW_F_HELPERS)
             .max_calls(MAX_CALLS)
             .max_cases(160)
+            // The set-ups run on the main thread only (the thread census; each one's only caller is
+            // `SetupGeometryConstants`, and the light set-up's are the lights' loops): native `f32`,
+            // compared under the main thread's control word, within one ulp (a step with a `double`
+            // operand, a luminance weight or a constant, rounds twice natively).
+            .main_thread(1)
     }
 
     fn geometry(self, plainly: &[u32], args: fn(&Geo) -> Vec<u32>) -> Diff {
@@ -4626,7 +4887,7 @@ fn light_setup() {
             },
             |g, c| {
                 let light = if c.word(1) == 0 { 0 } else { g.light };
-                vec![c.word(0), light, bits(c, 5)]
+                vec![c.word(0), light, play_bits(c, 5)]
             },
         )
         .run()
@@ -5471,16 +5732,24 @@ fn draw_and_clear_type() {
 fn draw_holder() {
     Diff::new(entry!(0x00b9_a4d0, dalpha::draw_holder(u32, u32)))
         .draw_common_at(0x00b9_a4d0)
+        // `RenderBatches`' accumulator getter is the render family's (its own tests).
+        .goes_by_address(&[0x00b4_f5c0])
         .inputs(&[
             Input::Of(TWO_WAYS),
             Input::Of(TWO_WAYS),
             Input::Of(&[0, 1, 0x33]),
+            // The renderer's slot 0x90: a stand-in, or `RenderBatches` (then the typed one, direct).
+            Input::Of(TWO_WAYS),
         ])
         .setup(|e, c| {
             let d = draw_world(e);
             let holder = d.w.holders[c.word(0) as usize];
             if c.word(1) == 0 {
                 set(e, holder + 8, 0);
+            }
+            if c.word(3) != 0 {
+                let vt = e.mem.u32(d.w.br);
+                set(e, vt + 0x90, 0x00b9_9e20);
             }
             vec![holder, c.word(2)]
         })
@@ -6231,24 +6500,51 @@ const SETUP_TYPE_INPUTS: &[Input] = &[
 ];
 
 fn setup_type_setup(e: &mut Engine, c: &Case) -> Vec<u32> {
+    setup_type_words(e, c, |b| b)
+}
+
+/// [`setup_type_setup`] with the scale as play has it ([`play`]): the main thread's comparison.
+fn setup_type_play(e: &mut Engine, c: &Case) -> Vec<u32> {
+    setup_type_words(e, c, play)
+}
+
+/// A pass set-up's words, the geometry's scale from the case folded by `fold`.
+fn setup_type_words(e: &mut Engine, c: &Case, fold: fn(u32) -> u32) -> Vec<u32> {
     let p = pass_world(e, &[], 0, 0);
     let state = setup_state(e, &p, c.word(0));
     let rendering = e.mem.u32(0x011f_91e0);
     e.mem.set_u8(rendering + 9, c.word(1) as u8);
     let geometry = e.mem.u32(rendering);
-    set(e, geometry + 0x98, bits(c, 2));
+    set(e, geometry + 0x98, fold(bits(c, 2)));
     set(e, 0x011f_951c, 0x7e00_951c);
     vec![p.d.w.shader, state]
 }
+
+// The three pass set-ups reach the shader family's world transform (through the world-view constants)
+// with the case's float as the geometry's scale: its maths is native `f64`. Under the other threads'
+// word bit for bit (NaN payloads aside: the scale it hands the matrix is no longer quieted), every
+// input; under the main thread's with the scale as play has it (a denormal scale makes denormal
+// entries, which the exe rounds twice and which compare exactly), within one ulp (the exe rounds each
+// product and sum of the model directions to 24 bits).
 
 #[test]
 fn setup_type_ca() {
     Diff::new(entry!(0x00b7_ded0, setups::setup_type_ca(Ptr<_>, Ptr<_>)))
         .pass_common()
+        .other_threads()
         .goes_by_address(&[0x00e7_eb00, 0x00c4_c2d0])
         .inputs(SETUP_TYPE_INPUTS)
         .max_cases(160)
         .setup(setup_type_setup)
+        .run()
+        .assert_same();
+    Diff::new(entry!(0x00b7_ded0, setups::setup_type_ca(Ptr<_>, Ptr<_>)))
+        .pass_common()
+        .main_thread(1)
+        .goes_by_address(&[0x00e7_eb00, 0x00c4_c2d0])
+        .inputs(SETUP_TYPE_INPUTS)
+        .max_cases(160)
+        .setup(setup_type_play)
         .run()
         .assert_same();
 }
@@ -6257,10 +6553,20 @@ fn setup_type_ca() {
 fn setup_type_d1() {
     Diff::new(entry!(0x00b7_dfe0, setups::setup_type_d1(Ptr<_>, Ptr<_>)))
         .pass_common()
+        .other_threads()
         .goes_by_address(&[0x00e7_eb00, 0x00c4_c2d0])
         .inputs(SETUP_TYPE_INPUTS)
         .max_cases(160)
         .setup(setup_type_setup)
+        .run()
+        .assert_same();
+    Diff::new(entry!(0x00b7_dfe0, setups::setup_type_d1(Ptr<_>, Ptr<_>)))
+        .pass_common()
+        .main_thread(1)
+        .goes_by_address(&[0x00e7_eb00, 0x00c4_c2d0])
+        .inputs(SETUP_TYPE_INPUTS)
+        .max_cases(160)
+        .setup(setup_type_play)
         .run()
         .assert_same();
 }
@@ -6269,10 +6575,20 @@ fn setup_type_d1() {
 fn setup_type_102() {
     Diff::new(entry!(0x00b7_e150, setups::setup_type_102(Ptr<_>, Ptr<_>)))
         .pass_common()
+        .other_threads()
         .goes_by_address(&[0x00e7_eb00, 0x00c4_c2d0])
         .inputs(SETUP_TYPE_INPUTS)
         .max_cases(160)
         .setup(setup_type_setup)
+        .run()
+        .assert_same();
+    Diff::new(entry!(0x00b7_e150, setups::setup_type_102(Ptr<_>, Ptr<_>)))
+        .pass_common()
+        .main_thread(1)
+        .goes_by_address(&[0x00e7_eb00, 0x00c4_c2d0])
+        .inputs(SETUP_TYPE_INPUTS)
+        .max_cases(160)
+        .setup(setup_type_play)
         .run()
         .assert_same();
 }
@@ -6766,4 +7082,238 @@ fn toggles_typed_land_and_fog() {
     })
     .run()
     .assert_same();
+}
+
+// ---- The list draws the world draw made through translations (the drawing thread's still-live list) ----
+
+use engine_typed::draw::lists as dlists;
+
+#[test]
+fn own_list_draw() {
+    Diff::new(entry!(0x00b9_9990, dlists::own_list_draw(Ptr<_>, u32)))
+        .draw_common_at(0x00b9_9990)
+        .inputs(&[Input::Of(&[0, 1, 2, 3, 4]), Input::Of(&[0, 1, 0x33])])
+        .setup(|e, c| {
+            let d = draw_world(e);
+            let w = &d.w;
+            let list = e.mem.alloc(0x14);
+            match c.word(0) {
+                // Empty: nothing drawn, nothing ended.
+                0 => {}
+                1 => list_at(e, list, &[w.passes[0]]),
+                2 => list_at(e, list, &[w.passes[0], w.passes[1], w.skin_pass]),
+                // A null pass stops the walk; a pass without a geometry is not drawn.
+                3 => list_at(e, list, &[w.passes[2], 0, w.passes[1]]),
+                _ => {
+                    let bare = e.mem.alloc(8);
+                    e.mem.set_u16(bare + 4, 0x10);
+                    list_at(e, list, &[bare, w.passes[3]]);
+                }
+            }
+            vec![list, c.word(1)]
+        })
+        .run()
+        .assert_same();
+}
+
+/// The world of `render_batches`' cases (its test and its view check).
+fn render_batches_world(e: &mut Engine, c: &Case) -> Vec<u32> {
+    let d = draw_world(e);
+    let w = &d.w;
+    let acc = w.acc;
+    set(e, RETS + 0xf80, acc);
+    e.register(0x00b4_f5c0, |e, _| ret(e.mem.u32(RETS + 0xf80)));
+    e.map(0x011a_9000, 0x1000);
+    e.map(0x0120_1000, 0x1000);
+    // Groups 0 to 3 (the map stand-in answers the type's low two bits). Group 0 (type 0x10): every list holds
+    // two passes of its own type with the sort byte set, so each list's blend byte reaches the pass draw.
+    // Group 1 (type 0x11): its lists 2 and 3 hold a pass of its own type with the sort byte set. The rest:
+    // every other list holds passes of other types.
+    let own_11 = e.mem.alloc(8);
+    set(e, own_11, w.geometry);
+    e.mem.set_u16(own_11 + 4, 0x11);
+    e.mem.set_u8(own_11 + 6, 4);
+    e.mem.set_u8(own_11 + 7, 1);
+    for group in 0..4u32 {
+        for list in 0..5u32 {
+            let at = group_list(e, w, group, list);
+            if group == 0 {
+                list_at(e, at, &[w.passes[0], w.passes[1]]);
+            } else if group == 1 && (list == 2 || list == 3) {
+                list_at(e, at, &[own_11, w.passes[2]]);
+            } else if (group + list) % 2 == 0 {
+                let items = [
+                    w.passes[(list % 4) as usize],
+                    w.passes[((list + 1) % 4) as usize],
+                ];
+                list_at(e, at, &items);
+            } else {
+                list_at(e, at, &[]);
+            }
+        }
+        set(e, e.mem.u32(w.br + 8) + group * 0x68 + 0x64, 2);
+    }
+    // The active list: empty, one type, or three (the inline head and two nodes).
+    let head = w.br + 0x2c;
+    match c.word(1) {
+        0 => {
+            e.mem.set_u16(head, 0);
+            set(e, head + 4, 0);
+        }
+        1 => {
+            e.mem.set_u16(head, 0x10);
+            set(e, head + 4, 0);
+        }
+        3 => {
+            let next = e.mem.alloc(8);
+            e.mem.set_u16(head, 0);
+            set(e, head + 4, next);
+            e.mem.set_u16(next, 0x10);
+            set(e, next + 4, 0);
+        }
+        _ => {
+            let second = e.mem.alloc(8);
+            let third_node = e.mem.alloc(8);
+            e.mem.set_u16(head, 0x11);
+            set(e, head + 4, second);
+            e.mem.set_u16(second, 0x10);
+            set(e, second + 4, third_node);
+            e.mem.set_u16(third_node, 0x13);
+            set(e, third_node + 4, 0);
+        }
+    }
+    e.mem.set_u8(0x011f_94a6, c.word(2) as u8);
+    e.mem.set_u8(0x011f_9421, c.word(3) as u8);
+    // The accumulator's two bytes that make a shadow pass (odd types here) only clear its group.
+    e.mem.set_u8(acc + 0x164, u8::from(c.word(4) == 1));
+    e.mem.set_u8(acc + 0x165, u8::from(c.word(4) == 2));
+    set(e, 0x011f_fa24, 2);
+    set(e, 0x011f_f9e8, 1);
+    let (first, last) = match c.word(0) {
+        0 => (0, 0x1234_56ff),
+        1 => (0x10, 0x11),
+        _ => (0x12, 0x2f1),
+    };
+    vec![w.br, first, last, c.word(5)]
+}
+
+#[test]
+fn render_batches() {
+    Diff::new(entry!(
+        0x00b9_9e20,
+        dlists::render_batches(Ptr<_>, u32, u32, u32)
+    ))
+    .draw_common_at(0x00b9_9e20)
+    // The accumulator getter is the render family's: stood in here.
+    .goes_by_address(&[0x00b4_f5c0])
+    .inputs(&[
+        Input::Of(&[0, 1, 2]),
+        // The active list: empty, one type, three, or type 0 at the head with one after it.
+        Input::Of(&[0, 1, 2, 3]),
+        Input::Of(TWO_WAYS),
+        Input::Of(TWO_WAYS),
+        Input::Of(&[0, 1, 2]),
+        Input::Of(&[0, 0x5a]),
+    ])
+    .setup(render_batches_world)
+    .run()
+    .assert_same();
+}
+
+// ---- The two list draws against the drawing thread's view (`draw::detach`) ----
+
+use engine_core::typed::diff::{memory_digest, Value};
+use engine_typed::draw::detach;
+
+/// `f` run on two engines `setup` makes alike for each case: one with the lists of the renderer `setup` names
+/// (its second answer) detached into the drawing thread's view around the call, as the cut does, one with no
+/// view. Both must answer the same and leave the same memory: a list word the draw read or wrote in place
+/// would differ (it reads 0 there while the view holds it), and the close stops a test build on a held word
+/// written in place.
+fn list_draw_view_same(
+    name: &str,
+    f: AbiFn,
+    cases: &[Vec<u32>],
+    setup: impl Fn(&mut Engine, &Case) -> (Vec<u32>, u32),
+) {
+    let mut total = 0;
+    for words in cases {
+        let case = Case(words.iter().map(|w| Value::Word(*w)).collect());
+        let mut plain = Engine::new();
+        let (a, _) = setup(&mut plain, &case);
+        let answer = f(&mut plain, &a);
+        let mut viewed = Engine::new();
+        let (b, renderer) = setup(&mut viewed, &case);
+        assert_eq!(a, b, "{name} {words:x?}: the setups differ");
+        let mut held = Vec::new();
+        detach::list_words(&viewed, renderer, &mut held);
+        total += held.len();
+        detach::open(&mut viewed, &held);
+        let viewed_answer = f(&mut viewed, &b);
+        detach::close(&mut viewed);
+        assert_eq!(
+            answer, viewed_answer,
+            "{name} {words:x?}: the answers differ"
+        );
+        assert_eq!(
+            memory_digest(&plain),
+            memory_digest(&viewed),
+            "{name} {words:x?}: the memory differs"
+        );
+    }
+    assert!(total > 0, "{name}: no case held a list word");
+}
+
+/// Every combination of `values` per argument.
+fn product(values: &[&[u32]]) -> Vec<Vec<u32>> {
+    values.iter().fold(vec![vec![]], |cases, vs| {
+        cases
+            .iter()
+            .flat_map(|c| {
+                vs.iter().map(move |v| {
+                    let mut c = c.clone();
+                    c.push(*v);
+                    c
+                })
+            })
+            .collect()
+    })
+}
+
+/// The own list draw on the holder that keeps its own list (`draw_world`'s holder 1), its renderer's lists
+/// detached.
+#[test]
+fn own_list_draw_with_the_lists_detached() {
+    list_draw_view_same(
+        "own_list_draw",
+        entry!(0x00b9_9990, dlists::own_list_draw(Ptr<_>, u32)).1,
+        &product(&[&[0, 1, 0x33]]),
+        |e, c| {
+            let d = draw_world(e);
+            let holder = d.w.holders[1];
+            (vec![holder + 0xc, c.word(0)], d.w.br)
+        },
+    );
+}
+
+/// `RenderBatches` on the world renderer, its lists detached, over its test's cases.
+#[test]
+fn render_batches_with_the_lists_detached() {
+    list_draw_view_same(
+        "render_batches",
+        entry!(0x00b9_9e20, dlists::render_batches(Ptr<_>, u32, u32, u32)).1,
+        &product(&[
+            &[0, 1, 2],
+            &[0, 1, 2, 3],
+            TWO_WAYS,
+            TWO_WAYS,
+            &[0, 1, 2],
+            &[0x5a],
+        ]),
+        |e, c| {
+            let words = render_batches_world(e, c);
+            let renderer = words[0];
+            (words, renderer)
+        },
+    );
 }

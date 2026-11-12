@@ -15,7 +15,7 @@
 use engine as _;
 use engine_core::prelude::*;
 use engine_core::typed::diff::{Case, Diff, Input, F32_VALUES};
-use engine_core::typed::leaf;
+use engine_core::typed::{leaf, MAIN_THREAD, OTHER_THREADS};
 use engine_core::{entry, Engine};
 use engine_typed::draw::{self, packed, packing, shapes, skin, thunks};
 use engine_typed::draw_f;
@@ -235,26 +235,52 @@ fn stand_ins(e: &mut Engine) {
     }
 }
 
+/// The dispatch family's functions the draw, render and shader families' typed code calls: `compose`,
+/// `invert_non_uniform`, `inverse_4x4`, `normalize`, the RTTI cast and the two immediate renders.
+const DISPATCH_CALLED: &[u32] = &[
+    0x0062_c250,
+    0x004b_4880,
+    0x00c4_c2d0,
+    0x004a_0c10,
+    0x0065_3290,
+    0x00a8_0610,
+    0x00a7_1d70,
+];
+
 trait Common {
     fn common(self) -> Diff;
+    /// [`Common::common`] with the dispatch family's functions by address, to their translations on
+    /// both sides. Their maths is native: a sum of products rounds once where the exe's 24-bit code
+    /// rounds each step, so on the main thread's control word it parts from the exe in the last bits
+    /// (the dispatch family's own tests compare it there, within their tolerance). The other families'
+    /// maths, compared on that word, runs them translated.
+    fn dispatch_translated(self) -> Diff;
 }
 
 impl Common for Diff {
     /// Every family the paths reach, on.
     fn common(self) -> Diff {
-        self.family(&draw::DRAW)
-            .family(&render::RENDER)
-            .family(&shader::SHADER)
-            .family(&leaf::LEAVES)
-            .family(&dispatch::DISPATCH)
-            .family(&pathing::PATHING)
-            .family(&culling::CULLING)
-            .family(&crt::CRT)
-            // draw_f's helpers: off until its gate, so by address, as in play; run in their own tests.
-            .goes_by_address(DRAW_F_HELPERS)
-            .max_calls(MAX_CALLS)
-            .max_cases(240)
+        families(self.family(&dispatch::DISPATCH))
     }
+
+    fn dispatch_translated(self) -> Diff {
+        families(self.goes_by_address(DISPATCH_CALLED))
+    }
+}
+
+/// [`Common`]'s families but dispatch, and the rest it adds.
+fn families(d: Diff) -> Diff {
+    d.family(&draw::DRAW)
+        .family(&render::RENDER)
+        .family(&shader::SHADER)
+        .family(&leaf::LEAVES)
+        .family(&pathing::PATHING)
+        .family(&culling::CULLING)
+        .family(&crt::CRT)
+        // draw_f's helpers: off until its gate, so by address, as in play; run in their own tests.
+        .goes_by_address(DRAW_F_HELPERS)
+        .max_calls(MAX_CALLS)
+        .max_cases(240)
 }
 
 /// The renderer: its device (+0x288), its draw mode and immediate byte, the vertex and index
@@ -1299,9 +1325,70 @@ fn bone_world(
     (r.renderer, skin, world)
 }
 
-/// `bone_matrices` (`00e6fe30`): already filled for this entry point and register count, or filled
-/// for 3 or 4 registers, either layout, with the world or without; the buffer made anew or kept; no,
-/// one or two bones; the scales over the special floats.
+/// `bone_matrices`' inputs: already filled for this entry point and register count, or filled for 3 or
+/// 4 registers, either layout, with the world or without; the buffer made anew or kept; no, one or two
+/// bones; the scales over the special floats.
+const BONE_MATRICES_INPUTS: &[Input] = &[
+    Input::Of(&[2, 0, 1]),
+    Input::Of(&[0, 1]),
+    Input::Of(&[3, 4]),
+    Input::Of(&[0, 1]),
+    Input::Of(&[0, 1]),
+    Input::Of(&[0x400, 0]),
+    Input::F32,
+    Input::Of(TWO_WAYS),
+];
+
+/// `bone_matrices`' words for a case of [`BONE_MATRICES_INPUTS`], the scale as it came or folded by
+/// `fold`.
+fn bone_matrices_words(e: &mut Engine, c: &Case, fold: fn(u32) -> u32) -> Vec<u32> {
+    let registers = c.word(2);
+    // The register count the skin holds: the one asked for, or another (so a filled skin is filled
+    // again).
+    let stored = registers ^ (c.word(7) * 7);
+    let (renderer, skin, world) = bone_world(
+        e,
+        c.word(0),
+        c.word(1),
+        stored,
+        c.word(5),
+        fold(c.f32(6).to_bits()),
+    );
+    vec![renderer, skin, world, c.word(3), registers, c.word(4)]
+}
+
+/// A float as play has it: its magnitude folded into 2^-12 to 2^12, sign and mantissa kept; zeros and
+/// infinities as they come; a NaN the quiet NaN 0x7fc00000 (`typed_shader.rs`'s `play`). A denormal
+/// bone scale, which play never has, makes denormal matrix entries: on the main thread's word the exe
+/// rounds such a product to 24 bits before its store rounds it again, and a denormal word compares
+/// exactly (it reads as a small integer), so the main thread's comparison takes the scale from here.
+fn play(bits: u32) -> u32 {
+    let exponent = (bits >> 23) & 0xff;
+    if exponent == 0xff && bits & 0x007f_ffff != 0 {
+        return 0x7fc0_0000;
+    }
+    if exponent == 0xff || bits & 0x7fff_ffff == 0 || (115..139).contains(&exponent) {
+        return bits;
+    }
+    (bits & 0x807f_ffff) | ((115 + exponent % 24) << 23)
+}
+
+/// What the transform inverse's and product's translations call plainly (the dispatch family's tests
+/// list the same).
+const BONE_PLAIN: &[u32] = &[
+    0x0040_19d0,
+    0x0040_8860,
+    0x0047_6930,
+    0x0047_6980,
+    0x0047_69c0,
+];
+
+/// `bone_matrices` (`00e6fe30`), [`BONE_MATRICES_INPUTS`]. The four-register layout's matrix is the
+/// shader family's `make_matrix`, whose maths is native `f64` (it also runs on another game thread):
+/// under the other threads' word bit for bit, every input; under the main thread's with the scale as
+/// play has it ([`play`]), within one ulp (the translation's difference of two floats far apart in
+/// size rounds once, the native one to 53 bits first), the dispatch family's transform product by
+/// address there ([`Common::dispatch_translated`]).
 #[test]
 fn bone_matrices() {
     Diff::new(entry!(
@@ -1309,42 +1396,29 @@ fn bone_matrices() {
         skin::bone_matrices(Ptr<_>, Ptr<_>, Ptr<_>, u8, u32, u8)
     ))
     .common()
-    // What the transform inverse's and product's translations call plainly (the dispatch family's tests list
-    // the same).
-    .translation_calls_plainly(&[
-        0x0040_19d0,
-        0x0040_8860,
-        0x0047_6930,
-        0x0047_6980,
-        0x0047_69c0,
-    ])
-    .inputs(&[
-        Input::Of(&[2, 0, 1]),
-        Input::Of(&[0, 1]),
-        Input::Of(&[3, 4]),
-        Input::Of(&[0, 1]),
-        Input::Of(&[0, 1]),
-        Input::Of(&[0x400, 0]),
-        Input::F32,
-        Input::Of(TWO_WAYS),
-    ])
+    .control_words(&[OTHER_THREADS])
+    // The dispatch family's transform product copies the scale as it is (a signalling NaN keeps its
+    // payload).
+    .allow_nan_payloads()
+    .translation_calls_plainly(BONE_PLAIN)
+    .inputs(BONE_MATRICES_INPUTS)
     .max_cases(400)
     .float_sweep(32)
-    .setup(|e, c| {
-        let registers = c.word(2);
-        // The register count the skin holds: the one asked for, or another (so a filled skin is filled
-        // again).
-        let stored = registers ^ (c.word(7) * 7);
-        let (renderer, skin, world) = bone_world(
-            e,
-            c.word(0),
-            c.word(1),
-            stored,
-            c.word(5),
-            c.f32(6).to_bits(),
-        );
-        vec![renderer, skin, world, c.word(3), registers, c.word(4)]
-    })
+    .setup(|e, c| bone_matrices_words(e, c, |b| b))
+    .run()
+    .assert_same();
+    Diff::new(entry!(
+        0x00e6_fe30,
+        skin::bone_matrices(Ptr<_>, Ptr<_>, Ptr<_>, u8, u32, u8)
+    ))
+    .dispatch_translated()
+    .control_words(&[MAIN_THREAD])
+    .float_ulps(1)
+    .translation_calls_plainly(BONE_PLAIN)
+    .inputs(BONE_MATRICES_INPUTS)
+    .max_cases(400)
+    .float_sweep(32)
+    .setup(|e, c| bone_matrices_words(e, c, play))
     .run()
     .assert_same();
 }

@@ -5,7 +5,7 @@
 //! under a block re-encoded with dither), with one level (the chain made by the box filter),
 //! non-square sizes, transparent DXT1 pixels, A8R8G8B8 and A4R4G4B4 chains (integer and float box
 //! paths), R8G8B8 converted to X8R8G8B8 with ordered dither, a DXT1 cube map, and files D3DX
-//! refuses.
+//! refuses. [`formats`] adds the formats translated for mods' textures, in answers of their own.
 
 /// A file: its name, whether it goes to the cube call, and its bytes.
 pub struct File {
@@ -28,6 +28,9 @@ impl Rng {
         (self.next() >> 24) as u8
     }
 }
+
+/// A DDS pixel format: its flags, FourCC, bit count and four masks.
+type DdsPixelFormat = (u32, u32, u32, [u32; 4]);
 
 /// The 128-byte DDS header (with the magic) for a `w` x `h` file of `mips` levels; `pf` is the
 /// pixel format's flags, FourCC, bit count and four masks; `caps2` the cube bits.
@@ -183,6 +186,303 @@ pub fn files() -> Vec<File> {
         dxt(&mut rng, b"DXT1", 16, 16, 5),
     );
     v
+}
+
+/// A cube map of an uncompressed format: six faces of `plain` pictures, `s` a side, `mips`
+/// levels each.
+fn plain_cube(rng: &mut Rng, pf: (u32, u32, u32, [u32; 4]), s: u32, mips: u32) -> Vec<u8> {
+    let mut d = header(s, s, mips, pf, 0xfe00);
+    for _ in 0..6 {
+        d.extend_from_slice(&plain(rng, pf, s, s, mips)[128..]);
+    }
+    d
+}
+
+/// Files of the formats translated for mods' textures (2026-11-11), through the DLL once like
+/// [`files`] (`d3dx-tex-verify --capture-formats`, `data/formats_32bit.tsv` and
+/// `formats_32bit_double.tsv`). For each format: the whole chain stored (copied as it is), one
+/// level (the box filter's integer path where the format has one), levels 4 and 2 high (down to
+/// levels one pixel high: the box filter's path through the working colour, the codec's decoder
+/// and encoder without dither), some levels stored, and a cube map; then files of edge values
+/// ([`edges`]). The 16-bit formats first, then the luminance and alpha ones. X4R4G4B4 and A4L4
+/// are read into X1R5G5B5 and A4R4G4B4 (the formats D3DX picks on the reference device) with the
+/// ordered dither. The pixels are noise over gradients, so the X bits are set in some. Last, three
+/// files of values whose box averages fall halfway between two ([`pairs`]).
+pub fn formats() -> Vec<File> {
+    let mut rng = Rng(0x5eed_d3d8_16b1_2026);
+    let mut v = Vec::new();
+    let sixteen = [
+        ("r5g6b5", (0x40, 0, 16, [0xf800, 0x7e0, 0x1f, 0])),
+        ("x1r5g5b5", (0x40, 0, 16, [0x7c00, 0x3e0, 0x1f, 0])),
+        ("a1r5g5b5", (0x41, 0, 16, [0x7c00, 0x3e0, 0x1f, 0x8000])),
+        ("x4r4g4b4", (0x40, 0, 16, [0xf00, 0xf0, 0xf, 0])),
+    ];
+    let luminance = [
+        ("l8", (0x2_0000, 0, 8, [0xff, 0, 0, 0])),
+        ("a8l8", (0x2_0001, 0, 16, [0xff, 0, 0, 0xff00])),
+        ("a8", (0x2, 0, 8, [0, 0, 0, 0xff])),
+        ("a4l4", (0x2_0001, 0, 8, [0xf, 0, 0, 0xf0])),
+        ("l16", (0x2_0000, 0, 16, [0xffff, 0, 0, 0])),
+    ];
+    // In this order, so each file's bytes stay those its answer was captured for.
+    format_group(&mut rng, &mut v, &sixteen, false);
+    format_group(&mut rng, &mut v, &sixteen, true);
+    format_group(&mut rng, &mut v, &luminance, false);
+    format_group(&mut rng, &mut v, &luminance, true);
+    pairs(&mut v, luminance[0].1, luminance[1].1, luminance[4].1);
+    v
+}
+
+/// Pairs of 8-bit values a box of a one-pixel-wide level averages halfway between two values:
+/// four that sum to 19 (from #480's review), the same reversed, then others of odd sums across
+/// the range.
+const PAIRS8: [(u8, u8); 16] = [
+    (3, 16),
+    (4, 15),
+    (5, 14),
+    (6, 13),
+    (16, 3),
+    (15, 4),
+    (14, 5),
+    (13, 6),
+    (0, 1),
+    (127, 128),
+    (254, 255),
+    (0, 255),
+    (1, 254),
+    (100, 155),
+    (77, 200),
+    (128, 129),
+];
+
+/// The files of [`formats`] whose box averages fall halfway between two values, through the box
+/// filter's working-colour path (levels one pixel wide or high), so the luminance encoders'
+/// rounding and L16's decoder show: L8 and A8L8 one pixel wide and 32 high, rows in the pairs of
+/// [`PAIRS8`] (A8L8's alpha in the next pair's values, reversed); L16 64 wide and one high, pixels
+/// in the pairs (257, 514) and (257, 522), each of which D3DX's float 1/65535 decodes to a tie
+/// between two floats (dividing by 65535 rounds the other way).
+fn pairs(v: &mut Vec<File>, l8: DdsPixelFormat, a8l8: DdsPixelFormat, l16: DdsPixelFormat) {
+    let mut d = header(1, 32, 1, l8, 0);
+    for (a, b) in PAIRS8 {
+        d.extend_from_slice(&[a, b]);
+    }
+    v.push(File {
+        name: "l8-1x32-pairs-one".into(),
+        cube: false,
+        data: d,
+    });
+    let mut d = header(1, 32, 1, a8l8, 0);
+    for (i, (a, b)) in PAIRS8.into_iter().enumerate() {
+        let (x, y) = PAIRS8[(i + 1) % PAIRS8.len()];
+        d.extend_from_slice(&[a, y, b, x]);
+    }
+    v.push(File {
+        name: "a8l8-1x32-pairs-one".into(),
+        cube: false,
+        data: d,
+    });
+    let mut d = header(64, 1, 1, l16, 0);
+    for i in 0..32 {
+        let b: u16 = if i % 2 == 0 { 514 } else { 522 };
+        d.extend_from_slice(&257u16.to_le_bytes());
+        d.extend_from_slice(&b.to_le_bytes());
+    }
+    v.push(File {
+        name: "l16-64x1-pairs-one".into(),
+        cube: false,
+        data: d,
+    });
+}
+
+/// The source of the encoder checks (`d3dx-tex-verify --capture-rows`, `data/rows_32bit.tsv` and
+/// `rows_32bit_double.tsv`: D3DX's same-size conversion into each luminance and alpha format,
+/// with the dither and without): an A8R8G8B8 image [`ROWS_SIZE`], rows packed, of colours that are
+/// not grey, so each weight of the luminance step shows. Row 0 has every combination of 0, 1, 254
+/// and 255 in the four channels, row 1 of 0, 127, 128 and 255; the rest is noise.
+pub fn rows_source() -> Vec<u8> {
+    let (w, h) = ROWS_SIZE;
+    let mut rng = Rng(0x5eed_d3d8_1a4e_0480);
+    let mut d = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let ends: Option<[u8; 4]> = match y {
+                0 => Some([0, 1, 254, 255]),
+                1 => Some([0, 127, 128, 255]),
+                _ => None,
+            };
+            for k in 0..4 {
+                d.push(match ends {
+                    Some(e) => e[((x >> (2 * k)) & 3) as usize],
+                    None => rng.byte(),
+                });
+            }
+        }
+    }
+    d
+}
+
+/// The width and height of [`rows_source`] (a row of 256 holds every combination of four values
+/// in four channels).
+pub const ROWS_SIZE: (u32, u32) = (256, 64);
+
+/// The files of [`formats`] for a group of formats: the plain ones, or (`edge`) the edge-value
+/// ones in levels one pixel high or wide that the file stores, and in a square one.
+fn format_group(rng: &mut Rng, v: &mut Vec<File>, group: &[(&str, DdsPixelFormat)], edge: bool) {
+    let mut add = |name: String, cube: bool, data: Vec<u8>| v.push(File { name, cube, data });
+    for &(name, pf) in group {
+        if edge {
+            add(
+                format!("{name}-64x1-edges-one"),
+                false,
+                edges(rng, pf, 64, 1, 1),
+            );
+            add(
+                format!("{name}-1x32-edges-one"),
+                false,
+                edges(rng, pf, 1, 32, 1),
+            );
+            add(
+                format!("{name}-16-edges-one"),
+                false,
+                edges(rng, pf, 16, 16, 1),
+            );
+            continue;
+        }
+        add(format!("{name}-16-full"), false, plain(rng, pf, 16, 16, 5));
+        add(format!("{name}-32-one"), false, plain(rng, pf, 32, 32, 1));
+        add(format!("{name}-64x4-one"), false, plain(rng, pf, 64, 4, 1));
+        add(
+            format!("{name}-256x2-one"),
+            false,
+            plain(rng, pf, 256, 2, 1),
+        );
+        add(
+            format!("{name}-8x32-three"),
+            false,
+            plain(rng, pf, 8, 32, 3),
+        );
+        add(
+            format!("{name}-cube-8-one"),
+            true,
+            plain_cube(rng, pf, 8, 1),
+        );
+    }
+}
+
+/// Edge values of the 16-bit formats: every bit, none, the top bit (an X bit) alone and with the
+/// rest, each field full alone, one bit of each field, and others near the ends.
+const EDGES16: [u16; 14] = [
+    0xffff, 0x0000, 0x8000, 0x7fff, 0xf800, 0x07e0, 0x001f, 0x7c00, 0x03e0, 0x8421, 0x7bde, 0xfffe,
+    0x0001, 0x8001,
+];
+
+/// Edge values of the 8-bit formats: every bit, none, the top bit alone and with the rest, a
+/// nibble full alone, and others near the ends.
+const EDGES8: [u8; 10] = [0xff, 0x00, 0x80, 0x7f, 0xf0, 0x0f, 0x01, 0xfe, 0x81, 0x7e];
+
+/// A file of edge values ([`EDGES16`], [`EDGES8`] by the format's bit count) and some noise, one
+/// value per 2x2 cell (a box of a cell averages it unchanged): levels one pixel high or wide
+/// reach the box filter's path through the working colour with their X bits set and their fields
+/// at the ends.
+fn edges(rng: &mut Rng, pf: (u32, u32, u32, [u32; 4]), w: u32, h: u32, mips: u32) -> Vec<u8> {
+    let wide = pf.2 == 16;
+    let mut d = header(w, h, mips, pf, 0);
+    for l in 0..mips {
+        let (lw, lh) = ((w >> l).max(1), (h >> l).max(1));
+        let cw = lw.div_ceil(2);
+        let cells: Vec<u16> = (0..cw * lh.div_ceil(2))
+            .map(|i| match (i % 4 == 3, wide) {
+                (true, true) => rng.next() as u16,
+                (true, false) => u16::from(rng.next() as u8),
+                (false, true) => EDGES16[i as usize % EDGES16.len()],
+                (false, false) => u16::from(EDGES8[i as usize % EDGES8.len()]),
+            })
+            .collect();
+        for y in 0..lh {
+            for x in 0..lw {
+                let c = cells[((y / 2) * cw + x / 2) as usize].to_le_bytes();
+                d.extend_from_slice(if wide { &c } else { &c[..1] });
+            }
+        }
+    }
+    d
+}
+
+/// Files whose levels D3DX resamples with its triangle filter (`d3dx-tex-verify --capture-npot`,
+/// `data/npot_32bit.tsv` and `npot_32bit_double.tsv`): sides that are not powers of two (yUI's HUD
+/// icons' sizes among them: 8x24, 24x24, 48x48, 32x48), DXT sides that are not multiples of 4, a
+/// single row and a single column, several levels stored, a cube map (its edges mirrored, not
+/// wrapped).
+pub fn npot() -> Vec<File> {
+    let mut rng = Rng(0x5eed_d3d8_4e50_7412);
+    let mut v = Vec::new();
+    let mut add = |name: &str, cube: bool, data: Vec<u8>| {
+        v.push(File {
+            name: name.into(),
+            cube,
+            data,
+        })
+    };
+    let argb = (0x41, 0, 32, [0xff_0000, 0xff00, 0xff, 0xff00_0000]);
+    let xrgb = (0x40, 0, 32, [0xff_0000, 0xff00, 0xff, 0]);
+    let r565 = (0x40, 0, 16, [0xf800, 0x7e0, 0x1f, 0]);
+    let l8 = (0x2_0000, 0, 8, [0xff, 0, 0, 0]);
+    add("dxt5-8x24-one", false, dxt(&mut rng, b"DXT5", 8, 24, 1));
+    add("argb-24x24-one", false, plain(&mut rng, argb, 24, 24, 1));
+    add("argb-48x48-one", false, plain(&mut rng, argb, 48, 48, 1));
+    add("dxt5-32x48-one", false, dxt(&mut rng, b"DXT5", 32, 48, 1));
+    add("dxt1-24x40-one", false, dxt(&mut rng, b"DXT1", 24, 40, 1));
+    add("dxt3-12x12-one", false, dxt(&mut rng, b"DXT3", 12, 12, 1));
+    add("argb-24x24-full", false, plain(&mut rng, argb, 24, 24, 5));
+    add("xrgb-100x60-one", false, plain(&mut rng, xrgb, 100, 60, 1));
+    add("argb-3x5-one", false, plain(&mut rng, argb, 3, 5, 1));
+    add("argb-7x1-one", false, plain(&mut rng, argb, 7, 1, 1));
+    add("argb-1x9-one", false, plain(&mut rng, argb, 1, 9, 1));
+    add(
+        "r5g6b5-12x20-three",
+        false,
+        plain(&mut rng, r565, 12, 20, 3),
+    );
+    add("l8-20x12-one", false, plain(&mut rng, l8, 20, 12, 1));
+    add("dxt1-6x6-one", false, dxt(&mut rng, b"DXT1", 6, 6, 1));
+    add("dxt1-2x2-one", false, dxt(&mut rng, b"DXT1", 2, 2, 1));
+    add("argb-cube-24-one", true, plain_cube(&mut rng, argb, 24, 1));
+    // From #496's review: mip counts past the file's chain (D3DX loads the extra 1x1 levels into
+    // the larger texture), stored DXT levels resampled, a DXT cube with its chain, a DXT side of 1.
+    add("argb-24x24-six", false, plain(&mut rng, argb, 24, 24, 6));
+    add("dxt1-1x1-three", false, dxt(&mut rng, b"DXT1", 1, 1, 3));
+    add("dxt1-24x40-full", false, dxt(&mut rng, b"DXT1", 24, 40, 6));
+    add("dxt5-12x12-full", false, dxt(&mut rng, b"DXT5", 12, 12, 4));
+    add("dxt1-1x5-one", false, dxt(&mut rng, b"DXT1", 1, 5, 1));
+    let mut cube = header(12, 12, 4, fourcc(b"DXT1"), 0xfe00);
+    for _ in 0..6 {
+        for l in 0..4u32 {
+            let s = (12u32 >> l).max(1);
+            let n = (s.div_ceil(4) * s.div_ceil(4)) as usize;
+            cube.extend(dxt_blocks(&mut rng, n, 8, true));
+        }
+    }
+    add("dxt1-cube-12-full", true, cube);
+    v
+}
+
+/// Large files D3DX resamples, for timing (`d3dx-tex-verify --time-npot`): 1920x1080 DXT5 and
+/// A8R8G8B8, one level each (a 2048x2048 texture: the top level resampled, the rest boxed).
+pub fn large_npot() -> Vec<File> {
+    let mut rng = Rng(0x5eed_d3d8_1920_1080);
+    let argb = (0x41, 0, 32, [0xff_0000, 0xff00, 0xff, 0xff00_0000]);
+    vec![
+        File {
+            name: "dxt5-1920x1080-one".into(),
+            cube: false,
+            data: dxt(&mut rng, b"DXT5", 1920, 1080, 1),
+        },
+        File {
+            name: "argb-1920x1080-one".into(),
+            cube: false,
+            data: plain(&mut rng, argb, 1920, 1080, 1),
+        },
+    ]
 }
 
 /// Headers whose sizes push D3DX's DDS loader (`data/headers_32bit.tsv`: the 32-bit DLL's image

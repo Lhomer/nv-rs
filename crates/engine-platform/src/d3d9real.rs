@@ -166,6 +166,13 @@ pub fn wanted() -> bool {
     backends().is_some()
 }
 
+/// Whether wgpu draws (asked for alone, and not replaced by the real Direct3D 9): the game's
+/// textures are then made on wgpu, in the formats `d3d9_wgpu::format` provides, so the textures
+/// D3DX makes leave out the rest (`super::d3dx`). With `real,wgpu` the real one draws.
+pub fn wgpu_draws() -> bool {
+    backends() == Some(Backends::Wgpu) && !DRAWING_REAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The backends' words for the layer's lines (`NV_D3D9=real: ...`, as in play): the one drawing.
 fn tag() -> &'static str {
     if DRAWING_REAL.load(std::sync::atomic::Ordering::Relaxed) {
@@ -379,6 +386,21 @@ extern "system" fn window_procedure(
         // written in the frame still running on main when the window closes can be lost.
         crate::run_exit_hooks();
         crate::end_process(0);
+    }
+    // Activated (Alt+Tab back, a click, the screen unlocked), the display changed, or the machine
+    // woke: wgpu asks its window for a frame at once rather than at the end of a rest
+    // (`d3d9_wgpu::window_changed`); a display change also refits the borderless window.
+    let woke = message == WM_POWERBROADCAST
+        && matches!(
+            wparam.0 as u32,
+            PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND
+        );
+    let activated = message == WM_ACTIVATE && wparam.0 & 0xffff != 0;
+    if activated || woke || message == WM_DISPLAYCHANGE || message == WM_DPICHANGED {
+        d3d9_wgpu::window_changed();
+    }
+    if message == WM_DISPLAYCHANGE {
+        refit_borderless(window);
     }
     let look = MouseLook::asked();
     match message {
@@ -921,8 +943,39 @@ pub fn want_borderless(on: bool) {
 }
 
 /// The borderless window ([`borderless`]), which keeps the monitor's size when the game moves or
-/// sizes its window (0: none).
+/// sizes its window (0: none), and the game's window that fills it.
 static BORDERLESS_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static BORDERLESS_CHILD: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// `PBT_APMRESUMESUSPEND`, `PBT_APMRESUMEAUTOMATIC`: the machine woke from sleep.
+const PBT_APMRESUMESUSPEND: u32 = 7;
+const PBT_APMRESUMEAUTOMATIC: u32 = 0x12;
+
+/// The display changed (`WM_DISPLAYCHANGE`, on the window thread, which is per-monitor DPI aware
+/// with the borderless window): when `window` is the borderless window, it and the game's window
+/// that fills it take the primary monitor's new size, so the picture covers the screen at a new
+/// resolution as it did at the old one (each backend fits its frames to the window).
+fn refit_borderless(window: HWND) {
+    let borderless = BORDERLESS_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+    if borderless == 0 || window.0 as isize != borderless {
+        return;
+    }
+    let child = BORDERLESS_CHILD.load(std::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        let (width, height) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        for w in [borderless, child].into_iter().filter(|&w| w != 0) {
+            let _ = SetWindowPos(
+                HWND(w as *mut _),
+                None,
+                0,
+                0,
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            );
+        }
+    }
+}
 
 unsafe fn run_window_thread(rx: std::sync::mpsc::Receiver<Request>) {
     let module = GetModuleHandleA(None).unwrap_or_default();
@@ -988,6 +1041,9 @@ unsafe fn run_window_thread(rx: std::sync::mpsc::Receiver<Request>) {
                     }
                     if borderless {
                         BORDERLESS_WINDOW.store(w.0 as isize, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if fills {
+                        BORDERLESS_CHILD.store(w.0 as isize, std::sync::atomic::Ordering::Relaxed);
                     }
                     if !child && request.style & WS_VISIBLE.0 != 0 {
                         match request.show {
@@ -1537,6 +1593,13 @@ pub fn clear(
 /// The rectangle at `at` (left, top, right, bottom), none for a null pointer.
 fn rect_words(e: &Engine, at: u32) -> Option<[u32; 4]> {
     (at != 0).then(|| words(e, at))
+}
+
+/// The Presents submitted to the backend so far (the last one's number) and the last one it has
+/// carried out, with when (`NV_FRAME_LOG`'s delay columns). None before the backend's stream.
+pub fn presents(e: &mut Engine) -> Option<(u32, Option<(u32, std::time::Instant)>)> {
+    let s = real(e).stream.as_ref()?;
+    Some((s.presents(), s.last_present_carried_out()))
 }
 
 pub fn present(

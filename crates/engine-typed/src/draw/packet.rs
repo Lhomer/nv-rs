@@ -107,6 +107,20 @@ pub(crate) fn render_decals(e: &Engine, acc: Ptr<BSShaderAccumulator>) -> bool {
     e.get(acc, BSShaderAccumulator::bRenderDecals) != 0
 }
 
+/// The accumulator's +0x164 alone (`ucSkipType13`): what `RenderBatches` reads first, from its own getter call, to
+/// tell a shadow pass that only has its group cleared.
+#[inline(always)]
+pub(crate) fn skip_type_13(e: &Engine, acc: Ptr<BSShaderAccumulator>) -> bool {
+    e.get(acc, BSShaderAccumulator::ucSkipType13) != 0
+}
+
+/// The accumulator's +0x165 alone (`ucShadowGroups`): what `RenderBatches` reads, from a second getter call, when
+/// +0x164 is clear.
+#[inline(always)]
+pub(crate) fn shadow_groups_set(e: &Engine, acc: Ptr<BSShaderAccumulator>) -> bool {
+    e.get(acc, BSShaderAccumulator::ucShadowGroups) != 0
+}
+
 /// The fog-coloured ambient flag of the lighting shaders (`011f94a6`).
 #[inline(always)]
 pub(crate) fn fog_ambient(e: &Engine) -> bool {
@@ -143,13 +157,13 @@ pub(crate) fn alpha_list(renderer: Ptr<BSBatchRenderer>, group: u32) -> u32 {
 /// How many sorted groups an alpha group list holds (its +8).
 #[inline(always)]
 pub(crate) fn sorted_count(e: &Engine, list: u32) -> u32 {
-    e.global::<u32>(list.wrapping_add(8))
+    super::detach::word(e, list.wrapping_add(8))
 }
 
 /// The first sorted group of an alpha group list (its head's item).
 #[inline(always)]
 pub(crate) fn first_sorted_group(e: &Engine, list: u32) -> u32 {
-    let head = e.global::<u32>(list);
+    let head = super::detach::word(e, list);
     e.global::<u32>(head.wrapping_add(8))
 }
 
@@ -162,13 +176,13 @@ pub(crate) fn sorted_distance(e: &Engine, sorted: u32) -> u32 {
 /// A holder's first list node (+0x10), 0 for an empty list.
 #[inline(always)]
 pub(crate) fn holder_head(e: &Engine, holder: u32) -> u32 {
-    e.global::<u32>(holder.wrapping_add(0x10))
+    super::detach::word(e, holder.wrapping_add(0x10))
 }
 
 /// A list's first node (its +0).
 #[inline(always)]
 pub(crate) fn list_head(e: &Engine, list: u32) -> u32 {
-    e.global::<u32>(list)
+    super::detach::word(e, list)
 }
 
 /// A list node's next node (its +0).
@@ -239,7 +253,7 @@ pub(crate) fn renderer_singleton(e: &Engine) -> u32 {
 /// Whether a holder keeps its passes in its own list (bit 0 of its flags).
 #[inline(always)]
 pub(crate) fn keeps_own(e: &Engine, holder: u32) -> bool {
-    e.global::<u8>(holder) & 1 != 0
+    super::detach::byte(e, holder) & 1 != 0
 }
 
 /// A holder's batch renderer (+8), as a word.
@@ -252,7 +266,7 @@ pub(crate) fn holder_renderer(e: &Engine, holder: u32) -> u32 {
 /// A holder's count of passes (16 bits at +2).
 #[inline(always)]
 pub(crate) fn holder_count(e: &Engine, holder: u32) -> u16 {
-    e.get(Ptr::<PassHolder>::new(holder), PassHolder::usCount)
+    super::detach::half(e, holder.wrapping_add(PassHolder::usCount.off))
 }
 
 /// A geometry's world bound (+0x20), or the empty bound.

@@ -1083,6 +1083,9 @@ pub enum NotTranslated {
     Crate(d3dx_tex::Untranslated),
     /// A calling thread at an x87 precision other than 24 or 53 bits.
     Precision,
+    /// A texture the translation made that the device refuses to create (a format its adapter
+    /// table does not take after all).
+    Refused,
 }
 
 /// Prints once per kind (with the first case's details) what the translation left to the DLL or
@@ -1110,19 +1113,111 @@ fn calling_precision(e: &mut Engine) -> Option<d3dx_tex::Precision> {
     }
 }
 
-/// `d3dx_tex`'s answer for the create calls at the calling thread's `precision`, as a texture
-/// cache entry with the bytes beside it. Pure work on the file's bytes: it runs outside the kernel
-/// lock.
+/// `IDirect3DDevice9::GetDirect3D`, `GetCreationParameters`; `IDirect3D9::Release`,
+/// `GetAdapterDisplayMode` (vtable offsets).
+const DEVICE_GET_DIRECT3D: u32 = 4 * 6;
+const DEVICE_GET_CREATION_PARAMETERS: u32 = 4 * 9;
+const DIRECT3D_RELEASE: u32 = 4 * 2;
+const DIRECT3D_GET_ADAPTER_DISPLAY_MODE: u32 = 4 * 8;
+
+/// What the game's `device` takes, for the format d3dx-tex picks as D3DX does: of D3DX's format
+/// table, the formats the layer's `CheckDeviceFormat` takes as a texture and as a cube texture,
+/// asked as the layer's `CreateTexture` and `CreateCubeTexture` ask before they make the texture
+/// (`super::d3d9device`: the device's adapter and type, the adapter's display mode's format, usage
+/// 0), so every format picked is one they take. A format the player's adapter table has no answer
+/// for counts as not taken. Asked once per device. Without a table (unit tests' doubles) the
+/// reference machine's lists. When wgpu draws, a format it cannot make is not taken either
+/// ([`leave_out_what_wgpu_lacks`]).
+fn device_caps(e: &mut Engine, device: Ptr) -> d3dx_tex::Caps {
+    if let Some((d, caps)) = &state!(e).graphics.d3dx_caps {
+        if *d == device.addr() {
+            return caps.clone();
+        }
+    }
+    let mut caps = d3dx_tex::Caps::default();
+    if super::d3d9::has_adapter_table(e) {
+        let direct3d = e.with_stack(4, |e, slot| {
+            let hr = e
+                .vcall(device.addr(), DEVICE_GET_DIRECT3D, &[slot.addr()])
+                .u32();
+            assert_eq!(hr, 0, "GetDirect3D for the texture formats");
+            e.mem.u32(slot.addr())
+        });
+        let (adapter, device_type) = e.with_stack(16, |e, params| {
+            let hr = e
+                .vcall(
+                    device.addr(),
+                    DEVICE_GET_CREATION_PARAMETERS,
+                    &[params.addr()],
+                )
+                .u32();
+            assert_eq!(hr, 0, "GetCreationParameters for the texture formats");
+            (e.mem.u32(params.addr()), e.mem.u32(params.addr() + 4))
+        });
+        let display = e.with_stack(16, |e, mode| {
+            let hr = e
+                .vcall(
+                    direct3d,
+                    DIRECT3D_GET_ADAPTER_DISPLAY_MODE,
+                    &[adapter, mode.addr()],
+                )
+                .u32();
+            assert_eq!(hr, 0, "GetAdapterDisplayMode for the texture formats");
+            e.mem.u32(mode.addr() + 0xc)
+        });
+        e.vcall(direct3d, DIRECT3D_RELEASE, &[]);
+        let mut takes = |rtype: u32| -> Vec<u32> {
+            d3dx_tex::table_formats()
+                .filter(|&f| {
+                    super::d3d9::captured_format_check(
+                        e,
+                        &[adapter, device_type, display, 0, rtype, f],
+                    ) == Some(0)
+                })
+                .collect()
+        };
+        caps.texture_formats = takes(D3DRTYPE_TEXTURE);
+        caps.cube_formats = takes(D3DRTYPE_CUBETEXTURE);
+    }
+    #[cfg(windows)]
+    {
+        let on_wgpu = super::d3d9real::wgpu_draws();
+        #[cfg(test)]
+        let on_wgpu = on_wgpu || tests::WGPU_DRAWS.with(std::cell::Cell::get);
+        if on_wgpu {
+            leave_out_what_wgpu_lacks(&mut caps);
+        }
+    }
+    state!(e).graphics.d3dx_caps = Some((device.addr(), caps.clone()));
+    caps
+}
+
+/// On wgpu, the formats `d3d9_wgpu` does not provide are left out of what the card takes: a
+/// texture in one would never be made (wgpu draws its stand-in), so D3DX picks among the rest, as
+/// on a card without them (A4L4 files become A4R4G4B4, the same nibbles). Of D3DX's table, wgpu
+/// lacks 22 of 57: R8G8B8, R3G3B2, A8R3G3B2, A2R10G10B10, A8P8 and P8, A4L4, L6V5U5, X8L8V8U8,
+/// V16U16, A2W10V10U10, Q16W16V16U16, CxV8U8, UYVY, YUY2, R8G8_B8G8, G8R8_G8B8, D15S1, D24X4S4,
+/// D24FS8 and the FourCCs AL16 and ` R16`.
+#[cfg(windows)]
+fn leave_out_what_wgpu_lacks(caps: &mut d3dx_tex::Caps) {
+    let makes = |f: &u32| d3d9_wgpu::format::format(*f).is_some();
+    caps.texture_formats.retain(makes);
+    caps.cube_formats.retain(makes);
+}
+
+/// `d3dx_tex`'s answer for the create calls at the calling thread's `precision`, on a device that
+/// takes what `caps` says, as a texture cache entry with the bytes beside it. Pure work on the
+/// file's bytes: it runs outside the kernel lock.
 fn translated_texture(
     bytes: &[u8],
     cube: bool,
     precision: d3dx_tex::Precision,
+    caps: &d3dx_tex::Caps,
 ) -> Result<(CachedTexture, Vec<Vec<u8>>), d3dx_tex::Error> {
-    let caps = d3dx_tex::Caps::default();
     let t = if cube {
-        d3dx_tex::create_cube_texture_from_file_in_memory(bytes, &caps, precision)
+        d3dx_tex::create_cube_texture_from_file_in_memory(bytes, caps, precision)
     } else {
-        d3dx_tex::create_texture_from_file_in_memory(bytes, &caps, precision)
+        d3dx_tex::create_texture_from_file_in_memory(bytes, caps, precision)
     }?;
     let surfaces = t
         .surfaces
@@ -1386,14 +1481,31 @@ fn create_from_file(
                 // On the copy of the file, with the kernel lock given back meanwhile: a loading
                 // thread's encoding does not hold up other threads' platform calls. The device
                 // calls that fill the texture come after, under the kernel lock again.
+                let caps = device_caps(e, device);
                 let made = engine_core::real_threads::without_kernel_lock(e, || {
-                    translated_texture(&bytes, cube, precision)
+                    translated_texture(&bytes, cube, precision, &caps)
                 });
                 match made {
                     Ok((entry, levels)) => {
-                        note_source(e, TextureSource::Translated);
                         let levels: Vec<&[u8]> = levels.iter().map(|l| &l[..]).collect();
-                        return fill_texture(e, device, out, call, &entry, cube, &levels);
+                        match try_fill_texture(e, device, out, &entry, cube, &levels) {
+                            Ok(hr) => {
+                                note_source(e, TextureSource::Translated);
+                                return hr;
+                            }
+                            // The device refuses the texture D3DX would make: left to the DLL,
+                            // as a file the translation does not read is, never the stop below.
+                            Err(hr) => {
+                                let why = format!(
+                                    "a texture of format {:#x} the device refuses ({hr:#x})",
+                                    entry.surfaces[0].format
+                                );
+                                note_not_translated(e, NotTranslated::Refused, &why);
+                                if let Some(hr) = unreadable_without_dll(e, Some(device.addr())) {
+                                    return hr;
+                                }
+                            }
+                        }
                     }
                     Err(d3dx_tex::Error::D3dx(hr)) => {
                         note_source(e, TextureSource::Translated);
@@ -1492,7 +1604,8 @@ fn create_from_file(
 /// Makes the layer's texture for a D3DX answer `entry` (from the DLL or the cache) through the
 /// game's `device` (`CreateTexture` or `CreateCubeTexture`, `D3DPOOL_MANAGED`, usage 0) and fills
 /// each level (face by face) with `levels`' bytes (rows packed) through `LockRect`/`UnlockRect`,
-/// as D3DX fills its texture; the texture to `out`, answers `D3D_OK`.
+/// as D3DX fills its texture; the texture to `out`, answers `D3D_OK`. A texture the device refuses
+/// stops the run ([`try_fill_texture`] gives the refusal back).
 fn fill_texture(
     e: &mut Engine,
     device: Ptr,
@@ -1502,6 +1615,21 @@ fn fill_texture(
     cube: bool,
     levels: &[&[u8]],
 ) -> u32 {
+    match try_fill_texture(e, device, out, entry, cube, levels) {
+        Ok(hr) => hr,
+        Err(hr) => panic!("D3DX{call}: the device answered {hr:#x} (not provided)"),
+    }
+}
+
+/// [`fill_texture`], or the device's answer when it refuses to make the texture.
+fn try_fill_texture(
+    e: &mut Engine,
+    device: Ptr,
+    out: Ptr,
+    entry: &CachedTexture,
+    cube: bool,
+    levels: &[&[u8]],
+) -> Result<u32, u32> {
     let top = &entry.surfaces[0];
     let made = e.with_stack(4, |e, slot| {
         let hr = if cube {
@@ -1538,10 +1666,7 @@ fn fill_texture(
         (hr, e.mem.u32(slot.addr()))
     });
     if made.0 != 0 {
-        panic!(
-            "D3DX{call}: the device answered {:#x} (not provided)",
-            made.0
-        );
+        return Err(made.0);
     }
     let texture = made.1;
     for (i, s) in entry.surfaces.iter().enumerate() {
@@ -1578,7 +1703,7 @@ fn fill_texture(
         }
     }
     e.mem.set_u32(out.addr(), texture);
-    0
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -2228,7 +2353,8 @@ mod tests {
             engine_core::units::crt::set_x87_control_word(&mut e, cw);
             assert_eq!(calling_precision(&mut e), precision, "{cw:#x}");
             if let Some(p) = precision {
-                let ours = translated_texture(&file, false, p).map(|(_, levels)| levels);
+                let ours = translated_texture(&file, false, p, &d3dx_tex::Caps::default())
+                    .map(|(_, levels)| levels);
                 let want = d3dx_tex::create_texture_from_file_in_memory(&file, &caps, p)
                     .expect("a DXT1 file");
                 let want: Vec<Vec<u8>> = want.surfaces.into_iter().map(|s| s.bytes).collect();
@@ -2334,6 +2460,195 @@ mod tests {
         });
         e.register(UNLOCK, |_, _| Ret::default());
         (device, texture, levels)
+    }
+
+    /// A device double for the texture formats' questions: `GetDirect3D` (an `IDirect3D9` double
+    /// whose `GetAdapterDisplayMode` gives X8R8G8B8 and whose `Release` does nothing; the calls
+    /// counted), `GetCreationParameters` (adapter 0, a HAL device), and a `CreateTexture` that
+    /// refuses (`D3DERR_INVALIDCALL`).
+    fn format_doubles(e: &mut Engine) -> (u32, std::rc::Rc<std::cell::Cell<u32>>) {
+        const GET_DIRECT3D: u32 = 0x7f00_0300;
+        const GET_PARAMS: u32 = 0x7f00_0304;
+        const DISPLAY_MODE: u32 = 0x7f00_0308;
+        const RELEASE: u32 = 0x7f00_030c;
+        const CREATE: u32 = 0x7f00_0310;
+        let direct3d_vtable = e.mem.alloc(4 * 20);
+        e.mem.set_u32(direct3d_vtable + DIRECT3D_RELEASE, RELEASE);
+        e.mem.set_u32(
+            direct3d_vtable + DIRECT3D_GET_ADAPTER_DISPLAY_MODE,
+            DISPLAY_MODE,
+        );
+        let direct3d = e.mem.alloc(4);
+        e.mem.set_u32(direct3d, direct3d_vtable);
+        let vtable = e.mem.alloc(4 * 30);
+        e.mem.set_u32(vtable + DEVICE_GET_DIRECT3D, GET_DIRECT3D);
+        e.mem
+            .set_u32(vtable + DEVICE_GET_CREATION_PARAMETERS, GET_PARAMS);
+        e.mem.set_u32(vtable + DEVICE_CREATE_TEXTURE, CREATE);
+        let device = e.mem.alloc(4);
+        e.mem.set_u32(device, vtable);
+        let asked = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let counter = std::rc::Rc::clone(&asked);
+        e.register_double(GET_DIRECT3D, move |e, a| {
+            counter.set(counter.get() + 1);
+            e.mem.set_u32(a[1], direct3d);
+            Ret::default()
+        });
+        e.register_double(GET_PARAMS, |e, a| {
+            e.mem.set_u32(a[1], 0);
+            e.mem.set_u32(a[1] + 4, 1);
+            Ret::default()
+        });
+        e.register_double(DISPLAY_MODE, |e, a| {
+            e.mem.set_u32(a[2] + 0xc, 0x16);
+            Ret::default()
+        });
+        e.register(RELEASE, |_, _| Ret::default());
+        e.register_double(CREATE, |_, _| Ret {
+            eax: 0x8876_086c,
+            ..Ret::default()
+        });
+        (device, asked)
+    }
+
+    /// The formats d3dx-tex picks among are the player's adapter table's answers, asked as the
+    /// layer's CreateTexture and CreateCubeTexture ask (the device's adapter and type, the display
+    /// format, usage 0), in D3DX's order; a format the table has no answer for counts as not
+    /// taken (the layer would stop on it); asked once per device.
+    #[test]
+    fn the_texture_formats_are_the_adapter_tables() {
+        let mut e = Engine::new();
+        super::super::d3d9::load_adapter_table(
+            &mut e,
+            "Domain\td0\t15,16,17,1a,1e,31545844\n\
+             CheckDeviceFormat\t0 1 16 0 3\t8876086a\t15=0,16=0,17=0,31545844=0\td0\n\
+             CheckDeviceFormat\t0 1 16 0 5\t8876086a\t15=0,31545844=0\td0",
+        );
+        let (device, asked) = format_doubles(&mut e);
+        let caps = device_caps(&mut e, Ptr::new(device));
+        let dxt1 = u32::from_le_bytes(*b"DXT1");
+        assert_eq!(caps.texture_formats, vec![0x15, 0x16, 0x17, dxt1]);
+        assert_eq!(caps.cube_formats, vec![0x15, dxt1]);
+        assert_eq!(device_caps(&mut e, Ptr::new(device)), caps);
+        assert_eq!(asked.get(), 1, "asked once");
+    }
+
+    #[cfg(windows)]
+    thread_local! {
+        /// Whether wgpu draws, for [`device_caps`] on this test's thread (the run-wide answer,
+        /// `d3d9real::wgpu_draws`, is `NV_D3D9`'s).
+        pub(super) static WGPU_DRAWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// On wgpu the formats d3dx-tex picks among leave out every one `d3d9_wgpu` does not make
+    /// (a texture in one would be drawn as wgpu's stand-in): on a card taking all 57 of D3DX's
+    /// table, the 35 wgpu makes, so an A4L4 file becomes A4R4G4B4 (the same nibbles), not an A4L4
+    /// texture wgpu draws black. Without wgpu the card's answers stand.
+    #[cfg(windows)]
+    #[test]
+    fn on_wgpu_the_texture_formats_leave_out_what_wgpu_lacks() {
+        let every: Vec<u32> = d3dx_tex::table_formats().collect();
+        let hex: Vec<String> = every.iter().map(|f| format!("{f:x}")).collect();
+        let taken: Vec<String> = hex.iter().map(|f| format!("{f}=0")).collect();
+        let table = format!(
+            "Domain\td0\t{}\n\
+             CheckDeviceFormat\t0 1 16 0 3\t8876086a\t{}\td0\n\
+             CheckDeviceFormat\t0 1 16 0 5\t8876086a\t{}\td0",
+            hex.join(","),
+            taken.join(","),
+            taken.join(",")
+        );
+        let caps_of = |wgpu: bool| {
+            let mut e = Engine::new();
+            super::super::d3d9::load_adapter_table(&mut e, &table);
+            let (device, _) = format_doubles(&mut e);
+            WGPU_DRAWS.with(|w| w.set(wgpu));
+            let caps = device_caps(&mut e, Ptr::new(device));
+            WGPU_DRAWS.with(|w| w.set(false));
+            caps
+        };
+        let card = caps_of(false);
+        assert_eq!(card.texture_formats, every);
+        assert_eq!(card.cube_formats, every);
+        let cc = |s: &[u8; 4]| u32::from_le_bytes(*s);
+        let lacking = [
+            20,
+            40,
+            41,
+            27,
+            29,
+            35,
+            52,
+            61,
+            62,
+            64,
+            67,
+            110,
+            117,
+            cc(b"UYVY"),
+            cc(b"RGBG"),
+            cc(b"YUY2"),
+            cc(b"GRGB"),
+            73,
+            79,
+            83,
+            cc(b"AL16"),
+            cc(b" R16"),
+        ];
+        let kept: Vec<u32> = every
+            .iter()
+            .copied()
+            .filter(|f| !lacking.contains(f))
+            .collect();
+        assert_eq!(kept.len(), 35);
+        for &f in &every {
+            let makes = d3d9_wgpu::format::format(f).is_some();
+            assert_eq!(makes, kept.contains(&f), "{f:#x}");
+        }
+        let wgpu = caps_of(true);
+        assert_eq!(wgpu.texture_formats, kept);
+        assert_eq!(wgpu.cube_formats, kept);
+        let file = d3dx_tex::synthetic::formats()
+            .into_iter()
+            .find(|f| f.name == "a4l4-32-one")
+            .expect("an A4L4 file");
+        let made = |caps: &d3dx_tex::Caps| {
+            let t = d3dx_tex::create_texture_from_file_in_memory(
+                &file.data,
+                caps,
+                d3dx_tex::Precision::Single,
+            );
+            t.expect("made").surfaces[0].format
+        };
+        assert_eq!(made(&card), d3dx_tex::format::A4L4);
+        assert_eq!(made(&wgpu), d3dx_tex::format::A4R4G4B4);
+    }
+
+    /// A texture the device refuses to make is left to the DLL as an untranslated one is: without
+    /// the DLL (here) the answer is `D3DXERR_INVALIDDATA`, and the run does not stop.
+    #[test]
+    fn a_texture_the_device_refuses_is_left_to_the_dll() {
+        let mut e = Engine::new();
+        let (device, _) = format_doubles(&mut e);
+        engine_core::units::crt::set_x87_control_word(&mut e, 0x007f);
+        let file = dxt1(8, 4, 4, 40);
+        let data = e.mem.alloc(file.len() as u32);
+        e.mem.write(data, &file);
+        let out = e.mem.alloc(4);
+        let hr = create_texture_from_file_in_memory(
+            &mut e,
+            Ptr::new(device),
+            Ptr::new(data),
+            file.len() as u32,
+            Ptr::new(out),
+        );
+        assert_eq!(hr, D3DXERR_INVALIDDATA);
+        // Noted under a kind of its own, so an earlier pixel-format note does not hide it.
+        assert_eq!(
+            state!(e).graphics.d3dx_not_translated,
+            vec![NotTranslated::Refused]
+        );
+        engine_core::units::crt::set_x87_control_word(&mut e, 0x027f);
     }
 }
 

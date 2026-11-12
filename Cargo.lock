@@ -623,6 +623,7 @@ dependencies = [
  "engine",
  "engine-platform",
  "esm",
+ "jip",
  "nvse",
  "play-patch",
  "zlib-rs",
@@ -636,6 +637,14 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "jip"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "nvse",
 ]
 
 [[package]]
@@ -1244,8 +1253,6 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "30.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6b7fb58561a792bc237628ba0792e332de418fefe145f13b5ed8201e6d52f58"
 dependencies = [
  "android_system_properties",
  "arrayvec",

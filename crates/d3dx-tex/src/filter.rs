@@ -21,13 +21,23 @@ pub struct Level {
     pub bytes: Vec<u8>,
 }
 
-/// Whether this crate reads and writes `f`.
-pub(crate) fn supported(f: u32) -> bool {
-    format::is_dxt(f) && f != format::DXT2 && f != format::DXT4 || pixel::supported(f)
+/// Whether this crate reads files of `f`.
+pub fn reads(f: u32) -> bool {
+    dxt_translated(f) || pixel::decodes(f)
+}
+
+/// Whether this crate makes textures of `f`.
+pub fn makes(f: u32) -> bool {
+    dxt_translated(f) || pixel::encodes(f)
+}
+
+/// DXT1, DXT3 and DXT5 (not the premultiplied DXT2 and DXT4).
+fn dxt_translated(f: u32) -> bool {
+    format::is_dxt(f) && f != format::DXT2 && f != format::DXT4
 }
 
 /// The bytes of one block of the DXT format `f`.
-fn block_bytes(f: u32) -> usize {
+pub(crate) fn block_bytes(f: u32) -> usize {
     if f == format::DXT1 {
         8
     } else {
@@ -47,7 +57,7 @@ fn decode_block<P: Fpu>(f: u32, b: &[u8]) -> [Color; 16] {
 /// Block rows `first..first + n` of a DXT level (`w` x `h`) to the working colour: rows
 /// `4 first..` of the level, `w` pixels each, into `out` (rows past the level's bottom are
 /// left as they are).
-fn decode_block_rows<P: Fpu>(
+pub(crate) fn decode_block_rows<P: Fpu>(
     f: u32,
     w: usize,
     h: usize,
@@ -109,7 +119,7 @@ fn decode_p<P: Fpu>(f: u32, w: usize, h: usize, bytes: &[u8]) -> Vec<Color> {
 /// each, `vh` of them valid), as D3DX's DXT encoder gathers them: a block reaching past the
 /// level's right or bottom edge repeats its pixels (columns, then rows, from the pattern 0, 0,
 /// 0, 1).
-fn band_block(rows: &[Color], w: usize, vh: usize, bx: usize) -> [Color; 16] {
+pub(crate) fn band_block(rows: &[Color], w: usize, vh: usize, bx: usize) -> [Color; 16] {
     const REP: [usize; 4] = [0, 0, 0, 1];
     let mut px = [[0.0f32; 4]; 16];
     let vw = w - bx * 4;
@@ -139,7 +149,7 @@ pub fn block_pixels(colors: &[Color], w: usize, h: usize, bx: usize, by: usize) 
 }
 
 /// One DXT block of `f`, into `out`.
-fn encode_block_into<P: Fpu>(f: u32, px: &[Color; 16], dither: bool, out: &mut [u8]) {
+pub(crate) fn encode_block_into<P: Fpu>(f: u32, px: &[Color; 16], dither: bool, out: &mut [u8]) {
     match f {
         format::DXT1 => out.copy_from_slice(&dxt::encode_dxt1::<P>(px, dither)),
         format::DXT2 | format::DXT3 => out.copy_from_slice(&dxt::encode_dxt3::<P>(px, dither)),
@@ -193,11 +203,11 @@ pub fn set_max_threads(n: usize) {
 }
 
 /// Helper threads taken from the process-wide budget, given back when dropped.
-struct Helpers(usize);
+pub(crate) struct Helpers(pub(crate) usize);
 
 impl Helpers {
     /// Up to `want` helpers, as many as the budget has left (possibly none).
-    fn take(want: usize) -> Helpers {
+    pub(crate) fn take(want: usize) -> Helpers {
         let cap = match MAX_THREADS.load(Ordering::Relaxed) {
             0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
             n => n,
@@ -327,7 +337,7 @@ pub(crate) fn box_next<P: Fpu>(src: &Level) -> Level {
         pixel::decode_row(f, &src.bytes[r0 * srow..(r0 + 1) * srow], w, &mut c0);
         pixel::decode_row(f, &src.bytes[r1 * srow..(r1 + 1) * srow], w, &mut c1);
         box_row(&c0, &c1, w, &mut out);
-        pixel::encode_row(
+        pixel::encode_row::<P>(
             f,
             &out,
             y as u32,
@@ -360,6 +370,47 @@ pub fn box_colors(src: &Level, precision: Precision) -> Vec<Color> {
         );
     }
     out
+}
+
+/// D3DX's same-size conversion through the working colour (0x624879) with the dither or without
+/// (`D3DXLoadSurfaceFromMemory` with `D3DX_FILTER_NONE`, `| D3DX_FILTER_DITHER` when `dither`), at
+/// the thread's `precision`: each row of the `w` x `h` image of `src_format` (not DXT; rows
+/// packed) decoded and encoded into `dst_format` (not DXT). For the tests against the DLL's
+/// encoders (`data/rows_32bit*.tsv`); the textures go through [`load_same_size`].
+pub fn convert_rows(
+    src_format: u32,
+    dst_format: u32,
+    w: u32,
+    h: u32,
+    bytes: &[u8],
+    dither: bool,
+    precision: Precision,
+) -> Vec<u8> {
+    fn rows<P: Fpu>(src: u32, dst: u32, w: usize, h: usize, bytes: &[u8], dither: bool) -> Vec<u8> {
+        let (from, to) = (
+            format::level_size(src, w as u32, 1),
+            format::level_size(dst, w as u32, 1),
+        );
+        let mut out = vec![0u8; to * h];
+        let mut colors = vec![[0.0f32; 4]; w];
+        for y in 0..h {
+            pixel::decode_row(src, &bytes[y * from..(y + 1) * from], w, &mut colors);
+            pixel::encode_row::<P>(
+                dst,
+                &colors,
+                y as u32,
+                dither,
+                &mut out[y * to..(y + 1) * to],
+            );
+        }
+        out
+    }
+    assert!(pixel::decodes(src_format) && pixel::encodes(dst_format));
+    let (w, h) = (w as usize, h as usize);
+    match precision {
+        Precision::Single => rows::<P24>(src_format, dst_format, w, h, bytes, dither),
+        Precision::Double => rows::<P53>(src_format, dst_format, w, h, bytes, dither),
+    }
 }
 
 /// What D3DX does with a level of the file it loads into a level of the same size
@@ -412,7 +463,7 @@ pub(crate) fn load_same_size<P: Fpu>(
             decode_rows(y0, step, &mut c);
             for y in y0..(y0 + step).min(h) {
                 let colors = &c[(y - y0) * w..(y - y0 + 1) * w];
-                pixel::encode_row(
+                pixel::encode_row::<P>(
                     dst_format,
                     colors,
                     y as u32,

@@ -3,7 +3,8 @@
 //! drawing them, which the next frame's registration fills again (condition 1); the blend, clip and
 //! depth state it leaves behind (condition 2); the blocks it frees (condition 4); the one reference
 //! count it takes (condition 7). Nothing outside this file touches what a section names. Each accessor
-//! does what the exe does there, in its order: nothing is copied, deferred or moved yet.
+//! does what the exe does there, in its order; the pass lists' words go through the drawing thread's view
+//! ([`super::detach`]), which holds them while the cut's draw runs with `NV_DRAW_DETACH=1` (a check).
 
 use crate::shader::layout::{BSBatchRenderer, BSShaderAccumulator, PassGroup, PassHolder};
 use crate::shader::{self, batch, state};
@@ -15,8 +16,9 @@ use engine_core::{args, typed_call, Engine};
 //
 // The draw empties each list it drew (its nodes to the list's spare chain or the global pool) and
 // clears the active type lists and counts; the next frame's `RegisterObject` fills the same lists
-// from those nodes. A drawing thread needs the filled lists handed over and fresh ones for main
-// (or two batch renderers taking turns): everything the draw does to them after drawing is here.
+// from those nodes. A drawing thread needs the filled lists handed over and fresh ones for main: step 1
+// (`super::detach`) takes their words out of guest memory at the cut, and everything the draw does to them
+// after drawing is here, through it.
 
 /// `BSBatchRenderer::kActivePassIndexList` cleared (`00b64ec0`, by address).
 const ACTIVE_LIST_CLEAR: u32 = 0x00b6_4ec0;
@@ -27,7 +29,11 @@ const POINTER_LIST_REMOVE_ALL: u32 = 0x00b7_1300;
 #[inline(always)]
 pub(crate) fn clear_active_list(e: &mut Engine, renderer: u32) {
     let list = renderer.wrapping_add(BSBatchRenderer::kActivePassIndexList.off);
-    e.call(ACTIVE_LIST_CLEAR, &args![list]);
+    super::detach::suspended_for(
+        e,
+        |_| vec![list, list.wrapping_add(4)],
+        |e| e.call(ACTIVE_LIST_CLEAR, &args![list]),
+    );
 }
 
 /// Empties a pass holder (`00b9a490`, the shader family's): its list and its batch renderer's
@@ -54,7 +60,7 @@ pub(crate) fn clear_pass_group(e: &mut Engine, group: Ptr<PassGroup>) {
 /// Clears a holder's count of passes (16 bits at +2) (condition 1).
 #[inline(always)]
 pub(crate) fn clear_holder_count(e: &mut Engine, holder: u32) {
-    e.set(Ptr::<PassHolder>::new(holder), PassHolder::usCount, 0);
+    super::detach::set_half(e, holder.wrapping_add(PassHolder::usCount.off), 0);
 }
 
 /// Empties an alpha group list (`RemoveAll`) and clears the renderer's current grouped alpha
@@ -62,12 +68,13 @@ pub(crate) fn clear_holder_count(e: &mut Engine, holder: u32) {
 #[inline(always)]
 pub(crate) fn empty_alpha_list(e: &mut Engine, renderer: Ptr<BSBatchRenderer>, group: u32) {
     let list = super::packet::alpha_list(renderer, group);
-    e.call(POINTER_LIST_REMOVE_ALL, &args![list]);
+    let words = |_: &Engine| vec![list, list.wrapping_add(4), list.wrapping_add(8)];
+    super::detach::suspended_for(e, words, |e| e.call(POINTER_LIST_REMOVE_ALL, &args![list]));
     let current = renderer
         .addr()
         .wrapping_add(group.wrapping_mul(4))
         .wrapping_add(0x90);
-    e.set_global(current, 0u32);
+    super::detach::set_word(e, current, 0u32);
 }
 
 /// The pass type range a batch renderer takes from its active list (+0x20, +0x24) (condition 1:
@@ -144,17 +151,17 @@ pub(crate) fn set_cursor_active(
 /// +0x1c) into its spare chain, the holder's count (+2) down first, as `RenderNextAlpha` does after
 /// drawing it (condition 1).
 pub(crate) fn take_first_pass(e: &mut Engine, holder: u32) {
-    if e.global::<u32>(holder.wrapping_add(0x10)) == 0 {
+    if super::detach::word(e, holder.wrapping_add(0x10)) == 0 {
         return;
     }
-    let count = e.global::<u16>(holder.wrapping_add(2)).wrapping_add(0xffff);
-    e.set_global(holder.wrapping_add(2), count);
-    let node = e.global::<u32>(holder.wrapping_add(0x10));
+    let count = super::detach::half(e, holder.wrapping_add(2)).wrapping_add(0xffff);
+    super::detach::set_half(e, holder.wrapping_add(2), count);
+    let node = super::detach::word(e, holder.wrapping_add(0x10));
     if node == 0 {
         return;
     }
-    if node == e.global::<u32>(holder.wrapping_add(0x14)) {
-        e.set_global(holder.wrapping_add(0x14), 0u32);
+    if node == super::detach::word(e, holder.wrapping_add(0x14)) {
+        super::detach::set_word(e, holder.wrapping_add(0x14), 0u32);
     }
     let mut next = 0;
     if e.global::<u32>(node) != 0 {
@@ -163,33 +170,33 @@ pub(crate) fn take_first_pass(e: &mut Engine, holder: u32) {
     }
     let spare = e.global::<u32>(holder.wrapping_add(0x18));
     if spare != 0 {
-        let head = e.global::<u32>(holder.wrapping_add(0x10));
+        let head = super::detach::word(e, holder.wrapping_add(0x10));
         e.set_global(spare.wrapping_add(4), head);
     }
-    let head = e.global::<u32>(holder.wrapping_add(0x10));
+    let head = super::detach::word(e, holder.wrapping_add(0x10));
     let spare = e.global::<u32>(holder.wrapping_add(0x18));
     e.set_global(head, spare);
-    let head = e.global::<u32>(holder.wrapping_add(0x10));
-    let items = e.global::<u32>(holder.wrapping_add(0x1c)).wrapping_sub(1);
-    e.set_global(holder.wrapping_add(0x1c), items);
+    let head = super::detach::word(e, holder.wrapping_add(0x10));
+    let items = super::detach::word(e, holder.wrapping_add(0x1c)).wrapping_sub(1);
+    super::detach::set_word(e, holder.wrapping_add(0x1c), items);
     e.set_global(holder.wrapping_add(0x18), head);
-    e.set_global(holder.wrapping_add(0x10), next);
+    super::detach::set_word(e, holder.wrapping_add(0x10), next);
 }
 
 /// Takes the first node off an alpha group list (head, tail, count), gives it back to the node pool
 /// ([`give_node`]) and counts the list down (condition 1).
 pub(crate) fn take_sorted_node(e: &mut Engine, list: u32) {
-    let node = e.global::<u32>(list);
+    let node = super::detach::word(e, list);
     let next = e.global::<u32>(node);
-    e.set_global(list, next);
+    super::detach::set_word(e, list, next);
     if next != 0 {
         e.set_global(next.wrapping_add(4), 0u32);
     } else {
-        e.set_global(list.wrapping_add(4), 0u32);
+        super::detach::set_word(e, list.wrapping_add(4), 0u32);
     }
     give_node(e, node);
-    let count = e.global::<u32>(list.wrapping_add(8)).wrapping_sub(1);
-    e.set_global(list.wrapping_add(8), count);
+    let count = super::detach::word(e, list.wrapping_add(8)).wrapping_sub(1);
+    super::detach::set_word(e, list.wrapping_add(8), count);
 }
 
 // ---- Condition 2: blend, clip and depth state the draw leaves behind. ----
@@ -201,6 +208,26 @@ pub(crate) fn take_sorted_node(e: &mut Engine, list: u32) {
 const SET_CLIP_PLANES: u32 = 0x00b9_8280;
 /// The word the first half sets to 1 around render group 0 (`011a9608`).
 const GROUP_ZERO_FLAG: u32 = 0x011a_9608;
+
+/// The coverage counter (`011ffa28`) counted down, as a list's draw ends with alpha to coverage where the card has
+/// it (condition 2).
+#[inline(always)]
+pub(crate) fn coverage_count_down(e: &mut Engine) {
+    let count = e.global::<u32>(state::COVERAGE_COUNTER).wrapping_sub(1);
+    e.set_global(state::COVERAGE_COUNTER, count);
+}
+
+/// The two list counters (`011ffa24`, then `011ff9e8`) counted down when not zero, as a list's draw ends
+/// (condition 2).
+#[inline(always)]
+pub(crate) fn list_counters_down(e: &mut Engine) {
+    for counter in [0x011f_fa24u32, 0x011f_f9e8] {
+        let count = e.global::<u32>(counter);
+        if count != 0 {
+            e.set_global(counter, count - 1);
+        }
+    }
+}
 
 /// Alpha blending off (`00b97fa0(0, 0)`, the shader family's) (condition 2).
 #[inline(always)]

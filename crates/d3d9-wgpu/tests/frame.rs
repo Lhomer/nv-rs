@@ -22,6 +22,8 @@ const VB: u32 = 0x1500;
 /// `D3DFMT_A8R8G8B8`, `D3DFMT_D24S8`.
 const A8R8G8B8: u32 = 21;
 const D24S8: u32 = 75;
+/// The depth texture format a pixel shader can sample (`MAKEFOURCC('I', 'N', 'T', 'Z')`).
+const INTZ: u32 = u32::from_le_bytes(*b"INTZ");
 /// Render states.
 const ZENABLE: u32 = 7;
 const ZWRITEENABLE: u32 = 14;
@@ -33,6 +35,21 @@ const ALPHAFUNC: u32 = 25;
 const CLIPPING: u32 = 136;
 const CLIPPLANEENABLE: u32 = 152;
 const ADAPTIVETESS_Y: u32 = 181;
+const STENCILENABLE: u32 = 52;
+const STENCILFAIL: u32 = 53;
+const STENCILZFAIL: u32 = 54;
+const STENCILPASS: u32 = 55;
+const STENCILFUNC: u32 = 56;
+const STENCILREF: u32 = 57;
+const STENCILMASK: u32 = 58;
+const STENCILWRITEMASK: u32 = 59;
+const SLOPESCALEDEPTHBIAS: u32 = 175;
+const TWOSIDEDSTENCILMODE: u32 = 185;
+const CCW_STENCILFAIL: u32 = 186;
+const CCW_STENCILZFAIL: u32 = 187;
+const CCW_STENCILPASS: u32 = 188;
+const CCW_STENCILFUNC: u32 = 189;
+const DEPTHBIAS: u32 = 195;
 
 fn ins(op: u32, params: &[u32]) -> Vec<u32> {
     let mut v = vec![op | ((params.len() as u32) << 24)];
@@ -72,8 +89,26 @@ impl Gpu {
 
     /// As [`Gpu::new`], keeping the driver's pipelines in `cache` ([`WgpuBackend::with_cache_dir`]).
     fn with_cache(size: u32, samples: u32, cache: Option<std::path::PathBuf>) -> Option<Gpu> {
+        Gpu::make(size, samples, cache, &[])
+    }
+
+    /// As [`Gpu::new`], with the environment variables `env` set while the device is made (on
+    /// this test's turn, so no other test's device sees them).
+    fn with_env(size: u32, samples: u32, env: &[(&str, &str)]) -> Option<Gpu> {
+        Gpu::make(size, samples, None, env)
+    }
+
+    fn make(
+        size: u32,
+        samples: u32,
+        cache: Option<std::path::PathBuf>,
+        env: &[(&str, &str)],
+    ) -> Option<Gpu> {
         // A failed test leaves the lock poisoned; the next one still takes its turn.
         let turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+        for (name, value) in env {
+            std::env::set_var(name, value);
+        }
         let mut b = WgpuBackend::new(Output::Offscreen);
         if let Some(dir) = cache {
             b = b.with_cache_dir(dir);
@@ -89,6 +124,9 @@ impl Gpu {
             back_buffers: Data::Bytes(&back),
             depth_stencil: 0,
         });
+        for (name, _) in env {
+            std::env::remove_var(name);
+        }
         if b.device().is_none() {
             eprintln!("no GPU adapter: the frame tests are skipped");
             return None;
@@ -369,6 +407,1182 @@ fn every_sample_of_the_viewports_edge_pixels_can_be_covered() {
     }
 }
 
+/// A vertex shader has one module for every declaration of the same kinds: its position from a
+/// FLOAT2 element (filled to (x, y, 0, 1), Direct3D 9's own expansion: the triangle at depth 0)
+/// and from the FLOAT4 element (at depth 0.5) draw alike from one module, in two pipelines.
+#[test]
+fn a_vertex_shader_has_one_module_for_float_inputs_of_any_size() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    g.colour([1.0, 0.0, 0.0, 1.0]);
+    // Behind the triangle at 0.5 and in front of the one at 0 (`LESSEQUAL` passes both
+    // against 1.0; a depth of 0.25 then shows which reached the target).
+    for (declaration, ty, z_drawn) in [(DECL, 3u8, 0.5f32), (DECL + 1, 1, 0.0)] {
+        if declaration != DECL {
+            // POSITION as FLOAT2 in stream 0, then D3DDECL_END.
+            let decl = [0u8, 0, 0, 0, ty, 0, 0, 0, 0xFF, 0, 0, 0, 17, 0, 0, 0];
+            g.run(Cmd::CreateDeclaration {
+                device: DEVICE,
+                declaration,
+                elements: Data::Bytes(&decl),
+            });
+        }
+        g.run(Cmd::SetVertexDeclaration {
+            device: DEVICE,
+            declaration,
+        });
+        // A first pass at depth 0.25: the triangle drawn after it covers it only where it is
+        // nearer (`LESSEQUAL`).
+        g.clear(3, 0, 0.25);
+        g.cover(0.5);
+        let want = if z_drawn <= 0.25 { 255 } else { 0 };
+        assert_eq!(g.reds(), vec![want; 16], "drawn at depth {z_drawn}");
+    }
+    let d = g.b.device().expect("the device");
+    assert_eq!(
+        d.module_counts().0,
+        1,
+        "one vertex module for FLOAT4 and FLOAT2"
+    );
+    assert_eq!(
+        d.pipelines_made_on_draws(),
+        2,
+        "a pipeline for each vertex format"
+    );
+}
+
+/// Draws one triangle over the whole target from `vertices` (`stride` bytes each) through a new
+/// declaration `decl` of `elements` (stream 0: offset, `D3DDECLTYPE`, usage, usage index).
+fn draw_with(g: &mut Gpu, decl: u32, elements: &[(u16, u8, u8, u8)], vertices: &[u8], stride: u32) {
+    let mut bytes = Vec::new();
+    for &(offset, ty, usage, index) in elements {
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&offset.to_le_bytes());
+        bytes.extend_from_slice(&[ty, 0, usage, index]);
+    }
+    bytes.extend_from_slice(&[0xFF, 0, 0, 0, 17, 0, 0, 0]);
+    g.run(Cmd::CreateDeclaration {
+        device: DEVICE,
+        declaration: decl,
+        elements: Data::Bytes(&bytes),
+    });
+    g.run(Cmd::SetVertexDeclaration {
+        device: DEVICE,
+        declaration: decl,
+    });
+    let offset = 256 * (g.next % 12);
+    g.next += 1;
+    g.run(Cmd::UploadBuffer {
+        buffer: VB,
+        offset,
+        flags: 0,
+        data: Data::Bytes(vertices),
+    });
+    g.run(Cmd::SetStreamSource {
+        device: DEVICE,
+        stream: 0,
+        buffer: VB,
+        offset,
+        stride,
+    });
+    g.run(Cmd::DrawPrimitive {
+        device: DEVICE,
+        kind: 4,
+        start: 0,
+        count: 1,
+    });
+}
+
+/// The corners of a triangle over the whole target (clip x and y).
+const TRIANGLE: [[f32; 2]; 3] = [[-3.0, -3.0], [-3.0, 9.0], [9.0, -3.0]];
+
+/// A vs_2_0 passing POSITION and TEXCOORD0 on (dcl_position v0; dcl_texcoord0 v1; mov oPos, v0;
+/// mov oT0, v1) and a ps_2_0 drawing its TEXCOORD0 (dcl t0; mov oC0, t0), made and set.
+fn texcoord_pair(g: &mut Gpu, vs: u32, ps: u32) {
+    let mut v = vec![0xFFFE_0200];
+    v.extend(ins(31, &[0x8000_0000, 0x900F_0000]));
+    v.extend(ins(31, &[0x8000_0005, 0x900F_0001]));
+    v.extend(ins(1, &[0xC00F_0000, 0x90E4_0000]));
+    v.extend(ins(1, &[0xE00F_0000, 0x90E4_0001]));
+    v.push(END);
+    let mut p = vec![0xFFFF_0200];
+    p.extend(ins(31, &[0x8000_0000, 0xB00F_0000]));
+    p.extend(ins(1, &[0x800F_0800, 0xB0E4_0000]));
+    p.push(END);
+    for (shader, pixel, tokens) in [(vs, false, v), (ps, true, p)] {
+        let t = words(&tokens);
+        g.run(Cmd::CreateShader {
+            device: DEVICE,
+            shader,
+            pixel,
+            tokens: Data::Bytes(&t),
+        });
+        g.run(Cmd::SetShader {
+            device: DEVICE,
+            pixel,
+            shader,
+        });
+    }
+}
+
+/// FLOAT3 and FLOAT1 are filled to (x, y, z, 1) and (x, 0, 0, 1) as Direct3D 9 expands them, by
+/// the hardware, with one vertex module for them and FLOAT4. Each is followed in memory by a
+/// value a wider read would take: a FLOAT3 TEXCOORD0 of (0.2, 0.4, 0.6) followed by 0.0 draws
+/// alpha 1, where a w read from memory would give 0; a FLOAT1 TEXCOORD0 of 0.4 followed by 0.6
+/// draws (0.4, 0, 0, 1), where a second component read from memory would give green. (The FLOAT3
+/// positions are followed by 0.0 too, but a triangle whose w is 0 everywhere still covers the
+/// target on this machine's card, so the colour carries the check.)
+#[test]
+fn float3_and_float1_elements_are_filled_as_direct3d_9_expands_them() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    texcoord_pair(&mut g, VS + 5, PS + 14);
+    // POSITION FLOAT4 (x, y, 0.5, 1) and TEXCOORD0 FLOAT4 (0.2, 0.4, 0.6, 1): 32 bytes each.
+    let four: Vec<u8> = floats(
+        &TRIANGLE
+            .iter()
+            .flat_map(|p| [p[0], p[1], 0.5, 1.0, 0.2, 0.4, 0.6, 1.0])
+            .collect::<Vec<f32>>(),
+    );
+    g.clear(3, 0, 1.0);
+    draw_with(&mut g, DECL + 10, &[(0, 3, 0, 0), (16, 3, 5, 0)], &four, 32);
+    // (0.2, 0.4, 0.6, 1) as B, G, R, A bytes (whole numbers of 1/255: no rounding tie).
+    assert_eq!(g.pixels(), vec![[153, 102, 51, 255]; 16], "FLOAT4");
+    // POSITION FLOAT3 (x, y, 0) and TEXCOORD0 FLOAT3 (0.2, 0.4, 0.6), each with 0.0 after it.
+    let three: Vec<u8> = floats(
+        &TRIANGLE
+            .iter()
+            .flat_map(|p| [p[0], p[1], 0.0, 0.0, 0.2, 0.4, 0.6, 0.0])
+            .collect::<Vec<f32>>(),
+    );
+    g.clear(3, 0, 1.0);
+    draw_with(
+        &mut g,
+        DECL + 11,
+        &[(0, 2, 0, 0), (16, 2, 5, 0)],
+        &three,
+        32,
+    );
+    assert_eq!(
+        g.pixels(),
+        vec![[153, 102, 51, 255]; 16],
+        "FLOAT3 read as (0.2, 0.4, 0.6, 1)"
+    );
+    // POSITION FLOAT3 (x, y, 0) and 0.0 after it, TEXCOORD0 FLOAT1 0.4 and 0.6 after it.
+    let one: Vec<u8> = floats(
+        &TRIANGLE
+            .iter()
+            .flat_map(|p| [p[0], p[1], 0.0, 0.0, 0.4, 0.6])
+            .collect::<Vec<f32>>(),
+    );
+    g.clear(3, 0, 1.0);
+    draw_with(&mut g, DECL + 13, &[(0, 2, 0, 0), (16, 0, 5, 0)], &one, 24);
+    assert_eq!(
+        g.pixels(),
+        vec![[0, 0, 102, 255]; 16],
+        "FLOAT1 read as (0.4, 0, 0, 1)"
+    );
+    let d = g.b.device().expect("the device");
+    // With the harness's vertex shader's module, made ahead as this one's.
+    d.wait_for_modules();
+    assert_eq!(
+        d.module_counts().0,
+        1 + 1,
+        "one vertex module for all three"
+    );
+}
+
+/// A `D3DCOLOR` element reaches the shader with its bytes in Direct3D 9's order (memory B, G, R,
+/// A: the shader's x is the third byte), and a `SHORT4` element as whole numbers, not normalised:
+/// a position of (-3, -3, 0, 1) and the like covers the target.
+#[test]
+fn d3dcolor_and_short4_elements_read_as_direct3d_9_reads_them() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    // vs_2_0: dcl_position v0; dcl_color v1; mov oPos, v0; mov oD0, v1.
+    let mut v = vec![0xFFFE_0200];
+    v.extend(ins(31, &[0x8000_0000, 0x900F_0000]));
+    v.extend(ins(31, &[0x8000_000A, 0x900F_0001]));
+    v.extend(ins(1, &[0xC00F_0000, 0x90E4_0000]));
+    v.extend(ins(1, &[0xD00F_0000, 0x90E4_0001]));
+    v.push(END);
+    // ps_2_0: dcl v0; mov oC0, v0.
+    let mut p = vec![0xFFFF_0200];
+    p.extend(ins(31, &[0x8000_0000, 0x900F_0000]));
+    p.extend(ins(1, &[0x800F_0800, 0x90E4_0000]));
+    p.push(END);
+    for (shader, pixel, tokens) in [(VS + 6, false, v), (PS + 15, true, p)] {
+        let t = words(&tokens);
+        g.run(Cmd::CreateShader {
+            device: DEVICE,
+            shader,
+            pixel,
+            tokens: Data::Bytes(&t),
+        });
+        g.run(Cmd::SetShader {
+            device: DEVICE,
+            pixel,
+            shader,
+        });
+    }
+    // POSITION SHORT4 (x, y, 0, 1), COLOR0 D3DCOLOR bytes 0x10, 0x80, 0xF0, 0xFF: 12 bytes.
+    let mut vertices = Vec::new();
+    for p in TRIANGLE {
+        for c in [p[0] as i16, p[1] as i16, 0, 1] {
+            vertices.extend_from_slice(&c.to_le_bytes());
+        }
+        vertices.extend_from_slice(&[0x10, 0x80, 0xF0, 0xFF]);
+    }
+    g.clear(3, 0, 1.0);
+    draw_with(
+        &mut g,
+        DECL + 12,
+        &[(0, 7, 0, 0), (8, 4, 10, 0)],
+        &vertices,
+        12,
+    );
+    // The target's B, G, R, A bytes are the colour's own: R 0xF0, B 0x10.
+    assert_eq!(g.pixels(), vec![[0x10, 0x80, 0xF0, 0xFF]; 16]);
+}
+
+/// The coarser key still separates what a module depends on: one vertex shader drawn with a
+/// float position, a signed one (`SHORT4`) and a declaration without its TEXCOORD0 (read as
+/// (0, 0, 0, 1)) takes three modules, and each draw is its own declaration's.
+#[test]
+fn declarations_of_other_kinds_or_a_missing_element_get_their_own_modules() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    texcoord_pair(&mut g, VS + 7, PS + 16);
+    // Float: POSITION FLOAT4, TEXCOORD0 FLOAT4 (0.2, 0.4, 0.6, 1).
+    let float: Vec<u8> = floats(
+        &TRIANGLE
+            .iter()
+            .flat_map(|p| [p[0], p[1], 0.5, 1.0, 0.2, 0.4, 0.6, 1.0])
+            .collect::<Vec<f32>>(),
+    );
+    g.clear(3, 0, 1.0);
+    draw_with(
+        &mut g,
+        DECL + 13,
+        &[(0, 3, 0, 0), (16, 3, 5, 0)],
+        &float,
+        32,
+    );
+    assert_eq!(g.pixels(), vec![[153, 102, 51, 255]; 16], "float position");
+    // Signed: POSITION SHORT4 (x, y, 0, 1), the same TEXCOORD0 after it.
+    let mut signed = Vec::new();
+    for p in TRIANGLE {
+        for c in [p[0] as i16, p[1] as i16, 0, 1] {
+            signed.extend_from_slice(&c.to_le_bytes());
+        }
+        signed.extend(floats(&[0.2, 0.4, 0.6, 1.0]));
+    }
+    g.clear(3, 0, 1.0);
+    draw_with(
+        &mut g,
+        DECL + 14,
+        &[(0, 7, 0, 0), (8, 3, 5, 0)],
+        &signed,
+        24,
+    );
+    assert_eq!(g.pixels(), vec![[153, 102, 51, 255]; 16], "signed position");
+    // No TEXCOORD0: the shader reads (0, 0, 0, 1), opaque black.
+    let bare: Vec<u8> = floats(
+        &TRIANGLE
+            .iter()
+            .flat_map(|p| [p[0], p[1], 0.5, 1.0])
+            .collect::<Vec<f32>>(),
+    );
+    g.clear(3, 0x8080_8080, 1.0);
+    draw_with(&mut g, DECL + 15, &[(0, 3, 0, 0)], &bare, 16);
+    assert_eq!(g.pixels(), vec![[0, 0, 0, 255]; 16], "TEXCOORD0 missing");
+    let d = g.b.device().expect("the device");
+    // With the harness's vertex shader's module; the float one was made ahead.
+    d.wait_for_modules();
+    assert_eq!(
+        d.module_counts().0,
+        1 + 3,
+        "a vertex module for float, for signed and for the missing input"
+    );
+}
+
+/// Each stage's samplers in a bind group of its own (the pixel shader's 1, the vertex shader's
+/// 2): a vertex shader sampling vertex texture 0 (`texldl`, a green texel) feeds a pixel shader
+/// that samples nothing, and the target shows the green; then a pixel shader that also samples
+/// its texture 0 (a red texel) adds the two: yellow.
+#[test]
+fn each_stage_samples_from_its_own_group() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    stage_samplers(&mut g);
+    g.run(Cmd::SetShader {
+        device: DEVICE,
+        pixel: false,
+        shader: VS + 2,
+    });
+    for (ps, want) in [(PS + 5, [0, 255, 0, 255]), (PS + 6, [0, 255, 255, 255])] {
+        g.run(Cmd::SetShader {
+            device: DEVICE,
+            pixel: true,
+            shader: ps,
+        });
+        g.clear(3, 0, 1.0);
+        g.cover(0.5);
+        assert_eq!(g.pixels(), vec![want; 16], "pixel shader {ps:#x}");
+    }
+    let d = g.b.device().expect("the device");
+    assert_eq!(d.wgpu_errors(), 0);
+}
+
+/// With pipeline libraries, a textured shader's library made ahead is the one its draws link:
+/// the vertex shader sampling a vertex texture and the pixel shader sampling its own make no
+/// library on their draws (their textures filterable, as the layout made ahead assumes). A
+/// draw whose pixel shader samples a depth texture (not filterable) makes exactly one pixel
+/// shader library.
+#[test]
+fn a_textured_shaders_library_made_ahead_is_the_one_its_draws_link() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    stage_samplers(&mut g);
+    let d = g.b.device().expect("the device");
+    let Some(_) = d.pipeline_library_report() else {
+        eprintln!(
+            "{}: no pipeline libraries, so the case is not reached here",
+            d.adapter_name()
+        );
+        return;
+    };
+    d.wait_for_modules();
+    let made = library_counts(d).expect("the counts");
+    g.run(Cmd::SetShader {
+        device: DEVICE,
+        pixel: false,
+        shader: VS + 2,
+    });
+    for ps in [PS + 5, PS + 6] {
+        g.run(Cmd::SetShader {
+            device: DEVICE,
+            pixel: true,
+            shader: ps,
+        });
+        g.clear(3, 0, 1.0);
+        g.cover(0.5);
+    }
+    let d = g.b.device().expect("the device");
+    assert_eq!(
+        library_counts(d),
+        Some(made),
+        "the draws linked the ones made ahead"
+    );
+    // An INTZ depth texture (1 by 1) for the pixel shader's sampler 0: not filterable.
+    const DEPTH_TEX: u32 = 0x1604;
+    let levels = words(&[DEPTH_TEX + 1]);
+    g.run(Cmd::CreateTexture {
+        device: DEVICE,
+        texture: DEPTH_TEX,
+        levels: Data::Bytes(&levels),
+        width: 1,
+        height: 1,
+        usage: 2,
+        format: INTZ,
+        pool: 1,
+    });
+    g.run(Cmd::SetTexture {
+        device: DEVICE,
+        sampler: 0,
+        texture: DEPTH_TEX,
+    });
+    g.clear(3, 0, 1.0);
+    g.cover(0.5);
+    let d = g.b.device().expect("the device");
+    assert_eq!(
+        library_counts(d),
+        Some((made.0, made.1 + 1)),
+        "one more pixel shader library, for the other layout"
+    );
+    assert_eq!(d.wgpu_errors(), 0);
+}
+
+/// Textures and shaders for each stage's own sampler group: a 1 by 1 green texture for vertex
+/// sampler 0 and a red one for pixel sampler 0; a vs_3_0 (`VS + 2`) that samples its texture
+/// (`texldl`) into TEXCOORD0; a ps_3_0 (`PS + 5`) that draws TEXCOORD0 and one (`PS + 6`) that
+/// adds its own texture's texel to it.
+fn stage_samplers(g: &mut Gpu) {
+    const VS_TEX: u32 = 0x1600;
+    const PS_TEX: u32 = 0x1602;
+    for (texture, bgra) in [(VS_TEX, [0u8, 255, 0, 255]), (PS_TEX, [0, 0, 255, 255])] {
+        let level = texture + 1;
+        let levels = words(&[level]);
+        g.run(Cmd::CreateTexture {
+            device: DEVICE,
+            texture,
+            levels: Data::Bytes(&levels),
+            width: 1,
+            height: 1,
+            usage: 0,
+            format: A8R8G8B8,
+            pool: 1,
+        });
+        g.run(Cmd::UploadSurface {
+            surface: level,
+            row: 4,
+            rows: 1,
+            data: Data::Bytes(&bgra),
+        });
+    }
+    // D3DVERTEXTEXTURESAMPLER0 and pixel sampler 0.
+    for (sampler, texture) in [(257, VS_TEX), (0, PS_TEX)] {
+        g.run(Cmd::SetTexture {
+            device: DEVICE,
+            sampler,
+            texture,
+        });
+    }
+    // vs_3_0: dcl_position v0; dcl_position o0; dcl_texcoord0 o1; dcl_2d s0; mov o0, v0;
+    // texldl o1, c0, s0 (c0: the texel's centre, level 0).
+    let mut vs = vec![0xFFFE_0300];
+    vs.extend(ins(31, &[0x8000_0000, 0x900F_0000]));
+    vs.extend(ins(31, &[0x8000_0000, 0xE00F_0000]));
+    vs.extend(ins(31, &[0x8000_0005, 0xE00F_0001]));
+    vs.extend(ins(31, &[0x9000_0000, 0xA00F_0800]));
+    vs.extend(ins(1, &[0xE00F_0000, 0x90E4_0000]));
+    vs.extend(ins(95, &[0xE00F_0001, 0xA0E4_0000, 0xA0E4_0800]));
+    vs.push(END);
+    let regs = floats(&[0.5, 0.5, 0.0, 0.0]);
+    g.run(Cmd::SetConstants {
+        device: DEVICE,
+        kind: 0,
+        start: 0,
+        count: 1,
+        data: Data::Bytes(&regs),
+    });
+    // ps_3_0: dcl_texcoord0 v0; mov oC0, v0.
+    let mut ps_plain = vec![0xFFFF_0300];
+    ps_plain.extend(ins(31, &[0x8000_0005, 0x900F_0000]));
+    ps_plain.extend(ins(1, &[0x800F_0800, 0x90E4_0000]));
+    ps_plain.push(END);
+    // ps_3_0: dcl_texcoord0 v0; dcl_2d s0; texld r0, v0, s0; add oC0, r0, v0.
+    let mut ps_sampling = vec![0xFFFF_0300];
+    ps_sampling.extend(ins(31, &[0x8000_0005, 0x900F_0000]));
+    ps_sampling.extend(ins(31, &[0x9000_0000, 0xA00F_0800]));
+    ps_sampling.extend(ins(66, &[0x800F_0000, 0x90E4_0000, 0xA0E4_0800]));
+    ps_sampling.extend(ins(2, &[0x800F_0800, 0x80E4_0000, 0x90E4_0000]));
+    ps_sampling.push(END);
+    for (shader, pixel, tokens) in [
+        (VS + 2, false, vs),
+        (PS + 5, true, ps_plain),
+        (PS + 6, true, ps_sampling),
+    ] {
+        let t = words(&tokens);
+        g.run(Cmd::CreateShader {
+            device: DEVICE,
+            shader,
+            pixel,
+            tokens: Data::Bytes(&t),
+        });
+    }
+}
+
+/// Fixed varying locations: one vertex shader writing TEXCOORD0 (red) and TEXCOORD1 (green)
+/// serves a pixel shader reading TEXCOORD0 and one reading TEXCOORD1 with one module, each pair
+/// drawing its own colour; a pixel shader reading TEXCOORD2, which the vertex shader does not
+/// write, reads 0 from a vertex module of its own pair. Before, each pixel shader took a vertex
+/// module of its own.
+#[test]
+fn a_vertex_shader_has_one_module_for_the_pixel_shaders_reading_what_it_writes() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    // vs_2_0: dcl_position v0; mov oPos, v0; mov oT0, c1; mov oT1, c2.
+    let mut vs = vec![0xFFFE_0200];
+    vs.extend(ins(31, &[0x8000_0000, 0x900F_0000]));
+    vs.extend(ins(1, &[0xC00F_0000, 0x90E4_0000]));
+    vs.extend(ins(1, &[0xE00F_0000, 0xA0E4_0001]));
+    vs.extend(ins(1, &[0xE00F_0001, 0xA0E4_0002]));
+    vs.push(END);
+    let t = words(&vs);
+    g.run(Cmd::CreateShader {
+        device: DEVICE,
+        shader: VS + 1,
+        pixel: false,
+        tokens: Data::Bytes(&t),
+    });
+    g.run(Cmd::SetShader {
+        device: DEVICE,
+        pixel: false,
+        shader: VS + 1,
+    });
+    let regs = floats(&[1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+    g.run(Cmd::SetConstants {
+        device: DEVICE,
+        kind: 0,
+        start: 1,
+        count: 2,
+        data: Data::Bytes(&regs),
+    });
+    // ps_2_0: dcl tN; mov oC0, tN; for N = 0, 1, 2.
+    for (n, want) in [
+        (0u32, [0, 0, 255, 255]),
+        (1, [0, 255, 0, 255]),
+        (2, [0, 0, 0, 0]),
+    ] {
+        let mut ps = vec![0xFFFF_0200];
+        ps.extend(ins(31, &[0x8000_0000, 0xB00F_0000 | n]));
+        ps.extend(ins(1, &[0x800F_0800, 0xB0E4_0000 | n]));
+        ps.push(END);
+        let t = words(&ps);
+        g.run(Cmd::CreateShader {
+            device: DEVICE,
+            shader: PS + 1 + n,
+            pixel: true,
+            tokens: Data::Bytes(&t),
+        });
+        g.run(Cmd::SetShader {
+            device: DEVICE,
+            pixel: true,
+            shader: PS + 1 + n,
+        });
+        g.clear(3, 0x8080_8080, 1.0);
+        g.cover(0.5);
+        assert_eq!(g.pixels(), vec![want; 16], "reading TEXCOORD{n}");
+    }
+    let d = g.b.device().expect("the device");
+    // With the modules the harness's own two shaders got when they were made (each shader's
+    // modules are made ahead: [`a_shaders_modules_are_made_when_the_game_creates_it`]).
+    d.wait_for_modules();
+    assert_eq!(
+        d.module_counts(),
+        (1 + 2, 1 + 3),
+        "one vertex module for TEXCOORD0 and 1, one more for TEXCOORD2"
+    );
+}
+
+/// A pixel shader reading a varying without a fixed location (NORMAL0, which no package's
+/// shader passes, but a mod's might) keeps the pair's own locations: a vs_3_0 writing TEXCOORD0
+/// and NORMAL0 and a ps_3_0 drawing the NORMAL0 it reads, green; each stage gets a module (none
+/// refused) and the draw is not skipped.
+#[test]
+fn a_varying_without_a_fixed_location_keeps_the_pairs_own_link() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    // vs_3_0: dcl_position v0; dcl_position o0; dcl_normal o1; dcl_texcoord0 o2;
+    // mov o0, v0; mov o1, c1; mov o2, c2.
+    let mut vs = vec![0xFFFE_0300];
+    vs.extend(ins(31, &[0x8000_0000, 0x900F_0000]));
+    vs.extend(ins(31, &[0x8000_0000, 0xE00F_0000]));
+    vs.extend(ins(31, &[0x8000_0003, 0xE00F_0001]));
+    vs.extend(ins(31, &[0x8000_0005, 0xE00F_0002]));
+    vs.extend(ins(1, &[0xE00F_0000, 0x90E4_0000]));
+    vs.extend(ins(1, &[0xE00F_0001, 0xA0E4_0001]));
+    vs.extend(ins(1, &[0xE00F_0002, 0xA0E4_0002]));
+    vs.push(END);
+    // ps_3_0: dcl_normal v1; mov oC0, v1.
+    let mut ps = vec![0xFFFF_0300];
+    ps.extend(ins(31, &[0x8000_0003, 0x900F_0001]));
+    ps.extend(ins(1, &[0x800F_0800, 0x90E4_0001]));
+    ps.push(END);
+    for (shader, pixel, tokens) in [(VS + 3, false, vs), (PS + 7, true, ps)] {
+        let t = words(&tokens);
+        g.run(Cmd::CreateShader {
+            device: DEVICE,
+            shader,
+            pixel,
+            tokens: Data::Bytes(&t),
+        });
+        g.run(Cmd::SetShader {
+            device: DEVICE,
+            pixel,
+            shader,
+        });
+    }
+    // NORMAL0 green, TEXCOORD0 red.
+    let regs = floats(&[0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]);
+    g.run(Cmd::SetConstants {
+        device: DEVICE,
+        kind: 0,
+        start: 1,
+        count: 2,
+        data: Data::Bytes(&regs),
+    });
+    g.clear(3, 0, 1.0);
+    g.cover(0.5);
+    assert_eq!(g.pixels(), vec![[0, 255, 0, 255]; 16], "NORMAL0 drawn");
+    let d = g.b.device().expect("the device");
+    // With the modules made ahead: the harness's two shaders', and this vertex shader's own
+    // (TEXCOORD0 at its fixed location; the pixel shader reading NORMAL0 has none).
+    d.wait_for_modules();
+    assert_eq!(
+        d.module_counts(),
+        (1 + 1 + 1, 1 + 1),
+        "a module for each stage of the pair, none refused"
+    );
+    assert_eq!(d.wgpu_errors(), 0);
+}
+
+/// A varying the vertex shader does not write reads as on the real Direct3D 9 (measured on
+/// NVIDIA's driver, engine-platform's `what_an_unwritten_varying_reads_on_the_real_direct3d_9`):
+/// COLOR0 white after vs_1_1, vs_2_0 and vs_3_0; COLOR1 (0, 0, 0, 1) after vs_1_1 and vs_2_0, 0
+/// after vs_3_0; TEXCOORD0 0. A colour written only in x, y and z (`mov oD0.xyz, c0`) keeps the
+/// rest of that value: alpha 1, and 0 for COLOR1 after vs_3_0. The pair's own link (a pixel
+/// shader also reading NORMAL0, which has no fixed location) writes it the same way.
+#[test]
+fn an_unwritten_varying_reads_as_on_the_real_direct3d_9() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    // vs_3_0: dcl_position v0; dcl_position o0; mov o0, v0 (the harness's VS is the vs_2_0 one).
+    let mut vs3 = vec![0xFFFE_0300];
+    vs3.extend(ins(31, &[0x8000_0000, 0x900F_0000]));
+    vs3.extend(ins(31, &[0x8000_0000, 0xE00F_0000]));
+    vs3.extend(ins(1, &[0xE00F_0000, 0x90E4_0000]));
+    vs3.push(END);
+    // vs_1_1: dcl_position v0; mov oPos, v0 (shader model 1 tokens carry no length).
+    let vs1 = vec![
+        0xFFFE_0101,
+        0x0000_001F,
+        0x8000_0000,
+        0x900F_0000,
+        0x0000_0001,
+        0xC00F_0000,
+        0x90E4_0000,
+        END,
+    ];
+    // Each also writing x, y and z of a colour output from c0 (mov oDn.xyz, c0).
+    let mut vs1d0 = vs1[..vs1.len() - 1].to_vec();
+    vs1d0.extend([0x0000_0001, 0xD007_0000, 0xA0E4_0000, END]);
+    let mut vs2d1 = vec![0xFFFE_0200];
+    vs2d1.extend(ins(31, &[0x8000_0000, 0x900F_0000]));
+    vs2d1.extend(ins(1, &[0xC00F_0000, 0x90E4_0000]));
+    vs2d1.extend(ins(1, &[0xD007_0001, 0xA0E4_0000]));
+    vs2d1.push(END);
+    // vs_3_0: dcl_position v0; dcl_position o0; dcl_colorN o1.xyz; mov o0, v0; mov o1.xyz, c0.
+    let vs3c = |usage: u32| {
+        let mut v = vec![0xFFFE_0300];
+        v.extend(ins(31, &[0x8000_0000, 0x900F_0000]));
+        v.extend(ins(31, &[0x8000_0000, 0xE00F_0000]));
+        v.extend(ins(31, &[usage, 0xE007_0001]));
+        v.extend(ins(1, &[0xE00F_0000, 0x90E4_0000]));
+        v.extend(ins(1, &[0xE007_0001, 0xA0E4_0000]));
+        v.push(END);
+        v
+    };
+    // vs_3_0 writing NORMAL0 only: dcl_position v0; dcl_position o0; dcl_normal o1; mov o0, v0;
+    // mov o1, c0.
+    let mut vs3n = vec![0xFFFE_0300];
+    vs3n.extend(ins(31, &[0x8000_0000, 0x900F_0000]));
+    vs3n.extend(ins(31, &[0x8000_0000, 0xE00F_0000]));
+    vs3n.extend(ins(31, &[0x8000_0003, 0xE00F_0001]));
+    vs3n.extend(ins(1, &[0xE00F_0000, 0x90E4_0000]));
+    vs3n.extend(ins(1, &[0xE00F_0001, 0xA0E4_0000]));
+    vs3n.push(END);
+    for (shader, tokens) in [
+        (VS + 4, vs3),
+        (VS + 5, vs1),
+        (VS + 6, vs1d0),
+        (VS + 7, vs2d1),
+        (VS + 8, vs3c(0x8000_000A)),
+        (VS + 9, vs3c(0x8001_000A)),
+        (VS + 10, vs3n),
+    ] {
+        let t = words(&tokens);
+        g.run(Cmd::CreateShader {
+            device: DEVICE,
+            shader,
+            pixel: false,
+            tokens: Data::Bytes(&t),
+        });
+    }
+    // c0 of the vertex shaders: (0.2, 0.4, 0.6, 0.8), each a whole number of 1/255.
+    let regs = floats(&[0.2, 0.4, 0.6, 0.8]);
+    g.run(Cmd::SetConstants {
+        device: DEVICE,
+        kind: 0,
+        start: 0,
+        count: 1,
+        data: Data::Bytes(&regs),
+    });
+    // ps_2_0: dcl REG; mov oC0, REG. ps_3_0: dcl_USAGE vN; mov oC0, vN.
+    let ps2 = |dcl: u32, src: u32| {
+        let mut p = vec![0xFFFF_0200];
+        p.extend(ins(31, &[0x8000_0000, dcl]));
+        p.extend(ins(1, &[0x800F_0800, src]));
+        p.push(END);
+        p
+    };
+    let ps3 = |usage: u32, n: u32| {
+        let mut p = vec![0xFFFF_0300];
+        p.extend(ins(31, &[usage, 0x900F_0000 | n]));
+        p.extend(ins(1, &[0x800F_0800, 0x90E4_0000 | n]));
+        p.push(END);
+        p
+    };
+    // ps_3_0 reading NORMAL0 and COLOR0 and drawing COLOR0: dcl_normal v1; dcl_color0 v0;
+    // mov oC0, v0.
+    let mut psn = vec![0xFFFF_0300];
+    psn.extend(ins(31, &[0x8000_0003, 0x900F_0001]));
+    psn.extend(ins(31, &[0x8000_000A, 0x900F_0000]));
+    psn.extend(ins(1, &[0x800F_0800, 0x90E4_0000]));
+    psn.push(END);
+    let white = [255, 255, 255, 255];
+    let black = [0, 0, 0, 255];
+    let zero = [0, 0, 0, 0];
+    // x, y and z from c0 (B 0.6, G 0.4, R 0.2), the alpha as said.
+    let rgb_1 = [153, 102, 51, 255];
+    let rgb_0 = [153, 102, 51, 0];
+    let cases = [
+        (
+            "vs_1_1 COLOR0",
+            VS + 5,
+            ps2(0x900F_0000, 0x90E4_0000),
+            white,
+        ),
+        (
+            "vs_1_1 COLOR1",
+            VS + 5,
+            ps2(0x900F_0001, 0x90E4_0001),
+            black,
+        ),
+        ("vs_2_0 COLOR0", VS, ps2(0x900F_0000, 0x90E4_0000), white),
+        ("vs_2_0 COLOR1", VS, ps2(0x900F_0001, 0x90E4_0001), black),
+        ("vs_2_0 TEXCOORD0", VS, ps2(0xB00F_0000, 0xB0E4_0000), zero),
+        ("vs_3_0 COLOR0", VS + 4, ps3(0x8000_000A, 0), white),
+        ("vs_3_0 COLOR1", VS + 4, ps3(0x8001_000A, 1), zero),
+        ("vs_3_0 TEXCOORD0", VS + 4, ps3(0x8000_0005, 2), zero),
+        (
+            "vs_1_1 COLOR0.xyz",
+            VS + 6,
+            ps2(0x900F_0000, 0x90E4_0000),
+            rgb_1,
+        ),
+        (
+            "vs_2_0 COLOR1.xyz",
+            VS + 7,
+            ps2(0x900F_0001, 0x90E4_0001),
+            rgb_1,
+        ),
+        ("vs_3_0 COLOR0.xyz", VS + 8, ps3(0x8000_000A, 0), rgb_1),
+        ("vs_3_0 COLOR1.xyz", VS + 9, ps3(0x8001_000A, 1), rgb_0),
+        ("vs_3_0 NORMAL0, COLOR0 read", VS + 10, psn, white),
+    ];
+    for (k, (name, vs, ps, want)) in cases.into_iter().enumerate() {
+        let t = words(&ps);
+        let shader = PS + 8 + k as u32;
+        g.run(Cmd::CreateShader {
+            device: DEVICE,
+            shader,
+            pixel: true,
+            tokens: Data::Bytes(&t),
+        });
+        for (pixel, shader) in [(false, vs), (true, shader)] {
+            g.run(Cmd::SetShader {
+                device: DEVICE,
+                pixel,
+                shader,
+            });
+        }
+        g.clear(3, 0x8080_8080, 1.0);
+        g.cover(0.5);
+        assert_eq!(g.pixels(), vec![want; 16], "{name}");
+    }
+}
+
+/// The list names each plane state a pipeline's draws had: with the clip distances one pipeline
+/// serves a draw with no plane on and one with a plane on, but an adapter without them
+/// (Direct3D 12) needs a pipeline for each, so a list written here holds both lines (clip 0 and
+/// a plane's code), as one written there does. A pipeline made ahead from a list that names only
+/// its clip-0 line (the shipped list's, from before both were listed) still adds the plane
+/// state's line when a draw has a plane on. A pipeline drawn again in a state it was listed with
+/// offers the list nothing. (The list file holds the shipped entries too: a run that draws with
+/// no plane only gives what the other runs add to.)
+#[test]
+fn the_list_names_each_plane_state_a_pipeline_drew_with() {
+    let folder = |name: &str| {
+        let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "pipeline-list-planes-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+    // A run with its list in `dir`: with `ahead` a `Present` first, so the listed pipelines are
+    // made before the draws; then a draw in each plane state of `planes`, in order. The list the
+    // device left, the pipelines made on draws, the entries the draws offered the list, whether
+    // the adapter has clip distances, and its name.
+    type Run = (Vec<String>, u64, u64, bool, String);
+    let run = |dir: &std::path::Path, ahead: bool, planes: &[bool]| -> Option<Run> {
+        let (made, offers, distances, adapter) = {
+            let mut g = Gpu::with_cache(4, 1, Some(dir.to_path_buf()))?;
+            if ahead {
+                g.run(Cmd::Present {
+                    device: DEVICE,
+                    source: None,
+                    dest: None,
+                    window: 0,
+                    dirty: false,
+                    model: 0,
+                    frame: 1,
+                });
+            }
+            let plane = [1.0f32, 0.0, 0.0, -0.25].map(f32::to_bits);
+            g.run(Cmd::SetClipPlane {
+                device: DEVICE,
+                index: 0,
+                plane,
+            });
+            g.colour([1.0, 1.0, 1.0, 1.0]);
+            g.clear(3, 0, 1.0);
+            for &on in planes {
+                g.state(CLIPPLANEENABLE, u32::from(on));
+                g.cover(0.5);
+            }
+            let d = g.b.device().expect("the device");
+            (
+                d.pipelines_made_on_draws(),
+                d.list_offers(),
+                d.has_clip_distances(),
+                d.adapter_name().to_string(),
+            )
+            // The device goes: its list is written.
+        };
+        let list = std::fs::read_to_string(dir.join("pipelines.txt")).expect("the list written");
+        let list = list.lines().map(str::to_string).collect();
+        Some((list, made, offers, distances, adapter))
+    };
+    let none_dir = folder("none");
+    let Some((none, made, offers, distances, adapter)) = run(&none_dir, false, &[false]) else {
+        return;
+    };
+    assert_eq!(
+        (made, offers),
+        (1, 1),
+        "one pipeline, offered to the list once"
+    );
+    // What a run adds to the list of the run without a plane: one line, with a plane's code,
+    // whose clip-0 twin that run listed (the same pipeline with the clip distances, else the
+    // one without a plane).
+    let plane_line = |list: &[String], what: &str| {
+        let added: Vec<&String> = list.iter().filter(|l| !none.contains(l)).collect();
+        assert_eq!(
+            added.len(),
+            1,
+            "{what}: one more line, a plane on: {added:?}"
+        );
+        let mut fields: Vec<&str> = added[0].split_ascii_whitespace().collect();
+        assert_ne!(fields.last(), Some(&"0"), "{what}: {}", added[0]);
+        *fields.last_mut().unwrap() = "0";
+        let zero = fields.join(" ");
+        assert!(
+            none.contains(&zero),
+            "{what}: the line with no plane on: {zero}"
+        );
+    };
+    // No plane, a plane, and each again: each state offered to the list once.
+    let both_dir = folder("both");
+    let (both, made, offers, ..) = run(&both_dir, false, &[false, true, false, true]).unwrap();
+    plane_line(&both, "both");
+    assert_eq!(offers, 2, "each plane state offered once");
+    if distances {
+        assert_eq!(made, 1, "{adapter}: one pipeline for both plane states");
+    } else {
+        assert_eq!(made, 2, "{adapter}: a pipeline for each plane state");
+        eprintln!(
+            "{adapter}: no clip distances, so a plane on is a pipeline of its own, listed as any \
+             new one: one pipeline listed in two states is not reached here"
+        );
+    }
+    // The first run's list again, drawing only with a plane on: its clip-0 line makes the
+    // pipeline ahead, and the draw still adds the plane state's line. With the clip distances
+    // that pipeline serves the draw; without, the plane state is a pipeline of its own.
+    let (ahead, made, offers, ..) = run(&none_dir, true, &[true]).unwrap();
+    plane_line(&ahead, "made ahead");
+    assert_eq!(offers, 1, "the plane state offered");
+    let want = if distances { 0 } else { 1 };
+    assert_eq!(made, want, "{adapter}: pipelines made on the draw");
+    let _ = std::fs::remove_dir_all(&none_dir);
+    let _ = std::fs::remove_dir_all(&both_dir);
+}
+
+/// Each shader's modules are made on the module threads when the game creates it: once they
+/// are, the first draw of the pair converts and makes no module (its pipeline only), and draws
+/// as before.
+#[test]
+fn a_shaders_modules_are_made_when_the_game_creates_it() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    let d = g.b.device().expect("the device");
+    d.wait_for_modules();
+    assert_eq!(
+        d.module_counts(),
+        (1, 1),
+        "the harness's two shaders' modules"
+    );
+    assert_eq!(d.modules_made_here(), 0);
+    g.colour([1.0, 0.5, 0.25, 1.0]);
+    g.clear(3, 0, 1.0);
+    g.cover(0.5);
+    assert_eq!(g.reds(), vec![255; 16]);
+    let d = g.b.device().expect("the device");
+    assert_eq!(d.modules_made_here(), 0, "no module made on the draw");
+    assert_eq!(d.module_counts(), (1, 1));
+    assert_eq!(d.pipelines_made_on_draws(), 1);
+}
+
+/// A draw that needs modules no module thread has started (the threads held) takes both jobs
+/// back and makes them itself, and draws; let go, the threads make neither again, and a second
+/// draw makes none. (After the game's start, its first draw, which waits for what is queued.)
+#[test]
+fn a_draw_takes_back_the_modules_no_thread_has_started() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    g.colour([1.0, 1.0, 1.0, 1.0]);
+    g.clear(3, 0, 1.0);
+    g.cover(0.5);
+    let d = g.b.device().expect("the device");
+    d.wait_for_modules();
+    let before = d.modules_made_here();
+    d.hold_modules(true);
+    texcoord_pair(&mut g, VS + 11, PS + 19);
+    // POSITION FLOAT4 and TEXCOORD0 FLOAT4 (0.2, 0.4, 0.6, 1): the module made ahead's inputs.
+    let vertices: Vec<u8> = floats(
+        &TRIANGLE
+            .iter()
+            .flat_map(|p| [p[0], p[1], 0.5, 1.0, 0.2, 0.4, 0.6, 1.0])
+            .collect::<Vec<f32>>(),
+    );
+    g.clear(3, 0, 1.0);
+    draw_with(
+        &mut g,
+        DECL + 10,
+        &[(0, 3, 0, 0), (16, 3, 5, 0)],
+        &vertices,
+        32,
+    );
+    assert_eq!(g.pixels(), vec![[153, 102, 51, 255]; 16]);
+    let d = g.b.device().expect("the device");
+    assert_eq!(d.modules_made_here() - before, 2, "both jobs taken back");
+    d.hold_modules(false);
+    d.wait_for_modules();
+    g.clear(3, 0, 1.0);
+    draw_with(
+        &mut g,
+        DECL + 11,
+        &[(0, 3, 0, 0), (16, 3, 5, 0)],
+        &vertices,
+        32,
+    );
+    assert_eq!(g.pixels(), vec![[153, 102, 51, 255]; 16]);
+    let d = g.b.device().expect("the device");
+    assert_eq!(d.modules_made_here() - before, 2, "none made again");
+    assert_eq!(d.module_counts(), (1 + 1, 1 + 1));
+}
+
+/// The game's start, its first draw: with pipeline libraries it waits for every shader's
+/// module and library the module threads have queued, so it takes none back and makes no
+/// shader library itself. A shader the game creates after its start is counted.
+#[test]
+fn the_start_waits_for_every_shaders_library_and_counts_later_shaders() {
+    // Each module job a second late, so jobs are in flight across the start's draw; a start that
+    // waited 20 s fails instead of hanging. Undone when the test ends, however it ends.
+    struct Timing;
+    impl Drop for Timing {
+        fn drop(&mut self) {
+            d3d9_wgpu::device::module_timing_for_tests(0, 0);
+        }
+    }
+    let _timing = Timing;
+    d3d9_wgpu::device::module_timing_for_tests(1000, 20_000);
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    // The harness's two shaders' jobs are in flight (each module thread has one); two more
+    // created with the threads held stay queued, for the start to take back.
+    let d = g.b.device().expect("the device");
+    d.hold_modules(true);
+    texcoord_pair(&mut g, VS + 12, PS + 20);
+    for (pixel, shader) in [(false, VS), (true, PS)] {
+        g.run(Cmd::SetShader {
+            device: DEVICE,
+            pixel,
+            shader,
+        });
+    }
+    let d = g.b.device().expect("the device");
+    assert_eq!(d.shaders_created_after_start(), 0);
+    assert_eq!(d.modules_pending(), 4);
+    let libraries = d.pipeline_library_report().is_some();
+    g.colour([1.0, 1.0, 1.0, 1.0]);
+    g.clear(3, 0, 1.0);
+    g.cover(0.5);
+    assert_eq!(g.reds(), vec![255; 16]);
+    let d = g.b.device().expect("the device");
+    let before = library_counts(d);
+    if libraries {
+        assert_eq!(d.start_waited_for(), 4, "the start waited for all four");
+        assert_eq!(d.modules_pending(), 0, "nothing left after the start");
+        assert_eq!(
+            d.modules_made_here(),
+            0,
+            "the start's draw made none itself"
+        );
+        // The four shaders' libraries and the stand-ins' (one pixel shader, two vertex
+        // shaders: the harness's pixel shader reads nothing, the other TEXCOORD0).
+        assert_eq!(before, Some((4, 3)));
+        #[cfg(windows)]
+        assert!(
+            d.module_thread_priorities().iter().all(|&p| p == -1),
+            "the module threads below normal again: {:?}",
+            d.module_thread_priorities()
+        );
+    } else {
+        eprintln!(
+            "{}: no pipeline libraries, so the start does not wait",
+            d.adapter_name()
+        );
+        assert_eq!(d.start_waited_for(), 0);
+    }
+    d.hold_modules(false);
+    // Two new shaders after the start (vs_2_0: dcl_position v0; dcl_color v1; mov oPos, v0;
+    // mov oD0, v1. ps_2_0: dcl v0; mov oC0, v0), and one made again (the same bytecode as one
+    // made before: nothing new to make, not counted).
+    let mut v = vec![0xFFFE_0200];
+    v.extend(ins(31, &[0x8000_0000, 0x900F_0000]));
+    v.extend(ins(31, &[0x8000_000A, 0x900F_0001]));
+    v.extend(ins(1, &[0xC00F_0000, 0x90E4_0000]));
+    v.extend(ins(1, &[0xD00F_0000, 0x90E4_0001]));
+    v.push(END);
+    let mut p = vec![0xFFFF_0200];
+    p.extend(ins(31, &[0x8000_0000, 0x900F_0000]));
+    p.extend(ins(1, &[0x800F_0800, 0x90E4_0000]));
+    p.push(END);
+    for (shader, pixel, tokens) in [(VS + 13, false, v), (PS + 21, true, p)] {
+        let t = words(&tokens);
+        g.run(Cmd::CreateShader {
+            device: DEVICE,
+            shader,
+            pixel,
+            tokens: Data::Bytes(&t),
+        });
+    }
+    texcoord_pair(&mut g, VS + 14, PS + 22);
+    let d = g.b.device().expect("the device");
+    assert_eq!(d.shaders_created_after_start(), 2);
+    // Their modules only: no library is made in the background during play.
+    d.wait_for_modules();
+    assert_eq!(library_counts(d), before, "no library for a later shader");
+}
+
+/// wgpu-hal's counts of the vertex and pixel shader libraries made so far; `None` without
+/// libraries.
+fn library_counts(d: &d3d9_wgpu::device::Device) -> Option<(u64, u64)> {
+    let report = d.pipeline_library_report()?;
+    // The number before `what` in wgpu-hal's line.
+    let count = |what: &str| -> u64 {
+        let end = report
+            .find(what)
+            .unwrap_or_else(|| panic!("no {what:?}: {report}"));
+        report[..end]
+            .rsplit(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no count before {what:?}: {report}"))
+    };
+    Some((count(" vertex shader ("), count(" pixel shader (")))
+}
+
+/// A shader model 1 or 2 vertex shader always writes its two colours, as Direct3D 9's values
+/// where it does not (COLOR0 white, COLOR1 (0, 0, 0, 1)), so its own module, made when the game
+/// creates it, serves a pixel shader that reads a colour it does not write: the draws make no
+/// module and draw those values.
+#[test]
+fn a_shader_model_1_or_2_vertex_shaders_own_module_serves_its_colours_readers() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    // vs_1_1: dcl_position v0; mov oPos, v0 (shader model 1 tokens carry no length).
+    let vs1 = vec![
+        0xFFFE_0101,
+        0x0000_001F,
+        0x8000_0000,
+        0x900F_0000,
+        0x0000_0001,
+        0xC00F_0000,
+        0x90E4_0000,
+        END,
+    ];
+    // ps_2_0: dcl vN; mov oC0, vN (COLOR0, COLOR1).
+    let ps = |n: u32| {
+        let mut p = vec![0xFFFF_0200];
+        p.extend(ins(31, &[0x8000_0000, 0x900F_0000 | n]));
+        p.extend(ins(1, &[0x800F_0800, 0x90E4_0000 | n]));
+        p.push(END);
+        p
+    };
+    for (shader, pixel, tokens) in [
+        (VS + 9, false, vs1),
+        (PS + 17, true, ps(0)),
+        (PS + 18, true, ps(1)),
+    ] {
+        let t = words(&tokens);
+        g.run(Cmd::CreateShader {
+            device: DEVICE,
+            shader,
+            pixel,
+            tokens: Data::Bytes(&t),
+        });
+    }
+    g.b.device().expect("the device").wait_for_modules();
+    // The harness's vs_2_0 (its position only) and this vs_1_1, each with both pixel shaders.
+    for vs in [VS, VS + 9] {
+        for (ps, want) in [(PS + 17, [255, 255, 255, 255]), (PS + 18, [0, 0, 0, 255])] {
+            for (pixel, shader) in [(false, vs), (true, ps)] {
+                g.run(Cmd::SetShader {
+                    device: DEVICE,
+                    pixel,
+                    shader,
+                });
+            }
+            g.clear(3, 0x8080_8080, 1.0);
+            g.cover(0.5);
+            assert_eq!(g.pixels(), vec![want; 16], "{vs:#x} with {ps:#x}");
+        }
+    }
+    let d = g.b.device().expect("the device");
+    assert_eq!(d.modules_made_here(), 0, "every module made ahead");
+    assert_eq!(
+        d.module_counts(),
+        (2, 1 + 2),
+        "a vertex module for each vertex shader, its own"
+    );
+}
+
+/// With pipeline libraries (wgpu-hal's, on Vulkan where the driver has them), each shader's
+/// library is made with its module when the game creates it: the first draw of the pair then
+/// makes no shader library (it links the two), and draws as before.
+#[test]
+fn a_shaders_pipeline_library_is_made_when_the_game_creates_it() {
+    let Some(mut g) = Gpu::new(4, 1) else { return };
+    g.colour([1.0, 0.5, 0.25, 1.0]);
+    g.clear(3, 0, 1.0);
+    let d = g.b.device().expect("the device");
+    d.wait_for_modules();
+    let Some(report) = d.pipeline_library_report() else {
+        eprintln!(
+            "{}: no pipeline libraries, so the case is not reached here",
+            d.adapter_name()
+        );
+        return;
+    };
+    // The number before `what` in wgpu-hal's line.
+    let count = |report: &str, what: &str| -> u64 {
+        let end = report
+            .find(what)
+            .unwrap_or_else(|| panic!("no {what:?}: {report}"));
+        report[..end]
+            .rsplit(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no count before {what:?}: {report}"))
+    };
+    let shaders = |r: &str| (count(r, " vertex shader ("), count(r, " pixel shader ("));
+    let made = shaders(&report);
+    // The harness's two shaders' and the stand-ins' they were made with.
+    assert_eq!(made, (2, 2), "{report}");
+    g.cover(0.5);
+    assert_eq!(g.reds(), vec![255; 16]);
+    let d = g.b.device().expect("the device");
+    let after = d.pipeline_library_report().expect("the report");
+    assert_eq!(
+        shaders(&after),
+        made,
+        "a shader library made on the draw: {after}"
+    );
+    assert_eq!(d.pipelines_made_on_draws(), 1);
+}
+
 #[test]
 fn user_clip_planes_cut_where_the_distance_is_negative() {
     let Some(mut g) = Gpu::new(4, 1) else { return };
@@ -396,6 +1610,12 @@ fn user_clip_planes_cut_where_the_distance_is_negative() {
     g.state(CLIPPING, 0);
     g.cover(0.5);
     assert_eq!(g.reds(), vec![255; 16], "clipping off");
+    // With the hardware's clip distances (Vulkan, Metal) every draw takes them, planes on or
+    // off: the three draws above share one pipeline. Without (Direct3D 12) a plane on is the
+    // pixel shader's discard, another pipeline.
+    let d = g.b.device().expect("the device");
+    let want = if d.has_clip_distances() { 1 } else { 2 };
+    assert_eq!(d.pipelines_made_on_draws(), want, "{}", d.adapter_name());
 }
 
 #[test]
@@ -1848,4 +3068,314 @@ fn cuts_between_finished_encoders_keep_multisampled_colour_and_depth() {
         }
         assert_eq!(g.b.device().map(|d| d.wgpu_errors()), Some(0));
     }
+}
+
+/// The vertex buffer of [`dynamic_state_scene`]: every shape in it once, uploaded before the
+/// first draw, so that no upload falls between the draws (an upload can end the render pass, and
+/// with it what the command buffer is known to have set). Each shape's first vertex.
+struct Shapes {
+    data: Vec<f32>,
+}
+
+impl Shapes {
+    /// Clip-space vertices (x, y, z; w 1); the first vertex's number.
+    fn add(&mut self, v: &[[f32; 3]]) -> u32 {
+        let first = (self.data.len() / 4) as u32;
+        self.data
+            .extend(v.iter().flat_map(|p| [p[0], p[1], p[2], 1.0]));
+        first
+    }
+
+    /// Clip x from `x0` to `x1` over the viewport's height, at depth `z0` on the left and `z1` on
+    /// the right: two triangles wound clockwise on screen (Direct3D 9's front faces), or
+    /// counter-clockwise.
+    fn band(&mut self, x0: f32, x1: f32, z0: f32, z1: f32, clockwise: bool) -> u32 {
+        let (a, b, c) = ([x0, -1.0, z0], [x0, 1.0, z0], [x1, -1.0, z1]);
+        let (d, e, f) = ([x1, -1.0, z1], [x0, 1.0, z0], [x1, 1.0, z1]);
+        if clockwise {
+            self.add(&[a, b, c, d, e, f])
+        } else {
+            self.add(&[a, c, b, d, f, e])
+        }
+    }
+}
+
+/// `count` triangles from vertex `first` of the scene's buffer.
+fn draw(g: &mut Gpu, first: u32, count: u32) {
+    g.run(Cmd::DrawPrimitive {
+        device: DEVICE,
+        kind: 4,
+        start: first,
+        count,
+    });
+}
+
+/// The left and top pixel of cell `i` of a 32 by 32 target cut into 8 by 8 cells, row by row.
+fn cell(i: u32) -> (u32, u32) {
+    ((i % 4) * 8, (i / 4) * 8)
+}
+
+/// What [`dynamic_state_scene`] leaves at a pixel: x, y, the B G R A bytes, and why.
+type Want = (u32, u32, [u8; 4], &'static str);
+
+/// Each state a linked pipeline leaves dynamic (vendor/wgpu-hal, pipeline_library.rs: cull mode,
+/// front face, the depth test, write and compare, one- and two-sided stencil, constant and
+/// slope-scaled depth bias), changed between draws in one command buffer, each in its own cell of a
+/// 32 by 32 target; what Direct3D 9 draws there, left and right of the cell's middle. Where a draw's
+/// result depends on a state the draw before it set differently, nothing but render states and
+/// the viewport changes between them (no upload, no new colour), so that the change is made within
+/// one render pass, where a bind sets only the states that changed.
+fn dynamic_state_scene(g: &mut Gpu) -> Vec<Want> {
+    const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+    const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+    const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+    let (red, green, blue, none) = (
+        [0, 0, 255, 255],
+        [0, 255, 0, 255],
+        [255, 0, 0, 255],
+        [0, 0, 0, 0],
+    );
+    let mut s = Shapes { data: Vec::new() };
+    let cw_tri = [[-3.0, -3.0, 0.5], [-3.0, 9.0, 0.5], [9.0, -3.0, 0.5]];
+    let cw = s.add(&cw_tri);
+    let ccw = s.add(&[cw_tri[0], cw_tri[2], cw_tri[1]]);
+    let full = s.band(-1.0, 1.0, 0.5, 0.5, true);
+    let left = s.band(-1.0, 0.0, 0.5, 0.5, true);
+    let left_ccw = s.band(-1.0, 0.0, 0.5, 0.5, false);
+    let right = s.band(0.0, 1.0, 0.5, 0.5, true);
+    let far = s.band(-1.0, 1.0, 0.75, 0.75, true);
+    let sloped = s.band(-1.0, 1.0, 0.25, 0.75, true);
+    let bytes = floats(&s.data);
+    assert!(bytes.len() <= 48 * 64, "the scene's shapes fit the buffer");
+    g.run(Cmd::UploadBuffer {
+        buffer: VB,
+        offset: 0,
+        flags: 0,
+        data: Data::Bytes(&bytes),
+    });
+    g.run(Cmd::SetStreamSource {
+        device: DEVICE,
+        stream: 0,
+        buffer: VB,
+        offset: 0,
+        stride: 16,
+    });
+    let at = |g: &mut Gpu, i: u32| {
+        let (x, y) = cell(i);
+        g.viewport(x, y, 8, 8, 0.0, 1.0);
+    };
+    let mut want = Vec::new();
+    let mut expect = |i: u32, left: [u8; 4], right: [u8; 4], what: &'static str| {
+        let (x, y) = cell(i);
+        want.push((x + 2, y + 4, left, what));
+        want.push((x + 6, y + 4, right, what));
+    };
+    g.viewport(0, 0, 32, 32, 0.0, 1.0);
+    g.clear(7, 0, 1.0);
+
+    // Cull mode and front face: CULLMODE 2 culls triangles clockwise on screen, 3
+    // counter-clockwise ones. One colour: only the cull mode and the viewport change.
+    g.state(ZENABLE, 0);
+    g.colour(GREEN);
+    for (i, cull, tri) in [(0, 2, cw), (1, 2, ccw), (2, 3, cw), (3, 3, ccw)] {
+        g.state(CULLMODE, cull);
+        at(g, i);
+        draw(g, tri, 1);
+    }
+    expect(0, none, none, "CULLMODE 2 culls a clockwise triangle");
+    expect(1, green, green, "CULLMODE 2 keeps a counter-clockwise one");
+    expect(2, green, green, "CULLMODE 3 keeps a clockwise triangle");
+    expect(3, none, none, "CULLMODE 3 culls a counter-clockwise one");
+    g.state(CULLMODE, 1);
+
+    // Depth writes switched on alone (the same ZFUNC, the same colour): the third draw
+    // (GREATER, further away) passes only where the second wrote its depth.
+    g.state(ZENABLE, 1);
+    g.state(ZFUNC, 4);
+    at(g, 4);
+    g.colour(BLUE);
+    g.state(ZWRITEENABLE, 0);
+    draw(g, full, 2);
+    g.state(ZWRITEENABLE, 1);
+    draw(g, left, 2);
+    g.state(ZFUNC, 5);
+    g.state(ZWRITEENABLE, 0);
+    g.colour(GREEN);
+    draw(g, far, 2);
+    expect(4, green, blue, "ZWRITEENABLE 1 after 0 writes depth");
+    g.state(ZFUNC, 4);
+    g.state(ZWRITEENABLE, 1);
+    g.state(ZENABLE, 0);
+
+    // One-sided stencil: REPLACE with 1 on the left, then EQUAL 1 over the cell (one colour).
+    at(g, 5);
+    g.state(STENCILENABLE, 1);
+    g.state(STENCILMASK, 0xFF);
+    g.state(STENCILWRITEMASK, 0xFF);
+    g.state(STENCILFAIL, 1);
+    g.state(STENCILZFAIL, 1);
+    g.state(STENCILFUNC, 8);
+    g.state(STENCILPASS, 3);
+    g.state(STENCILREF, 1);
+    g.colour(RED);
+    draw(g, left, 2);
+    g.state(STENCILFUNC, 3);
+    g.state(STENCILPASS, 1);
+    g.state(STENCILREF, 1);
+    draw(g, right, 2);
+    g.colour(GREEN);
+    draw(g, full, 2);
+    expect(
+        5,
+        green,
+        none,
+        "STENCILFUNC EQUAL passes where REPLACE wrote, nowhere else",
+    );
+
+    // Two-sided stencil: counter-clockwise faces REPLACE with 2 (the CCW_ states), clockwise ones
+    // KEEP 0; then EQUAL 2, one-sided, over the cell.
+    at(g, 6);
+    g.state(TWOSIDEDSTENCILMODE, 1);
+    g.state(STENCILFUNC, 8);
+    g.state(STENCILPASS, 1);
+    g.state(CCW_STENCILFUNC, 8);
+    g.state(CCW_STENCILFAIL, 1);
+    g.state(CCW_STENCILZFAIL, 1);
+    g.state(CCW_STENCILPASS, 3);
+    g.state(STENCILREF, 2);
+    g.colour(RED);
+    draw(g, left_ccw, 2);
+    draw(g, right, 2);
+    g.state(TWOSIDEDSTENCILMODE, 0);
+    g.state(STENCILFUNC, 3);
+    g.colour(GREEN);
+    draw(g, full, 2);
+    expect(
+        6,
+        green,
+        red,
+        "two-sided stencil: the counter-clockwise faces' REPLACE",
+    );
+    g.state(STENCILENABLE, 0);
+
+    // Depth bias: a coplanar draw biased nearer passes LESS against the first.
+    g.state(ZENABLE, 1);
+    at(g, 7);
+    g.colour(RED);
+    draw(g, full, 2);
+    g.colour(GREEN);
+    g.state(ZFUNC, 2);
+    g.state(DEPTHBIAS, (-0.001f32).to_bits());
+    draw(g, full, 2);
+    g.state(DEPTHBIAS, 0);
+    expect(7, green, green, "DEPTHBIAS brings a coplanar draw in front");
+
+    // Slope-scaled depth bias, on a band whose depth runs from 0.25 to 0.75 across the cell.
+    g.state(ZFUNC, 4);
+    at(g, 8);
+    g.colour(RED);
+    draw(g, sloped, 2);
+    g.colour(GREEN);
+    g.state(ZFUNC, 2);
+    g.state(SLOPESCALEDEPTHBIAS, (-2.0f32).to_bits());
+    draw(g, sloped, 2);
+    g.state(SLOPESCALEDEPTHBIAS, 0);
+    g.state(ZFUNC, 4);
+    expect(
+        8,
+        green,
+        green,
+        "SLOPESCALEDEPTHBIAS brings a coplanar sloped draw in front",
+    );
+    want
+}
+
+/// The scene's pixels as [`dynamic_state_scene`] says Direct3D 9 draws them, and no wgpu error.
+fn check_scene(g: &mut Gpu, want: &[Want]) {
+    let px = g.pixels();
+    for &(x, y, p, what) in want {
+        assert_eq!(px[(y * 32 + x) as usize], p, "{what} (pixel {x}, {y})");
+    }
+    assert_eq!(g.b.device().map(|d| d.wgpu_errors()), Some(0));
+}
+
+/// Whether this machine's device links pipelines from libraries; if not, says the test is skipped.
+fn has_libraries(g: &mut Gpu) -> bool {
+    let has = g.b.device().is_some_and(|d| d.uses_pipeline_libraries());
+    if !has {
+        eprintln!("no pipeline libraries on this device (Vulkan with VK_EXT_graphics_pipeline_library): skipped");
+    }
+    has
+}
+
+/// The states a linked pipeline leaves dynamic reach its draws as a whole pipeline's baked ones
+/// do, in one command buffer where each draw changes one of them: cull mode and front face (the
+/// world inside out if the front face were wrong), a change of the depth write alone, stencil one-
+/// and two-sided, constant and slope-scaled depth bias. Every pipeline is linked.
+#[test]
+fn linked_pipelines_draw_cull_depth_stencil_and_bias_as_direct3d_9_does() {
+    let Some(mut g) = Gpu::new(32, 1) else { return };
+    if !has_libraries(&mut g) {
+        return;
+    }
+    let want = dynamic_state_scene(&mut g);
+    check_scene(&mut g, &want);
+    let report = g.b.device().and_then(|d| d.pipeline_library_report());
+    let report = report.expect("a report where pipelines are linked");
+    assert!(report.contains("made whole: 0"), "{report}");
+}
+
+/// `NV_WGPU_LIBRARIES=off` on a device that links from libraries: no libraries (no report), and
+/// the same scene drawn by whole pipelines as Direct3D 9 draws it.
+#[test]
+fn the_libraries_switch_off_makes_every_pipeline_whole() {
+    {
+        let Some(mut g) = Gpu::new(32, 1) else { return };
+        if !has_libraries(&mut g) {
+            return;
+        }
+    }
+    let Some(mut g) = Gpu::with_env(32, 1, &[("NV_WGPU_LIBRARIES", "off")]) else {
+        return;
+    };
+    let d = g.b.device().expect("the device");
+    assert!(!d.uses_pipeline_libraries(), "switched off");
+    assert_eq!(d.pipeline_library_report(), None);
+    let want = dynamic_state_scene(&mut g);
+    check_scene(&mut g, &want);
+}
+
+/// A library the driver refuses leaves its pipelines to the whole path on a device that links
+/// (the test hook `NV_WGPU_LIBRARIES_TEST_REFUSE` refuses every pixel shader library): every
+/// pipeline made whole, with the independent-sets layout the linked ones are bound with, and the
+/// scene's pixels exactly the linked run's.
+#[test]
+fn a_refused_library_leaves_its_pipelines_whole_with_the_same_pixels() {
+    let linked = {
+        let Some(mut g) = Gpu::new(32, 1) else { return };
+        if !has_libraries(&mut g) {
+            return;
+        }
+        dynamic_state_scene(&mut g);
+        g.pixels()
+    };
+    let refuse = [("NV_WGPU_LIBRARIES_TEST_REFUSE", "pixel-shader")];
+    let Some(mut g) = Gpu::with_env(32, 1, &refuse) else {
+        return;
+    };
+    let want = dynamic_state_scene(&mut g);
+    check_scene(&mut g, &want);
+    let report = g.b.device().and_then(|d| d.pipeline_library_report());
+    let report = report.expect("a report: the device still has libraries");
+    assert!(
+        report.contains("pipelines linked from libraries that existed: 0 ")
+            && report.contains("after making a library: 0 ")
+            && !report.contains("made whole: 0"),
+        "every pipeline whole: {report}"
+    );
+    assert_eq!(
+        g.pixels(),
+        linked,
+        "the whole path draws the linked path's pixels"
+    );
 }

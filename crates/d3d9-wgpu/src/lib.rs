@@ -14,6 +14,7 @@
 //! - `window`: the game's window: the swap chain at the window's size, minimised, sized or lost.
 //! - `shot`: `NV_SHOT` captures numbered like the forwarding layer's.
 
+mod ahead;
 mod answers;
 mod cache;
 pub mod device;
@@ -35,6 +36,7 @@ pub fn save_pipeline_caches() {
 pub use answers::{Answer, QueryAnswers};
 use d3d9_stream::{Backend, Cmd, Data, Handle, Reply};
 pub use device::{hardware_adapter, Output};
+pub use window::window_changed;
 
 /// The Direct3D 9 calls carried out on wgpu.
 pub struct WgpuBackend {
