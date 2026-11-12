@@ -7,6 +7,12 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-12 (quick loot, a first slice)
+
+- **What:** the `[nv-rs Fixes]` row `bQuickLoot` (`crates/host/src/quick_loot.rs`, on in the fixes preset): after the crosshair pick (`0070bc20`) a looked-at container or corpse (target type 2; not locked, no script on the reference, no ash pile, not empty) gets its items, as ContainerMenu lists them, written under its name in the HUD's name tile (`HUDMainMenu +0xa8`), 7 lines, `>` the highlight, then the keys. Wheel (cleared so it doesn't zoom) and Up/Down move it; a tap of Activate takes the stack; a 0.45 s hold opens the original menu through the original Activate; X takes all (a key bound to a control is left to it). The player's one Activate from a press seen there is not passed on (`00573170`). Taking follows `TakeAllFn`/`ItemSelectCallback` (dropper rule, `RemoveItem` slot `+0x17c`, sounds), stealing as `00704ed0` decides, `StealAlarm` with `GetStolenValue`'s rule.
+- **Why HUD text, not a list:** the HUD has no list widget, and a list needs the game's own menu XML (ListBox templates), which nv-rs must not change. A real popup (FO4-like) is the next step if Patrick wants it: a menu of nv-rs's own built from the game's tiles.
+- **Not run here:** the game. Unknown until then: how the multi-line text sits in the HUD's prompt (the name tile's width and wrap), the swallow of the player's Activate, the steal reaction. **Next action:** Patrick: a footlocker, a desk owned by someone (stealing), a raider corpse, a locked safe (lockpick as before), a scripted container (original menu).
+
 ### Claude, 2026-11-12 (the field of view slider sets the arms and weapon too)
 
 - **What:** Patrick asked for the first-person view (arms and weapon) to follow the slider. Both sliders (the game's Settings, Display, and Settings.cmd) now set `fDefaultWorldFOV` (`0120315c`) and `fDefault1stPersonFOV` (`01203168`, `[Display]` in Fallout.ini, the same collection) to one number; the game's Defaults puts both to 75. Live: `0095de30` steers `f1stPersonFOV` to `fDefault1stPersonFOV` on the same path as the world's each frame of play (not in the vanity camera), and the first-person pass hands `f1stPersonFOV` to its camera as it draws (`00874900`). Settings.cmd writes both keys when moved, and any save makes a first-person value that differs from the world's equal to it; Play.exe's `FOV=` line writes both. `fPipboy1stPersonFOV` is left alone.

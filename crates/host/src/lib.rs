@@ -33,6 +33,7 @@ pub mod patch_data;
 pub mod perk_every_level;
 pub mod phys_blend;
 pub mod player_move;
+pub mod quick_loot;
 pub mod save_out;
 pub mod thread_races;
 pub mod topic_index;

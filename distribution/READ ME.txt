@@ -83,6 +83,30 @@ Prompt: set NV_MOUSE_LOOK=hold, then Play.exe), the mouse pointer stays free and
 while the right mouse button is held, which then doesn't aim. This is not how the original plays.
 
 
+Quick loot
+----------
+Look at a container or a body and its items are listed under its name, in the game's own prompt (up
+to seven lines; "(n more)" when there are more). The game goes on while the list shows: it goes away
+when you look elsewhere, step out of reach or open any menu. The mouse wheel, or the Up and Down
+arrow keys, move the marked line (the wheel doesn't zoom the camera while the list shows).
+
+Press your Activate key (E unless you changed it) to take the marked item, the whole stack. Press X
+to take everything. Hold Activate for about half a second to open the game's own container menu, as
+the original does, for anything the list doesn't do. If you have bound X, or the arrow keys, to one
+of the game's controls, that control keeps them, and the list's last line shows only the keys that
+work.
+
+Taking follows the game's own rules: from a container someone owns, items are taken as stolen and
+anyone who sees it reacts, as when you take them in the container menu. Locked containers,
+containers and bodies with a script of their own (quest ones, often), ash piles and empty ones open
+as in the original, and items lying on the ground, pickpocketing and companions are as in the
+original too. Taking from the list does not play a container's lid animation.
+
+Quick loot comes with the fixes: with Vanilla (Settings.cmd, Game fixes), Activate opens containers
+as the original does. To keep the other fixes without it, find the line ;bQuickLoot=1 in
+Fallout.ini's [nv-rs Fixes] section and make it bQuickLoot=0 (without the ;).
+
+
 Bug fixes
 ---------
 Bug fixes are on by default. With them, the frame rate isn't held to the original's limit, the game's

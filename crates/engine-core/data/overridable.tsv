@@ -34,6 +34,7 @@
 00525a90	0	JIP
 00525b20	3	yUI
 005702e0	0	ITR
+00573170	2	nv-rs quick loot
 00583560	2	nv-rs cell offsets for every plugin, nv-rs no distant water under the Strip
 005854f0	1	nv-rs cell offsets for every plugin
 0058e9d0	1	JIP
@@ -71,6 +72,7 @@
 0066e440	0	nv-rs causes keep no witness lists
 0068f320	1	ITR
 007052f0	0	xNVSE
+0070bc20	1	nv-rs quick loot
 0071d0a0	1	nv-rs thread races
 0077a480	0	JIP
 007838a0	1	nv-rs mod fit worn question

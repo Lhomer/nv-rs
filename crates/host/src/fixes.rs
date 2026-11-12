@@ -54,6 +54,7 @@ pub static FIXES: &[Fix] = &[
     crate::cell_entry_wait::FIX,
     crate::perk_every_level::FIX,
     crate::fov_slider::FIX,
+    crate::quick_loot::FIX,
     crate::cell_offsets::FIX,
     VATS_LAG,
     ACTOR_CAUSE_WITNESSES,
