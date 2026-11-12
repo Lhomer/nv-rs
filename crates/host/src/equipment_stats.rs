@@ -52,6 +52,7 @@
 use crate::fixes::Fix;
 use crate::menu_tiles::{child, is_child, read_xml, set_text, set_value, set_visible, trait_value};
 use engine::prelude::*;
+use engine::units::bsmenu::tile::fn_00a01440;
 use engine::units::fallout_interface::interface_p2::interface_populate_item_stats_display;
 use engine::units::fallout_interface::interfacemanager_p2::fn_00719790;
 use std::sync::Mutex;
@@ -79,6 +80,12 @@ const CELL_DT: usize = 12;
 pub const MOST_EQUIPPED: usize = 2;
 /// The space between the stats and the equipped lines.
 const GAP: f32 = 4.0;
+/// A line of the lines' font (font 3) when the text has not been drawn yet, and the room kept
+/// above the screen's bottom.
+const LINE_HEIGHT: f32 = 24.0;
+const SCREEN_MARGIN: f32 = 8.0;
+/// `InterfaceManager::GetScreenHeight` (the interface's units).
+const SCREEN_HEIGHT: u32 = 0x0071_5da0;
 
 // The game's words.
 const PLAYER: u32 = 0x011d_ea3c;
@@ -91,6 +98,7 @@ const TRAIT_LOCUS: i32 = 0xfa8;
 const TRAIT_HEIGHT: i32 = 0xfb0;
 const TRAIT_WIDTH: i32 = 0xfb1;
 const TRAIT_WRAP_WIDTH: i32 = 0xfba;
+const TRAIT_DEPTH: i32 = 0xfad;
 /// The cells' title and value trait names (`"_title"`-like user traits, as the menus use them).
 const TITLE_NAME: u32 = 0x0106_ed20;
 const VALUE_NAME: u32 = 0x0106_ed18;
@@ -618,22 +626,117 @@ fn show_lines(e: &mut Engine, display: u32, lines: &[Vec<u8>]) {
         text.extend_from_slice(line);
     }
     set_text(e, tile, crate::menu_tiles::TRAIT_STRING, &text);
-    let height = trait_value(e, display, TRAIT_HEIGHT).unwrap_or(0.0);
-    let width = trait_value(e, display, TRAIT_WIDTH).unwrap_or(0.0);
-    let locus = trait_value(e, display, TRAIT_LOCUS).unwrap_or(0.0) != 0.0;
-    let (x, y) = if locus {
-        (0.0, height + GAP)
-    } else {
-        let x = trait_value(e, display, TRAIT_X).unwrap_or(0.0);
-        let y = trait_value(e, display, TRAIT_Y).unwrap_or(0.0);
-        (x, y + height + GAP)
-    };
-    set_value(e, tile, TRAIT_X, x.round());
-    set_value(e, tile, TRAIT_Y, y.round());
-    if width > 0.0 {
-        set_value(e, tile, TRAIT_WRAP_WIDTH, width.round());
+    // The shown cells, where they are (the cells and this tile are the display's children, so
+    // their x and y are in one frame), and how deep.
+    let mut boxes = Vec::new();
+    let mut depth = None::<f32>;
+    for cell in cells(e, display) {
+        if cell == 0
+            || e.call(TILE_GET_FLOAT, &args![cell, TRAIT_VISIBLE as u32])
+                .f32()
+                == 0.0
+        {
+            continue;
+        }
+        let x = trait_value(e, cell, TRAIT_X).unwrap_or(0.0);
+        let y = trait_value(e, cell, TRAIT_Y).unwrap_or(0.0);
+        let width = trait_value(e, cell, TRAIT_WIDTH).unwrap_or(0.0);
+        let height = trait_value(e, cell, TRAIT_HEIGHT).unwrap_or(0.0);
+        boxes.push(CellBox {
+            x,
+            y,
+            width,
+            height,
+        });
+        if let Some(cell_depth) = trait_value(e, cell, TRAIT_DEPTH) {
+            depth = Some(depth.map_or(cell_depth, |d: f32| d.max(cell_depth)));
+        }
+    }
+    // The text's height from its last drawing, else a line of the font a line.
+    let text_height = trait_value(e, tile, TRAIT_HEIGHT)
+        .filter(|&h| h > 0.0)
+        .unwrap_or(LINE_HEIGHT * lines.len() as f32);
+    // Where this tile's frame is on the screen: its place there less its own y.
+    let own_y = trait_value(e, tile, TRAIT_Y).unwrap_or(0.0);
+    let frame_top = fn_00a01440(e, Ptr::new(tile)) - own_y;
+    let screen_height = e.call(SCREEN_HEIGHT, &args![]).f64() as f32;
+    let placed = place_lines(&boxes, text_height, frame_top, screen_height).unwrap_or_else(|| {
+        // No shown cell: under the display, as its height says.
+        let height = trait_value(e, display, TRAIT_HEIGHT).unwrap_or(0.0);
+        let width = trait_value(e, display, TRAIT_WIDTH).unwrap_or(0.0);
+        let locus = trait_value(e, display, TRAIT_LOCUS).unwrap_or(0.0) != 0.0;
+        if locus {
+            Placement {
+                x: 0.0,
+                y: height + GAP,
+                wrap: width,
+            }
+        } else {
+            let x = trait_value(e, display, TRAIT_X).unwrap_or(0.0);
+            let y = trait_value(e, display, TRAIT_Y).unwrap_or(0.0);
+            Placement {
+                x,
+                y: y + height + GAP,
+                wrap: width,
+            }
+        }
+    });
+    set_value(e, tile, TRAIT_X, placed.x.round());
+    set_value(e, tile, TRAIT_Y, placed.y.round());
+    if placed.wrap > 0.0 {
+        set_value(e, tile, TRAIT_WRAP_WIDTH, placed.wrap.round());
+    }
+    if let Some(depth) = depth {
+        set_value(e, tile, TRAIT_DEPTH, depth);
     }
     set_visible(e, tile, true);
+}
+
+/// A shown cell of the display: its place and size in the display's children's frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CellBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Where the equipped lines go, in the same frame: their x, y and wrap width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    pub x: f32,
+    pub y: f32,
+    pub wrap: f32,
+}
+
+/// The equipped lines' place: under the lowest shown cell, as wide as the cells; above the
+/// highest when under would run past the screen's bottom (`frame_top` is where the frame is on
+/// the screen). Placing them by the shown cells, not by the display's height (which in the
+/// container and barter menus can reach past the cells, down to or below the frame's and the
+/// screen's bottom), keeps them by the stats in every menu. `None` without shown cells.
+pub fn place_lines(
+    cells: &[CellBox],
+    text_height: f32,
+    frame_top: f32,
+    screen_height: f32,
+) -> Option<Placement> {
+    let left = cells.iter().map(|c| c.x).reduce(f32::min)?;
+    let right = cells.iter().map(|c| c.x + c.width).reduce(f32::max)?;
+    let top = cells.iter().map(|c| c.y).reduce(f32::min)?;
+    let bottom = cells.iter().map(|c| c.y + c.height).reduce(f32::max)?;
+    let below = bottom + GAP;
+    let fits_below =
+        screen_height <= 0.0 || frame_top + below + text_height <= screen_height - SCREEN_MARGIN;
+    let y = if fits_below {
+        below
+    } else {
+        top - GAP - text_height
+    };
+    Some(Placement {
+        x: left,
+        y,
+        wrap: (right - left).max(0.0),
+    })
 }
 
 fn remember(s: &mut State, display: u32, tile: u32) {
@@ -949,5 +1052,47 @@ mod tests {
         assert_eq!(own_text(b"15", None, b"/20"), b"15");
         // Never to nothing.
         assert_eq!(own_text(b"/20", None, b"/20"), b"/20");
+    }
+
+    fn cell(x: f32, y: f32, width: f32, height: f32) -> CellBox {
+        CellBox {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// The Pip-Boy's card: room under the stats, the lines go under the lowest shown cell, as wide
+    /// as the cells.
+    #[test]
+    fn in_the_pipboy_the_lines_go_under_the_stats() {
+        let cells = [
+            cell(0.0, 30.0, 80.0, 24.0),
+            cell(90.0, 30.0, 80.0, 24.0),
+            cell(0.0, 60.0, 170.0, 24.0),
+        ];
+        let placed = place_lines(&cells, 24.0, 600.0, 960.0).unwrap();
+        assert_eq!(placed.y, 84.0 + GAP);
+        assert_eq!((placed.x, placed.wrap), (0.0, 170.0));
+    }
+
+    /// A compact container or barter card near the bottom of the screen, whose display reaches
+    /// past its cells: the lines come right under the cells, not under the display's height; and
+    /// when even that would run past the screen they go above the stats.
+    #[test]
+    fn in_loot_and_barter_the_lines_stay_on_the_screen() {
+        let cells = [cell(10.0, 20.0, 60.0, 20.0), cell(80.0, 44.0, 60.0, 20.0)];
+        // The card's frame at 840 of 960: 840 + 68 + 22 fits.
+        let placed = place_lines(&cells, 22.0, 840.0, 960.0).unwrap();
+        assert_eq!(placed.y, 64.0 + GAP);
+        assert!(840.0 + placed.y + 22.0 <= 960.0);
+        // At 880 it would not: above the highest shown cell.
+        let placed = place_lines(&cells, 22.0, 880.0, 960.0).unwrap();
+        assert_eq!(placed.y, 20.0 - GAP - 22.0);
+        assert!(placed.y + 22.0 <= 20.0, "not over the stats");
+        assert_eq!((placed.x, placed.wrap), (10.0, 130.0));
+        // No shown cells: no place from them.
+        assert!(place_lines(&[], 22.0, 0.0, 960.0).is_none());
     }
 }
