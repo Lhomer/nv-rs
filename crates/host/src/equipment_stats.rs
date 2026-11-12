@@ -6,7 +6,8 @@
 //!
 //! **The item stats display.** The inventory, container (looting, pickpocketing, companions) and
 //! barter menus show the highlighted item's stats with `Interface::PopulateItemStatsDisplay`
-//! (`00707e30`): the display tile's first 13 children are its cells (0 DR, 1 DPS, 2 WG, 3 VAL,
+//! (`00707e30`): the display tile's 13 cells, its children in menu-file order (taken from the
+//! list's tail; [`cells`]), are (0 DR, 1 DPS, 2 WG, 3 VAL,
 //! 4 CND, 5 ammo or armour type, 6 effects, 7..9 mods, 10 STR, 11 DAM, 12 DT), each with a title
 //! and a value (the user traits `0106ed20` and `0106ed18`). Every frame the menu's `DoIdle` hands
 //! two of them to `00719790`, which fades one in while the other fades out, in the same place:
@@ -24,6 +25,15 @@
 //! next item has only one of the two ([`populate`]). The status line's pair has no room for a
 //! second box, so its second box (DT) shows both, "DT/DR 15/20" ([`combine`]), and the first is
 //! hidden.
+//!
+//! Only the inventory's own status boxes (`InventoryMenu +0x30` and `+0x7c`) are ever combined, and
+//! a combined box is built each time from its own text, with what was added before taken off
+//! ([`own_text`]): it cannot grow. The first build (1a85202) read the cells from the head of the
+//! children list, not from the tail as the game does, so the card's DAM and DPS were not
+//! recognised as cells and were combined instead; with one remembered box for two pairs a frame,
+//! each frame added once more ("DPS/DAM/DAM/DAM...", Patrick's screenshot), and the equipped
+//! weapon's line read WG where DAM and DPS are. A pair that is neither the cells nor the status
+//! boxes is left to the game's own fade.
 //!
 //! **The equipped item beside it.** When the display is filled for a weapon or a piece of armour,
 //! the player's equipped items that the highlighted one would replace ([`replaces`]) are found:
@@ -59,7 +69,7 @@ pub const FIX: Fix = Fix {
     install,
 };
 
-/// The cells of the display (its first 13 children): DR, DPS, STR, DAM, DT.
+/// The cells of the display (13 of its children, [`cells`]): DR, DPS, DAM, DT.
 const CELLS: usize = 13;
 const CELL_DR: usize = 0;
 const CELL_DPS: usize = 1;
@@ -86,10 +96,20 @@ const TITLE_NAME: u32 = 0x0106_ed20;
 const VALUE_NAME: u32 = 0x0106_ed18;
 const TILE_GET_STRING: u32 = 0x00a0_11f0;
 const TILE_SET_FLOAT: u32 = 0x00a0_12d0;
+/// `Tile::GetFloat` (`00a011b0`, 0.0 for a missing trait; every cell's visibility is set by
+/// `PopulateItemStatsDisplay`).
+const TILE_GET_FLOAT: u32 = 0x00a0_11b0;
 /// `Tile::TextToTrait` (`00a01860`).
 const TEXT_TO_TRAIT: u32 = 0x00a0_1860;
-/// `Tile::pParent`.
+/// `Tile::pParent`, the children list's tail (`Tile::xChildren` at `+4`, `m_pkTail` `+4` in it),
+/// and a list node's previous link.
 const PARENT: u32 = 0x28;
+const CHILDREN_TAIL: u32 = 0x08;
+const NODE_PREVIOUS: u32 = 0x04;
+/// `InventoryMenu::pMe` and its status line's DR and DT boxes.
+const INVENTORY_MENU: u32 = 0x011d_9ea4;
+const STATUS_DR: u32 = 0x30;
+const STATUS_DT: u32 = 0x7c;
 /// Items: the walk (`00575510`, `004ca330`, `004bf630`), an item's name (`004be2d0`), whether it
 /// is worn (`ItemChange::GetWorn`, `004bddd0`), its delete (`004459e0`), a form's type
 /// (`00401170`) and biped part (`TESBipedModelForm::GetFormAsBipedModel`, `00480db0`).
@@ -169,20 +189,14 @@ pub fn stacked_y(partner_y: f32, own_height: f32) -> f32 {
 
 // The game.
 
-/// A moved cell and the partner it sits above; and the status box shown combined, with what the
-/// game wrote into it and what was shown.
+/// A moved cell and the partner it sits above; the status box shown combined and the suffixes
+/// it was given (the title's and the value's, "/DR" and "/20"), which are taken off again before
+/// anything is added; and the equipped lines' tiles, by display.
 #[derive(Default)]
 struct State {
     moved: Vec<(u32, u32)>,
-    combined: Option<Combined>,
-    /// The equipped lines' tiles, by display.
+    combined: Vec<(u32, [Vec<u8>; 2])>,
     lines: Vec<(u32, u32)>,
-}
-
-struct Combined {
-    tile: u32,
-    raw: [Vec<u8>; 2],
-    shown: [Vec<u8>; 2],
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -223,15 +237,17 @@ fn parent_of(e: &Engine, tile: u32) -> u32 {
     }
 }
 
-/// The display's first 13 children (`Tile::xChildren`: the head at `+4`; a node's next at `+0`, its
-/// tile at `+8`).
+/// The display's 13 cells, as `PopulateItemStatsDisplay` takes them: from the tail of the children
+/// list (`Tile::xChildren` at `+4`, its tail at `+8`) along each node's previous link (`+4`; the
+/// item at `+8`), which is the order of the menu file (`Tile::SetParent` puts each new child at the
+/// head). A child added later (the equipped lines' tile) is at the head, after the cells.
 fn cells(e: &Engine, display: u32) -> [u32; CELLS] {
     let mut cells = [0u32; CELLS];
-    let mut node = e.mem.u32(display + 4);
+    let mut node = e.mem.u32(display + CHILDREN_TAIL);
     let mut index = 0;
     while node != 0 && index < CELLS {
         cells[index] = e.mem.u32(node + 8);
-        node = e.mem.u32(node);
+        node = e.mem.u32(node + NODE_PREVIOUS);
         index += 1;
     }
     cells
@@ -241,8 +257,19 @@ fn cells(e: &Engine, display: u32) -> [u32; CELLS] {
 /// tile and the level's clock alone; a pair of the display's cells is shown both, the second above
 /// the first; the status line's pair is shown combined in its second box.
 fn set_item_card(e: &mut Engine, first: u32, second: u32, third: u32, source: u32, which: u8) {
-    if first == 0 || second == 0 {
-        restore_combined(e, second);
+    let pair = if first == 0 || second == 0 {
+        Pair::None
+    } else if cell_pair(e, first, second) {
+        Pair::Cells
+    } else if status_pair(e, first, second) {
+        Pair::Status
+    } else {
+        Pair::Other
+    };
+    if matches!(pair, Pair::None | Pair::Other) {
+        if second != 0 {
+            restore_combined(e, second);
+        }
         fn_00719790(
             e,
             Ptr::new(first),
@@ -261,7 +288,7 @@ fn set_item_card(e: &mut Engine, first: u32, second: u32, third: u32, source: u3
         Ptr::new(source),
         which,
     );
-    if cell_pair(e, first, second) {
+    if pair == Pair::Cells {
         set_alpha(e, first, 255.0);
         set_alpha(e, second, 255.0);
         let partner_y = trait_value(e, first, TRAIT_Y).unwrap_or(0.0);
@@ -278,6 +305,23 @@ fn set_item_card(e: &mut Engine, first: u32, second: u32, third: u32, source: u3
     } else {
         show_combined(e, first, second);
     }
+}
+
+/// What `00719790` was given: no pair, a pair of the display's cells, the status line's pair, or
+/// a pair of neither (faded as the game fades it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pair {
+    None,
+    Cells,
+    Status,
+    Other,
+}
+
+/// Whether `first` and `second` are the inventory's status line DR and DT boxes (`InventoryMenu`
+/// `+0x30` and `+0x7c`): the only pair shown combined.
+fn status_pair(e: &Engine, first: u32, second: u32) -> bool {
+    let menu = e.global::<u32>(INVENTORY_MENU);
+    menu != 0 && first == e.mem.u32(menu + STATUS_DR) && second == e.mem.u32(menu + STATUS_DT)
 }
 
 /// A tile's alpha, written each frame as `00719790` writes it (`Tile::SetFloat`, flag 1).
@@ -312,50 +356,79 @@ pub fn is_cell_pair(first: Option<usize>, second: Option<usize>) -> bool {
     )
 }
 
-/// The status line's pair in its second box (module documentation).
+/// The status line's pair in its second box (module documentation): its own title and value, as
+/// the game wrote them (what an earlier call added taken off: [`own_text`]), then "/" and the
+/// other's. As often as it runs, the box reads "DT/DR 15/20", never "DT/DR/DR".
 fn show_combined(e: &mut Engine, first: u32, second: u32) {
     let (title_trait, value_trait) = title_value_traits(e);
-    let current = [
-        text_of(e, second, title_trait),
-        text_of(e, second, value_trait),
-    ];
-    let raw = with_state(|s| match &s.combined {
-        Some(c) if c.tile == second && c.shown == current => c.raw.clone(),
-        _ => current.clone(),
+    let added = with_state(|s| {
+        s.combined
+            .iter()
+            .find(|(tile, _)| *tile == second)
+            .map(|(_, added)| added.clone())
     });
-    let other_title = text_of(e, first, title_trait);
-    let other_value = text_of(e, first, value_trait);
-    let shown = combine(&raw[0], &raw[1], &other_title, &other_value);
-    set_text(e, second, title_trait, &shown[0]);
-    set_text(e, second, value_trait, &shown[1]);
+    let other = [
+        text_of(e, first, title_trait),
+        text_of(e, first, value_trait),
+    ];
+    let suffix = |text: &[u8]| {
+        let mut suffix = b"/".to_vec();
+        suffix.extend_from_slice(text);
+        suffix
+    };
+    let new = [suffix(&other[0]), suffix(&other[1])];
+    let mut shown = [Vec::new(), Vec::new()];
+    for (index, trait_id) in [title_trait, value_trait].into_iter().enumerate() {
+        let current = text_of(e, second, trait_id);
+        let earlier = added.as_ref().map(|added| added[index].as_slice());
+        let mut text = own_text(&current, earlier, &new[index]);
+        text.extend_from_slice(&new[index]);
+        set_text(e, second, trait_id, &text);
+        shown[index] = text;
+    }
     set_alpha(e, second, 255.0);
     set_alpha(e, first, 0.0);
-    with_state(|s| {
-        s.combined = Some(Combined {
-            tile: second,
-            raw,
-            shown,
-        })
-    });
+    with_state(
+        |s| match s.combined.iter_mut().find(|(tile, _)| *tile == second) {
+            Some(entry) => entry.1 = new,
+            None => s.combined.push((second, new)),
+        },
+    );
 }
 
-/// The status box back to what the game wrote, when its pair is over.
+/// A combined box's own text: `text` with what was added to it taken off its end, as often as it
+/// is there (`earlier`, the last suffix added, and `now`, the one about to be).
+pub fn own_text(text: &[u8], earlier: Option<&[u8]>, now: &[u8]) -> Vec<u8> {
+    let mut own = text.to_vec();
+    loop {
+        let before = own.len();
+        for suffix in earlier.into_iter().chain([now]) {
+            if !suffix.is_empty() && own.ends_with(suffix) && own.len() > suffix.len() {
+                own.truncate(own.len() - suffix.len());
+            }
+        }
+        if own.len() == before {
+            return own;
+        }
+    }
+}
+
+/// The status box back to its own text, when its pair is over.
 fn restore_combined(e: &mut Engine, second: u32) {
-    let combined = with_state(|s| match &s.combined {
-        Some(c) if c.tile == second && second != 0 => s.combined.take(),
-        _ => None,
+    let added = with_state(|s| {
+        let index = s.combined.iter().position(|(tile, _)| *tile == second)?;
+        Some(s.combined.remove(index).1)
     });
-    let Some(combined) = combined else {
+    let Some(added) = added else {
         return;
     };
     let (title_trait, value_trait) = title_value_traits(e);
-    let current = [
-        text_of(e, second, title_trait),
-        text_of(e, second, value_trait),
-    ];
-    if current == combined.shown {
-        set_text(e, second, title_trait, &combined.raw[0]);
-        set_text(e, second, value_trait, &combined.raw[1]);
+    for (index, trait_id) in [title_trait, value_trait].into_iter().enumerate() {
+        let current = text_of(e, second, trait_id);
+        let own = own_text(&current, Some(&added[index]), &[]);
+        if own != current {
+            set_text(e, second, trait_id, &own);
+        }
     }
 }
 
@@ -428,7 +501,11 @@ fn cell_stats(e: &mut Engine, display: u32, which: &[usize]) -> Vec<(Vec<u8>, Ve
     let mut stats = Vec::new();
     for &index in which {
         let cell = cells[index];
-        if cell == 0 || trait_value(e, cell, TRAIT_VISIBLE) == Some(0.0) {
+        if cell == 0
+            || e.call(TILE_GET_FLOAT, &args![cell, TRAIT_VISIBLE as u32])
+                .f32()
+                == 0.0
+        {
             continue;
         }
         let value = text_of(e, cell, value_trait);
@@ -715,22 +792,162 @@ mod tests {
         assert!(!is_cell_pair(None, None));
     }
 
-    #[test]
-    fn the_cells_are_the_displays_first_thirteen_children() {
-        let mut e = Engine::new();
-        e.mem.map(0x1000, 0x2000);
-        let display = 0x1000;
-        // 15 children: nodes at 0x1800 + 0x10 * i (next, _, tile).
-        e.mem.set_u32(display + 4, 0x1800);
-        for i in 0..15u32 {
-            let node = 0x1800 + 0x10 * i;
-            e.mem.set_u32(node, if i < 14 { node + 0x10 } else { 0 });
-            e.mem.set_u32(node + 8, 0x2000 + i);
+    /// A display as the menu file makes it: `cells` (in file order) and then `extra` children (the
+    /// condition meter, the equipped lines), each new child put at the head of the list
+    /// (`Tile::SetParent`). Nodes are (next, previous, tile) from `0x1800`; the list at
+    /// `display + 4` (head, tail).
+    fn display_with(e: &mut Engine, display: u32, tiles: &[u32]) {
+        let node_of = |i: usize| 0x1800 + 0x10 * i as u32;
+        // In the list, head first: the last child added first.
+        let order: Vec<u32> = tiles.iter().rev().copied().collect();
+        for (i, tile) in order.iter().enumerate() {
+            let node = node_of(i);
+            let next = if i + 1 < order.len() {
+                node_of(i + 1)
+            } else {
+                0
+            };
+            let previous = if i > 0 { node_of(i - 1) } else { 0 };
+            e.mem.set_u32(node, next);
+            e.mem.set_u32(node + 4, previous);
+            e.mem.set_u32(node + 8, *tile);
+            e.mem.set_u32(tile + PARENT, display);
         }
+        e.mem.set_u32(display + 4, node_of(0));
+        e.mem.set_u32(display + 8, node_of(order.len() - 1));
+    }
+
+    /// 13 cells at `0x2000 + 0x40 * i`, then the condition meter and an equipped lines' tile.
+    fn item_display(e: &mut Engine) -> (u32, Vec<u32>) {
+        e.mem.map(0x1000, 0x3000);
+        let display = 0x1000;
+        let mut tiles: Vec<u32> = (0..13u32).map(|i| 0x2000 + 0x40 * i).collect();
+        tiles.push(0x2400);
+        tiles.push(0x2440);
+        display_with(e, display, &tiles);
+        (display, tiles)
+    }
+
+    #[test]
+    fn the_cells_are_taken_as_the_game_takes_them() {
+        let mut e = Engine::new();
+        let (display, tiles) = item_display(&mut e);
         let found = cells(&e, display);
-        assert_eq!(found[CELL_DR], 0x2000);
-        assert_eq!(found[CELL_DPS], 0x2001);
-        assert_eq!(found[CELL_DAM], 0x200b);
-        assert_eq!(found[CELL_DT], 0x200c);
+        // From the tail along the previous links: the menu file's order, whatever was added after.
+        assert_eq!(found.to_vec(), tiles[..13].to_vec());
+        assert_eq!(found[CELL_DAM], tiles[11]);
+        assert_eq!(found[CELL_DPS], tiles[1]);
+        // The card's DAM and DPS (the menus' +0x60, +0x64) and DR, DT are cell pairs; the old reading
+        // from the head took them for something else and combined them ("DPS/DAM/DAM...").
+        assert!(cell_pair(&e, tiles[11], tiles[1]));
+        assert!(cell_pair(&e, tiles[0], tiles[12]));
+        assert!(!cell_pair(&e, tiles[2], tiles[3]));
+    }
+
+    #[test]
+    fn the_equipped_weapon_line_has_its_dam_and_dps() {
+        let (mut e, strings, _) = tile_engine();
+        let (display, tiles) = item_display(&mut e);
+        let (title, value) = (10_000u32, 10_001u32);
+        let cells_text = [
+            (0, "DR", "--"),
+            (1, "DPS", "36"),
+            (2, "WG", "3.00"),
+            (3, "VAL", "120"),
+            (11, "DAM", "18"),
+            (12, "DT", "6"),
+        ];
+        for (cell, t, v) in cells_text {
+            strings
+                .borrow_mut()
+                .insert((tiles[cell], title), t.as_bytes().to_vec());
+            strings
+                .borrow_mut()
+                .insert((tiles[cell], value), v.as_bytes().to_vec());
+        }
+        // DR hidden (an armour with DT only); every other cell shown.
+        e.register(TILE_GET_FLOAT, |e, a| {
+            let hidden = [0x2000u32];
+            let shown = !(a[1] == TRAIT_VISIBLE as u32 && hidden.contains(&a[0]));
+            let _ = e;
+            Ret {
+                st0: if shown { 1.0 } else { 0.0 },
+                ..Ret::default()
+            }
+        });
+        let stats = cell_stats(&mut e, display, &[CELL_DAM, CELL_DPS]);
+        assert_eq!(
+            equipped_line(b"Weathered 10mm Pistol", &stats),
+            b"Equipped: Weathered 10mm Pistol  DAM 18  DPS 36"
+        );
+        // Armour: the shown one of DR and DT, with its own title.
+        let stats = cell_stats(&mut e, display, &[CELL_DR, CELL_DT]);
+        assert_eq!(stats, [(b"DT".to_vec(), b"6".to_vec())]);
+    }
+
+    #[test]
+    fn only_the_inventorys_status_boxes_are_combined() {
+        let mut e = Engine::new();
+        let (_, tiles) = item_display(&mut e);
+        e.mem.map(0x011d_9000, 0x1000);
+        let menu = 0x2800;
+        e.mem.set_u32(INVENTORY_MENU, menu);
+        e.mem.set_u32(menu + STATUS_DR, 0x2900);
+        e.mem.set_u32(menu + STATUS_DT, 0x2940);
+        assert!(status_pair(&e, 0x2900, 0x2940));
+        // The card's DAM and DPS, or DR and DT, never.
+        assert!(!status_pair(&e, tiles[11], tiles[1]));
+        assert!(!status_pair(&e, tiles[0], tiles[12]));
+        // No inventory: nothing is.
+        e.mem.set_u32(INVENTORY_MENU, 0);
+        assert!(!status_pair(&e, 0x2900, 0x2940));
+    }
+
+    #[test]
+    fn a_combined_box_never_grows() {
+        let (mut e, strings, _) = tile_engine();
+        let (title, value) = (10_000u32, 10_001u32);
+        // The status line's DR and DT boxes, and a second pair handled in the same frame (as the
+        // inventory hands the card's pair and the status line's to the fade one after the other).
+        let boxes = [
+            (0x1100u32, "DR", "20"),
+            (0x1200, "DT", "15"),
+            (0x1300, "DAM", "24"),
+            (0x1400, "DPS", "192"),
+        ];
+        for (tile, t, v) in boxes {
+            strings
+                .borrow_mut()
+                .insert((tile, title), t.as_bytes().to_vec());
+            strings
+                .borrow_mut()
+                .insert((tile, value), v.as_bytes().to_vec());
+        }
+        for _frame in 0..6 {
+            show_combined(&mut e, 0x1100, 0x1200);
+            show_combined(&mut e, 0x1300, 0x1400);
+        }
+        assert_eq!(strings.borrow()[&(0x1200, title)], b"DT/DR");
+        assert_eq!(strings.borrow()[&(0x1200, value)], b"15/20");
+        assert_eq!(strings.borrow()[&(0x1400, title)], b"DPS/DAM");
+        // DR changes: its new value replaces the old, nothing piles up.
+        strings.borrow_mut().insert((0x1100, value), b"21".to_vec());
+        show_combined(&mut e, 0x1100, 0x1200);
+        assert_eq!(strings.borrow()[&(0x1200, value)], b"15/21");
+        restore_combined(&mut e, 0x1200);
+        assert_eq!(strings.borrow()[&(0x1200, value)], b"15");
+        assert_eq!(strings.borrow()[&(0x1200, title)], b"DT");
+        restore_combined(&mut e, 0x1400);
+        assert_eq!(strings.borrow()[&(0x1400, title)], b"DPS");
+        with_state(|s| *s = State::default());
+    }
+
+    #[test]
+    fn own_text_takes_off_what_was_added() {
+        assert_eq!(own_text(b"DPS/DAM/DAM/DAM", Some(b"/DAM"), b"/DAM"), b"DPS");
+        assert_eq!(own_text(b"15/20", Some(b"/20"), b"/21"), b"15");
+        assert_eq!(own_text(b"15", None, b"/20"), b"15");
+        // Never to nothing.
+        assert_eq!(own_text(b"/20", None, b"/20"), b"/20");
     }
 }
