@@ -170,6 +170,22 @@ the pickpocket menu shows it. To turn it off, make the line ;bPickpocketChance=1
 [nv-rs Fixes] section bPickpocketChance=0 (without the ;).
 
 
+Equipment stats
+---------------
+Where the game shows a weapon's or an armour's stats (the Pip-Boy's inventory, containers and
+bodies, pickpocketing, a companion's inventory, bartering), every stat shows at once instead of
+two of them fading into each other: DAM and DPS both (DPS on a line just above DAM), DR and DT both
+(DT above DR), and in the Pip-Boy's status line your DT and DR together in one box ("DT/DR 15/20").
+The Strength requirement still blinks when you are too weak for a weapon.
+
+Under the stats of a weapon or a piece of armour or clothing you don't wear, the item you have
+equipped in the same place shows with its numbers, for comparison: your weapon for a weapon, and
+for armour the piece you wear on the same part of the body (a hat against your hat, armour against
+your armour; a suit that covers more shows each piece it would replace, up to two). Nothing shows
+when that place is empty. To turn both off, make the line ;bEquipmentStats=1 in Fallout.ini's
+[nv-rs Fixes] section bEquipmentStats=0 (without the ;).
+
+
 Bug fixes
 ---------
 Bug fixes are on by default. With them, the frame rate isn't held to the original's limit, the game's

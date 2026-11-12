@@ -72,7 +72,9 @@
 0066e440	0	nv-rs causes keep no witness lists
 0068f320	1	ITR
 007052f0	0	xNVSE
+00707e30	2	nv-rs equipment stats
 0070bc20	1	nv-rs quick loot
+00719790	2	nv-rs equipment stats
 0071d0a0	1	nv-rs thread races
 0075eac0	1	nv-rs pickpocket chance
 007638b0	1	nv-rs compact text
