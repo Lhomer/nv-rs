@@ -111,10 +111,11 @@ Quick loot
 Look at a container or a body and a small panel shows to the right of the crosshair, above your
 weapon: its name, your weight against what you can carry ("Wg 265/401"), and its items, five lines
 at a time, each with the item's icon, its name and how many ("(13)"); a bar on the right shows where
-you are when there are more. The game goes on while the panel shows: it goes away when you look
-elsewhere, step out of reach or open any menu, and the game's own "Search" prompt is hidden while it
-is up. The mouse wheel, or the Up and Down arrow keys, move the marked line (the wheel doesn't zoom
-the camera while the panel shows).
+you are when there are more. The panel is mostly see-through, so you can see the world behind it;
+its words are white, and red when taking the items would be stealing. The game goes on while the
+panel shows: it goes away when you look elsewhere, step out of reach or open any menu, and the
+game's own "Search" prompt is hidden while it is up. The mouse wheel, or the Up and Down arrow keys,
+move the marked line (the wheel doesn't zoom the camera while the panel shows).
 
 The keys are on the panel's last line:
   E) Take       your Activate key (E unless you changed it) takes the marked item, the whole stack;
@@ -126,8 +127,8 @@ The keys are on the panel's last line:
 R is also Reload: while the panel shows, R opens the container and does not reload; look away and R
 reloads as usual. If you have made R your Activate key, Activate keeps it and Open moves to your
 Reload key (the panel shows which). If you have bound X, or the arrow keys, to one of the game's
-controls, that control keeps them, and the panel shows only the keys that work. Names show in gold,
-and Take reads Steal, when taking them is stealing.
+controls, that control keeps them, and the panel shows only the keys that work. When taking is
+stealing, the names show in red and Take reads Steal.
 
 Taking follows the game's own rules: from a container someone owns, items are taken as stolen and
 anyone who sees it reacts, as when you take them in the container menu. Locked containers,
@@ -138,6 +139,17 @@ original too. Taking from the list does not play a container's lid animation.
 Quick loot comes with the fixes: with Vanilla (Settings.cmd, Game fixes), Activate opens containers
 as the original does. To keep the other fixes without it, find the line ;bQuickLoot=1 in
 Fallout.ini's [nv-rs Fixes] section and make it bQuickLoot=0 (without the ;).
+
+
+Compact menus
+-------------
+The conversation, container, barter, inventory, repair and crafting menus use the game's smaller
+font instead of its large console-sized one, so their lists show more lines in the same space
+(more dialogue topics, more items when you trade or loot) and long names wrap less. The menus,
+their options, items, prices and keys are the same; the HUD and the rest of the Pip-Boy are as
+before. To go back to the large text, make the line ;bCompactMenus=1 in Fallout.ini's
+[nv-rs Fixes] section bCompactMenus=0 (without the ;); Vanilla (Settings.cmd, Game fixes) turns it
+off with the other changes.
 
 
 Bug fixes

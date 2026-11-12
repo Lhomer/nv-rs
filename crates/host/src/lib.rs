@@ -18,6 +18,7 @@
 
 pub mod cell_entry_wait;
 pub mod cell_offsets;
+pub mod compact_menus;
 pub mod direct_files;
 pub mod fixes;
 pub mod form_types;

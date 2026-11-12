@@ -14,7 +14,9 @@
 //! one), the highlighted line under a darker bar with a frame and a small square on its left, a
 //! scroll bar when there are more, a thin rule, and the keys: "E) Take" on the left, "X) Take All"
 //! in the middle (while X is free), "R) Open" on the right, each with the key the player's game
-//! really uses. The names are cyan, gold when taking them is stealing (and Take reads Steal then).
+//! really uses. The words are white, and the item names and Take red when taking them is stealing
+//! (Take reads Steal then); the frame, rules and highlight are cyan. The box is mostly see-through
+//! ([`BACK_ALPHA`]), so the world behind it shows.
 //!
 //! The panel is the game's own UI: menu XML ([`panel_xml`]) read by the game's reader
 //! (`Tile::ParseFile`, `BuildAndNameTree`, `ConnectTraitsToTree`: the steps of `Tile::ReadFile`
@@ -109,34 +111,43 @@ const REREAD_FRAMES: u32 = 30;
 // The panel's measures, in the interface's units (the screen is 960 high).
 
 /// The panel's width (its height is [`PANEL_HEIGHT`], under the footer).
-pub const PANEL_WIDTH: u32 = 560;
+pub const PANEL_WIDTH: u32 = 480;
 /// The panel's left edge right of the crosshair, and its top above the crosshair.
-const PANEL_RIGHT_OF_CROSSHAIR: f32 = 70.0;
-const PANEL_ABOVE_CROSSHAIR: f32 = 190.0;
+const PANEL_RIGHT_OF_CROSSHAIR: f32 = 60.0;
+const PANEL_ABOVE_CROSSHAIR: f32 = 160.0;
 /// The margin, the header rule's y, the first row's top and a row's height.
-const MARGIN: u32 = 14;
-const HEADER_RULE_Y: u32 = 40;
-const ROWS_TOP: u32 = 48;
-const ROW_HEIGHT: u32 = 34;
+const MARGIN: u32 = 12;
+const HEADER_RULE_Y: u32 = 34;
+const ROWS_TOP: u32 = 40;
+const ROW_HEIGHT: u32 = 29;
 /// The icon's box in a row (2:1, the shape of the game's inventory images) and the name's x.
-const ICON_X: u32 = 34;
+const ICON_X: u32 = 30;
 const ICON_Y: u32 = 3;
-const ICON_WIDTH: f32 = 56.0;
-const ICON_HEIGHT: f32 = 28.0;
-const NAME_X: u32 = 100;
+const ICON_WIDTH: f32 = 46.0;
+const ICON_HEIGHT: f32 = 23.0;
+const NAME_X: u32 = 84;
 /// The scroll bar's x, the footer rule's y and the footer's text y.
-const SCROLL_X: u32 = PANEL_WIDTH - 12;
-const FOOTER_RULE_Y: u32 = ROWS_TOP + ROWS as u32 * ROW_HEIGHT + 6;
-const FOOTER_Y: u32 = FOOTER_RULE_Y + 8;
+const SCROLL_X: u32 = PANEL_WIDTH - 10;
+const FOOTER_RULE_Y: u32 = ROWS_TOP + ROWS as u32 * ROW_HEIGHT + 5;
+const FOOTER_Y: u32 = FOOTER_RULE_Y + 6;
 /// The panel's height: the footer's line and a margin.
-pub const PANEL_HEIGHT: u32 = FOOTER_Y + ROW_HEIGHT;
+pub const PANEL_HEIGHT: u32 = FOOTER_Y + ROW_HEIGHT - 2;
 /// The longest row and header names, in characters (the font is monospaced): longer ones end
 /// in "...".
-pub const ROW_CHARACTERS: usize = 31;
-pub const HEADER_CHARACTERS: usize = 26;
-/// The colors: the Pip-Boy's cyan for the names and lines, gold for things taken as stolen.
+pub const ROW_CHARACTERS: usize = 27;
+pub const HEADER_CHARACTERS: usize = 22;
+/// The colors: white words, red ones for what taking would steal, the Pip-Boy's cyan for the
+/// frame, rules and highlight.
+const WHITE: [u8; 3] = [255, 255, 255];
+const RED: [u8; 3] = [255, 72, 64];
 const CYAN: [u8; 3] = [110, 215, 240];
-const GOLD: [u8; 3] = [240, 196, 80];
+/// How opaque the parts are (0 to 255): the box mostly see-through, the highlight's bar a little
+/// darker, the lines clear.
+pub const BACK_ALPHA: u32 = 72;
+const BAR_ALPHA: u32 = 60;
+const FRAME_ALPHA: u32 = 170;
+const RULE_ALPHA: u32 = 130;
+const HIGHLIGHT_ALPHA: u32 = 210;
 /// The game's font for all of it: font 3, `Glow_Monofonto_Medium`.
 const FONT: u32 = 3;
 
@@ -420,7 +431,7 @@ pub fn panel_xml(atlas: &str) -> String {
         format!(
             "<text name=\"{name}\"><x>{x}</x><y>{y}</y><font>{FONT}</font>\
              <red>{}</red><green>{}</green><blue>{}</blue><alpha>255</alpha></text>\n",
-            CYAN[0], CYAN[1], CYAN[2]
+            WHITE[0], WHITE[1], WHITE[2]
         )
     };
     let black = [0, 0, 0];
@@ -431,24 +442,64 @@ pub fn panel_xml(atlas: &str) -> String {
          <height>{height}</height><depth>8</depth><visible>0</visible>\n"
     );
     // The box: dark and see-through, a thin frame.
-    xml += &solid("nvrs_ql_back", 0, 0, width, height, black, 150);
-    xml += &solid("nvrs_ql_frame_top", 0, 0, width, 2, CYAN, 170);
-    xml += &solid("nvrs_ql_frame_bottom", 0, height - 2, width, 2, CYAN, 170);
-    xml += &solid("nvrs_ql_frame_left", 0, 0, 2, height, CYAN, 170);
-    xml += &solid("nvrs_ql_frame_right", width - 2, 0, 2, height, CYAN, 170);
+    xml += &solid("nvrs_ql_back", 0, 0, width, height, black, BACK_ALPHA);
+    xml += &solid("nvrs_ql_frame_top", 0, 0, width, 2, CYAN, FRAME_ALPHA);
+    xml += &solid(
+        "nvrs_ql_frame_bottom",
+        0,
+        height - 2,
+        width,
+        2,
+        CYAN,
+        FRAME_ALPHA,
+    );
+    xml += &solid("nvrs_ql_frame_left", 0, 0, 2, height, CYAN, FRAME_ALPHA);
+    xml += &solid(
+        "nvrs_ql_frame_right",
+        width - 2,
+        0,
+        2,
+        height,
+        CYAN,
+        FRAME_ALPHA,
+    );
     // The header: the name, the weight (placed from the right by code), the rule.
-    xml += &text("nvrs_ql_title", MARGIN, 7);
-    xml += &text("nvrs_ql_weight", width - MARGIN - 160, 7);
-    xml += &solid("nvrs_ql_rule", MARGIN, HEADER_RULE_Y, rule, 2, CYAN, 140);
+    xml += &text("nvrs_ql_title", MARGIN, 5);
+    xml += &text("nvrs_ql_weight", width - MARGIN - 140, 5);
+    xml += &solid(
+        "nvrs_ql_rule",
+        MARGIN,
+        HEADER_RULE_Y,
+        rule,
+        2,
+        CYAN,
+        RULE_ALPHA,
+    );
     // The highlight, moved to its row by code.
     xml += &format!(
         "<rect name=\"nvrs_ql_highlight\"><locus>1</locus><x>0</x><y>{ROWS_TOP}</y>\
          <width>{width}</width><height>{ROW_HEIGHT}</height><visible>0</visible>\n"
     );
-    xml += &solid("nvrs_ql_bar", 8, 1, bar, ROW_HEIGHT - 2, black, 120);
-    xml += &solid("nvrs_ql_bar_top", 8, 0, bar, 2, CYAN, 210);
-    xml += &solid("nvrs_ql_bar_bottom", 8, ROW_HEIGHT - 2, bar, 2, CYAN, 210);
-    xml += &solid("nvrs_ql_bar_left", 8, 0, 2, ROW_HEIGHT, CYAN, 210);
+    xml += &solid("nvrs_ql_bar", 8, 1, bar, ROW_HEIGHT - 2, black, BAR_ALPHA);
+    xml += &solid("nvrs_ql_bar_top", 8, 0, bar, 2, CYAN, HIGHLIGHT_ALPHA);
+    xml += &solid(
+        "nvrs_ql_bar_bottom",
+        8,
+        ROW_HEIGHT - 2,
+        bar,
+        2,
+        CYAN,
+        HIGHLIGHT_ALPHA,
+    );
+    xml += &solid(
+        "nvrs_ql_bar_left",
+        8,
+        0,
+        2,
+        ROW_HEIGHT,
+        CYAN,
+        HIGHLIGHT_ALPHA,
+    );
     xml += &solid(
         "nvrs_ql_bar_right",
         8 + bar - 2,
@@ -458,7 +509,7 @@ pub fn panel_xml(atlas: &str) -> String {
         CYAN,
         210,
     );
-    xml += &solid("nvrs_ql_marker", 16, ROW_HEIGHT / 2 - 5, 10, 10, CYAN, 255);
+    xml += &solid("nvrs_ql_marker", 15, ROW_HEIGHT / 2 - 4, 8, 8, CYAN, 255);
     xml += "</rect>\n";
     // The rows: an icon (fitted to its box by code) and a name.
     for row in 0..ROWS {
@@ -470,7 +521,7 @@ pub fn panel_xml(atlas: &str) -> String {
              <height>{}</height><zoom>100</zoom><alpha>0</alpha></image>\n",
             ICON_WIDTH as u32, ICON_HEIGHT as u32
         );
-        xml += &text(&format!("nvrs_ql_name{row}"), NAME_X, 3);
+        xml += &text(&format!("nvrs_ql_name{row}"), NAME_X, 2);
         xml += "</rect>\n";
     }
     // The scroll bar: its track and its thumb (sized and placed by code).
@@ -488,8 +539,8 @@ pub fn panel_xml(atlas: &str) -> String {
         140,
     );
     xml += &text("nvrs_ql_take", MARGIN, FOOTER_Y);
-    xml += &text("nvrs_ql_take_all", width / 2 - 70, FOOTER_Y);
-    xml += &text("nvrs_ql_open", width - MARGIN - 100, FOOTER_Y);
+    xml += &text("nvrs_ql_take_all", width / 2 - 60, FOOTER_Y);
+    xml += &text("nvrs_ql_open", width - MARGIN - 90, FOOTER_Y);
     xml += "</rect>\n";
     xml
 }
@@ -1426,7 +1477,7 @@ fn show(e: &mut Engine) {
             .collect();
         (view, rows, s.stealing)
     });
-    let color = if stealing { GOLD } else { CYAN };
+    let color = if stealing { RED } else { WHITE };
     set_text(e, panel.title, TRAIT_STRING, &view.title);
     set_text(e, panel.weight, TRAIT_STRING, &view.weight);
     place_from_right(e, panel.weight, (PANEL_WIDTH - MARGIN) as f32);
@@ -1463,6 +1514,7 @@ fn show(e: &mut Engine) {
     }
     let [take, take_all, open] = &view.footer;
     set_text(e, panel.take, TRAIT_STRING, take);
+    set_color(e, panel.take, color);
     set_text(e, panel.take_all, TRAIT_STRING, take_all);
     set_visible(e, panel.take_all, !take_all.is_empty());
     let width = trait_value(e, panel.take_all, TRAIT_WIDTH).unwrap_or(0.0);
@@ -1608,7 +1660,8 @@ mod tests {
         assert_eq!(label.len(), ROW_CHARACTERS);
         assert!(text(&label).ends_with("... (12)"), "{}", text(&label));
         let title = fit(b"A Very Long Footlocker Name Indeed", HEADER_CHARACTERS);
-        assert_eq!(text(&title), "A Very Long Footlocker...");
+        assert_eq!(title.len(), HEADER_CHARACTERS);
+        assert!(text(&title).starts_with("A Very Long Foot") && text(&title).ends_with("..."));
     }
 
     #[test]
@@ -1661,13 +1714,16 @@ mod tests {
 
     #[test]
     fn an_icon_fits_its_box_and_keeps_its_shape() {
-        // A 2:1 inventory image fills the box.
-        assert_eq!(icon_fit(256.0, 128.0), (21.875, 56.0, 28.0));
+        // A 2:1 inventory image fills the box (which is 2:1 too).
+        let (zoom, width, height) = icon_fit(256.0, 128.0);
+        assert_eq!((width, height), (ICON_WIDTH, ICON_HEIGHT));
+        assert_eq!(zoom, 100.0 * ICON_WIDTH / 256.0);
         // A square one fills its height.
-        assert_eq!(icon_fit(128.0, 128.0), (21.875, 28.0, 28.0));
+        let (_, width, height) = icon_fit(128.0, 128.0);
+        assert_eq!((width, height), (ICON_HEIGHT, ICON_HEIGHT));
         // A wide one fills its width.
         let (_, width, height) = icon_fit(512.0, 128.0);
-        assert_eq!((width, height), (56.0, 14.0));
+        assert_eq!((width, height), (ICON_WIDTH, (ICON_WIDTH / 4.0).round()));
     }
 
     #[test]
@@ -1699,6 +1755,22 @@ mod tests {
             }
         }
         assert!(xml.contains("<texatlas>Interface\\InterfaceShared.tai</texatlas>"));
+        // The box is mostly see-through (Patrick: "so I can somewhat see through it"), the words
+        // white.
+        const _: () = assert!(BACK_ALPHA <= 96);
+        assert!(xml.contains(&format!(
+            "name=\"nvrs_ql_back\"><filename>solid.dds</filename>\
+             <texatlas>Interface\\InterfaceShared.tai</texatlas><x>0</x><y>0</y>\
+             <width>{PANEL_WIDTH}</width><height>{PANEL_HEIGHT}</height><red>0</red><green>0</green>\
+             <blue>0</blue><alpha>{BACK_ALPHA}</alpha>"
+        )));
+        assert!(xml.contains("<text name=\"nvrs_ql_take\"><x>12</x><y>"));
+        assert_eq!(
+            xml.matches("<font>3</font><red>255</red><green>255</green><blue>255</blue>")
+                .count(),
+            xml.matches("<text ").count(),
+            "every text starts white"
+        );
         assert!(xml.contains(&format!("<font>{FONT}</font>")));
         // Balanced: every rect, image and text closes.
         for tag in ["rect", "image", "text"] {
