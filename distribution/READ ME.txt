@@ -152,6 +152,18 @@ before. To go back to the large text, make the line ;bCompactMenus=1 in Fallout.
 off with the other changes.
 
 
+Pickpocket chance
+-----------------
+When you pickpocket someone, the menu shows your chance of success on the right of their name's
+line, for the item you have marked: "Chance: 75%". It is the game's own number, the one it rolls
+against when you take or place that item: what you take is checked by its value (a stack you take
+whole, gold for instance, by the whole stack's value; with the quantity window open, by the number
+chosen there), and what you place on them by a fixed small value. It changes as you move through
+either list. 100% means the game makes no check for that item (one you own, for instance). Only
+the pickpocket menu shows it. To turn it off, make the line ;bPickpocketChance=1 in Fallout.ini's
+[nv-rs Fixes] section bPickpocketChance=0 (without the ;).
+
+
 Bug fixes
 ---------
 Bug fixes are on by default. With them, the frame rate isn't held to the original's limit, the game's

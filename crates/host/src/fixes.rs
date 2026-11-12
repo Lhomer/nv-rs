@@ -56,6 +56,7 @@ pub static FIXES: &[Fix] = &[
     crate::fov_slider::FIX,
     crate::quick_loot::FIX,
     crate::compact_menus::FIX,
+    crate::pickpocket_chance::FIX,
     crate::cell_offsets::FIX,
     VATS_LAG,
     ACTOR_CAUSE_WITNESSES,

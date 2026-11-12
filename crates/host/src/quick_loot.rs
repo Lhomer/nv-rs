@@ -76,11 +76,11 @@
 //! is.
 
 use crate::fixes::Fix;
-use engine::prelude::*;
-use engine::units::bsmenu::tile::{
-    fn_00a011b0, tile_build_and_name_tree, tile_connect_traits_to_tree, tile_get_child_by_name,
-    tile_get_value, tile_parse_file, BuildStorage,
+use crate::menu_tiles::{
+    child, is_child, place_from_right, read_xml, set_color, set_text, set_value, set_visible,
+    trait_value,
 };
+use engine::prelude::*;
 use engine::units::unplaced::run_0070bbe0::fn_0070bc20;
 use std::sync::Mutex;
 
@@ -170,29 +170,11 @@ const TRAIT_VISIBLE: i32 = 0xfa3;
 const TRAIT_ALPHA: i32 = 0xfa9;
 const TRAIT_HEIGHT: i32 = 0xfb0;
 const TRAIT_WIDTH: i32 = 0xfb1;
-const TRAIT_RED: i32 = 0xfb2;
-const TRAIT_GREEN: i32 = 0xfb3;
-const TRAIT_BLUE: i32 = 0xfb4;
 const TRAIT_ZOOM: i32 = 0xfb8;
 const TRAIT_STRING: i32 = 0xfc4;
 const TRAIT_FILENAME: i32 = 0xfcc;
 const TRAIT_FILE_WIDTH: i32 = 0xfcd;
 const TRAIT_FILE_HEIGHT: i32 = 0xfce;
-const TILE_GET_STRING: u32 = 0x00a0_11f0;
-const TILE_SET_FLOAT: u32 = 0x00a0_12d0;
-const TILE_SET_STRING: u32 = 0x00a0_1350;
-/// `Tile::ReadFile`'s other steps: `BuildStorage`'s destructor, the memory manager's free, the
-/// interface's lock (the owner's word, its section at `+0x80`), `Tile::UpdateChildren`, the
-/// reader's error flag and the thread's current-line word (13 while menu files are read).
-const BUILD_STORAGE_DESTROY: u32 = 0x00a0_ad40;
-const MEMORY_DEALLOCATE: u32 = 0x00aa_4060;
-const MEMORY_MANAGER: u32 = 0x011f_6238;
-const INTERFACE_LOCK_OWNER: u32 = 0x011f_4748;
-const ENTER_CRITICAL_SECTION: u32 = 0x00fd_f05c;
-const LEAVE_CRITICAL_SECTION: u32 = 0x00fd_f100;
-const TILE_UPDATE_CHILDREN: u32 = 0x00a0_4620;
-const XML_ERROR_FLAG: u32 = 0x011f_32c8;
-const TLS_CURRENT_LINE: u32 = 0x2b4;
 /// The interface's default texture atlas name (a `char *`), the one that holds `solid.dds`.
 const DEFAULT_ATLAS_NAME: u32 = 0x011f_336c;
 /// The interface's screen size (`InterfaceManager::GetScreenWidth`, `GetScreenHeight`).
@@ -1173,55 +1155,6 @@ fn key_name(e: &mut Engine, key: Option<u8>, fallback: &[u8]) -> Vec<u8> {
 
 // The panel's tiles.
 
-/// A float trait of `tile`, `None` when the tile has no such trait.
-fn trait_value(e: &mut Engine, tile: u32, id: i32) -> Option<f32> {
-    if tile == 0 || tile_get_value(e, Ptr::new(tile), id).is_null() {
-        None
-    } else {
-        Some(fn_00a011b0(e, Ptr::new(tile), id))
-    }
-}
-
-/// Sets a float trait of `tile` when it differs (a change makes the tile update).
-fn set_value(e: &mut Engine, tile: u32, id: i32, value: f32) {
-    if tile != 0 && trait_value(e, tile, id) != Some(value) {
-        e.call(TILE_SET_FLOAT, &args![tile, id as u32, value, 1u32]);
-    }
-}
-
-/// Sets the string trait `id` of `tile` when it differs.
-fn set_text(e: &mut Engine, tile: u32, id: i32, text: &[u8]) {
-    if tile == 0 {
-        return;
-    }
-    let current = e.call(TILE_GET_STRING, &args![tile, id as u32]).u32();
-    if current != 0 && e.mem.cstr(current) == text {
-        return;
-    }
-    e.with_stack(text.len() as u32 + 1, |e, buffer| {
-        e.mem.set_cstr(buffer.addr(), text);
-        e.call(TILE_SET_STRING, &args![tile, id as u32, buffer, 1u32]);
-    });
-}
-
-/// A tile's color.
-fn set_color(e: &mut Engine, tile: u32, color: [u8; 3]) {
-    set_value(e, tile, TRAIT_RED, f32::from(color[0]));
-    set_value(e, tile, TRAIT_GREEN, f32::from(color[1]));
-    set_value(e, tile, TRAIT_BLUE, f32::from(color[2]));
-}
-
-/// Shows or hides a tile.
-fn set_visible(e: &mut Engine, tile: u32, visible: bool) {
-    set_value(e, tile, TRAIT_VISIBLE, if visible { 1.0 } else { 0.0 });
-}
-
-/// Places a text tile so that it ends at `right` (its width is its text's, from its last update).
-fn place_from_right(e: &mut Engine, tile: u32, right: f32) {
-    let width = trait_value(e, tile, TRAIT_WIDTH).unwrap_or(0.0);
-    set_value(e, tile, TRAIT_X, (right - width).round());
-}
-
 /// The HUD and its menu tile, if the HUD is up.
 fn hud_menu_tile(e: &Engine) -> Option<(u32, u32)> {
     let hud = e.global::<u32>(HUD);
@@ -1230,24 +1163,6 @@ fn hud_menu_tile(e: &Engine) -> Option<(u32, u32)> {
     }
     let tile = e.mem.u32(hud + MENU_TILE);
     (tile != 0).then_some((hud, tile))
-}
-
-/// Whether `child` is one of `parent`'s children (`Tile::xChildren`, the list at `+4`: its head
-/// first; a node's next at `+0`, its tile at `+8`).
-fn is_child(e: &Engine, parent: u32, child: u32) -> bool {
-    if parent == 0 || child == 0 {
-        return false;
-    }
-    let mut node = e.mem.u32(parent + 4);
-    let mut steps = 0;
-    while node != 0 && steps < 4096 {
-        if e.mem.u32(node + 8) == child {
-            return true;
-        }
-        node = e.mem.u32(node);
-        steps += 1;
-    }
-    false
 }
 
 /// The panel, made under the HUD's menu tile the first time and again when the HUD was made anew.
@@ -1275,55 +1190,8 @@ fn build(e: &mut Engine, hud: u32, menu_tile: u32) -> Option<Panel> {
     }
     let atlas = String::from_utf8_lossy(&e.mem.cstr(atlas)).into_owned();
     let xml = panel_xml(&atlas).into_bytes();
-    const PATH: &[u8] = b"nv-rs quick loot panel";
-    let line_word = e.tls() + TLS_CURRENT_LINE;
-    let saved_line = e.mem.u32(line_word);
-    let size = xml.len() as u32 + PATH.len() as u32 + 2;
-    let root = e.with_stack(size, |e, buffer| {
-        let text = buffer.addr();
-        let path = text + xml.len() as u32 + 1;
-        e.mem.set_cstr(text, &xml);
-        e.mem.set_cstr(path, PATH);
-        e.mem.set_u32(line_word, 0xd);
-        e.set_global(XML_ERROR_FLAG, 0u8);
-        let storage = tile_parse_file(e, Ptr::new(path), Ptr::new(text), xml.len() as u32);
-        if e.global::<u8>(XML_ERROR_FLAG) != 0 || storage.is_null() {
-            return None;
-        }
-        let template = |e: &Engine| {
-            let current = e.get(storage, BuildStorage::pCurrentTemplate);
-            if current.is_null() {
-                e.get(storage, BuildStorage::pTemplate)
-            } else {
-                current
-            }
-        };
-        let tile = tile_build_and_name_tree(e, Ptr::new(menu_tile), template(e));
-        if e.global::<u8>(XML_ERROR_FLAG) != 0 || tile.is_null() {
-            return None;
-        }
-        tile_connect_traits_to_tree(e, tile, template(e));
-        if e.global::<u8>(XML_ERROR_FLAG) != 0 {
-            return None;
-        }
-        e.call(BUILD_STORAGE_DESTROY, &args![storage]);
-        e.call(MEMORY_DEALLOCATE, &args![MEMORY_MANAGER, storage]);
-        let lock = e.global::<u32>(INTERFACE_LOCK_OWNER) + 0x80;
-        e.call(ENTER_CRITICAL_SECTION, &args![lock]);
-        e.call(TILE_UPDATE_CHILDREN, &args![tile, 0u32]);
-        e.call(LEAVE_CRITICAL_SECTION, &args![lock]);
-        Some(tile.addr())
-    });
-    e.set_global(XML_ERROR_FLAG, 0u8);
-    e.mem.set_u32(line_word, saved_line);
-    let root = root?;
-    let find = |e: &mut Engine, name: &str| {
-        let name = format!("nvrs_ql_{name}");
-        e.with_stack(name.len() as u32 + 1, |e, buffer| {
-            e.mem.set_cstr(buffer.addr(), name.as_bytes());
-            tile_get_child_by_name(e, Ptr::new(root), buffer).addr()
-        })
-    };
+    let root = read_xml(e, menu_tile, &xml, b"nv-rs quick loot panel")?;
+    let find = |e: &mut Engine, name: &str| child(e, root, &format!("nvrs_ql_{name}"));
     let mut panel = Panel {
         hud,
         menu_tile,
