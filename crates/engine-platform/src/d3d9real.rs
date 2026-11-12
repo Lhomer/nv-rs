@@ -38,7 +38,7 @@
 //! game's x87 precision switch is modelled (`crate::direct3d_device_created`,
 //! from the game's own flags), and the backend's thread's floating-point state is not the game's.
 
-use crate::mouse_look::MouseLook;
+use crate::mouse_look::{absolute_to_pixels, should_recentre, MouseLook, RawMotion};
 use crate::Engine;
 use d3d9_stream::{Cmd, Data, Reply, Stream};
 use std::collections::{HashMap, HashSet};
@@ -51,8 +51,9 @@ use windows::Win32::UI::HiDpi::{
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::{
-    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT,
-    RAWINPUTDEVICE, RAWINPUTDEVICE_FLAGS, RAWINPUTHEADER, RID_INPUT, RIM_TYPEMOUSE,
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE,
+    MOUSE_VIRTUAL_DESKTOP, RAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICE_FLAGS, RAWINPUTHEADER,
+    RID_INPUT, RIM_TYPEMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -480,16 +481,67 @@ fn let_go_of_cursor() {
             let _ = ClipCursor(None);
             ShowCursor(true);
         }
+        RAW_MOTION.with(|m| m.borrow_mut().reset());
     }
 }
 
-/// The centre of the held client area, in screen coordinates: the cursor is put back there after
-/// each raw mouse motion, so it never rests on the area's edge (where it showed, playtest
-/// 2026-11-03). The motion the game reads comes from raw input, not the cursor's position.
+/// The centre of the held client area, in screen coordinates: the cursor is put back there once
+/// it strays half way to the area's edge ([`recentre`]), so it never rests on the edge (where it
+/// showed, playtest 2026-11-03). The motion the game reads comes from raw input, not the cursor's
+/// position.
 static CURSOR_CENTRE: [std::sync::atomic::AtomicI32; 2] = [
     std::sync::atomic::AtomicI32::new(0),
     std::sync::atomic::AtomicI32::new(0),
 ];
+
+/// Half the held client area's width and height, in pixels ([`recentre`]).
+static CURSOR_HALF: [std::sync::atomic::AtomicI32; 2] = [
+    std::sync::atomic::AtomicI32::new(0),
+    std::sync::atomic::AtomicI32::new(0),
+];
+
+thread_local! {
+    /// The raw mouse's absolute positions and the warps whose echo may still come
+    /// (`super::mouse_look`). Only the window thread, whose procedure reads raw input, uses it.
+    static RAW_MOTION: std::cell::RefCell<RawMotion> = std::cell::RefCell::new(RawMotion::default());
+}
+
+/// Puts the held cursor back at the client area's centre: always (`always`, as the window takes
+/// it), or once it has strayed half way to the edge (`mouse_look::should_recentre`). The warp is
+/// noted, so that its echo, on a PC whose Windows reports one as raw input, is not taken for the
+/// player's movement.
+fn recentre(always: bool) {
+    let centre = [
+        CURSOR_CENTRE[0].load(std::sync::atomic::Ordering::Relaxed),
+        CURSOR_CENTRE[1].load(std::sync::atomic::Ordering::Relaxed),
+    ];
+    let half = [
+        CURSOR_HALF[0].load(std::sync::atomic::Ordering::Relaxed),
+        CURSOR_HALF[1].load(std::sync::atomic::Ordering::Relaxed),
+    ];
+    let mut at = POINT::default();
+    if unsafe { GetCursorPos(&mut at) }.is_err() {
+        return;
+    }
+    let offset = [at.x - centre[0], at.y - centre[1]];
+    if offset == [0, 0] || !(always || should_recentre(offset, half)) {
+        return;
+    }
+    if unsafe { SetCursorPos(centre[0], centre[1]) }.is_ok() {
+        RAW_MOTION.with(|m| m.borrow_mut().warped([-offset[0], -offset[1]], centre));
+    }
+}
+
+/// Prints `line` once for each `printed` flag (what the raw mouse turned out to send, for a
+/// player's report).
+fn note_once(printed: &std::sync::atomic::AtomicBool, line: &str) {
+    if !printed.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("NV_D3D9={}: {line}", tag());
+    }
+}
+
+static ABSOLUTE_NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ECHO_NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the window holds the cursor (clipped to its client area, hidden over it).
 static CURSOR_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -580,14 +632,21 @@ fn hold_cursor(window: HWND) {
                 (screen.left + screen.right) / 2,
                 (screen.top + screen.bottom) / 2,
             ];
+            let half = [
+                (screen.right - screen.left) / 2,
+                (screen.bottom - screen.top) / 2,
+            ];
             for (slot, value) in CURSOR_CENTRE.iter().zip(centre) {
+                slot.store(value, std::sync::atomic::Ordering::Relaxed);
+            }
+            for (slot, value) in CURSOR_HALF.iter().zip(half) {
                 slot.store(value, std::sync::atomic::Ordering::Relaxed);
             }
             if !CURSOR_HELD.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 ShowCursor(false);
             }
             SetCursor(None);
-            let _ = SetCursorPos(centre[0], centre[1]);
+            recentre(true);
         }
     }
 }
@@ -606,9 +665,11 @@ fn register_raw_mouse(window: HWND) {
 }
 
 /// A raw input message (only while the window is in front: the device is registered without
-/// `RIDEV_INPUTSINK`): a mouse's relative motion is added to the frame's ([`MouseLook`] decides
-/// whether it reaches the game), and with the original's way the first one takes the cursor if
-/// the window has not taken it yet (`MouseLook::takes_on_motion`).
+/// `RIDEV_INPUTSINK`): a mouse's movement (relative, or the difference of absolute positions; not
+/// the echo of the window's own recentring: [`RawMotion`]) is added to the frame's ([`MouseLook`]
+/// decides whether it reaches the game), and with the original's way the first one takes the
+/// cursor if the window has not taken it yet (`MouseLook::takes_on_motion`). The held cursor is
+/// put back at the centre once it strays half way to the edge ([`recentre`]).
 fn raw_mouse(window: HWND, lparam: LPARAM) {
     let mut raw = RAWINPUT::default();
     let mut size = std::mem::size_of::<RAWINPUT>() as u32;
@@ -625,9 +686,45 @@ fn raw_mouse(window: HWND, lparam: LPARAM) {
         return;
     }
     let mouse = unsafe { raw.data.mouse };
-    if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 {
-        return;
-    }
+    // The movement: an absolute position becomes the movement since the device's last one, and a
+    // relative one that is the echo of the window's own recentring is left out
+    // (`super::mouse_look`, "The raw mouse's movement").
+    let delta = if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 {
+        note_once(
+            &ABSOLUTE_NOTED,
+            "the mouse reports absolute positions (raw input): their differences move the game's mouse",
+        );
+        let screen = unsafe {
+            if mouse.usFlags.0 & MOUSE_VIRTUAL_DESKTOP.0 != 0 {
+                [
+                    GetSystemMetrics(SM_XVIRTUALSCREEN),
+                    GetSystemMetrics(SM_YVIRTUALSCREEN),
+                    GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                    GetSystemMetrics(SM_CYVIRTUALSCREEN),
+                ]
+            } else {
+                [
+                    0,
+                    0,
+                    GetSystemMetrics(SM_CXSCREEN),
+                    GetSystemMetrics(SM_CYSCREEN),
+                ]
+            }
+        };
+        let at = absolute_to_pixels([mouse.lLastX, mouse.lLastY], screen);
+        RAW_MOTION.with(|m| m.borrow_mut().absolute(raw.header.hDevice.0 as isize, at))
+    } else {
+        match RAW_MOTION.with(|m| m.borrow_mut().relative([mouse.lLastX, mouse.lLastY])) {
+            Some(delta) => delta,
+            None => {
+                note_once(
+                    &ECHO_NOTED,
+                    "Windows reports the cursor's recentring as raw mouse movement: it is left out",
+                );
+                return;
+            }
+        }
+    };
     let look = MouseLook::asked();
     // Held already (nearly every message): no need to ask Windows about the buttons and the front.
     if !cursor_held()
@@ -639,13 +736,11 @@ fn raw_mouse(window: HWND, lparam: LPARAM) {
         return;
     }
     if let Ok(mut i) = input().lock() {
-        i.motion[0] += mouse.lLastX;
-        i.motion[1] += mouse.lLastY;
+        i.motion[0] += delta[0];
+        i.motion[1] += delta[1];
     }
     if cursor_held() {
-        let x = CURSOR_CENTRE[0].load(std::sync::atomic::Ordering::Relaxed);
-        let y = CURSOR_CENTRE[1].load(std::sync::atomic::Ordering::Relaxed);
-        let _ = unsafe { SetCursorPos(x, y) };
+        recentre(false);
     }
 }
 
