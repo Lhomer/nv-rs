@@ -53,8 +53,13 @@
 //! original's "Empty" line shows). A corpse (a dead actor: target type 2) is covered with its
 //! script: every reference of a scripted base form carries an `ExtraScript`
 //! (`TESObjectREFR::InitScript`, `00565730`), so the script test, which until 2026-11-12 stood for
-//! corpses too, left out nearly every corpse ([`eligible_target`]). Items on the ground, living
-//! actors (pickpocketing, target types 1, 7, 0xa, 0xb) and companions are the original's.
+//! corpses too, left out nearly every corpse ([`eligible_target`]). But not a corpse (or a
+//! container) whose Activate runs its script instead of the container menu: the game's own test,
+//! `TESObjectREFR::Activate`'s, is the reference's action bit 1 (the default activation), which a
+//! script with a `Begin OnActivate` block clears each time it runs; ED-E in Primm (examined to be
+//! repaired) is one, and keeps the original's examine. Nor a dead NPC `TESNPC::Activate` refuses
+//! (life state 4). Items on the ground, living actors (pickpocketing, target types 1, 7, 0xa, 0xb)
+//! and companions are the original's.
 //!
 //! **Taking, by the container menu's rules** (`ContainerMenu::TakeAllFn` `0075da60` and
 //! `ItemSelectCallback` `0075dc80`, which need the menu open, so their steps are made here): the
@@ -202,6 +207,10 @@ const IS_LOCKED: u32 = 0x0050_21a0;
 const EXTRA_LIST: u32 = 0x005d_43c0;
 const GET_EXTRA_DATA: u32 = 0x0041_0220;
 const EXTRA_SCRIPT: u32 = 0x0d;
+/// A reference's action bits (`00572d30`, `TESObjectREFR::ExtraAction`: bit 1 the default
+/// activation) and an actor's life state (`004f8960`, the word at `+0x108`).
+const HAS_ACTION: u32 = 0x0057_2d30;
+const LIFE_STATE: u32 = 0x004f_8960;
 /// The two ash pile base forms (their words), a reference's base form (`+0x20`).
 const ASH_PILES: [u32; 2] = [0x011c_a27c, 0x011c_a280];
 const BASE_FORM: u32 = 0x20;
@@ -772,19 +781,36 @@ pub struct Target {
     pub scripted: bool,
     /// Its listed stacks (`00575590`).
     pub items: i32,
+    /// Activate takes the default path (the container menu for a container or a corpse): action
+    /// bit 1 of the reference is set (`TESObjectREFR`'s `00572d30(1)`; `ExtraAction`, 1 when the
+    /// reference has none). A script with a `Begin OnActivate` block clears it each time it runs
+    /// (`Script::OnActivateFunction`, `005ca3f0`, clears actions 1 and 2), and Activate then runs
+    /// that script instead (`TESObjectREFR::Activate`, `00573170`): ED-E in Primm, whose damaged
+    /// body is examined to be repaired, and every corpse or container like it.
+    pub default_activation: bool,
+    /// An actor's life state (`+0x108`, `004f8960`); `TESNPC::Activate` (`00607990`) refuses a dead
+    /// target in state 4 (`00608d80`) instead of opening its container menu.
+    pub life_state: u32,
 }
 
+/// The life state `TESNPC::Activate` refuses a dead target in.
+pub const REFUSED_LIFE_STATE: u32 = 4;
+
 /// Whether quick loot takes from `target` (module documentation): a container or a corpse (target
-/// type 2), not an ash pile, not locked, with items; and, for a container that is not an actor, no
-/// script of its own. Every reference of a scripted base form gets an `ExtraScript`
-/// (`TESObjectREFR::InitScript`, `00565730`), so most corpses have one (their actor's script); a
-/// corpse is opened into its container menu all the same, and the script only stops a container.
+/// type 2), not an ash pile, not locked, with items, whose Activate takes the default path, the
+/// one that opens its container menu (`default_activation`; not a dead actor `TESNPC::Activate`
+/// refuses); and, for a container that is not an actor, no script of its own. Every reference of a
+/// scripted base form gets an `ExtraScript` (`TESObjectREFR::InitScript`, `00565730`), so most
+/// corpses have one (their actor's script) and are opened into their container menu all the same;
+/// a corpse whose script has a `Begin OnActivate` block (an examine, a repair, a message) is not.
 pub fn eligible_target(target: Target) -> bool {
     target.target_type == CONTAINER_OR_CORPSE
         && !target.ash_pile
         && !target.locked
         && (target.actor || !target.scripted)
         && target.items > 0
+        && target.default_activation
+        && !(target.actor && target.life_state == REFUSED_LIFE_STATE)
 }
 
 /// Whether `target` is a container or corpse quick loot takes from ([`eligible_target`]).
@@ -802,13 +828,20 @@ pub fn eligible(e: &mut Engine, target: u32) -> bool {
     }
     let lock = e.call(GET_LOCK, &args![target]).u32();
     let extra = e.call(EXTRA_LIST, &args![target]).u32();
+    let actor = e.vcall(target, IS_ACTOR_SLOT, &args![]).bool();
     eligible_target(Target {
         target_type,
-        actor: e.vcall(target, IS_ACTOR_SLOT, &args![]).bool(),
+        actor,
         ash_pile: ASH_PILES.iter().any(|&pile| e.global::<u32>(pile) == base),
         locked: lock != 0 && e.call(IS_LOCKED, &args![lock]).bool(),
         scripted: extra != 0 && e.call(GET_EXTRA_DATA, &args![extra, EXTRA_SCRIPT]).u32() != 0,
         items: e.call(ITEM_TOTAL, &args![target, 0u32, 0u32]).i32(),
+        default_activation: e.call(HAS_ACTION, &args![target, 1u32]).bool(),
+        life_state: if actor {
+            e.call(LIFE_STATE, &args![target]).u32()
+        } else {
+            0
+        },
     })
 }
 
@@ -1696,6 +1729,8 @@ mod tests {
             actor: true,
             scripted: true,
             items: 4,
+            default_activation: true,
+            life_state: 2,
             ..Target::default()
         };
         // The rule until 2026-11-12 turned a scripted reference away, actor or not: this corpse.
@@ -1726,6 +1761,47 @@ mod tests {
         assert!(!eligible_target(Target {
             ash_pile: true,
             ..corpse
+        }));
+    }
+
+    /// ED-E in Primm: a dead robot whose script's `Begin OnActivate` block (the examine and repair)
+    /// cleared its default activation. Activate runs that script, not the container menu: no
+    /// panel. The rule of ea30031 gave it one.
+    #[test]
+    fn a_corpse_whose_script_takes_activate_is_not_loot() {
+        let ede = Target {
+            target_type: CONTAINER_OR_CORPSE,
+            actor: true,
+            scripted: true,
+            items: 3,
+            default_activation: false,
+            life_state: 2,
+            ..Target::default()
+        };
+        assert!(!eligible_target(ede));
+        // The same corpse with a script that has no OnActivate block (an ordinary scripted NPC):
+        // Activate opens its container menu, the panel shows.
+        assert!(eligible_target(Target {
+            default_activation: true,
+            ..ede
+        }));
+        // An unscripted corpse (a raider): the panel.
+        assert!(eligible_target(Target {
+            scripted: false,
+            default_activation: true,
+            ..ede
+        }));
+        // A dead NPC TESNPC::Activate refuses (life state 4): no panel.
+        assert!(!eligible_target(Target {
+            default_activation: true,
+            life_state: REFUSED_LIFE_STATE,
+            ..ede
+        }));
+        // A container whose script takes Activate: no panel either.
+        assert!(!eligible_target(Target {
+            actor: false,
+            scripted: false,
+            ..ede
         }));
     }
 

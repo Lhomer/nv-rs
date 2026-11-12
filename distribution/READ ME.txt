@@ -132,8 +132,10 @@ Reload key (the panel shows which). If you have bound X, or the arrow keys, to o
 controls, that control keeps them, and the panel shows only the keys that work. When taking is
 stealing, the names show in red and Take reads Steal.
 
-Bodies get the panel too (until this build most of them didn't: a body whose character has a
-script was left to the game's own Search; now only a container with a script of its own is).
+Bodies get the panel too (a body whose character has a script was at first left to the game's own
+Search; now only a container with a script of its own is). A body or container you interact with
+rather than search keeps that interaction: examining ED-E in Primm to repair him, and the like,
+works as in the original, and no loot panel comes up for it.
 
 Taking follows the game's own rules: from a container someone owns, items are taken as stolen and
 anyone who sees it reacts, as when you take them in the container menu. Locked containers,
