@@ -14,7 +14,9 @@ Start
 -----
 1. Extract the whole ZIP to a folder of its own that is NOT inside Documents, AppData, Program Files
    or the game's folder. For example C:\Games\nv-rs. It doesn't need administrator rights.
-2. Double-click Play.exe.
+2. Double-click Launcher.exe. It looks for a newer build, then starts the game (Play.exe). From
+   then on, start nv-rs with Launcher.exe (see "Updates" below); Play.exe still starts the game
+   without looking.
 
 Windows will probably warn you, because the program is new and not signed. See "If Windows or your
 antivirus objects" below.
@@ -24,6 +26,7 @@ graphics card and sound device (about 20 seconds; a small window says what it is
 the game. Later starts take a moment. When your graphics card, drivers, monitors, sound device,
 Windows language or Windows version change, nv-rs notices and reads them again.
 
+  Launcher.exe           gets the newest build (when you agree), then starts the game
   Play.exe               the game
   Play with mods.cmd     the game with the mods in the mods folder (see mods\READ ME.txt)
   Settings.cmd           window or borderless, resolution, anti-aliasing, field of view, game fixes,
@@ -34,6 +37,26 @@ Windows language or Windows version change, nv-rs notices and reads them again.
 
 Use Exit Game in the game's menu to quit. Saves reach the disk within about 5 seconds of being made,
 so wait a moment after saving before you close the window with its X.
+
+
+Updates
+-------
+Launcher.exe keeps this folder up to date. Each time it starts it asks the project's GitHub page for
+the newest build of this version of nv-rs (no GitHub account is needed). When there is one, it says
+which and asks; Yes downloads it (about 33 MB), checks it against the checksum published with it,
+and puts the new programs in place of the old ones, then starts the game. No, no newer build, or no
+internet: the game you have starts as it is.
+
+An update replaces nv-rs's own files only: Play.exe, Launcher.exe, the app folder, the .cmd and
+settings files, this READ ME and the licences. The userdata folder is never touched: your saves,
+Fallout.ini and FalloutPrefs.ini (and with them your settings), logs, reports and the mods' play
+data stay exactly as they are, and so do the mods you put in the mods folder. A download that fails
+or doesn't match its checksum changes nothing, and if putting the new files in place fails part of
+the way, the old ones are put back, so the build you had still plays. Close the game before
+updating; Launcher.exe says so if it is running.
+
+So the ZIP is only needed once, for the first install (or to bring this folder, with its userdata,
+to another PC). BUILD.txt says which build you have.
 
 
 Your files

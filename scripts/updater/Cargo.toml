@@ -1,0 +1,14 @@
+[package]
+name = "updater"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-3.0-or-later"
+description = "The preview package's Launcher.exe: looks for a newer Play build on the package's GitHub Release, checks its SHA-256, puts it in place of the installed programs (never touching userdata), then starts Play.exe. Windows only; its update logic is tested everywhere."
+
+[[bin]]
+name = "Launcher"
+path = "src/main.rs"
+
+# Standalone tool, not part of the root workspace. No dependencies.
+[workspace]

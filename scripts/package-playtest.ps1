@@ -68,7 +68,7 @@ try {
         $env:CARGO_TARGET_DIR = $Target
         cargo build --release --locked -p nv-viewer
         if ($LASTEXITCODE) { throw 'The game program did not build.' }
-        foreach ($manifest in @('launcher', 'd3d9-capture', 'package-check')) {
+        foreach ($manifest in @('launcher', 'updater', 'd3d9-capture', 'package-check')) {
             cargo build --release --locked --manifest-path "scripts/$manifest/Cargo.toml"
             if ($LASTEXITCODE) { throw "$manifest did not build." }
         }
@@ -88,6 +88,9 @@ try {
     # Our own programs. app\FalloutNV.exe is nv-viewer under that name: NVIDIA's driver fixes and
     # Windows' per-program sound go by the name (docs/SOUND.md), and no link is needed.
     Copy-Item -LiteralPath (Join-Path $x64 'Play.exe') -Destination (Join-Path $stage 'Play.exe')
+    # Launcher.exe keeps the install up to date from the package's GitHub Release, then starts
+    # Play.exe (scripts/updater); it never touches userdata.
+    Copy-Item -LiteralPath (Join-Path $x64 'Launcher.exe') -Destination (Join-Path $stage 'Launcher.exe')
     Copy-Item -LiteralPath (Join-Path $x64 'nv-viewer.exe') -Destination (Join-Path $stage 'app/FalloutNV.exe')
     Copy-Item -LiteralPath (Join-Path $x64 'd3d9-capture.exe') -Destination (Join-Path $stage 'app/tools/d3d9-capture.exe')
     Copy-Item -LiteralPath (Join-Path $x86 'nvapi-capture.exe') -Destination (Join-Path $stage 'app/tools/nvapi-capture.exe')

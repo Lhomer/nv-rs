@@ -4,6 +4,11 @@ name: Play package
 # No game files exist here, so the package is a test build (-TestBuild) made without -Game: the
 # script skips package-check's scan for the game program's bytes and BUILD.txt says so. A release
 # package is still made by the maintainer with -Game (docs/MAINTAINING.md).
+#
+# On a claude/** branch a second job publishes the package as the branch's rolling prerelease,
+# tag play-<branch> (one release a branch, its files replaced by each successful build): the
+# package's Launcher.exe downloads it from there (public, no account; scripts/updater). That job
+# alone may write to the repository (contents: write, for the release); the build never can.
 on:
   push:
     branches: [main, 'claude/**']
@@ -47,6 +52,13 @@ jobs:
           $short = '${{ github.sha }}'.Substring(0, 7)
           "ARTIFACT=nvrs-play-$branch-$short" >> $env:GITHUB_ENV
           "PACKAGE_VERSION=ci-$branch-$short" >> $env:GITHUB_ENV
+          # The release this package's Launcher.exe updates from (the publish job's tag).
+          "NV_RS_UPDATE_REPO=${{ github.repository }}" >> $env:GITHUB_ENV
+          "NV_RS_UPDATE_TAG=play-$branch" >> $env:GITHUB_ENV
+      - name: Test the updater (Launcher.exe)
+        run: |
+          cargo test --locked --manifest-path scripts/updater/Cargo.toml
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build the package (scripts/package-playtest.ps1 -TestBuild, no game data)
         id: package
         run: |
@@ -59,6 +71,27 @@ jobs:
           name: ${{ env.ARTIFACT }}
           path: ${{ env.STAGE }}
           if-no-files-found: error
+      # The release's files, for the publish job: the ZIP under a name that stays the same from build
+      # to build, its SHA-256, BUILD.txt, and latest.txt (what Launcher.exe reads first: the commit,
+      # the version, the ZIP's name and size).
+      - name: Prepare the release files
+        if: ${{ startsWith(github.ref, 'refs/heads/claude/') }}
+        run: |
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Copy-Item -LiteralPath "dist/nv-rs-preview-$env:PACKAGE_VERSION-windows-x64-test.zip" -Destination release/nv-rs-play.zip
+          $hash = (Get-FileHash -LiteralPath release/nv-rs-play.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  nv-rs-play.zip" | Set-Content -LiteralPath release/nv-rs-play.zip.sha256 -Encoding ascii
+          Copy-Item -LiteralPath "$env:STAGE/BUILD.txt" -Destination release/BUILD.txt
+          $bytes = (Get-Item -LiteralPath release/nv-rs-play.zip).Length
+          @("commit=${{ github.sha }}", "version=$env:PACKAGE_VERSION", 'zip=nv-rs-play.zip', "bytes=$bytes", "sha256=$hash") |
+            Set-Content -LiteralPath release/latest.txt -Encoding ascii
+      - name: Upload the release files
+        if: ${{ startsWith(github.ref, 'refs/heads/claude/') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-files
+          path: release
+          if-no-files-found: error
       # If packaging stops after the programs were built (a check, a copy), the programs still come
       # out, under the same name, so a build can be tried.
       - name: Upload the programs alone (the package step failed)
@@ -70,3 +103,47 @@ jobs:
             target/release/Play.exe
             target/release/nv-viewer.exe
           if-no-files-found: ignore
+
+  # The branch's rolling prerelease (tag play-<branch>): created at the first build, then its title,
+  # notes and files replaced by each successful build of the branch. Never for main. The tag stays
+  # where it was first made; the title and notes name the build's commit.
+  publish:
+    name: publish
+    needs: package
+    if: ${{ startsWith(github.ref, 'refs/heads/claude/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-files
+          path: release
+      - name: Publish the rolling prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch="${GITHUB_REF_NAME//[^A-Za-z0-9._-]/-}"
+          tag="play-$branch"
+          short="${GITHUB_SHA:0:7}"
+          version="$(sed -n 's/^version=//p' release/latest.txt | tr -d '\r')"
+          title="nv-rs Play build: $GITHUB_REF_NAME ($short)"
+          notes="$(printf '%s\n' \
+            "The newest Windows play package of the branch \`$GITHUB_REF_NAME\`, replaced by each successful build. Launcher.exe in the package updates from here." \
+            "" \
+            "- Commit: $GITHUB_SHA ($short)" \
+            "- Version (BUILD.txt): $version" \
+            "- A test build, not for release: no game files are in it; you need your own Fallout: New Vegas 1.4.0.525." \
+            "" \
+            "Files: nv-rs-play.zip (the package), nv-rs-play.zip.sha256 (its SHA-256), BUILD.txt, latest.txt (what Launcher.exe reads).")"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "$title" --notes "$notes" --prerelease
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$title" --notes "$notes" --prerelease
+          fi
+          # The package first, latest.txt last: a launcher reads latest.txt, then fetches the rest.
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
+            release/nv-rs-play.zip release/nv-rs-play.zip.sha256 release/BUILD.txt
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber release/latest.txt

@@ -74,3 +74,15 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo clippy --locked --manifest-path scripts/launcher/Cargo.toml --all-targets -- -D warnings
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      # Launcher.exe (the updater) is its own workspace too: its update logic (the SHA-256 check,
+      # userdata never touched, all or nothing) is tested here as well as wherever it builds.
+      - name: Test the updater (Launcher.exe)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: |
+          cargo fmt --manifest-path scripts/updater/Cargo.toml -- --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path scripts/updater/Cargo.toml
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo clippy --locked --manifest-path scripts/updater/Cargo.toml --all-targets -- -D warnings
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
