@@ -450,6 +450,8 @@ const OWNER_SET_CALLBACK_B: u32 = 0x0086_cf00;
 const MENU_CALLBACK: u32 = 0x007d_69d0;
 /// `0076b610`: true when the word at `+8` of the object is 0.
 const ELEMENTS_MISSING: u32 = 0x0076_b610;
+/// `StartMenu::CreateMenuElements` ([`start_menu_create_menu_elements`]), called by address.
+const CREATE_MENU_ELEMENTS: u32 = 0x007c_c6e0;
 /// The path `"Data\Menus\Options\start_menu.xml"` and its source line.
 const START_MENU_XML: u32 = 0x0107_6d8c;
 /// `BSAudio::QInstance` (Ghidra name) and the audio call made on it by the
@@ -706,7 +708,8 @@ fn start_menu_create_body(e: &mut Engine, frame: u32, flag_a: u8, flag_b: u8) ->
         e.call(OWNER_SET_CALLBACK_B, &args![owner, MENU_CALLBACK]);
     }
     if e.call(ELEMENTS_MISSING, &args![ELEMENTS_OBJECT]).bool() {
-        start_menu_create_menu_elements(e);
+        // By address, so a row of the fixes preset registered there runs (host `fov_slider`).
+        e.call(CREATE_MENU_ELEMENTS, &args![]);
     }
     let manager = e.call(INTERFACE_MANAGER_GETTER, &args![]).u32();
     let root = e.call(MENUS_ROOT_GETTER, &args![manager]).u32();

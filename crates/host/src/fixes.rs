@@ -53,6 +53,7 @@ pub static FIXES: &[Fix] = &[
     TEXTURE_READ_FIRST,
     crate::cell_entry_wait::FIX,
     crate::perk_every_level::FIX,
+    crate::fov_slider::FIX,
     crate::cell_offsets::FIX,
     VATS_LAG,
     ACTOR_CAUSE_WITNESSES,

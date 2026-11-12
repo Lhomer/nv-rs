@@ -58,10 +58,14 @@ instead, choose Window under Display mode in Settings.cmd. That is bBorderless=0
 [nv-rs Display] section (Bug fixes, below, says where the file is). With 1, or with no such line,
 the window is borderless.
 
-Settings.cmd's Field of view slider sets how wide the world is seen in play, from 70 to 120 degrees;
-75 is the original's. It is the game's own fDefaultWorldFOV in Fallout.ini's [Display] section, and
-it takes effect at the next start. Your weapon and arms keep the original's view
-(fDefault1stPersonFOV, left as it is), so at a wide field of view they look the same as before.
+The field of view, how wide the world is seen in play (70 to 120 degrees; 75 is the original's), has
+a slider in the game's own menu: Settings, then Display, Field of View at the end of the list. It
+changes the view as soon as you are back in the game, and it is kept for the next start.
+Settings.cmd has the same slider (that one takes effect at the next start). Both set the game's own
+fDefaultWorldFOV in Fallout.ini's [Display] section, so each shows what the other saved. Your weapon
+and arms keep the original's view (fDefault1stPersonFOV, left as it is), so at a wide field of view
+they look the same as before. The slider in the game's menu comes with the fixes: with Vanilla the
+game's menu is the original's, and Settings.cmd still has its slider.
 
 
 Controls

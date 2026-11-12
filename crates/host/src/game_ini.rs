@@ -189,6 +189,72 @@ fn flag(raw: &str) -> Option<bool> {
     }
 }
 
+/// `text` with `key=value` in `section`, as Play.exe and Settings.cmd write a key
+/// (`scripts/launcher` `game_ini::set_key`, the same rules; a test here holds this copy to them):
+/// the first such key's value replaced where it stands (names compared without case); else a
+/// `;key=` line of that section turned into the key; else the line added under the section's
+/// first heading; else the section added at the end. Every other byte stays. Only the first
+/// section of the name is looked in, as Windows reads and writes that one alone.
+pub fn set_key(text: &str, section: &str, key: &str, value: &str) -> String {
+    let heading = |line: &str| {
+        let rest = line.trim().strip_prefix('[')?;
+        Some(rest.split(']').next().unwrap_or(rest).trim().to_string())
+    };
+    let mut inside = false;
+    let mut under_heading = None;
+    let mut commented = None;
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let start = at;
+        at += line.len();
+        let body = line.trim_end_matches(['\r', '\n']);
+        if let Some(name) = heading(body) {
+            if inside {
+                break;
+            }
+            inside = name.eq_ignore_ascii_case(section.trim());
+            if inside && under_heading.is_none() {
+                under_heading = Some(at);
+            }
+            continue;
+        }
+        let Some((name, _)) = body.split_once('=').filter(|_| inside) else {
+            continue;
+        };
+        let name = name.trim();
+        if name.eq_ignore_ascii_case(key) {
+            let equals = start + body.find('=').unwrap_or(0);
+            return format!(
+                "{}{value}{}",
+                &text[..equals + 1],
+                &text[start + body.len()..]
+            );
+        }
+        let off = name.strip_prefix(';').map(str::trim);
+        if commented.is_none() && off.is_some_and(|n| n.eq_ignore_ascii_case(key)) {
+            commented = Some((start, start + body.len()));
+        }
+    }
+    let eol = if !text.contains("\r\n") && text.contains('\n') {
+        "\n"
+    } else {
+        "\r\n"
+    };
+    if let Some((from, to)) = commented {
+        return format!("{}{key}={value}{}", &text[..from], &text[to..]);
+    }
+    if let Some(at) = under_heading {
+        let gap = if text[..at].ends_with('\n') { "" } else { eol };
+        return format!("{}{gap}{key}={value}{eol}{}", &text[..at], &text[at..]);
+    }
+    let gap = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        eol
+    };
+    format!("{text}{gap}[{section}]{eol}{key}={value}{eol}")
+}
+
 /// The run's `Fallout.ini`: `My Games\FalloutNV\Fallout.ini` in the Documents folder the run's
 /// adapter table gives the game (`crate::adapter_table_path`), where the game reads it.
 /// A folder whose bytes can't be read is named once in the log ([`path_from_table`]).
@@ -250,6 +316,99 @@ fn documents_bytes(table: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`set_key`] is Play.exe's (`scripts/launcher` `game_ini::set_key`): the launcher's own
+    /// cases (its tests `a_key_is_set_where_it_stands`,
+    /// `repeated_keys_headings_and_keys_before_any_section_are_written_as_windows_does` and
+    /// `only_the_first_section_of_a_name_is_written`), answered the same here.
+    #[test]
+    fn set_key_writes_as_play_exe_does() {
+        let cases: [(&str, &str, &str, &str, &str); 14] = [
+            (
+                "[A]\r\nx=1\r\n[nv-rs Display]\r\n; note\r\n  bBorderless = 0 \r\n[B]\r\nbBorderless=7\r\n",
+                "NV-RS DISPLAY",
+                "bborderless",
+                "1",
+                "[A]\r\nx=1\r\n[nv-rs Display]\r\n; note\r\n  bBorderless =1\r\n[B]\r\nbBorderless=7\r\n",
+            ),
+            (
+                "[nv-rs Fixes]\n; Uncapped.\n;bUncap=1\n",
+                "nv-rs Fixes",
+                "bUncap",
+                "0",
+                "[nv-rs Fixes]\n; Uncapped.\nbUncap=0\n",
+            ),
+            (
+                "[Display]\r\nfX=1\r\n",
+                "Display",
+                "iPresentInterval",
+                "0",
+                "[Display]\r\niPresentInterval=0\r\nfX=1\r\n",
+            ),
+            (
+                "[Display]",
+                "Display",
+                "iPresentInterval",
+                "0",
+                "[Display]\r\niPresentInterval=0\r\n",
+            ),
+            (
+                "[General]\nx=1",
+                "Display",
+                "iPresentInterval",
+                "1",
+                "[General]\nx=1\n[Display]\niPresentInterval=1\n",
+            ),
+            ("[A]\r\n X =1\r\nx=2\r\n", "A", "x", "5", "[A]\r\n X =5\r\nx=2\r\n"),
+            ("[A] trailing\r\nx=1\r\n", "A", "x", "5", "[A] trailing\r\nx=5\r\n"),
+            (
+                "[A] trailing\r\nx=1\r\n",
+                "A",
+                "n",
+                "8",
+                "[A] trailing\r\nn=8\r\nx=1\r\n",
+            ),
+            ("x=1\r\n[A]\r\ny=2\r\n", "A", "x", "5", "x=1\r\n[A]\r\nx=5\r\ny=2\r\n"),
+            (
+                "x=1\r\n[A]\r\ny=2\r\n",
+                "",
+                "x",
+                "5",
+                "x=1\r\n[A]\r\ny=2\r\n[]\r\nx=5\r\n",
+            ),
+            (
+                "[A]\r\nx=1\r\n[B]\r\nz=3\r\n[a]\r\ny=2\r\nx=9\r\n",
+                "A",
+                "x",
+                "5",
+                "[A]\r\nx=5\r\n[B]\r\nz=3\r\n[a]\r\ny=2\r\nx=9\r\n",
+            ),
+            (
+                "[A]\r\nx=1\r\n[B]\r\nz=3\r\n[a]\r\ny=2\r\nx=9\r\n",
+                "A",
+                "y",
+                "7",
+                "[A]\r\ny=7\r\nx=1\r\n[B]\r\nz=3\r\n[a]\r\ny=2\r\nx=9\r\n",
+            ),
+            (
+                "[A]\r\nx=1\r\n[B]\r\nz=3\r\n[a]\r\ny=2\r\nx=9\r\n",
+                "a",
+                "n",
+                "8",
+                "[A]\r\nn=8\r\nx=1\r\n[B]\r\nz=3\r\n[a]\r\ny=2\r\nx=9\r\n",
+            ),
+            (
+                "[A]\r\n[A]\r\n;x=1\r\n",
+                "A",
+                "x",
+                "5",
+                "[A]\r\nx=5\r\n[A]\r\n;x=1\r\n",
+            ),
+        ];
+        for (text, section, key, value, want) in cases {
+            assert_eq!(set_key(text, section, key, value), want, "{text:?} {key}");
+        }
+    }
 
     /// One row per fix (in docs/FIXES.md's order), each with its own variable; the player
     /// settings before them. Every key has a comment, and every key carries the original's type

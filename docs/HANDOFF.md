@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-12 (field of view in the game's own Settings menu)
+
+- **What:** the `[nv-rs Fixes]` row `bFovSlider` (`crates/host/src/fov_slider.rs`, on in the fixes preset) adds one of the game's own sliders to the Settings menu's Display page: after `StartMenu::CreateMenuElements` (`007cc6e0`) a user option made by the game's constructor (`007d6350`; modes `0x10`, meter, 51 settings), labelled `Field of View: <degrees>`, change function at `7e060000`. Moved, it sets `fDefaultWorldFOV` (`0120315c`), which the view follows from the next frame (`0095de30`), and writes the key into the run's Fallout.ini (play runs; `game_ini::set_key`, a copy of Play.exe's held to its cases), where Settings.cmd's slider reads it. `CreateMenuElements`' one caller now calls it by address.
+- **Not run here:** the game. **Next action:** Patrick: Settings, Display, Field of View at the end; move it, back to the game (wider at once), restart (kept), and Settings.cmd shows the same value.
+
 ### Claude, 2026-11-12 (field of view slider; a perk every level)
 
 - **Field of view** (Settings.cmd, `distribution/Settings.ps1`; Play.exe's `apply_choices` for settings.ini's `FOV=`): a slider, 70 to 120, writing the game's own `[Display] fDefaultWorldFOV` in both profiles' Fallout.ini (the setting `0120315c`, in the INI collection `011f96a0`, default 75; `PlayerCharacter`'s `0095de30` steers the view to it). `fDefault1stPersonFOV` and `fDefaultFOV` left alone. The names come from the gaps between their strings (`010c289c`..`010c290c`), not read from the exe here: if the slider changes nothing in play, that is the first thing to check.

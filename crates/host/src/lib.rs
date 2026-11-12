@@ -21,6 +21,7 @@ pub mod cell_offsets;
 pub mod direct_files;
 pub mod fixes;
 pub mod form_types;
+pub mod fov_slider;
 pub mod frame_log;
 pub mod full_screen;
 pub mod game_file;
