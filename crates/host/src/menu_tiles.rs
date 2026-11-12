@@ -33,6 +33,9 @@ pub const TRAIT_RED: i32 = 0xfb2;
 pub const TRAIT_GREEN: i32 = 0xfb3;
 pub const TRAIT_BLUE: i32 = 0xfb4;
 pub const TRAIT_STRING: i32 = 0xfc4;
+pub const TRAIT_BRIGHTNESS: i32 = 0xff5;
+/// The `brightness` that makes a tile use its own `red`, `green` and `blue` ([`set_color`]).
+pub const OWN_COLOR: f32 = -1.0;
 
 /// Reads `xml` into tiles under `parent` by the steps of `Tile::ReadFile` (`00a01b00`) for a text
 /// in memory: `Tile::ParseFile` with the buffer, `BuildAndNameTree`, `ConnectTraitsToTree`, the
@@ -139,8 +142,12 @@ pub fn set_text(e: &mut Engine, tile: u32, id: i32, text: &[u8]) {
     });
 }
 
-/// A tile's color.
+/// A tile's color: its `red`, `green` and `blue` (0 to 255), which the game uses only while its
+/// `brightness` is -1 (`Tile::UpdateTile`'s color step; any other brightness, a missing one
+/// included, takes the system color of the nearest ancestor that has one, the HUD's color in
+/// the HUD), so the brightness is made -1 too.
 pub fn set_color(e: &mut Engine, tile: u32, color: [u8; 3]) {
+    set_value(e, tile, TRAIT_BRIGHTNESS, OWN_COLOR);
     set_value(e, tile, TRAIT_RED, f32::from(color[0]));
     set_value(e, tile, TRAIT_GREEN, f32::from(color[1]));
     set_value(e, tile, TRAIT_BLUE, f32::from(color[2]));

@@ -47,10 +47,14 @@
 //!
 //! **What it covers, and what it leaves to the original.** Only a reference that the original would
 //! open straight into its container menu: not locked ([`eligible`]: a locked one goes to the key
-//! or the lock pick menu as before), no script on the reference (its `OnActivate` may do anything,
-//! a quest stage, a message: those keep the original's Activate), not an ash pile (they activate
-//! another reference), and not empty (the original's "Empty" line shows). Items on the ground,
-//! living actors (pickpocketing) and companions are the original's.
+//! or the lock pick menu as before), for a container that is not an actor no script on the
+//! reference (its `OnActivate` may do anything, a quest stage, a message: those keep the
+//! original's Activate), not an ash pile (they activate another reference), and not empty (the
+//! original's "Empty" line shows). A corpse (a dead actor: target type 2) is covered with its
+//! script: every reference of a scripted base form carries an `ExtraScript`
+//! (`TESObjectREFR::InitScript`, `00565730`), so the script test, which until 2026-11-12 stood for
+//! corpses too, left out nearly every corpse ([`eligible_target`]). Items on the ground, living
+//! actors (pickpocketing, target types 1, 7, 0xa, 0xb) and companions are the original's.
 //!
 //! **Taking, by the container menu's rules** (`ContainerMenu::TakeAllFn` `0075da60` and
 //! `ItemSelectCallback` `0075dc80`, which need the menu open, so their steps are made here): the
@@ -405,14 +409,16 @@ pub fn panel_xml(atlas: &str) -> String {
         format!(
             "<image name=\"{name}\"><filename>solid.dds</filename><texatlas>{atlas}</texatlas>\
              <x>{x}</x><y>{y}</y><width>{w}</width><height>{h}</height>\
-             <red>{}</red><green>{}</green><blue>{}</blue><alpha>{alpha}</alpha></image>\n",
+             <red>{}</red><green>{}</green><blue>{}</blue><alpha>{alpha}</alpha>\
+             <brightness>-1</brightness></image>\n",
             color[0], color[1], color[2]
         )
     };
     let text = |name: &str, x: u32, y: u32| {
         format!(
             "<text name=\"{name}\"><x>{x}</x><y>{y}</y><font>{FONT}</font>\
-             <red>{}</red><green>{}</green><blue>{}</blue><alpha>255</alpha></text>\n",
+             <red>{}</red><green>{}</green><blue>{}</blue><alpha>255</alpha>\
+             <brightness>-1</brightness></text>\n",
             WHITE[0], WHITE[1], WHITE[2]
         )
     };
@@ -500,7 +506,7 @@ pub fn panel_xml(atlas: &str) -> String {
             "<rect name=\"nvrs_ql_row{row}\"><locus>1</locus><x>0</x><y>{y}</y>\
              <width>{width}</width><height>{ROW_HEIGHT}</height><visible>0</visible>\n\
              <image name=\"nvrs_ql_icon{row}\"><x>{ICON_X}</x><y>{ICON_Y}</y><width>{}</width>\
-             <height>{}</height><zoom>100</zoom><alpha>0</alpha></image>\n",
+             <height>{}</height><zoom>100</zoom><alpha>0</alpha><brightness>-1</brightness></image>\n",
             ICON_WIDTH as u32, ICON_HEIGHT as u32
         );
         xml += &text(&format!("nvrs_ql_name{row}"), NAME_X, 2);
@@ -753,27 +759,57 @@ fn after_pick(e: &mut Engine, manager: u32) {
     show(e);
 }
 
-/// Whether `target` is a container or corpse quick loot takes from (module documentation).
+/// What [`eligible`] reads of a reference.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Target {
+    /// `TESObjectREFR::GetTargetType` (`00579280`): 2 for a container, and for an actor only when
+    /// it is dead (its slot `+0x22c`); a living one answers 1, 7, 0xa or 0xb.
+    pub target_type: u32,
+    pub actor: bool,
+    pub ash_pile: bool,
+    pub locked: bool,
+    /// The reference has a script (`ExtraScript`, type `0x0d`).
+    pub scripted: bool,
+    /// Its listed stacks (`00575590`).
+    pub items: i32,
+}
+
+/// Whether quick loot takes from `target` (module documentation): a container or a corpse (target
+/// type 2), not an ash pile, not locked, with items; and, for a container that is not an actor, no
+/// script of its own. Every reference of a scripted base form gets an `ExtraScript`
+/// (`TESObjectREFR::InitScript`, `00565730`), so most corpses have one (their actor's script); a
+/// corpse is opened into its container menu all the same, and the script only stops a container.
+pub fn eligible_target(target: Target) -> bool {
+    target.target_type == CONTAINER_OR_CORPSE
+        && !target.ash_pile
+        && !target.locked
+        && (target.actor || !target.scripted)
+        && target.items > 0
+}
+
+/// Whether `target` is a container or corpse quick loot takes from ([`eligible_target`]).
 pub fn eligible(e: &mut Engine, target: u32) -> bool {
     if target == 0 || target == e.global::<u32>(PLAYER) {
         return false;
     }
-    if e.call(TARGET_TYPE, &args![target]).u32() != CONTAINER_OR_CORPSE {
+    let target_type = e.call(TARGET_TYPE, &args![target]).u32();
+    if target_type != CONTAINER_OR_CORPSE {
         return false;
     }
     let base = e.mem.u32(target + BASE_FORM);
-    if base == 0 || ASH_PILES.iter().any(|&pile| e.global::<u32>(pile) == base) {
+    if base == 0 {
         return false;
     }
     let lock = e.call(GET_LOCK, &args![target]).u32();
-    if lock != 0 && e.call(IS_LOCKED, &args![lock]).bool() {
-        return false;
-    }
     let extra = e.call(EXTRA_LIST, &args![target]).u32();
-    if extra == 0 || e.call(GET_EXTRA_DATA, &args![extra, EXTRA_SCRIPT]).u32() != 0 {
-        return false;
-    }
-    e.call(ITEM_TOTAL, &args![target, 0u32, 0u32]).i32() > 0
+    eligible_target(Target {
+        target_type,
+        actor: e.vcall(target, IS_ACTOR_SLOT, &args![]).bool(),
+        ash_pile: ASH_PILES.iter().any(|&pile| e.global::<u32>(pile) == base),
+        locked: lock != 0 && e.call(IS_LOCKED, &args![lock]).bool(),
+        scripted: extra != 0 && e.call(GET_EXTRA_DATA, &args![extra, EXTRA_SCRIPT]).u32() != 0,
+        items: e.call(ITEM_TOTAL, &args![target, 0u32, 0u32]).i32(),
+    })
 }
 
 /// Every item of `target` the container menu would list, in its walk's order: the walk's own
@@ -1651,6 +1687,59 @@ mod tests {
         // The footer and the panel's height: the panel ends a line under the footer's text.
         assert!(xml.contains(&format!("<height>{PANEL_HEIGHT}</height>")));
         assert!(xml.contains(&format!("<y>{FOOTER_Y}</y>")));
+    }
+
+    #[test]
+    fn a_corpse_with_its_actors_script_gets_the_panel_and_a_living_actor_does_not() {
+        let corpse = Target {
+            target_type: CONTAINER_OR_CORPSE,
+            actor: true,
+            scripted: true,
+            items: 4,
+            ..Target::default()
+        };
+        // The rule until 2026-11-12 turned a scripted reference away, actor or not: this corpse.
+        assert!(eligible_target(corpse));
+        // A living actor (pickpocketing; GetTargetType 7, 1, 0xa or 0xb) is the original's.
+        for living in [7, 1, 0xa, 0xb] {
+            assert!(!eligible_target(Target {
+                target_type: living,
+                ..corpse
+            }));
+        }
+        // A container with a script of its own keeps the original's Activate.
+        let container = Target {
+            actor: false,
+            ..corpse
+        };
+        assert!(!eligible_target(container));
+        assert!(eligible_target(Target {
+            scripted: false,
+            ..container
+        }));
+        // Empty, locked, an ash pile: the original's.
+        assert!(!eligible_target(Target { items: 0, ..corpse }));
+        assert!(!eligible_target(Target {
+            locked: true,
+            ..corpse
+        }));
+        assert!(!eligible_target(Target {
+            ash_pile: true,
+            ..corpse
+        }));
+    }
+
+    /// The game uses a tile's own red, green and blue only when its brightness is -1 (else the
+    /// HUD's system color): every image and text of the panel has it, the words start white, and
+    /// the stealing red is red.
+    #[test]
+    fn every_tile_uses_its_own_color() {
+        let xml = panel_xml("atlas");
+        let tiles = xml.matches("<image ").count() + xml.matches("<text ").count();
+        assert_eq!(xml.matches("<brightness>-1</brightness>").count(), tiles);
+        assert_eq!(WHITE, [255, 255, 255]);
+        assert!(RED[0] == 255 && RED[1] < 100 && RED[2] < 100, "{RED:?}");
+        assert_eq!(crate::menu_tiles::OWN_COLOR, -1.0);
     }
 
     #[test]

@@ -331,6 +331,9 @@ const TOPIC_NAME_FORMAT: u32 = 0x0107_27d8;
 const LINE_ALPHA_TEXT: u32 = 0x0107_27cc;
 const SCROLLBAR_HEIGHT_TEXT: u32 = 0x0107_27b8;
 const HEIGHT_TEXT: u32 = 0x0107_27b0;
+/// `DialogMenu::LoadTopicsList` ([`dialog_menu_load_topics_list`]), which `LoadNextScreen`
+/// calls by address.
+const LOAD_TOPICS_LIST: u32 = 0x0076_38b0;
 
 // ---------------------------------------------------------------------------
 // The `ListBox<int>` instance.
@@ -2113,7 +2116,9 @@ pub fn dialog_menu_load_next_screen(e: &mut Engine, this: Ptr<DialogMenu>, chall
                     let showing = e.global::<u32>(SHOWING_TEXT_TRAIT_011D9500);
                     let root = menu_tile(e, this.addr());
                     set_int(e, root, showing, 0);
-                    dialog_menu_load_topics_list(e, this);
+                    // By address: nv-rs's compact menus override it (crates/host
+                    // compact_menus.rs, overridable.tsv).
+                    e.call(LOAD_TOPICS_LIST, &args![this]);
                     state = 2;
                 }
             }

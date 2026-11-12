@@ -29,6 +29,12 @@
 //!   (`Font::fFontHeight`, with [`ROW_PADDING`] for the row's own spacing), so the list keeps the
 //!   height it had and holds more rows.
 //!
+//! The conversation's topic list is the one list not sized by that count: `DialogMenu::
+//! LoadTopicsList` (`007638b0`) makes it as high as its first 3 topic tiles, a number in the code,
+//! so the smaller text alone gave 3 smaller rows (Patrick, after 755a141: "still the same number of
+//! rows in conversations"). Its override runs it as it is, then makes the list as high as its first
+//! [`DIALOG_TOPIC_ROWS`] topics ([`topic_list_height`]) and synchronizes the list box again.
+//!
 //! The menu files are the player's, as the game finds them (an archive or a UI mod's loose files);
 //! nothing is written to them, and a menu file that sets other fonts or no list counts is left as
 //! it is.
@@ -38,15 +44,19 @@ use engine::prelude::*;
 use engine::units::bsmenu::tile::{
     fn_00a011b0, tile_add_user_trait, tile_get_menu, tile_get_value, tile_read_file,
 };
+use engine::units::fallout_interface::dialogmenu::{
+    dialog_menu_load_topics_list, list_box_int_synchronize,
+};
 
-/// `Tile::ReadFile` (`00a01b00`).
+/// `Tile::ReadFile` (`00a01b00`) and `DialogMenu::LoadTopicsList` (`007638b0`).
 pub const READ_FILE: u32 = 0x00a0_1b00;
+pub const LOAD_TOPICS_LIST: u32 = 0x0076_38b0;
 
 /// The row in [`crate::fixes::FIXES`].
 pub const FIX: Fix = Fix {
     name: "compact text",
     env: "NV_COMPACT_MENUS",
-    addresses: &[READ_FILE],
+    addresses: &[READ_FILE, LOAD_TOPICS_LIST],
     summary: "conversation, container, barter, inventory, repair and crafting menus write their text in the medium font, and their lists show more rows in the same space",
     install,
 };
@@ -65,6 +75,11 @@ const LIST_FONT: u32 = 1;
 /// A row's own spacing around its text, in the interface's units, for [`visible_items`]: a row is
 /// counted as its text's height and this, so a list never grows past the height it had.
 pub const ROW_PADDING: f32 = 6.0;
+/// The conversation's topics shown at once: `DialogMenu::LoadTopicsList` makes the topic list as
+/// high as its first 3 topics (a number in the code, not in the menu file), so smaller text alone
+/// left 3 smaller rows; with the compact text the list is as high as its first 6.
+pub const DIALOG_TOPIC_ROWS: usize = 6;
+const ORIGINAL_TOPIC_ROWS: usize = 3;
 
 // The game's words.
 /// `Menu::GetClass`, the menu's vtable slot.
@@ -86,8 +101,13 @@ const NUMBER_OF_VISIBLE_ITEMS_TEXT: u32 = 0x0106_f860;
 const FONT_MANAGER: u32 = 0x011f_33f8;
 const FONT_HEIGHT: u32 = 0x2c;
 
-/// Registers the reader.
+/// Registers the reader and the topic list.
 pub fn install(e: &mut Engine) {
+    e.register(LOAD_TOPICS_LIST, |e, a| {
+        dialog_menu_load_topics_list(e, Ptr::new(a[0]));
+        grow_topics(e, a[0]);
+        Ret::default()
+    });
     e.register(READ_FILE, |e, a| {
         let root = tile_read_file(e, Ptr::new(a[0]), Ptr::new(a[1])).addr();
         compact(e, root);
@@ -122,7 +142,52 @@ pub fn visible_items(count: f32, from: f32, to: f32) -> f32 {
         .max(count)
 }
 
+/// The topic list's height for the heights of its topics' tiles in order (each truncated to a
+/// whole number, as `LoadTopicsList` sums them): the first [`DIALOG_TOPIC_ROWS`].
+pub fn topic_list_height(heights: &[i32]) -> i32 {
+    heights
+        .iter()
+        .take(DIALOG_TOPIC_ROWS)
+        .fold(0i32, |sum, height| sum.wrapping_add(*height))
+}
+
 // The game.
+
+/// `DialogMenu`'s topic list container (`pTiles[3]`, `+0x3c`), its list box
+/// (`lbResponseList`, `+0x40`), the topic tiles' names, and `Tile::SetFloat`'s height trait.
+const DIALOG_LIST_CONTAINER: u32 = 0x3c;
+const DIALOG_LIST_BOX: u32 = 0x40;
+const TRAIT_HEIGHT: i32 = 0xfb0;
+
+/// After `LoadTopicsList`: the list as high as its first [`DIALOG_TOPIC_ROWS`] topics instead of
+/// 3, set as `LoadTopicsList` sets it (the container's `height`, the flag 0), and the list box
+/// synchronized again as it is at the end of `LoadTopicsList`. Three topics or fewer: as it was.
+fn grow_topics(e: &mut Engine, menu: u32) {
+    if menu == 0 {
+        return;
+    }
+    let container = e.mem.u32(menu + DIALOG_LIST_CONTAINER);
+    if container == 0 {
+        return;
+    }
+    let mut heights = Vec::new();
+    for index in 0..DIALOG_TOPIC_ROWS {
+        let tile = crate::menu_tiles::child(e, container, &format!("topic_{index}"));
+        if tile == 0 {
+            break;
+        }
+        heights.push(fn_00a011b0(e, Ptr::new(tile), TRAIT_HEIGHT) as i32);
+    }
+    if heights.len() <= ORIGINAL_TOPIC_ROWS {
+        return;
+    }
+    let height = topic_list_height(&heights) as f32;
+    e.call(
+        TILE_SET_FLOAT,
+        &args![container, TRAIT_HEIGHT as u32, height, 0u32],
+    );
+    list_box_int_synchronize(e, Ptr::new(menu + DIALOG_LIST_BOX));
+}
 
 /// A font's height, if the font is loaded.
 fn font_height(e: &Engine, font: u32) -> Option<f32> {
@@ -226,6 +291,18 @@ fn compact_templates(e: &mut Engine, menu: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_conversation_shows_six_topics_not_three() {
+        // Rows of 22 (a wrapped one of 44): the list is as high as the first six.
+        let heights = [22, 22, 44, 22, 22, 22, 22, 22];
+        assert_eq!(topic_list_height(&heights), 154);
+        // What the original sums, the first 3, is less: more rows fit in the list now.
+        assert!(topic_list_height(&heights) > heights[..ORIGINAL_TOPIC_ROWS].iter().sum());
+        // Fewer topics than six: all of them.
+        assert_eq!(topic_list_height(&[22, 22, 22, 22]), 88);
+        assert_eq!(DIALOG_TOPIC_ROWS, 6);
+    }
 
     #[test]
     fn the_large_fonts_become_the_medium_one_and_the_rest_stay() {
