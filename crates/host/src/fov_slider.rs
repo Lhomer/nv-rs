@@ -3,12 +3,19 @@
 //! player asked for (Patrick, 2026-11-12); in the `vanilla` preset, or with `bFovSlider=0`, the
 //! menu is the original's and nothing here runs.
 //!
-//! **What it sets.** The world's field of view is Fallout.ini's `[Display] fDefaultWorldFOV`, the
-//! float setting at `0120315c` (its value at `+4`; in the INI collection `011f96a0`, so the game
-//! reads it from Fallout.ini; the original's default 75). The player's character steers its view to
-//! it every frame while not zoomed (`PlayerCharacter`'s `0095de30`, when the Fallout.ini bool at
-//! `011e097c`, default 1, is on), so a new value shows as soon as play resumes. The weapon and arms
-//! (`fDefault1stPersonFOV`) are left alone. Settings.cmd sets the same key, from 70 to 120
+//! **What it sets.** One number for two of the game's Fallout.ini settings (the player asked for
+//! the weapon and arms to follow the world, 2026-11-12): the world's field of view,
+//! `[Display] fDefaultWorldFOV` (the float setting at `0120315c`), and the first-person view's, the
+//! arms and the weapon, `[Display] fDefault1stPersonFOV` (`01203168`). Both have their value at
+//! `+4`, both are in the INI collection `011f96a0` (the game reads them from Fallout.ini), and both
+//! start at the constant `0102f0f8`, 75 (the names come from the gaps between their name strings,
+//! `010c28b0` and `010c28cc`). Every frame of play outside the vanity camera the player's character
+//! steers its two fields toward them, `fWorldFOV` and `f1stPersonFOV` (`PlayerCharacter`'s
+//! `0095de30`, when the Fallout.ini bool at `011e097c`, default 1, is on; zoomed, the first-person
+//! target is scaled from the same two), and the first-person pass hands `f1stPersonFOV` to its
+//! camera's `SetCameraFOV` each time it draws (read through `00874900`), so a new value shows on
+//! both as soon as play resumes. The Pip-Boy's own first-person view (`fPipboy1stPersonFOV`,
+//! `01203174`) is left alone. Settings.cmd sets the same two keys, from 70 to 120
 //! (`distribution/Settings.ps1`), and so does this slider: each shows what the other saved.
 //!
 //! **The row.** The Settings menu's options are made once by `StartMenu::CreateMenuElements`
@@ -23,10 +30,12 @@
 //! **Its change function** ([`CHANGE_FN`]): the menu calls every user option's change function
 //! with the save flag (`0x20`) clear to read the current values (`007d3aa0`), and the dirty
 //! option's with it set when the player moves it (`StartMenu::Update`, after `DisplayOption`).
-//! Reading, the row's value is the setting's (rounded, kept inside the slider) and its default 75.
-//! Moved, the setting gets the row's degrees, the row's label shows them, and in a launcher's play
-//! run the run's Fallout.ini gets `fDefaultWorldFOV=<degrees>.0000` (the game's own `%.4f`, as
-//! Settings.cmd writes it; `crate::game_ini::set_key`, Play.exe's rule), so the next start has it.
+//! Reading, the row's value is the world setting's (rounded, kept inside the slider) and its
+//! default 75 (the menu's Defaults puts both back to 75). Moved, both settings get the row's
+//! degrees, the row's label shows them, and in a launcher's play run the run's Fallout.ini gets
+//! `fDefaultWorldFOV=<degrees>.0000` and `fDefault1stPersonFOV=<degrees>.0000` (the game's own
+//! `%.4f`, as Settings.cmd writes them; `crate::game_ini::set_key`, Play.exe's rule), so the next
+//! start has them.
 //! The game itself never writes Fallout.ini, only FalloutPrefs.ini.
 
 use crate::fixes::Fix;
@@ -41,7 +50,7 @@ pub const FIX: Fix = Fix {
     name: "field of view in the game's settings",
     env: "NV_FOV_SLIDER",
     addresses: &[CREATE_MENU_ELEMENTS],
-    summary: "the game's Settings menu has a Field of View slider on its Display page (fDefaultWorldFOV, 70 to 120)",
+    summary: "the game's Settings menu has a Field of View slider on its Display page (fDefaultWorldFOV and fDefault1stPersonFOV, 70 to 120)",
     install,
 };
 
@@ -50,8 +59,12 @@ pub const FIX: Fix = Fix {
 /// the platform's objects (`0x7e12_0000` on).
 pub const CHANGE_FN: u32 = 0x7e06_0000;
 
-/// `fDefaultWorldFOV:Display` and where its value is (`+4`, as `0043d4d0` gives a setting's).
+/// `fDefaultWorldFOV:Display`, `fDefault1stPersonFOV:Display` and where a setting's value is
+/// (`+4`, as `0043d4d0` gives it).
 const WORLD_FOV: u32 = 0x0120_315c;
+const FIRST_PERSON_FOV: u32 = 0x0120_3168;
+/// Their Fallout.ini keys, in `[Display]`, in the order they are written.
+pub const KEYS: [&str; 2] = ["fDefaultWorldFOV", "fDefault1stPersonFOV"];
 const VALUE: u32 = 4;
 /// The slider's ends and the original's default, in degrees (Settings.cmd's too).
 pub const LOWEST: i32 = 70;
@@ -185,7 +198,9 @@ fn change(e: &mut Engine, option: Ptr) {
         return;
     }
     let degrees = degrees_of(e.mem.u32(option.addr() + VAL));
-    e.mem.set_f32(WORLD_FOV + VALUE, degrees as f32);
+    for setting in [WORLD_FOV, FIRST_PERSON_FOV] {
+        e.mem.set_f32(setting + VALUE, degrees as f32);
+    }
     if text != 0 {
         write_label(e, text, degrees);
         let tile = e.with_stack(4, |e, cell| {
@@ -200,7 +215,8 @@ fn change(e: &mut Engine, option: Ptr) {
     save(degrees);
 }
 
-/// `fDefaultWorldFOV=<degrees>.0000` into the run's Fallout.ini, in a launcher's play run only
+/// `fDefaultWorldFOV=<degrees>.0000` and `fDefault1stPersonFOV=<degrees>.0000` ([`KEYS`]) into the
+/// run's Fallout.ini, in a launcher's play run only
 /// (`crate::fixes::is_play_run`): written beside it and renamed over it, so a reader never sees half
 /// of it. A file that can't be read or written is named once in the log; the game goes on with
 /// the value it has.
@@ -211,7 +227,7 @@ fn save(degrees: i32) {
     let Some(path) = crate::game_ini::path() else {
         return;
     };
-    if let Err(why) = write_world_fov(&path, degrees) {
+    if let Err(why) = write_fov(&path, degrees) {
         static NAMED: std::sync::Once = std::sync::Once::new();
         NAMED.call_once(|| {
             eprintln!(
@@ -224,11 +240,13 @@ fn save(degrees: i32) {
 
 /// [`save`]'s write: the file's bytes held one character per byte, so every byte outside the line
 /// comes back as it was.
-pub fn write_world_fov(path: &std::path::Path, degrees: i32) -> std::io::Result<()> {
+pub fn write_fov(path: &std::path::Path, degrees: i32) -> std::io::Result<()> {
     let bytes = std::fs::read(path)?;
-    let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+    let mut text: String = bytes.iter().map(|&b| char::from(b)).collect();
     let value = format!("{degrees}.0000");
-    let text = crate::game_ini::set_key(&text, "Display", "fDefaultWorldFOV", &value);
+    for key in KEYS {
+        text = crate::game_ini::set_key(&text, "Display", key, &value);
+    }
     let out: Vec<u8> = text.chars().map(|c| c as u32 as u8).collect();
     if out == bytes {
         return Ok(());
@@ -269,10 +287,11 @@ mod tests {
     /// menu's flags (`saving`), the tile of the row (`0x5000`), and every `SetString` recorded.
     fn engine(saving: bool) -> (Engine, Rc<RefCell<Vec<Vec<u32>>>>) {
         let mut e = Engine::new();
-        for page in [WORLD_FOV, START_MENU, 0x0001_0000] {
+        for page in [WORLD_FOV, FIRST_PERSON_FOV, START_MENU, 0x0001_0000] {
             e.mem.map(page & !0xfff, 0x1000);
         }
         e.mem.set_f32(WORLD_FOV + VALUE, 75.0);
+        e.mem.set_f32(FIRST_PERSON_FOV + VALUE, 75.0);
         e.set_global(START_MENU, 0x0001_0100u32);
         e.register_double(MENU_FLAGS_TEST, move |_, a| Ret {
             eax: u32::from(saving && a[1] == FLAG_SAVE_OPTIONS),
@@ -306,6 +325,7 @@ mod tests {
     fn reading_shows_the_settings_value_and_the_default_is_75() {
         let (mut e, strings) = engine(false);
         e.mem.set_f32(WORLD_FOV + VALUE, 95.0);
+        e.mem.set_f32(FIRST_PERSON_FOV + VALUE, 60.0);
         let option = row(&mut e);
         change(&mut e, option);
         assert_eq!(e.mem.u32(option.addr() + VAL), 25);
@@ -316,16 +336,22 @@ mod tests {
             95.0,
             "reading changes nothing"
         );
+        assert_eq!(e.mem.f32(FIRST_PERSON_FOV + VALUE), 60.0);
         assert!(strings.borrow().is_empty());
     }
 
     #[test]
-    fn moving_it_sets_the_world_fov_and_its_label() {
+    fn moving_it_sets_both_fovs_and_its_label() {
         let (mut e, strings) = engine(true);
         let option = row(&mut e);
         e.mem.set_u32(option.addr() + VAL, 35);
         change(&mut e, option);
         assert_eq!(e.mem.f32(WORLD_FOV + VALUE), 105.0);
+        assert_eq!(
+            e.mem.f32(FIRST_PERSON_FOV + VALUE),
+            105.0,
+            "the arms and the weapon too"
+        );
         assert_eq!(e.mem.cstr(0x0001_0800), b"Field of View: 105");
         assert_eq!(
             *strings.borrow(),
@@ -343,17 +369,23 @@ mod tests {
             b"[General]\r\nsA=\xe9\r\n[Display]\r\nfDefaultWorldFOV=75.0000\r\nfDefault1stPersonFOV=55.0000\r\n",
         )
         .unwrap();
-        write_world_fov(&path, 100).unwrap();
+        write_fov(&path, 100).unwrap();
         assert_eq!(
             std::fs::read(&path).unwrap(),
-            b"[General]\r\nsA=\xe9\r\n[Display]\r\nfDefaultWorldFOV=100.0000\r\nfDefault1stPersonFOV=55.0000\r\n"
+            b"[General]\r\nsA=\xe9\r\n[Display]\r\nfDefaultWorldFOV=100.0000\r\nfDefault1stPersonFOV=100.0000\r\n",
+            "both keys, where they stand"
         );
-        // A file without the key gets it under [Display].
-        std::fs::write(&path, b"[Display]\r\nfDefaultFOV=75.0000\r\n").unwrap();
-        write_world_fov(&path, 90).unwrap();
+        // A file without the keys gets them under [Display], the world's first; fDefaultFOV and
+        // the Pip-Boy's stay.
+        std::fs::write(
+            &path,
+            b"[Display]\r\nfDefaultFOV=75.0000\r\nfPipboy1stPersonFOV=47.0000\r\n",
+        )
+        .unwrap();
+        write_fov(&path, 90).unwrap();
         assert_eq!(
             std::fs::read(&path).unwrap(),
-            b"[Display]\r\nfDefaultWorldFOV=90.0000\r\nfDefaultFOV=75.0000\r\n"
+            b"[Display]\r\nfDefault1stPersonFOV=90.0000\r\nfDefaultWorldFOV=90.0000\r\nfDefaultFOV=75.0000\r\nfPipboy1stPersonFOV=47.0000\r\n"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

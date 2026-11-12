@@ -2771,10 +2771,13 @@ mod tests {
             settings::ini_value(&ini, "nv-rs Threads", "bRenderThread"),
             Some("0")
         );
-        assert_eq!(
-            settings::ini_value(&ini, "Display", "fDefaultWorldFOV"),
-            Some("100.0000")
-        );
+        for key in ["fDefaultWorldFOV", "fDefault1stPersonFOV"] {
+            assert_eq!(
+                settings::ini_value(&ini, "Display", key),
+                Some("100.0000"),
+                "{key}"
+            );
+        }
         assert!(!files.package.settings.exists());
     }
 
@@ -2806,6 +2809,7 @@ mod tests {
                 ("nv-rs Display", "bBorderless", "0"),
                 ("Display", "iPresentInterval", "0"),
                 ("Display", "fDefaultWorldFOV", "90.0000"),
+                ("Display", "fDefault1stPersonFOV", "90.0000"),
                 ("nv-rs General", "sPreset", "vanilla"),
                 ("nv-rs Display", "iFrameLimit", "144"),
                 ("nv-rs Threads", "bSteppedThreads", "1"),
@@ -2831,6 +2835,31 @@ mod tests {
             .unwrap()
             .permissions()
             .readonly());
+    }
+
+    /// One number for both fields of view: a profile whose first-person value differs from its
+    /// world value gets the world's at the next Save, even with the slider not moved.
+    #[test]
+    fn settings_cmd_makes_the_first_person_fov_the_worlds_at_a_save() {
+        let files = Files::new("settings-fov-same", None);
+        files.start().unwrap();
+        for profile in files.profiles() {
+            let ini = text_of(&std::fs::read(profile.fallout_ini()).unwrap());
+            let ini = game_ini::set_key(&ini, "Display", "fDefaultWorldFOV", "90.0000");
+            let ini = game_ini::set_key(&ini, "Display", "fDefault1stPersonFOV", "55.0000");
+            std::fs::write(profile.fallout_ini(), bytes_of(&ini)).unwrap();
+        }
+        settings_window(&files, "");
+        for profile in 0..2 {
+            let ini = text_of(&files.ini(profile));
+            for key in ["fDefaultWorldFOV", "fDefault1stPersonFOV"] {
+                assert_eq!(
+                    settings::ini_value(&ini, "Display", key),
+                    Some("90.0000"),
+                    "{key}"
+                );
+            }
+        }
     }
 
     #[test]

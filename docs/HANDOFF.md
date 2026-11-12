@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-12 (the field of view slider sets the arms and weapon too)
+
+- **What:** Patrick asked for the first-person view (arms and weapon) to follow the slider. Both sliders (the game's Settings, Display, and Settings.cmd) now set `fDefaultWorldFOV` (`0120315c`) and `fDefault1stPersonFOV` (`01203168`, `[Display]` in Fallout.ini, the same collection) to one number; the game's Defaults puts both to 75. Live: `0095de30` steers `f1stPersonFOV` to `fDefault1stPersonFOV` on the same path as the world's each frame of play (not in the vanity camera), and the first-person pass hands `f1stPersonFOV` to its camera as it draws (`00874900`). Settings.cmd writes both keys when moved, and any save makes a first-person value that differs from the world's equal to it; Play.exe's `FOV=` line writes both. `fPipboy1stPersonFOV` is left alone.
+- **Not run here:** the game, and the Windows-only Settings.cmd tests (one new: `settings_cmd_makes_the_first_person_fov_the_worlds_at_a_save`). **Next action:** Patrick: move the slider in play and see the arms and weapon follow.
+
 ### Claude, 2026-11-12 (field of view in the game's own Settings menu)
 
 - **What:** the `[nv-rs Fixes]` row `bFovSlider` (`crates/host/src/fov_slider.rs`, on in the fixes preset) adds one of the game's own sliders to the Settings menu's Display page: after `StartMenu::CreateMenuElements` (`007cc6e0`) a user option made by the game's constructor (`007d6350`; modes `0x10`, meter, 51 settings), labelled `Field of View: <degrees>`, change function at `7e060000`. Moved, it sets `fDefaultWorldFOV` (`0120315c`), which the view follows from the next frame (`0095de30`), and writes the key into the run's Fallout.ini (play runs; `game_ini::set_key`, a copy of Play.exe's held to its cases), where Settings.cmd's slider reads it. `CreateMenuElements`' one caller now calls it by address.

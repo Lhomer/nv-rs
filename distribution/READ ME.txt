@@ -60,12 +60,13 @@ the window is borderless.
 
 The field of view, how wide the world is seen in play (70 to 120 degrees; 75 is the original's), has
 a slider in the game's own menu: Settings, then Display, Field of View at the end of the list. It
-changes the view as soon as you are back in the game, and it is kept for the next start.
-Settings.cmd has the same slider (that one takes effect at the next start). Both set the game's own
-fDefaultWorldFOV in Fallout.ini's [Display] section, so each shows what the other saved. Your weapon
-and arms keep the original's view (fDefault1stPersonFOV, left as it is), so at a wide field of view
-they look the same as before. The slider in the game's menu comes with the fixes: with Vanilla the
-game's menu is the original's, and Settings.cmd still has its slider.
+sets the view of the world and of your arms and weapon to the same number. It changes both as soon
+as you are back in the game, and it is kept for the next start. Settings.cmd has the same slider
+(that one takes effect at the next start). Both set the game's own fDefaultWorldFOV and
+fDefault1stPersonFOV in Fallout.ini's [Display] section, so each shows what the other saved; if the
+two keys say different numbers there, saving in Settings.cmd makes the arms and weapon's the
+world's. The slider in the game's menu comes with the fixes: with Vanilla the game's menu is the
+original's, and Settings.cmd still has its slider.
 
 
 Controls

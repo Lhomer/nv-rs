@@ -263,16 +263,39 @@ $af = New-Combo @($own, 'Off', '2x', '4x', '8x', '15x') (Get-Setting 'Anisotropy
 Add-Row 'Anisotropic filtering' $af
 $vs = New-Combo @($own, 'On', 'Off') (Get-Setting 'VSync' $own)
 Add-Row 'V-sync' $vs
-# The world's field of view in play: Fallout.ini's [Display] fDefaultWorldFOV, which the game reads
-# from Fallout.ini (the setting at 0120315c, in the INI collection 011f96a0) and the player's
-# character steers its view to (PlayerCharacter's 0095de30; the weapon and arms keep
-# fDefault1stPersonFOV). The original's default is 75, the slider's when the file has no number. A
-# number outside the slider's range is shown at its nearest end and left as it is unless the slider
-# is moved.
+# The field of view in play, one number for two of the game's Fallout.ini [Display] settings: the
+# world's, fDefaultWorldFOV (the setting at 0120315c), and the first-person arms and weapon's,
+# fDefault1stPersonFOV (01203168), both in the INI collection 011f96a0, which the game reads from
+# Fallout.ini, and both steered to every frame by the player's character (PlayerCharacter's
+# 0095de30). The slider shows the world's; the original's default is 75, the slider's when the file
+# has no number. A number outside the slider's range is shown at its nearest end and left as it is
+# unless the slider is moved. The game's own Settings menu has the same slider (host fov_slider.rs).
 function Get-Fov($value) {
     $n = 0.0
     if (-not [double]::TryParse("$value", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$n)) { return 75 }
     [int][Math]::Max(70, [Math]::Min(120, [Math]::Round($n)))
+}
+# A field of view's number, or $null for none (no key, or no number).
+function Get-FovNumber($value) {
+    $n = 0.0
+    if ([double]::TryParse("$value", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$n)) { $n } else { $null }
+}
+# Whether a Fallout.ini's two field of view keys say different numbers (a key with no number is the
+# original's 75).
+function Test-FovDiffers($text) {
+    $world = Get-FovNumber (Get-IniValue $text 'Display' 'fDefaultWorldFOV')
+    $first = Get-FovNumber (Get-IniValue $text 'Display' 'fDefault1stPersonFOV')
+    if ($null -eq $world) { $world = 75.0 }
+    if ($null -eq $first) { $first = 75.0 }
+    $world -ne $first
+}
+# One number for both: a Fallout.ini whose first-person value differs from its world value gets the
+# world's (75.0000 when the world key has no number), at any Save.
+function Set-SameFov($text) {
+    if (-not (Test-FovDiffers $text)) { return $text }
+    $world = Get-IniValue $text 'Display' 'fDefaultWorldFOV'
+    $value = if ($null -ne (Get-FovNumber $world)) { "$world".Trim() } else { '75.0000' }
+    Set-IniKey $text 'Display' 'fDefault1stPersonFOV' $value
 }
 $fovRow = New-Object System.Windows.Forms.Panel
 $fovRow.Height = 28
@@ -390,7 +413,11 @@ if ($noWindow -or $form.ShowDialog() -eq 'OK') {
                     'AntiAliasing' { $newPrefs = Set-IniKey $newPrefs 'Display' 'iMultiSample' (& $sizes $v) }
                     'Anisotropy' { $newPrefs = Set-IniKey $newPrefs 'Display' 'iMaxAnisotropy' (& $sizes $v) }
                     'VSync' { $newIni = Set-IniKey $newIni 'Display' 'iPresentInterval' $(if ($v -eq 'On') { '1' } else { '0' }) }
-                    'FOV' { if ($v -match '^\d+$') { $newIni = Set-IniKey $newIni 'Display' 'fDefaultWorldFOV' "$v.0000" } }
+                    'FOV' {
+                        if ($v -match '^\d+$') {
+                            $newIni = Set-IniKey (Set-IniKey $newIni 'Display' 'fDefaultWorldFOV' "$v.0000") 'Display' 'fDefault1stPersonFOV' "$v.0000"
+                        }
+                    }
                     'Preset' { $newIni = Set-IniKey $newIni 'nv-rs General' 'sPreset' $v }
                     'FrameLimit' { $newIni = Set-IniKey $newIni 'nv-rs Display' 'iFrameLimit' $v }
                     'MenuFrameLimit' { $newIni = Set-IniKey $newIni 'nv-rs Display' 'iMenuFrameLimit' $v }
@@ -398,6 +425,7 @@ if ($noWindow -or $form.ShowDialog() -eq 'OK') {
                     'NV_RENDER_THREAD' { $newIni = Set-IniKey $newIni 'nv-rs Threads' 'bRenderThread' $(if ($v -eq '0') { '0' } else { '1' }) }
                 }
             }
+            $newIni = Set-SameFov $newIni
             if ([string]::CompareOrdinal($newPrefs, $prefs) -ne 0 -and (Test-Path -LiteralPath $prefsPath)) {
                 $writes += @{ Path = $prefsPath; Bytes = $latin1.GetBytes($newPrefs) }
             }
@@ -411,10 +439,17 @@ if ($noWindow -or $form.ShowDialog() -eq 'OK') {
         foreach ($name in @('Renderer', 'Borderless', 'Resolution', 'AntiAliasing', 'Anisotropy', 'VSync', 'Preset', 'FrameLimit', 'MenuFrameLimit')) {
             $lines += "$name=$($chosen[$name])"
         }
-        # The field of view only when the slider was moved, or as settings.ini had it: an unmoved
-        # slider leaves the file's own value (one outside the slider's range included).
+        # The field of view only when the slider was moved, or as settings.ini had it, or when the
+        # files' two keys differ and the slider shows the world's number exactly (Play.exe then
+        # writes both): an unmoved slider leaves the file's own value (one outside the slider's
+        # range included).
         if ($chosen['FOV'] -ne $shown['FOV']) { $lines += "FOV=$($chosen['FOV'])" }
         elseif ($null -ne $pendingFov) { $lines += "FOV=$pendingFov" }
+        elseif ($seeded -and (Test-FovDiffers $ini)) {
+            $world = Get-FovNumber (Get-IniValue $ini 'Display' 'fDefaultWorldFOV')
+            if ($null -eq $world) { $world = 75.0 }
+            if ($world -eq [double]$chosen['FOV']) { $lines += "FOV=$($chosen['FOV'])" }
+        }
         $lines += "NV_THREADS=$(if ($chosen['NV_THREADS'] -eq 'stepped') { 'stepped' } else { 'real' })"
         $lines += "NV_RENDER_THREAD=$(if ($chosen['NV_RENDER_THREAD'] -eq '0') { '0' } else { '1' })"
         $lines += $kept
