@@ -539,8 +539,20 @@ setters (every shader's constant maps), `00b98610`, the `BSShader` slots every `
 `00ee6de0`, `PlaneNormalize` `00ee6dce`, `PlaneTransform` `00ee6dc8`): each calls its import slot, which the
 platform layer answers (part crates do not depend on `engine-platform`, so the typed callers save the thunk's call,
 not the import's); every caller in the exe reaches them, so `draw:off` gives all of them the translations again.
-The tests: groups A's and B's in `crates/engine/tests/typed_shader.rs` (the shader family's world), groups D's and
-E's in `crates/engine/tests/typed_draw.rs`.
+Group C, the shader classes' set-ups the world draw reached through a shader's vtable as translations, typed with
+native maths (main-thread `f32`: the drawing thread replays main's control word): the render states' lock counters
+the passes' state restore calls (`00714a40`, `00714a60`, `00714aa0`, `00714ae0`, `004eced0`); the tall grass shader
+(`SetupGeometry` `00baac10`, its slots 0x78 `00bac950` and 0x7c `00bac9c0`, the instance copy `00baaf40`); the
+no-lighting shader (the pass choice `00bc6970`, its slots 0x78 `00bc8d40`, 0x7c `00bc9a50` and 0xfc `00bc6de0`, the
+sub-textures `00bc6fa0`, the material constants `00bc6fe0`, the light fog `00bc7100`, the texture matrix
+`00bc8e00`); the sky shader (its slots 0x78 `00b89cc0` and 0x7c `00b89d80`); the water shader (its slots 0x78 `00b863a0` and
+0x7c `00b864d0`); the SpeedTree leaf shader (`SetupGeometry` `00bb25d0`, its slots 0x7c `00bb2760` and 0xfc
+`00bb1b50`); the pass types' flag bits (`00b815e0`) and a material's colour constant (`00c03180`). Each reads the frame only through
+`draw::packet` and writes its constants, render states and counters through `draw::own` (each file's "Group C"
+section), with what is filled at load read in place (the shaders' own words, the passes' contents, the exe's
+constants).
+The tests: groups A's, B's and C's in `crates/engine/tests/typed_shader.rs` (the shader family's world), groups D's
+and E's in `crates/engine/tests/typed_draw.rs`.
 The accessors: what the drivers and the alpha pass read that the rest of the frame changes goes through
 `draw::packet`, and what they write that is their own through `draw::own`, one section per condition of the
 pipeline probe that lives there (the pass lists the next frame's registration fills again with the range draw's
@@ -585,12 +597,17 @@ replaces it), as do the Havok calls (motion type, hard keyframe, the velocities'
 `crates/engine/tests/typed_collision.rs`. On since its gate (the differential tests with each planted mutant caught,
 and the recorded street run byte-identical with `NV_TYPED=collision:off` in the fixes and vanilla presets); not a speed
 change by itself.
-The three update-half families (`scene`, `particles`, `collision`) keep the exact x87 helpers instead of the float
-rule's `f64` locals rounded at each `float` store (ADR-0014, below): they run on the main thread at 24-bit precision,
-where an `f64` local rounded only at the store can differ in the last bit from the exe, which rounds at every step, and
-byte identity with the translations needs each step rounded as the exe rounds it. The recording the rule asks for is
-each family's gate: the recorded street run, byte-identical with `NV_TYPED=scene:off`, `particles:off,scene:off` and
-`collision:off` in the fixes and vanilla presets.
+`particles`' float maths is native (ADR-0014, below; since 2026-11-11): each function written once over
+`engine-typed`'s `native::Real`, run as plain `f32` on the main thread (its 24-bit precision rounds every step to a float,
+as the exe's code does there) and as `f64` locals rounded at each `float` store on the AI threads (the exe's 53-bit
+arithmetic bit for bit), chosen per call from the thread's control word (the position modifier, every step of which is
+one operation on two floats, plain `f32` on every thread: one operation rounds to the same float); square roots by
+`FSQRT`; floats the exe only moves through the x87 copied plain. Its tests run each comparison under both control words:
+bit for bit (NaN payloads aside) on the other threads' and within one ulp on the main thread's (the dispatch and
+culling functions it calls by address there); and for the rotation, grow-fade, simple colour and bound update
+modifiers and the update controller's emitter test, bit for bit under both at a fixed input where rounding every step
+and rounding once part. `scene` and `collision` keep the exact x87 helpers until their turn, so that byte identity
+with the translations holds where the main thread rounds at every step.
 And `multibound` (same crate, id 22), the update half's fourth group: the two passes main runs over the loaded world
 once a frame that keep the multibound culling current. The reset pass (`0045bc80`) takes every object's multibound
 shape back to "not tested"; the visibility pass (`0045b070`) tests each again from the camera through the shadow
