@@ -3,7 +3,7 @@
 //! reads go through [`super::packet`], the shader constants it fills through [`super::own`]. Main
 //! thread only (the drawing thread replays main's draw with main's control word): `f32` maths.
 
-use super::{group_c, own, packet, thunks};
+use super::{capture, group_c, own, packet, thunks};
 use crate::anim_keys::narrow;
 use crate::shader::{self, accumulator, div_d, mul_d};
 use engine_core::ptr::Ptr;
@@ -66,6 +66,31 @@ pub fn setup_geometry(
     transform: u32,
     bound: u32,
 ) -> u32 {
+    // Value packet B: the transform is the geometry's world (`m_kWorld`, +0x68), which the cut takes; the set-up
+    // and every helper it hands the pointer to read a stack image of the copy (`capture::image`).
+    let (from, to) = super::cut::WORLD;
+    capture::image(e, transform.wrapping_sub(from), from, to, |e, object| {
+        let transform = object.wrapping_add(from);
+        setup_geometry_with(
+            e, this, geometry, word_2, word_3, word_4, state, word_6, transform, bound,
+        )
+    })
+}
+
+/// [`setup_geometry`] with `transform` the address its words are read at (the packet's image or guest memory).
+#[allow(clippy::too_many_arguments)]
+fn setup_geometry_with(
+    e: &mut Engine,
+    this: Ptr,
+    geometry: u32,
+    word_2: u32,
+    word_3: u32,
+    word_4: u32,
+    state: u32,
+    word_6: u32,
+    transform: u32,
+    bound: u32,
+) -> u32 {
     let this = this.addr();
     let renderer = e.global::<u32>(this.wrapping_add(0x18));
     typed_call!(
@@ -80,9 +105,9 @@ pub fn setup_geometry(
         let up = frame + 0x34;
         let transformed = frame + 0x84;
         let entry = |e: &Engine, index: u32| {
-            f32::from_bits(packet::transform_word(e, transform, 4 * index))
+            f32::from_bits(e.global::<u32>(transform.wrapping_add(4 * index)))
         };
-        let scale = f32::from_bits(packet::transform_word(e, transform, 0x30));
+        let scale = f32::from_bits(e.global::<u32>(transform.wrapping_add(0x30)));
         e.set_global(matrix, scale * entry(e, 0));
         let pass = packet::rendering_pass_type(e);
         e.set_global(frame + 0x40, pass);
@@ -91,7 +116,7 @@ pub fn setup_geometry(
             e.set_global(frame + place, value);
         }
         for (k, place) in (0u32..).zip([0x74u32, 0x78, 0x7c]) {
-            let value = packet::transform_word(e, transform, 0x24 + 4 * k);
+            let value = e.global::<u32>(transform.wrapping_add(0x24 + 4 * k));
             e.set_global(frame + place, value);
         }
         for place in [0x50u32, 0x60, 0x70] {
@@ -122,7 +147,7 @@ pub fn setup_geometry(
         if light != 0 {
             let direction = frame + 0x28;
             for (k, at) in [(2u32, 0xf8u32), (0, 0xf0), (1, 0xf4)] {
-                let word = packet::light_word(e, light, at);
+                let word = packet::scene_light_value(e, light, at);
                 e.set_global(direction + 4 * k, word);
             }
             typed_call!(
@@ -132,7 +157,7 @@ pub fn setup_geometry(
             );
             for (source, target) in [(0xc8u32, LIGHT_COLOUR), (0xd4, LIGHT_AMBIENT)] {
                 for k in 0..3u32 {
-                    let value = packet::light_word(e, light, source + 4 * k);
+                    let value = packet::scene_light_value(e, light, source + 4 * k);
                     own::set_shader_global(e, target + 4 * k, value);
                 }
                 own::set_shader_global(e, target + 0xc, ONE);
@@ -149,7 +174,7 @@ pub fn setup_geometry(
         } else if packet::point_lights_on(e) != 0
             && e.call(ACTIVE_NON_SHADOW_LIGHTS, &args![property]).u16() != 0
         {
-            let scale = packet::transform_word(e, transform, 0x30);
+            let scale = e.global::<u32>(transform.wrapping_add(0x30));
             e.call(
                 UPDATE_POINT_LIGHTS,
                 &args![this, property, inverse, scale, pass],

@@ -24,7 +24,7 @@
 //! the second half), the fog index (`011f91c4`, written by the tail's culling) with its scene node's fog property
 //! (+0x20 to +0x34, +0x60), and the time values the shaders animate with (`011f940c`, four floats, written before
 //! the next frame's input; `011f94ac`). The lights and the time values are read by the shader family (value
-//! packet B routes those reads).
+//! packet B routes those reads; it also takes the shaders' ambient colour and the scene's first light).
 
 use super::{capture, detach, packet, shapes};
 use crate::shader::layout::BSShaderAccumulator;
@@ -54,6 +54,8 @@ const FOG_VALUES: (u32, u32) = (0x20, 0x34);
 const FOG_POWER: (u32, u32) = (0x60, 0x64);
 /// The shaders' time values: four floats (`011f940c`) and the start time (`011f94ac`).
 const GAME_TIMES: u32 = 0x011f_940c;
+/// The shaders' ambient colour (`011f9ee0`, four words; value packet B).
+pub(crate) const SHADER_AMBIENT: u32 = 0x011f_9ee0;
 const START_TIME: u32 = 0x011f_94ac;
 /// A geometry's immediate draw (its slot 0xe0): the particles' (`NiParticles::RenderImmediate`, `00a9b1f0`, the four
 /// particle classes' vtables) reaches the points draw, which builds quads from the particle arrays.
@@ -110,6 +112,27 @@ pub fn take_frame(e: &Engine, camera: u32, acc: Ptr<BSShaderAccumulator>) {
     }
     capture::take(e, GAME_TIMES, 0, 0x10);
     capture::take(e, START_TIME, 0, 4);
+    // Value packet B: what the shader set-ups read of the frame (the ambient colour, the scene's first light).
+    capture::take(e, SHADER_AMBIENT, 0, 0x10);
+    take_scene_light(e, acc.addr());
+}
+
+/// The scene's first light of an accumulator (value packet B), as a set-up reaches it: its camera's (+0x194)
+/// light list (+0xe0), the list's first light (+0xf8, taken) and that light's values and direction. Nothing
+/// where a link is null or not mapped.
+pub fn take_scene_light(e: &Engine, acc: u32) {
+    let Some(middle) = peek(e, acc.wrapping_add(0x194)).filter(|&m| m != 0) else {
+        return;
+    };
+    let Some(lights) = peek(e, middle.wrapping_add(0xe0)).filter(|&l| l != 0) else {
+        return;
+    };
+    capture::take(e, lights, 0xf8, 0xfc);
+    let Some(light) = peek(e, lights.wrapping_add(0xf8)).filter(|&l| l != 0) else {
+        return;
+    };
+    capture::take(e, light, LIGHT_VALUES.0, LIGHT_VALUES.1);
+    capture::take(e, light, LIGHT_DIRECTION.0, LIGHT_DIRECTION.1);
 }
 
 /// What the cut takes for the camera: for the checks of the paths that read it.

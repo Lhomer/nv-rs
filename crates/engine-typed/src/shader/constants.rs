@@ -59,8 +59,9 @@ pub fn set_shader_constants(
     word_11: u32,
 ) -> bool {
     let base = this.addr();
-    // m_pkLastShaderProgram.
-    e.mem.set_u32(base.wrapping_add(0x30), program);
+    // m_pkLastShaderProgram: a word of a shared shader object the drawing side keeps its own copy of
+    // (`engine_core::draw_side`, copied at its first write).
+    engine_core::draw_side::store_own_u32(e, base.wrapping_add(0x30), program);
     let mut failed = false;
     // The predefined entries (m_aspDefinedEntries: elements +0x20, size +0x26), through
     // SetDefinedConstant.

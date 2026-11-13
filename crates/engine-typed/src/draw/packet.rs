@@ -761,16 +761,12 @@ pub(crate) fn property_distance(e: &Engine, property: u32) -> u32 {
 
 // ---- Group C: the reads of the shader set-ups the world draw reached as translations. ----
 //
-// Each reads guest memory today; the drawing thread's piece 2 backs them with the frame's captured
-// values (`measure/typed-draw/GROUP-C.md`). Read in place, not routed: a shader's renderer (+0x18, set
-// when the shader is made).
-
-/// A world transform's word at `offset` (+0 to +0x20 the rotation's entries, +0x24 to +0x2c the
-/// translation, +0x30 the scale), as a set-up reads the geometry's transform it is handed.
-#[inline(always)]
-pub(crate) fn transform_word(e: &Engine, transform: u32, offset: u32) -> u32 {
-    e.global::<u32>(transform.wrapping_add(offset))
-}
+// Value packet B (the drawing thread's piece 2): the reads of what the frame's tail changes go through the
+// packet, which the cut fills ([`super::cut::take_frame`]): the scene's first light and its values, the shaders' game time and ambient. The rest read guest memory:
+// structure set when the objects are made (a shader's renderer, +0x18; the light lists' links), and the
+// water's own light list (property +0x128), which the cut does not walk yet ([`light_word`]). The geometry's
+// world transform a set-up is handed is read from a stack image of the packet's copy (`capture::image`, in the
+// tall grass's and the leaves' set-ups), so the helpers it hands the pointer to see the copy too.
 
 /// The scene's light list of an accumulator: its camera's (+0x194) word +0xe0.
 #[inline(always)]
@@ -779,13 +775,21 @@ pub(crate) fn accumulator_lights(e: &Engine, accumulator: u32) -> u32 {
     e.global::<u32>(camera.wrapping_add(0xe0))
 }
 
-/// A light list's first light (+0xf8), none when 0.
+/// A light list's first light (+0xf8), none when 0: the cut takes it (packet B).
 #[inline(always)]
 pub(crate) fn first_light(e: &Engine, lights: u32) -> u32 {
-    e.global::<u32>(lights.wrapping_add(0xf8))
+    capture::word(e, lights, 0xf8)
 }
 
-/// A light's word at `offset` (+0xc8 and +0xd4 its two colours, +0xf0 to +0xf8 its direction).
+/// The scene's first light's word at `offset` (+0xc8 and +0xd4 its two colours, +0xf0 to +0xf8 its
+/// direction): its values, which the cut takes (packet B).
+#[inline(always)]
+pub(crate) fn scene_light_value(e: &Engine, light: u32, offset: u32) -> u32 {
+    capture::word(e, light, offset)
+}
+
+/// A light's word at `offset`, read in place: the water's own lights (its property's list), which the cut
+/// does not walk yet.
 #[inline(always)]
 pub(crate) fn light_word(e: &Engine, light: u32, offset: u32) -> u32 {
     e.global::<u32>(light.wrapping_add(offset))
@@ -869,11 +873,13 @@ pub(crate) fn full_bright(e: &Engine) -> u8 {
 }
 #[inline(always)]
 pub(crate) fn game_time(e: &Engine) -> u32 {
-    e.global::<u32>(0x011f_940c)
+    // Packet B: the cut takes the time values (`011f940c`), which the tail writes before the next input.
+    capture::word(e, 0x011f_940c, 0)
 }
 #[inline(always)]
 pub(crate) fn ambient_word(e: &Engine, index: u32) -> u32 {
-    e.global::<u32>(0x011f_9ee0u32.wrapping_add(index.wrapping_mul(4)))
+    // Packet B: the cut takes the shaders' ambient colour (`011f9ee0`).
+    capture::word(e, super::cut::SHADER_AMBIENT, index.wrapping_mul(4))
 }
 #[inline(always)]
 pub(crate) fn hdr_on(e: &Engine) -> u8 {

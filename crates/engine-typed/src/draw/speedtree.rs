@@ -5,7 +5,7 @@
 //! shader's own words (its renderer +0x18, its constant maps, made at load), the passes' contents and
 //! the exe's constants.
 
-use super::{group_c, own, packet, thunks};
+use super::{capture, group_c, own, packet, thunks};
 use crate::shader::{self, accumulator};
 use engine_core::ptr::Ptr;
 use engine_core::{args, typed_call, Engine};
@@ -58,6 +58,16 @@ pub fn setup_geometry(
     transform: u32,
     _bound: u32,
 ) -> u32 {
+    // Value packet B: the transform is the geometry's world (`m_kWorld`, +0x68), which the cut takes; the set-up
+    // and the helpers it hands the pointer to read a stack image of the copy (`capture::image`).
+    let (from, to) = super::cut::WORLD;
+    capture::image(e, transform.wrapping_sub(from), from, to, |e, object| {
+        setup_geometry_with(e, this, state, object.wrapping_add(from))
+    })
+}
+
+/// [`setup_geometry`] with `transform` the address its words are read at (the packet's image or guest memory).
+fn setup_geometry_with(e: &mut Engine, this: Ptr, state: u32, transform: u32) -> u32 {
     let base = this.addr();
     let renderer = e.global::<u32>(base.wrapping_add(0x18));
     typed_call!(
@@ -70,16 +80,16 @@ pub fn setup_geometry(
         let matrix = frame + 8;
         let inverse = frame + 0x48;
         let entry = |e: &Engine, index: u32| {
-            f32::from_bits(packet::transform_word(e, transform, 4 * index))
+            f32::from_bits(e.global::<u32>(transform.wrapping_add(4 * index)))
         };
-        let scale = f32::from_bits(packet::transform_word(e, transform, 0x30));
+        let scale = f32::from_bits(e.global::<u32>(transform.wrapping_add(0x30)));
         e.set_global(matrix, (scale * entry(e, 0)).to_bits());
         for (index, place) in SCALED_ENTRIES {
             let value = entry(e, index) * scale;
             e.set_global(frame + place, value.to_bits());
         }
         for (k, place) in (0u32..).zip([0x38u32, 0x3c, 0x40]) {
-            let word = packet::transform_word(e, transform, 0x24 + 4 * k);
+            let word = e.global::<u32>(transform.wrapping_add(0x24 + 4 * k));
             e.set_global(frame + place, word);
         }
         for place in [0x14u32, 0x24, 0x34] {
@@ -93,7 +103,7 @@ pub fn setup_geometry(
         } else {
             0
         };
-        let scale = packet::transform_word(e, transform, 0x30);
+        let scale = e.global::<u32>(transform.wrapping_add(0x30));
         e.call(LIGHT_SETUP, &args![base, property, inverse, scale]);
     });
     e.call(CAMERA_ROWS, &[]);

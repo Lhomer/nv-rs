@@ -9573,3 +9573,105 @@ fn setup_pass_constants_reads_the_fog_through_the_packet() {
         |e, w| cut::take_frame(e, w[0], Ptr::new(w[1])),
     );
 }
+
+/// Value packet B: the tall grass's `SetupGeometry` (`00baac10`) reads the geometry's world transform it is handed
+/// (the geometry's `m_kWorld`) and the scene's first light (its list's +0xf8, the light's colours and direction)
+/// through the packet: with the cut's takes (`cut::take_scene_light`, the transform's range) scribbled, it does
+/// what it does plain, and every read finds its copy.
+#[test]
+fn tall_grass_setup_geometry_reads_packet_b() {
+    let f = entry!(
+        0x00ba_ac10,
+        engine_typed::draw::tall_grass::setup_geometry(
+            Ptr<_>,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+        ) -> u32
+    )
+    .1;
+    packet_same(
+        "tall_grass_setup_geometry",
+        f,
+        &product(&[
+            &[HALF],
+            &[ONE, TWO],
+            &[4, 1],
+            TWO_WAYS,
+            TWO_WAYS,
+            TWO_WAYS,
+            &[0, 2],
+        ]),
+        |e, c| {
+            let floats = Case(
+                (0..7)
+                    .map(|i| {
+                        if i < 2 {
+                            Value::F32(c.word(i))
+                        } else {
+                            Value::Word(c.word(i))
+                        }
+                    })
+                    .collect(),
+            );
+            let words = tall_grass_words(e, &floats);
+            let acc = e.mem.u32(0x011f_95ec);
+            let transform = words[7];
+            (words, vec![transform, acc])
+        },
+        |e, from| {
+            // The geometry's world transform (the set-up is handed its +0x68) and the scene's first light.
+            capture::take(e, from[0].wrapping_sub(0x68), 0x68, 0x9c);
+            cut::take_scene_light(e, from[1]);
+        },
+    );
+}
+
+/// Value packet B: the leaves' `SetupGeometry` (`00bb25d0`) reads the geometry's world transform through a stack
+/// image of the packet's copy, and hands that image to the renderer's world transform and the D3DX inverse.
+#[test]
+fn leaf_setup_geometry_reads_packet_b() {
+    let f = entry!(
+        0x00bb_25d0,
+        engine_typed::draw::speedtree::setup_geometry(
+            Ptr<_>,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+        ) -> u32
+    )
+    .1;
+    packet_same(
+        "leaf_setup_geometry",
+        f,
+        &product(&[&[HALF, TWO], &[ONE, TWO], &[6, 5, 0]]),
+        |e, c| {
+            let floats = Case(vec![
+                Value::F32(c.word(0)),
+                Value::F32(c.word(1)),
+                Value::Word(c.word(2)),
+            ]);
+            let words = leaf_geometry_words(e, &floats);
+            // The light set-up is handed the inverse in the set-up's frame, whose address the image moves: its
+            // stand-in marks the matrix it points to, not the address.
+            e.register(0x00bb_1960, |e, a| {
+                let matrix: Vec<u32> = (0..16).map(|k| e.mem.u32(a[2] + 4 * k)).collect();
+                let words: Vec<u32> = [a[0], a[1], a[3]].into_iter().chain(matrix).collect();
+                marked(e, &words)
+            });
+            let transform = words[7];
+            (words, vec![transform])
+        },
+        |e, from| capture::take(e, from[0].wrapping_sub(0x68), 0x68, 0x9c),
+    );
+}
