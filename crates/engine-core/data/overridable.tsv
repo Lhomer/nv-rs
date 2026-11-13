@@ -101,6 +101,7 @@
 0086e650	0	script or frame function
 0086ff70	1	script or frame function
 008706b0	2	JIP, nv-rs smooth physics drawing
+00874c10	1	nv-rs weighty combat
 00881d30	1	nv-rs half-loaded actor's level change
 00882b90	1	nv-rs half-loaded actor's level change
 00883240	1	nv-rs half-loaded actor's level change
