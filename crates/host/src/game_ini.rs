@@ -110,6 +110,8 @@ pub struct Keys {
     pub fixes: Vec<(&'static str, bool)>,
     /// The `[nv-rs Gunplay]` keys the file sets (`crate::gunplay::KEYS`), in the table's order.
     pub gunplay: Vec<(&'static str, i32)>,
+    /// `sTestRangeCell`: the Test Range's cell (`crate::test_range`).
+    pub test_range_cell: Option<String>,
     /// The lines whose value can't be used (`key=value`): the default stands for each.
     pub bad: Vec<String>,
 }
@@ -158,6 +160,11 @@ impl Keys {
                 "bRenderThread" => {
                     keys.render_thread = flag(raw);
                     keys.render_thread.is_some()
+                }
+                "sTestRangeCell" => {
+                    keys.test_range_cell =
+                        crate::test_range::valid_cell(raw).then(|| raw.to_string());
+                    keys.test_range_cell.is_some()
                 }
                 key if row.section == crate::gunplay::SECTION => {
                     match crate::gunplay::parse(key, raw) {
@@ -504,7 +511,8 @@ mod tests {
                 "iMeleeReach",
                 "iImpulse",
                 "iDismemberForce",
-                "iExplodeForce"
+                "iExplodeForce",
+                "sTestRangeCell"
             ]
         );
     }
@@ -538,6 +546,10 @@ mod tests {
             Ok(crate::gunplay::Tuning::PLAY)
         );
         assert_eq!(keys.gunplay.len(), crate::gunplay::KEYS.len());
+        assert_eq!(
+            keys.test_range_cell.as_deref(),
+            Some(crate::test_range::DEFAULT_CELL)
+        );
         assert!(keys.bad.is_empty(), "{:?}", keys.bad);
         for row in rows().iter().filter(|r| r.section == FIXES_SECTION) {
             // A fix row writes what the fixes preset gives it: on, or off for a row off in every preset.

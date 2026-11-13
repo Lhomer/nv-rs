@@ -22,6 +22,7 @@ nv-rs Gunplay	iMeleeReach	NV_GUNPLAY_MELEE_REACH	115	Your melee reach, in percen
 nv-rs Gunplay	iImpulse	NV_GUNPLAY_IMPULSE	150	How hard a kill pushes the body, in percent of the game's push (which already grows with the damage); melee weapons push harder the heavier they are. 0 = no push.
 nv-rs Gunplay	iDismemberForce	NV_GUNPLAY_DISMEMBER_FORCE	45	A killing hit at least this strong severs the limb it struck, when the game lets that limb be severed: a gun's force is its damage of all its pellets, a melee weapon's its damage made heavier by its weight. 0 = only the game's own chance. The Settings menu's Dismember Force row sets it.
 nv-rs Gunplay	iExplodeForce	NV_GUNPLAY_EXPLODE_FORCE	110	A gun's killing hit at least this strong explodes a limb that can explode (melee only severs). 0 = only the game's own chance.
+nv-rs Gunplay	sTestRangeCell	NV_TEST_RANGE_CELL	QASmoke	The cell the main menu's Test Range starts in (an editor id: letters, digits and _; the game's own QASmoke test hall by default); the range never saves, and Home opens its menu there.
 nv-rs Fixes	bUncap	NV_UNCAP	1	Uncapped frame rate: the game's frame step without its sleep, so frames are not held to the original's pace (iFrameLimit paces it).
 nv-rs Fixes	bHighFrameRateLanding	NV_HF_LANDING	1	High-frame-rate landing: the player landing standing still falls as far as at 60 frames a second.
 nv-rs Fixes	bHighFrameRateSlowMotion	NV_HF_SLOWMO	1	High-frame-rate slow motion: the game's time multiplier moves to its target by the time passed, not by the frame.

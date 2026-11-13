@@ -85,6 +85,9 @@ pub const FIX: Fix = Fix {
         KILL_IMPULSE,
         DISMEMBER_ROLL,
         CREATE_MENU_ELEMENTS,
+        crate::test_range::SAVE_GAME,
+        crate::test_range::QUICK_SAVE,
+        crate::test_range::QUEUED_SAVES,
     ],
     summary: "guns kick the view and recover, the weapon lags fast turns and settles back, melee hits and heavy shots punch the viewmodel and camera (game time untouched), melee reaches a little further, kills push bodies by calibre and weapon weight, and a heavy enough hit severs the limb (Settings menu rows and [nv-rs Gunplay] tune it)",
     install,
@@ -579,6 +582,7 @@ pub fn install(e: &mut Engine) {
         );
         if a[0] != 0 {
             frame(e, a[0], f32::from_bits(a[1]));
+            crate::test_range::frame(e, a[0]);
         }
         Ret {
             eax: u32::from(used),
@@ -656,6 +660,7 @@ pub fn install(e: &mut Engine) {
         Ret::default()
     });
     install_change_fns(e);
+    crate::test_range::install(e);
 }
 
 /// The weapon form the actor holds (0 for its fists or none).
@@ -1351,7 +1356,8 @@ fn heap_text(e: &mut Engine, text: &str, size: u32) -> u32 {
     buffer
 }
 
-/// Makes the rows and appends them to `pUserOptionsA` (a failed allocation appends nothing).
+/// Makes the rows and appends them to `pUserOptionsA` (a failed allocation appends nothing), and
+/// the main menu's Test Range entry ([`crate::test_range::add_option`]).
 pub fn add_rows(e: &mut Engine) {
     for (row, change_fn) in ROWS.into_iter().zip(CHANGE_FNS) {
         let text = heap_text(e, &row.label(row.value()), LABEL_SIZE);
@@ -1377,6 +1383,7 @@ pub fn add_rows(e: &mut Engine) {
             e.call(ARRAY_ADD, &args![USER_OPTIONS, cell]);
         });
     }
+    crate::test_range::add_option(e);
 }
 
 /// Registers the rows' change functions.
@@ -1517,7 +1524,7 @@ mod tests {
     fn the_tables_gunplay_rows_are_the_built_in_tuning() {
         let rows: Vec<_> = crate::game_ini::rows()
             .into_iter()
-            .filter(|r| r.section == SECTION)
+            .filter(|r| r.section == SECTION && !r.key.starts_with('s'))
             .collect();
         assert_eq!(
             rows.iter().map(|r| r.key).collect::<Vec<_>>(),

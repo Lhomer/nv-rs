@@ -42,6 +42,7 @@ pub mod pickpocket_chance;
 pub mod player_move;
 pub mod quick_loot;
 pub mod save_out;
+pub mod test_range;
 pub mod thread_races;
 pub mod topic_index;
 pub mod uncap;

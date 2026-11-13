@@ -7,6 +7,12 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-13 (weighty combat slice 2: the Test Range)
+
+- **What:** Patrick: a main-menu Test Range to try and tune the weighty combat (his choices in docs/GUNPLAY.md, slice 2). `crates/host/src/test_range.rs`, part of the weighty combat row: the title menu's "Test Range" (above Quit) runs `coc QASmoke` (`[nv-rs Gunplay] sTestRangeCell`, `NV_TEST_RANGE_CELL`) as the console runs a line, so the game starts fresh there with a default character; ~30 frames in, a container with every playable named weapon of every loaded plugin (the form map `011c54c0`), 500 of every ammo, and a lane of passive targets (named NPC and creature bases, `PlaceAtMe` worker `005c4b30` then `MoveTo`) at 5-100 m. Home opens the range menu (the game's message box `00703e80`): Weapons, Fill Ammo, Make Targets Hostile/Passive, Respawn Targets (down the line faced now), Exit to Main Menu (`007d0a70`), Close.
+- **Saves:** refused while the range runs at `SaveGame` (`008503b0`), the quick save (`008509a0`) and `UpdateQueuedSaves` (`00851d90`, queues emptied); the range ends on a load / menu new game / main menu (seams `00847fd9`, `007d33ce`, `007d0b17`, now owned by the row "weighty combat" before xNVSE in engine-core's seam table; `0093db69`, the main menu's `coc` new game, starts it). `engine` re-exports `engine_core::extend` for the host.
+- **Checked here:** host tests (3 known cell_offsets), the range's pure parts (lane, offsets, option order, stances, cell names), engine-core's seam tests, nvse's (its one math bit-for-bit failure is the same without this change), d3d9-wgpu, repo_hygiene, clippy, fmt, the Windows build. **Not run here:** the game. Unknowns: whether `coc` from the port's main menu starts the game as in the original (the seam and `CenterOnCell` are translated; never run); QASmoke's length (far targets may stand in a wall: Respawn along the longest line); that Activate on the container opens it with quick loot on. **Next action:** Patrick: the PLAYTESTING checklist line for the Test Range.
+
 ### Claude, 2026-11-13 (merge of slaterain 25ca088, 7 commits #553, #551, #555, #554, #557, #559, #556)
 
 - **Merged:** slaterain/nv-rs main through 25ca088 (#556), a normal merge on 8f4cc9b (the settings-persistence fix), Patrick approved.

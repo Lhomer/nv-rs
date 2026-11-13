@@ -585,6 +585,10 @@ pub struct Choice {
     /// set; else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Gunplay]`; else the built-in
     /// feel. Read by the weighty combat row only, so a preset without it never feels it.
     pub gunplay: crate::gunplay::Tuning,
+    /// The Test Range's cell ([`crate::test_range`]): `NV_TEST_RANGE_CELL` when set (an editor id,
+    /// else the start stops); else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Gunplay]
+    /// sTestRangeCell`; else `QASmoke`.
+    pub test_range_cell: String,
     /// The one log line naming `Fallout.ini` values that could not be used
     /// ([`crate::game_ini::Keys::bad_line`]): the default stood for each.
     pub ini_note: Option<String>,
@@ -605,6 +609,7 @@ impl Choice {
             renderer: None,
             show_frame_rate: PLAY_SHOW_FRAME_RATE,
             gunplay: crate::gunplay::Tuning::PLAY,
+            test_range_cell: crate::test_range::DEFAULT_CELL.to_string(),
             ini_note: None,
         }
     }
@@ -760,6 +765,18 @@ impl Choice {
             renderer: ini.renderer.or(play.then_some(PLAY_RENDERER)),
             show_frame_rate: ini.show_frame_rate.unwrap_or(PLAY_SHOW_FRAME_RATE),
             gunplay: crate::gunplay::Tuning::from_parts(&ini.gunplay, &env)?,
+            test_range_cell: match env("NV_TEST_RANGE_CELL").filter(|v| !v.trim().is_empty()) {
+                Some(cell) if crate::test_range::valid_cell(cell.trim()) => cell.trim().to_string(),
+                Some(cell) => {
+                    return Err(format!(
+                        "NV_TEST_RANGE_CELL={cell}: use a cell's editor id (letters, digits and _)"
+                    ))
+                }
+                None => ini
+                    .test_range_cell
+                    .clone()
+                    .unwrap_or_else(|| crate::test_range::DEFAULT_CELL.to_string()),
+            },
             ini_note: ini.bad_line(),
         };
         for line in settings.unwrap_or("").lines() {
@@ -1008,6 +1025,7 @@ pub fn install(e: &mut Engine, choice: &Choice) {
     crate::uncap::set_frame_limit(choice.frame_limit);
     crate::uncap::set_menu_frame_limit(choice.bound_menu_frame_limit());
     crate::gunplay::set_tuning(choice.gunplay);
+    crate::test_range::set_cell(&choice.test_range_cell);
     for fix in FIXES.iter().filter(|f| choice.is_on(f)) {
         (fix.install)(e);
     }

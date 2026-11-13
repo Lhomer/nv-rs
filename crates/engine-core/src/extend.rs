@@ -116,6 +116,9 @@ pub struct Entry {
 }
 
 const NVSE: &[Owner] = &[Owner::Nvse];
+/// The weighty combat row's Test Range (`crates/host/src/test_range.rs`) before xNVSE: the range's
+/// start and end on a new game, a load and the return to the main menu.
+const RANGE_NVSE: &[Owner] = &[Owner::Row("weighty combat"), Owner::Nvse];
 const JIP: &[Owner] = &[Owner::Jip];
 
 /// Every exe address a built-in may wrap (ADR-0016 §3, "Wrappers"), by address. Each is a
@@ -531,7 +534,7 @@ pub const SITES: &[Entry] = &[
     // Exits of the game in ChooseMainMenu 007d0a70 and 007d0bf0 (xNVSE's exit messages).
     Entry {
         addr: 0x007d_0b17,
-        owners: NVSE,
+        owners: RANGE_NVSE,
         step: "I-8",
     },
     Entry {
@@ -542,7 +545,7 @@ pub const SITES: &[Entry] = &[
     // New game in ConfirmNewGame 007d32b0: the co-save cleared.
     Entry {
         addr: 0x007d_33ce,
-        owners: NVSE,
+        owners: RANGE_NVSE,
         step: "I-10",
     },
     // TutorialMenu::Create 007e8890: JIP LN NVSE's MessageDisabled (ShowTutorialHook).
@@ -572,7 +575,7 @@ pub const SITES: &[Entry] = &[
     // BGSSaveLoadGame::LoadGame: the co-save read before the .fos, after it, and post-load.
     Entry {
         addr: 0x0084_7fd9,
-        owners: NVSE,
+        owners: RANGE_NVSE,
         step: "I-10",
     },
     Entry {
@@ -727,7 +730,7 @@ pub const SITES: &[Entry] = &[
     // New game through CenterOnCell 0093db60: the co-save cleared.
     Entry {
         addr: 0x0093_db69,
-        owners: NVSE,
+        owners: RANGE_NVSE,
         step: "I-10",
     },
     // The combat group's target choice 00986c60, after the empty test: JIP LN NVSE's

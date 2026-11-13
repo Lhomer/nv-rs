@@ -182,34 +182,99 @@ unit tests and the build; the new sway and punch are not run in the game yet. To
 - severed limbs at the force thresholds;
 - the five Settings rows (labels, saving, Defaults).
 
-## Slice 2 (plan only): the Test Range
+## Slice 2: the Test Range
 
-**Goal.** A main-menu button "Test Range" that loads a small space. The space has:
-- targets and NPCs: standing, moving, armoured and unarmoured;
-- a weapon rack or menu to pick any weapon with ammo;
-- a way back to the main menu.
+Patrick's choices (2026-11-13):
+- a main-menu button straight into the range, no save needed;
+- a quiet, existing, well-lit space with room for targets at about 5 to 100 m;
+- humanoid and creature targets at several distances, passive by default, with a toggle to make
+  them hostile and a way to respawn them;
+- every weapon of every loaded plugin and DLC, with ammo, and a quick way to fill ammo;
+- the gunplay settings easy to reach;
+- a clean exit to the main menu, and the player's real saves never touched.
 
-**Plan:**
-1. **Button.** Add a list entry to the main menu (`MainMenu`) the way the Settings rows are added:
-   wrap the menu's element creation and add an entry with its own callback in the platform area.
-   The callback starts a new game as "New" does, but with a flag that is checked on the first
-   frame of play.
-2. **The space.** Use an existing interior cell of the base game as the range (no new plugin, no
-   shipped asset). Candidates are an empty test cell the game ships, or the Lucky 38 cocktail lounge
-   or a Vault 21 room. On the first frame of play with the flag set, move the player there with the
-   game's own `MoveTo` (`TESObjectREFR::MoveTo`). Then place targets with `PlaceAtMe` (`TESObjectREFR::PlaceAtMe`):
-   - the game's own NPC and creature base forms, as non-hostile (or hostile on a toggle), at
-     marked distances: 10, 25 and 50 m;
-   - a "dummy" that is a non-combatant NPC with high health and no AI;
-   - a moving target: an NPC given a travel package between two markers.
-3. **Weapons.** Add one of each base-game weapon with ammo to the player's inventory with the game's
-   own `AddItem`. Optionally offer a small menu of weapon categories built on the game's own
-   message box menu. A "reset range" entry respawns the targets.
-4. **Safety.** The range is a new game in a separate save slot, so it never touches the player's
-   saves. Saving on the range is turned off, or saves go to a separate name.
-5. **Tuning live.** The Settings rows of slice 1 already work there. A small on-screen readout of
-   the last hit's force, outcome and kick (the frame-rate counter's overlay) helps tune the
-   thresholds.
+Code: `crates/host/src/test_range.rs`, part of the weighty combat row (on with
+`bWeightyCombat`).
 
-**Open questions for Patrick.** Which cell? Hostile targets or not by default? Base-game weapons
-only, or every loaded plugin's?
+### How to use it
+
+1. On the main menu choose **Test Range** (just above Quit).
+2. The game starts fresh in the range cell, with a default character: no character creation and
+   no save.
+3. About half a second into play the range is set up:
+   - a container behind you with one of every weapon;
+   - 500 rounds of every ammo type in your inventory;
+   - a lane of targets straight ahead at 5, 10, 20, 35, 50, 75 and 100 m, humanoids and
+     creatures alternating, a step to each side.
+
+   A note says "press Home for the range menu".
+4. **Home** opens the range menu (the game's own message box):
+
+   | Button | What it does |
+   | --- | --- |
+   | Weapons | Opens the weapons container. |
+   | Fill Ammo | Tops every ammo type back up to 500. |
+   | Make Targets Hostile / Passive | Passive targets stand still and take hits (`SetRestrained 1`, aggression 0). Hostile ones fight (`SetRestrained 0`, aggression 2, `StartCombat player`). |
+   | Respawn Targets | Removes the old targets, dead or alive, and lays a fresh lane down the line you face now. Face the longest open line of the room first. |
+   | Exit to Main Menu | The game's own return to the title (`StartMenu::ChooseMainMenu`). |
+   | Close | Closes the menu. |
+
+5. **Tuning:** Esc > Settings > Display has Recoil, Weapon Sway, Impact Punch and Dismember
+   Force. They change at once and are kept. The rest is in Fallout.ini's `[nv-rs Gunplay]`.
+6. **Saving is off** in the range. A manual save or quick save shows "Saving is off in the Test
+   Range"; autosaves are dropped silently.
+
+### The place
+
+The default is **`QASmoke`**, the game's own test hall in FalloutNV.esm: interior, quiet and lit,
+with no wildlife or random encounters. `[nv-rs Gunplay] sTestRangeCell` (or `NV_TEST_RANGE_CELL`)
+names another cell by its editor id, interior or exterior (letters, digits and `_` only, as it
+goes on a console line).
+
+Not checked in the game: whether QASmoke's longest line reaches 100 m. The far targets may stand
+in or behind a wall. Respawn Targets lays the lane along whatever line you face.
+
+### How it is built: the game's own content and machinery only
+
+- **Start.** The option is made as `CreateMenuElements` makes its own: `StartMenu::Option`,
+  `007ce620`, title menu mode 1, moved above Quit in `pOptionsA`. Its choose function (platform
+  address `7e0600c0`) runs `coc <cell>` exactly as the console runs a typed line (`run_line`):
+  a temporary `Script` with the text, then `Script::CompileAndRun` (`005ac400`) with the
+  console's compiler. From the main menu, the game's own `CenterOnCell` starts a new game there.
+  Its new-game seam (`0093db69`) marks the range active.
+- **Content.** Forms are enumerated from the game's form map (`011c54c0`), so every loaded plugin
+  and DLC counts:
+  - weapons: playable (not `cFlags` 0x80), not a creature's own (not 0x20), and named;
+  - ammo: each weapon's `BGSAmmoForm`, or the first entry of its ammo list;
+  - targets: the first base form named "Powder Ganger", "Fiend", "NCR Trooper", "Legionary",
+    "Great Khan" or "Raider" (NPCs), and "Gecko", "Giant Rat", "Coyote", "Radscorpion", "Giant
+    Mantis", "Feral Ghoul", "Mr. Handy" or "Protectron" (creatures). With no named humanoid, the
+    player's own base (`0x7`) is used;
+  - the container: a "Footlocker", "Ammo Box", "Toolbox" or "Metal Box", else any named one,
+    emptied first.
+
+  Targets and the container are placed by the game's `PlaceAtMe` worker (`005c4b30`), then moved
+  by console lines (`MoveTo player x y 0`, `SetAngle`). Everything else is console lines too:
+  `AddItem`, `RemoveItem`, `SetRestrained`, `SetAV Aggression`, `StartCombat`, `StopCombat`,
+  `Disable`, `MarkForDelete`, `Activate player`.
+- **Menu.** Home is read from the real window's keys (`d3d9real::held_keys`, Windows). The menu is
+  the game's `ShowMessageBox` (`00703e80`, menu type 0x17, as xNVSE's `MessageBoxEx`). Its
+  answer callback (platform address `7e0600b0`) reads `GetMessageMenuResult` (`00703fa0`), and
+  the next frame of play acts on it.
+- **Saves never touched.** While the range is active, saves are refused at three points, so
+  nothing reaches the save folder and the copy-out (`NV_SAVE_OUT`) has nothing to copy or
+  delete:
+  - `BGSSaveLoadManager::SaveGame` (`008503b0`), used by the menus' saves and the `SaveGame`
+    command;
+  - the quick save (`008509a0`);
+  - `UpdateQueuedSaves` (`00851d90`), whose autosave, forced and system queue bytes are cleared.
+
+  The range ends on any of these seams, owned by the weighty combat row before xNVSE (engine-core
+  `extend.rs`): a save loading (`00847fd9`), a new game from the menu (`007d33ce`), or the return
+  to the main menu (`007d0b17`).
+
+### Still to come
+
+- A moving target (an NPC on a travel package).
+- An on-screen readout of the last hit's force, outcome and kick.
+- A god-mode toggle for hostile targets.
