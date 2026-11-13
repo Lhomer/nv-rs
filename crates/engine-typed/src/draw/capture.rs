@@ -224,6 +224,42 @@ pub fn begin(e: &Engine) -> bool {
     opened
 }
 
+/// An open packet taken off its thread ([`detach`]), to be put on another ([`attach`]): the hand-off of the cut's
+/// packet to the thread that draws, and back to main for the join.
+pub struct Detached(Box<Packet>);
+
+// A packet is plain data (its counters are `Cell`s): moved between threads, never shared.
+const _: () = {
+    const fn send<T: Send>() {}
+    send::<Detached>()
+};
+
+/// Takes this thread's open packet for `e`'s run off it, for another thread's [`attach`]. `None` without one.
+/// The packet stays open (counted as such): exactly one thread holds it at a time.
+pub fn detach(e: &Engine) -> Option<Detached> {
+    PACKET.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.as_ref().is_some_and(|p| p.run == run(e)) {
+            p.take().map(|p| Detached(Box::new(p)))
+        } else {
+            None
+        }
+    })
+}
+
+/// Puts a packet [`detach`] took on this thread: its accessors read it from now on. Gives it back when this
+/// thread holds a packet already.
+pub fn attach(packet: Detached) -> Result<(), Detached> {
+    PACKET.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.is_some() {
+            return Err(packet);
+        }
+        *p = Some(*packet.0);
+        Ok(())
+    })
+}
+
 /// Copies `object`'s bytes `[from, to)` into the open packet: the parts no range of it holds yet, each its own
 /// range. Nothing without an open packet, after [`poison`], or for a null object.
 pub fn take(e: &Engine, object: u32, from: u32, to: u32) {
@@ -652,6 +688,35 @@ mod tests {
             e.mem.set_u32(at + 4 * i, i + 1);
         }
         at
+    }
+
+    /// The cut's packet moves to the thread that draws and back to main for the join, still open and still
+    /// answering its copy.
+    #[test]
+    fn the_packet_moves_to_another_thread_and_back() {
+        let mut e = Engine::new();
+        let at = block(&mut e, 4);
+        assert!(begin(&e));
+        take(&e, at, 0, 8);
+        e.mem.set_u32(at, 0x77);
+        let packet = detach(&e).expect("the open packet");
+        assert!(!is_open(&e), "off this thread");
+        assert!(detach(&e).is_none());
+        let packet = std::thread::spawn(move || {
+            assert!(attach(packet).is_ok());
+            PACKET
+                .with(|p| p.borrow_mut().take())
+                .map(|p| Detached(Box::new(p)))
+                .unwrap()
+        })
+        .join()
+        .unwrap();
+        assert!(attach(packet).is_ok());
+        assert!(is_open(&e));
+        assert_eq!(word(&e, at, 0), 1, "the copy, not the guest's 0x77");
+        let report = end(&mut e);
+        assert_eq!(report.misses, 0);
+        assert!(!is_open(&e));
     }
 
     #[test]

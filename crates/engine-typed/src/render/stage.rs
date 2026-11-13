@@ -19,8 +19,19 @@ use engine_core::{args, typed_call, Engine};
 const RENDERER: u32 = 0x0126_f6c4;
 const DEVICE: u32 = 0x0126_f6c0;
 const RENDER_STATE: u32 = 0x0126_f6c8;
-/// The texture each stage was last bound with (`0126f680`, a word a stage).
+/// The texture each stage was last bound with (`0126f680`, a word a stage): one of the drawing side's own
+/// ranges ([`side_ranges`]).
 const SHADOWED_TEXTURES: u32 = 0x0126_f680;
+
+/// The drawing side's own copy of the stages' shadowed textures (`engine_core::draw_side`): the sixteen
+/// words, merged as the device's textures are (a word changes as its `SetTexture` is sent).
+pub fn side_ranges() -> Vec<(u32, u32, engine_core::draw_side::Kind)> {
+    vec![(
+        SHADOWED_TEXTURES,
+        16 * 4,
+        engine_core::draw_side::Kind::Device,
+    )]
+}
 /// The matrix `00e7df90` builds (`0126f6d0`).
 const MATRIX_RESULT: u32 = 0x0126_f6d0;
 /// How many texture stages there are (`011bf558`).
@@ -80,10 +91,10 @@ pub fn bind(e: &mut Engine, this: Ptr<TextureStage>, force: u8) -> bool {
     let stage = e.get(this, TextureStage::m_uiStage);
     let texture = e.get(this, TextureStage::m_pkTexture);
     let shadow = SHADOWED_TEXTURES.wrapping_add(stage.wrapping_mul(4));
-    if force == 0 && texture == e.global::<u32>(shadow) {
+    if force == 0 && texture == engine_core::draw_side::load_u32(e, shadow) {
         return true;
     }
-    e.set_global(shadow, texture);
+    engine_core::draw_side::store_u32(e, shadow, texture);
     let cache = e.get(this, TextureStage::pStateCache);
     if typed_call!(
         crate::shader::FAMILY,

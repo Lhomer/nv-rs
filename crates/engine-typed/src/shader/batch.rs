@@ -759,7 +759,7 @@ pub fn begin_pass(e: &mut Engine, pass_type: u32, shader: u32) {
         e.vcall(shader, slot::BEGIN, &args![pass_type]);
     }
     for i in 0..16 {
-        e.set_global(STAGE_TEXTURES + i * 4, 0u32);
+        engine_core::draw_side::store_u32(e, STAGE_TEXTURES + i * 4, 0u32);
     }
     match pass_type {
         0xca | 0xd1 => {
