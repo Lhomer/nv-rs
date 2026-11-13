@@ -646,7 +646,7 @@ pub fn set_world_view_constants(e: &mut Engine, this: u32, _unused: u32, transfo
 /// a normal, normalized, goes to vertex constant 0x19. The frame is the translation's: 0x24 bytes, the
 /// constant's fourth float its last word (in the exe the word above its 0x20-byte frame).
 pub fn set_light_direction(e: &mut Engine, matrix: u32) {
-    let rendering = e.global::<u32>(RENDERING_PASS);
+    let rendering = engine_core::draw_side::load_u32(e, RENDERING_PASS);
     let holder = e.global::<u32>(rendering.wrapping_add(0xc));
     let object = e.global::<u32>(holder);
     let vector = e.global::<u32>(object.wrapping_add(0xf8));
@@ -873,7 +873,7 @@ const LOCK_COUNTER_COLOR_MASK: u32 = 0x011f_fa18;
 /// a blending alpha property (+0x10) puts `00b98070` back; types 6 and 8 with bit 18 of the property's
 /// flags release the two counters and put depth writes and the colour mask (7) back.
 pub fn restore_states(e: &mut Engine, _this: u32, block: u32) {
-    let pass_type = e.global::<u32>(RENDERING_PASS_TYPE);
+    let pass_type = engine_core::draw_side::load_u32(e, RENDERING_PASS_TYPE);
     if pass_type == 0x250 || pass_type == 0x251 {
         typed_call!(FAMILY, 0x00b9_7e80, state::set_z_function(e, 3u32, 0u32));
     }

@@ -9471,6 +9471,19 @@ fn the_whole_draw_reads_the_packet_the_cut_fills() {
         reads += report.reads;
     }
     assert!(reads > 0, "the draw read nothing through the packet");
+    // Each half ran as the drawing side with its own render state (`draw::side`), its guest bytes scribbled: no
+    // write missed the side and no byte changed outside it, and the memory compared above is the plain draw's,
+    // so the join gave the serial order's state back. (The lock counts this setup's draw leaves raised are
+    // reported as unbalanced: the join takes them, as the serial order has them.)
+    let side = engine_typed::draw::side::thread_totals();
+    assert!(side.sides > 0, "no side was opened: {side:?}");
+    assert_eq!(side.refused, 0, "{side:?}");
+    assert!(side.join.taken > 0, "{side:?}");
+    assert_eq!(
+        (side.poison_written, side.join.unrouted),
+        (0, 0),
+        "{side:?}"
+    );
 }
 
 /// The alpha draw's next pass (`00b9af60`) reads the camera's direction and the passes' bounds through the packet:

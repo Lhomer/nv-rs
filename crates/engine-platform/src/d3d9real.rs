@@ -1994,7 +1994,8 @@ pub fn set_transform(e: &mut Engine, this: u32, state: u32, matrix: u32, model: 
     if matrix == 0 {
         return;
     }
-    let m: [u32; 16] = words(e, matrix);
+    let mut m: [u32; 16] = words(e, matrix);
+    engine_core::draw_side::overlay_words(engine_core::draw_side::run_of(e), matrix, &mut m);
     record(
         e,
         this,
@@ -2545,6 +2546,7 @@ fn set_constants_as_given(
     count: u32,
 ) {
     let per = if kind % 3 == 2 { 1 } else { 4 };
+    // Not the drawing side's copy (`engine_core::draw_side`): not reached, the model keeps every register.
     let words: Vec<u32> = (0..per * count).map(|i| mem.u32(data + 4 * i)).collect();
     s.submit(Cmd::SetConstants {
         device: this,

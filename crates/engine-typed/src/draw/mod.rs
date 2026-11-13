@@ -85,6 +85,7 @@ pub mod packing;
 pub mod passes;
 pub mod setups;
 pub mod shapes;
+pub mod side;
 pub mod skin;
 pub mod sky;
 pub mod speedtree;

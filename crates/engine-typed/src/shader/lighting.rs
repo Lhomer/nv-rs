@@ -50,7 +50,9 @@ fn float_word(e: &Engine, address: u32) -> f32 {
 /// The rendering geometry's shader property (`[[011f91e0]] + 0xa8`) when its word at +0x1c is 8 to 12
 /// (signed), else null.
 fn shader_object(e: &Engine) -> u32 {
-    let geometry = e.mem.u32(e.global::<u32>(RENDERING_PASS));
+    let geometry = e
+        .mem
+        .u32(engine_core::draw_side::load_u32(e, RENDERING_PASS));
     let object = e.mem.u32(geometry.wrapping_add(0xa8));
     if object == 0 {
         return 0;
@@ -136,7 +138,7 @@ pub fn light_setup(e: &mut Engine, index: u32, light: Ptr, scale: f32) {
     if light == 0 {
         for i in 0..4u32 {
             let value = e.global::<u32>(ZERO_COLOUR + 4 * i);
-            e.set_global(row + 4 * i, value);
+            engine_core::draw_side::store_own_u32(e, row + 4 * i, value);
         }
         return;
     }
@@ -210,9 +212,13 @@ pub fn light_setup(e: &mut Engine, index: u32, light: Ptr, scale: f32) {
                 colour = bright;
             }
             for (i, component) in colour.iter().enumerate() {
-                e.set_global(AMBIENT_COLOUR + 4 * idx(i), *component * scale);
+                engine_core::draw_side::store_own_f32(
+                    e,
+                    AMBIENT_COLOUR + 4 * idx(i),
+                    *component * scale,
+                );
             }
-            e.set_global(AMBIENT_COLOUR + 0xc, 1.0f32.to_bits());
+            engine_core::draw_side::store_own_u32(e, AMBIENT_COLOUR + 0xc, 1.0f32.to_bits());
         }
     }
     let strength = capped_strength(e, data);
@@ -242,7 +248,7 @@ pub fn light_setup(e: &mut Engine, index: u32, light: Ptr, scale: f32) {
             let extra = e.global::<u32>(EXTRA_SCALE);
             scale_point(e, point, extra);
         }
-        let pass = e.global::<u16>(PASS_TYPE).wrapping_sub(0x154);
+        let pass = engine_core::draw_side::load_u16(e, PASS_TYPE).wrapping_sub(0x154);
         let alpha = e.mem.u32(light.wrapping_add(0xd4));
         if pass <= 0x23 && object != 0 {
             let factor = narrow(e.vcall(object, 0x10c, &args![]).f64());
@@ -250,9 +256,9 @@ pub fn light_setup(e: &mut Engine, index: u32, light: Ptr, scale: f32) {
         }
         for i in 0..3u32 {
             let value = e.mem.u32(point + 4 * i);
-            e.set_global(row + 4 * i, value);
+            engine_core::draw_side::store_own_u32(e, row + 4 * i, value);
         }
-        e.set_global(row + 0xc, alpha);
+        engine_core::draw_side::store_own_u32(e, row + 0xc, alpha);
     });
     if is_point != 0 {
         let direction = LIGHT_DIRECTIONS.wrapping_add(index << 4);
@@ -262,13 +268,13 @@ pub fn light_setup(e: &mut Engine, index: u32, light: Ptr, scale: f32) {
             e.mem.u32(data.wrapping_add(0xe4)),
             e.mem.u32(data.wrapping_add(0xe8)),
         );
-        e.set_global(direction, first);
-        e.set_global(direction + 4, 0u32);
-        e.set_global(direction + 8, 0u32);
-        e.set_global(direction + 0xc, 1.0f32.to_bits());
+        engine_core::draw_side::store_own_u32(e, direction, first);
+        engine_core::draw_side::store_own_u32(e, direction + 4, 0u32);
+        engine_core::draw_side::store_own_u32(e, direction + 8, 0u32);
+        engine_core::draw_side::store_own_u32(e, direction + 0xc, 1.0f32.to_bits());
     }
-    e.set_global(LAST_LIGHT_FLAG, is_point);
-    e.set_global(LIGHT_KINDS + 4 * index, u32::from(is_point != 0) + 1);
+    engine_core::draw_side::store_own_u8(e, LAST_LIGHT_FLAG, is_point);
+    engine_core::draw_side::store_own_u32(e, LIGHT_KINDS + 4 * index, u32::from(is_point != 0) + 1);
 }
 
 /// A loop's small index as a word.

@@ -36,7 +36,7 @@ fn idx(i: usize) -> u32 {
 
 /// The first word of the rendering pass's (`011f91e0`) +0xc: its first light.
 fn rendering_object(e: &Engine) -> u32 {
-    let rendering = e.global::<u32>(RENDERING_PASS);
+    let rendering = engine_core::draw_side::load_u32(e, RENDERING_PASS);
     let holder = e.mem.u32(rendering + 0xc);
     e.mem.u32(holder)
 }
@@ -683,7 +683,7 @@ pub fn obj_to_cube(
             crate::draw::thunks::call_matrix_transpose(e, OBJECT_TO_CUBE, product);
             return;
         }
-        let rendering = e.global::<u32>(RENDERING_PASS);
+        let rendering = engine_core::draw_side::load_u32(e, RENDERING_PASS);
         if e.mem.u32(rendering + 0xc) == 0 || byte == 0 {
             return;
         }
@@ -1069,7 +1069,7 @@ pub fn ambient_emittance(
 ) {
     let property = property.addr();
     let rendering = rendering.addr();
-    let current = e.global::<u32>(RENDERING_PASS);
+    let current = engine_core::draw_side::load_u32(e, RENDERING_PASS);
     let colour: [u32; 3] = std::array::from_fn(|index| copy_float(e, ROWS + 4 * idx(index)));
     let alpha = copy_float(e, property + 0x28);
     for (index, value) in colour.iter().enumerate() {
@@ -1126,7 +1126,7 @@ pub fn ambient_emittance(
             let luminance = sum + third;
             let mut light_part = 0.0f32;
             if light != 0 {
-                let current = e.global::<u32>(RENDERING_PASS);
+                let current = engine_core::draw_side::load_u32(e, RENDERING_PASS);
                 let first_word = e.mem.u32(current);
                 let mut position = e.mem.u32(first_word + 0x20);
                 if position == 0 {
@@ -1176,7 +1176,7 @@ pub fn ambient_emittance(
         e.set_global(ROWS + 8, blue);
         e.set_global(ROWS + 0xc, alpha);
     }
-    let pass_type = e.global::<u32>(RENDERING_PASS_TYPE);
+    let pass_type = engine_core::draw_side::load_u32(e, RENDERING_PASS_TYPE);
     if pass_type.wrapping_sub(0x244) > 7 || mode == 10 {
         return;
     }
@@ -1212,9 +1212,9 @@ const SET_SHADER_CONSTANTS: u32 = 0x00e8_26d0;
 pub fn setup_geometry_constants(e: &mut Engine, this: Ptr, block: Ptr) {
     let base = this.addr();
     let block = block.addr();
-    let rendering = e.global::<u32>(RENDERING_PASS);
+    let rendering = engine_core::draw_side::load_u32(e, RENDERING_PASS);
     let geometry = e.mem.u32(rendering);
-    let pass_type = e.global::<u32>(RENDERING_PASS_TYPE);
+    let pass_type = engine_core::draw_side::load_u32(e, RENDERING_PASS_TYPE);
     let mut position = e.mem.u32(geometry + 0x20);
     if position == 0 {
         position = DEFAULT_POSITION;

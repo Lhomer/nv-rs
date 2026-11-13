@@ -390,6 +390,20 @@ pub fn join(e: &mut Engine) {
             totals.bytes,
             totals.held
         );
+        // The drawing side's own render state (`super::side`): a write it missed (POISON) or a byte main changed
+        // outside the routed accessors is a routing still missing.
+        let side = super::side::totals();
+        eprintln!(
+            "nv-draw side: {} sides ({} refused): taken {}, main changed {}, unrouted {}, unbalanced {}, own words {}, poison written {}",
+            side.sides,
+            side.refused,
+            side.join.taken,
+            side.join.main_changed,
+            side.join.unrouted,
+            side.join.unbalanced,
+            side.join.own_words,
+            side.poison_written
+        );
     }
 }
 

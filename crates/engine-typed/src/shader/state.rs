@@ -234,17 +234,32 @@ fn set_cache_f32(
 }
 
 /// The ranges of the render layer's shared state the drawing side keeps its own copy of
-/// (`engine_core::draw_side::open` at the cut): the renderer's state cache (`NiDX9RenderState`, 0x1114 bytes),
+/// (`engine_core::draw_side::open` at the cut): the renderer's state cache (`NiDX9RenderState`, 0x1114 bytes, but
+/// its vtable and its device word),
 /// Bethesda's render state lock counters (`011ff9d8`, up to the alpha-to-coverage counter `011ffa28`, which ends
 /// them), merged as balanced counters. Empty without a renderer.
 pub fn side_ranges(e: &Engine) -> Vec<(u32, u32, engine_core::draw_side::Kind)> {
     use engine_core::draw_side::Kind;
-    let cache = render_state(e).addr();
+    let word = |at: u32| {
+        let mut b = [0u8; 4];
+        e.mem
+            .try_read(at, &mut b)
+            .ok()
+            .map(|()| u32::from_le_bytes(b))
+    };
+    let cache = word(RENDERER)
+        .filter(|&r| r != 0)
+        .and_then(|r| word(r.wrapping_add(0x8b8)))
+        .unwrap_or(0);
     if cache == 0 {
         return Vec::new();
     }
+    // The vtable (+0) and the device (+0x10f8) are set once, when the renderer is made: left out, so a check
+    // that scribbles the ranges does not break what only reads them.
+    let device = NiDX9RenderState::m_pkD3DDevice9.off;
     vec![
-        (cache, CACHE_SIZE, Kind::Device),
+        (cache + 4, device - 4, Kind::Device),
+        (cache + device + 4, CACHE_SIZE - device - 4, Kind::Device),
         (
             LOCK_COUNTERS,
             COVERAGE_COUNTER + 4 - LOCK_COUNTERS,
@@ -1039,9 +1054,9 @@ mod side_tests {
         assert_eq!(calls().len(), 1);
         let mut ranges = side_ranges(&e);
         ranges.extend(crate::render::stage::side_ranges());
-        assert_eq!(ranges[0], (cache.addr(), CACHE_SIZE, Kind::Device));
+        assert_eq!(ranges[0], (cache.addr() + 4, 0x10f8 - 4, Kind::Device));
         // The stage shadow page is not mapped here; the cache and the counters are the side.
-        ranges.truncate(2);
+        ranges.truncate(3);
         let side = draw_side::open(&e, &ranges).expect("the side opens");
         set_render_state(&mut e, cache, 7, 2, 0, 0);
         assert_eq!(calls(), [(false, 0, vec![device(&e, cache), 7, 2])]);

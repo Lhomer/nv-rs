@@ -636,7 +636,7 @@ const RENDERING_PASS_TYPE: u32 = 0x011f_91e4;
 /// The current shader pass.
 #[inline(always)]
 pub(crate) fn current_pass(e: &Engine) -> u32 {
-    e.global::<u32>(CURRENT_PASS)
+    engine_core::draw_side::load_u32(e, CURRENT_PASS)
 }
 
 /// The current pass's constants holder (+0x5c).
@@ -654,7 +654,7 @@ pub(crate) fn pass_device(e: &Engine) -> u32 {
 /// The pass being rendered.
 #[inline(always)]
 pub(crate) fn rendering_pass(e: &Engine) -> u32 {
-    e.global::<u32>(RENDERING_PASS)
+    engine_core::draw_side::load_u32(e, RENDERING_PASS)
 }
 
 /// The pass being rendered's geometry (its first word).
@@ -666,7 +666,7 @@ pub(crate) fn rendering_geometry(e: &Engine) -> u32 {
 /// The type of the pass being rendered.
 #[inline(always)]
 pub(crate) fn rendering_pass_type(e: &Engine) -> u32 {
-    e.global::<u32>(RENDERING_PASS_TYPE)
+    engine_core::draw_side::load_u32(e, RENDERING_PASS_TYPE)
 }
 
 /// The renderer's render-state cache (+0x8b8).

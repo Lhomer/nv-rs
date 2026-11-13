@@ -1747,6 +1747,9 @@ fn set_transform(e: &mut Engine, this: Ptr, state: u32, matrix: Ptr) -> u32 {
     for (i, word) in m.iter_mut().enumerate() {
         *word = e.mem.u32(matrix.addr() + 4 * i as u32);
     }
+    // A matrix in the render layer's shared state is the drawing side's own there (`engine_core::draw_side`).
+    let run = engine_core::draw_side::run_of(e);
+    engine_core::draw_side::overlay_words(run, matrix.addr(), &mut m);
     mark(e, super::d3d9draw::Key::Transform(state));
     device(e, this).transforms.insert(state, m);
     D3D_OK

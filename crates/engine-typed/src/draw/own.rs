@@ -213,8 +213,8 @@ const GROUP_ZERO_FLAG: u32 = 0x011a_9608;
 /// it (condition 2).
 #[inline(always)]
 pub(crate) fn coverage_count_down(e: &mut Engine) {
-    let count = e.global::<u32>(state::COVERAGE_COUNTER).wrapping_sub(1);
-    e.set_global(state::COVERAGE_COUNTER, count);
+    let count = engine_core::draw_side::load_u32(e, state::COVERAGE_COUNTER).wrapping_sub(1);
+    engine_core::draw_side::store_u32(e, state::COVERAGE_COUNTER, count);
 }
 
 /// The two list counters (`011ffa24`, then `011ff9e8`) counted down when not zero, as a list's draw ends
@@ -222,9 +222,9 @@ pub(crate) fn coverage_count_down(e: &mut Engine) {
 #[inline(always)]
 pub(crate) fn list_counters_down(e: &mut Engine) {
     for counter in [0x011f_fa24u32, 0x011f_f9e8] {
-        let count = e.global::<u32>(counter);
+        let count = engine_core::draw_side::load_u32(e, counter);
         if count != 0 {
-            e.set_global(counter, count - 1);
+            engine_core::draw_side::store_u32(e, counter, count - 1);
         }
     }
 }
@@ -259,8 +259,8 @@ pub(crate) fn clip_planes(e: &mut Engine, on: u32) {
 /// global the draw of group 0 reads).
 #[inline(always)]
 pub(crate) fn swap_group_zero_flag(e: &mut Engine, value: u32) -> u32 {
-    let saved = e.global::<u32>(GROUP_ZERO_FLAG);
-    e.set_global(GROUP_ZERO_FLAG, value);
+    let saved = engine_core::draw_side::load_u32(e, GROUP_ZERO_FLAG);
+    engine_core::draw_side::store_u32(e, GROUP_ZERO_FLAG, value);
     saved
 }
 
@@ -291,15 +291,15 @@ pub(crate) fn decal_state_on(e: &mut Engine) {
 /// The decal state off: the first lock given back by hand, z-writes on, the third lock given back,
 /// no depth bias (condition 2).
 pub(crate) fn decal_state_off(e: &mut Engine) {
-    let count = e.global::<u32>(LOCK_COUNT_1).wrapping_sub(1);
-    e.set_global(LOCK_COUNT_1, count);
+    let count = engine_core::draw_side::load_u32(e, LOCK_COUNT_1).wrapping_sub(1);
+    engine_core::draw_side::store_u32(e, LOCK_COUNT_1, count);
     typed_call!(
         shader::FAMILY,
         0x00b9_7e30,
         state::set_z_write_enable(e, 1u8, 0u32)
     );
-    let count = e.global::<u32>(LOCK_COUNT_3).wrapping_sub(1);
-    e.set_global(LOCK_COUNT_3, count);
+    let count = engine_core::draw_side::load_u32(e, LOCK_COUNT_3).wrapping_sub(1);
+    engine_core::draw_side::store_u32(e, LOCK_COUNT_3, count);
     e.call(SET_DEPTH_BIAS, &args![x87_store32(0.0), 0u32]);
 }
 
@@ -310,12 +310,12 @@ pub(crate) fn decal_state_off(e: &mut Engine) {
 pub fn fog_ambient(e: &mut Engine) {
     for index in 0..4u32 {
         let word = e.global::<u32>(FOG_COLOUR.wrapping_add(4 * index));
-        e.set_global(AMBIENT.wrapping_add(4 * index), word);
+        engine_core::draw_side::store_own_u32(e, AMBIENT.wrapping_add(4 * index), word);
     }
     let enable = e.global::<u32>(AMBIENT_ENABLE);
-    e.set_global(enable.wrapping_add(8), 1u8);
-    e.set_global(AMBIENT_SET, 1u8);
-    e.set_global(AMBIENT_FOG, 1u8);
+    engine_core::draw_side::store_own_u8(e, enable.wrapping_add(8), 1u8);
+    engine_core::draw_side::store_own_u8(e, AMBIENT_SET, 1u8);
+    engine_core::draw_side::store_own_u8(e, AMBIENT_FOG, 1u8);
 }
 const FOG_COLOUR: u32 = 0x011a_9bd0;
 const AMBIENT: u32 = 0x0120_1b30;
@@ -661,32 +661,32 @@ const COPY_COUNTED: u32 = 0x00c6_63d0;
 /// The current shader pass set (condition 2).
 #[inline(always)]
 pub(crate) fn set_current_pass(e: &mut Engine, pass: u32) {
-    e.set_global(super::packet::CURRENT_PASS, pass);
+    engine_core::draw_side::store_u32(e, super::packet::CURRENT_PASS, pass);
 }
 
 /// A pass stage's texture (+8) set (condition 2).
 #[inline(always)]
 pub(crate) fn set_stage_texture(e: &mut Engine, stage: u32, texture: u32) {
-    e.set_global(stage.wrapping_add(8), texture);
+    engine_core::draw_side::store_own_u32(e, stage.wrapping_add(8), texture);
 }
 
 /// A constant switch object's word +0x20 set (condition 2).
 #[inline(always)]
 pub(crate) fn set_switch_word(e: &mut Engine, switch: u32, value: u32) {
-    e.set_global(switch.wrapping_add(0x20), value);
+    engine_core::draw_side::store_own_u32(e, switch.wrapping_add(0x20), value);
 }
 
 /// A constant entry switched on or off (its byte +8) for the pass (condition 2).
 #[inline(always)]
 pub(crate) fn set_entry_enabled(e: &mut Engine, entry: u32, on: bool) {
-    e.set_global(entry.wrapping_add(8), u8::from(on));
+    engine_core::draw_side::store_own_u8(e, entry.wrapping_add(8), u8::from(on));
 }
 
 /// A word of the shader constants the pass begin fills (the fog constants `011fa280`, their colour's
 /// copies `011fd9b8`, the land toggles `011fa2d0`) (condition 2).
 #[inline(always)]
 pub(crate) fn set_constant_word(e: &mut Engine, at: u32, word: u32) {
-    e.set_global(at, word);
+    engine_core::draw_side::store_own_u32(e, at, word);
 }
 
 /// `count` vertex shader constant registers from `register` on (`data`) on `device`, of the kind the
@@ -762,13 +762,13 @@ pub(crate) fn copy_counted(e: &mut Engine, slot: u32, source: u32) {
 /// A pass stage's texture (+8) as the draw left it, read back.
 #[inline(always)]
 pub(crate) fn stage_texture(e: &Engine, stage: u32) -> u32 {
-    e.global::<u32>(stage.wrapping_add(8))
+    engine_core::draw_side::load_u32(e, stage.wrapping_add(8))
 }
 
 /// Whether a constant entry is switched on (its byte +8), read back.
 #[inline(always)]
 pub(crate) fn entry_is_enabled(e: &Engine, entry: u32) -> bool {
-    e.global::<u8>(entry.wrapping_add(8)) != 0
+    engine_core::draw_side::load_u8(e, entry.wrapping_add(8)) != 0
 }
 
 /// The shader's counted constant map at `offset` (+0x30 pixel, +0x34 vertex), read back.
@@ -807,8 +807,8 @@ pub(crate) const COLOR_WRITE_LOCKS: u32 = 0x011f_fa18;
 /// subtracts).
 #[inline(always)]
 pub(crate) fn release_state_locks(e: &mut Engine, counter: u32, count: u32) {
-    let value = e.global::<u32>(counter).wrapping_sub(count);
-    e.set_global(counter, value);
+    let value = engine_core::draw_side::load_u32(e, counter).wrapping_sub(count);
+    engine_core::draw_side::store_u32(e, counter, value);
 }
 
 // ---- Group C: the shader constants' globals a set-up fills (condition 2). ----
@@ -819,13 +819,13 @@ pub(crate) fn release_state_locks(e: &mut Engine, counter: u32, count: u32) {
 /// alpha row +0x1d0 and phase +0x11c) and a constant entry's words (the instance count +0x20).
 #[inline(always)]
 pub(crate) fn set_shader_global(e: &mut Engine, at: u32, value: u32) {
-    e.set_global(at, value);
+    engine_core::draw_side::store_own_u32(e, at, value);
 }
 
 /// A word of a shader's own constant storage, read back (the tall grass's phase +0x11c).
 #[inline(always)]
 pub(crate) fn shader_word(e: &Engine, at: u32) -> u32 {
-    e.global::<u32>(at)
+    engine_core::draw_side::load_u32(e, at)
 }
 
 /// The count a geometry data draws, set through its slot 0xa4 (a 16-bit count; condition 3).
@@ -859,5 +859,5 @@ pub(crate) fn update_texture_transform(e: &mut Engine, transform: u32) {
 /// A byte of the shader constants a set-up fills (the pass flags `011ff110` and `011ff118`).
 #[inline(always)]
 pub(crate) fn set_constant_byte(e: &mut Engine, at: u32, value: u8) {
-    e.set_global(at, value);
+    engine_core::draw_side::store_own_u8(e, at, value);
 }

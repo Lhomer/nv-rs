@@ -70,7 +70,10 @@ pub fn world_draw_first(e: &mut Engine, camera: u32, acc: Ptr<BSShaderAccumulato
         super::detach::open(e, &words);
     }
     with_packet_guard(e, |e| {
-        e.vcall(acc.addr(), SLOT_DRAW, &args![camera, acc, third]);
+        // With `NV_DRAW_THREAD` set, as the drawing side with its own render state (`super::side`).
+        super::side::run(e, |e| {
+            e.vcall(acc.addr(), SLOT_DRAW, &args![camera, acc, third]);
+        });
     });
     // What runs before the second half (the VATS target's draw) is not the world draw: it reads guest memory.
     super::capture::pause(e);
@@ -97,7 +100,9 @@ fn with_packet_guard(e: &mut Engine, f: impl FnOnce(&mut Engine)) {
 pub fn world_draw_second(e: &mut Engine, camera: u32, acc: Ptr<BSShaderAccumulator>, third: u32) {
     super::capture::resume(e);
     with_packet_guard(e, |e| {
-        e.vcall(acc.addr(), SLOT_FINISH, &args![camera, acc, third]);
+        super::side::run(e, |e| {
+            e.vcall(acc.addr(), SLOT_FINISH, &args![camera, acc, third]);
+        });
     });
     // Step 1 of the drawing thread: the view's words back to guest memory as the draw ends.
     super::detach::close(e);

@@ -96,7 +96,7 @@ pub fn geometry_pass(e: &mut Engine, this: Ptr, pass: Ptr) {
     }
     e.with_stack(0x40, |e, frame| {
         let local = frame.addr();
-        let holder = e.global::<u32>(VIEW_HOLDER);
+        let holder = engine_core::draw_side::load_u32(e, VIEW_HOLDER);
         let object = e.mem.u32(holder);
         let matrix = object.wrapping_add(0x68);
         typed_call!(

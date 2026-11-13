@@ -85,7 +85,7 @@ const RENDERED_TEXTURE_GET_TEXTURE: u32 = 0x004b_c320;
 /// +0xc).
 pub fn stage_light_texture(e: &mut Engine, stage: u32) {
     let stage = pass_stage(e, stage);
-    let rendering = e.global::<u32>(RENDERING_PASS);
+    let rendering = engine_core::draw_side::load_u32(e, RENDERING_PASS);
     let lights = e.mem.u32(rendering.wrapping_add(0xc));
     let light = e.mem.u32(lights);
     let rendered = e.mem.u32(light.wrapping_add(0x10c));
@@ -213,7 +213,7 @@ const BIND_PASS_STAGES: u32 = 0x00be_2170;
 /// +0x108 binds the pass's stages. Types outside the table do nothing.
 pub fn setup_geometry_textures(e: &mut Engine, this: Ptr, block: Ptr) {
     let base = this.addr();
-    let rendering = e.global::<u32>(RENDERING_PASS);
+    let rendering = engine_core::draw_side::load_u32(e, RENDERING_PASS);
     let kind = u32::from(e.mem.u16(rendering.wrapping_add(4)));
     let property = e.mem.u32(block.addr().wrapping_add(0xc));
     let pass = e.global::<u32>(CURRENT_PASS);

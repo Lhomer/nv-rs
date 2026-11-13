@@ -398,14 +398,14 @@ pub fn render_group(
         }
     }
     for counter in GROUP_COUNTERS {
-        let count = e.global::<u32>(counter);
+        let count = engine_core::draw_side::load_u32(e, counter);
         if count != 0 {
-            e.set_global(counter, count - 1);
+            engine_core::draw_side::store_u32(e, counter, count - 1);
         }
     }
     if e.global::<u8>(COVERAGE_AVAILABLE) != 0 {
-        let count = e.global::<u32>(state::COVERAGE_COUNTER).wrapping_sub(1);
-        e.set_global(state::COVERAGE_COUNTER, count);
+        let count = engine_core::draw_side::load_u32(e, state::COVERAGE_COUNTER).wrapping_sub(1);
+        engine_core::draw_side::store_u32(e, state::COVERAGE_COUNTER, count);
         typed_call!(
             FAMILY,
             0x00b9_8540,
@@ -444,8 +444,8 @@ pub fn render_pass(
     if u32::from(e.get(pass, RenderPass::usPassEnum)) != pass_type {
         return;
     }
-    e.set_global(RENDERING_PASS_TYPE, pass_type);
-    e.set_global(RENDERING_PASS, pass.addr());
+    engine_core::draw_side::store_u32(e, RENDERING_PASS_TYPE, pass_type);
+    engine_core::draw_side::store_u32(e, RENDERING_PASS, pass.addr());
     let geometry = e.get(pass, RenderPass::pGeometry);
     let shader = e.get(geometry, NiGeometry::m_spShader);
     let mut begun = false;

@@ -183,7 +183,7 @@ pub fn apply(e: &mut Engine, this: Ptr<TextureStage>) {
         if e.get(this, TextureStage::m_eFilterMode) == 6 {
             let device = e.global::<u32>(DEVICE);
             let stage_now = e.get(this, TextureStage::m_uiStage);
-            let value = e.global::<u32>(MAX_ANISOTROPY);
+            let value = engine_core::draw_side::load_u32(e, MAX_ANISOTROPY);
             e.vcall(
                 device,
                 DEVICE_SET_SAMPLER_STATE,
