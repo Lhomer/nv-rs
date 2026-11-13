@@ -7,6 +7,14 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-13 (weighty combat, slice 1: recoil, sway, hit-stop, reach, kill impulse, dismemberment by force)
+
+- **What:** Patrick: guns and melee that feel weighty (recoil, kick, inertia, hit-stop, reach; hits that push bodies by calibre or weapon weight; limbs severed by force), then a Test Range from the main menu. Plan and the original's own systems: docs/GUNPLAY.md. Slice 1 is the new `[nv-rs Fixes]` row `bWeightyCombat` (`NV_WEIGHTY_COMBAT`, on in the fixes preset, `crates/host/src/gunplay.rs`), tuned in a new `[nv-rs Gunplay]` section (nine keys, `NV_GUNPLAY_*` variables) and five rows on Settings > Display after the graphics rows (Weighty Combat, Recoil, Weapon Sway, Hit-Stop, Dismember Force; live, saved in play runs).
+- **Hooks (all wraps of the translation):** `TESObjectWEAP::Fire` `00523150` (the player's kick), the player's look handling `009445b0` (kick in and recovery through `00931e50`/`00931d30`, sway on the first-person 3D's local translation, the hit-stop's end), the reach search `009a60e0` (player reach), `Actor::CombatHit` `00899cb0` (melee hit-stop), the kill impulse `008ae000` (strength scaled, heavy-kill hit-stop), the dismember roll `00646e50` (sever/explode by force, the weapon's override kept). `CreateMenuElements` `007cc6e0` is now shared by three rows: `fixes::install` registers one function making the rows of each that is on (`settings_rows`, a mask). overridable.tsv counts include the wrappers' own calls of the translations.
+- **Procedural only:** no animation or asset added or shipped; nothing from any other game (docs/GUNPLAY.md, "Assets and licensing").
+- **Checked here:** host tests (the 3 known Linux cell_offsets failures only), repo_hygiene, the gunplay formulas' tests, the table/generated-section tests. **Not run here:** the game. Unknowns: whether the first-person 3D's local translation is where the weapon's drawn position comes from at `009445b0`'s point in the frame (if the sway shows nothing, it must move later in the frame; if it moves the wrong way, the root's axes differ from the view's); the kick's sign was taken as the game's (pitch positive = looking down).
+- **Next action:** Patrick's in-game check (docs/PLAYTESTING.md, "Weighty combat's tuning"). Then slice 2, the Test Range (plan in docs/GUNPLAY.md, with three open questions for Patrick), and non-lethal hit reactions (knockback/stagger) as the next physics step.
+
 ### Claude, 2026-11-13 (merge of slaterain 635f381, 26 commits #521-#548; the drawing thread lined up with upstream's)
 
 - **Merged:** slaterain/nv-rs main through 635f381 (#548), 26 commits after a39e67d, a normal merge. Upstream had nothing newer than 635f381 at the fetch; the fork had nothing newer than b25abcb.

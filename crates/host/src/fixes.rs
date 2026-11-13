@@ -58,6 +58,7 @@ pub static FIXES: &[Fix] = &[
     crate::perk_every_level::FIX,
     crate::fov_slider::FIX,
     crate::graphics_settings::FIX,
+    crate::gunplay::FIX,
     crate::quick_loot::FIX,
     crate::compact_menus::FIX,
     crate::pickpocket_chance::FIX,
@@ -557,6 +558,10 @@ pub struct Choice {
     /// else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Display] bShowFrameRate`; else
     /// [`PLAY_SHOW_FRAME_RATE`], off. Not part of any preset.
     pub show_frame_rate: bool,
+    /// The weighty combat tuning ([`crate::gunplay::Tuning`]): its `NV_GUNPLAY_*` variables when
+    /// set; else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Gunplay]`; else the built-in
+    /// feel. Read by the weighty combat row only, so a preset without it never feels it.
+    pub gunplay: crate::gunplay::Tuning,
     /// The one log line naming `Fallout.ini` values that could not be used
     /// ([`crate::game_ini::Keys::bad_line`]): the default stood for each.
     pub ini_note: Option<String>,
@@ -576,6 +581,7 @@ impl Choice {
             borderless: None,
             renderer: None,
             show_frame_rate: PLAY_SHOW_FRAME_RATE,
+            gunplay: crate::gunplay::Tuning::PLAY,
             ini_note: None,
         }
     }
@@ -728,6 +734,7 @@ impl Choice {
             // The same: play's renderer, the file's choice over it; none for any other run.
             renderer: ini.renderer.or(play.then_some(PLAY_RENDERER)),
             show_frame_rate: ini.show_frame_rate.unwrap_or(PLAY_SHOW_FRAME_RATE),
+            gunplay: crate::gunplay::Tuning::from_parts(&ini.gunplay, &env)?,
             ini_note: ini.bad_line(),
         };
         for line in settings.unwrap_or("").lines() {
@@ -967,6 +974,7 @@ fn parse_limit(value: &str, source: &str) -> Result<u32, String> {
 pub fn install(e: &mut Engine, choice: &Choice) {
     crate::uncap::set_frame_limit(choice.frame_limit);
     crate::uncap::set_menu_frame_limit(choice.bound_menu_frame_limit());
+    crate::gunplay::set_tuning(choice.gunplay);
     for fix in FIXES.iter().filter(|f| choice.is_on(f)) {
         (fix.install)(e);
     }
@@ -979,16 +987,42 @@ pub fn install(e: &mut Engine, choice: &Choice) {
             crate::patch_data::strip_load_with_cell_offsets,
         );
     }
-    // Two rows add to the Settings menu's options (`StartMenu::CreateMenuElements`, 007cc6e0): with
-    // both on, one function makes the game's options, the Field of View row and the graphics rows.
-    if choice.is_on(&crate::fov_slider::FIX) && choice.is_on(&crate::graphics_settings::FIX) {
-        e.register(crate::fov_slider::CREATE_MENU_ELEMENTS, |e, _| {
-            engine::units::fallout_interface::startmenu::start_menu_create_menu_elements(e);
-            crate::fov_slider::add_row(e);
-            crate::graphics_settings::add_rows(e);
-            Ret::default()
-        });
+    // Three rows add to the Settings menu's options (`StartMenu::CreateMenuElements`, 007cc6e0):
+    // with more than one on, one function makes the game's options and the rows of each that is
+    // on, in this order: the Field of View row, the graphics rows, the weighty combat rows.
+    let rows = [
+        choice.is_on(&crate::fov_slider::FIX),
+        choice.is_on(&crate::graphics_settings::FIX),
+        choice.is_on(&crate::gunplay::FIX),
+    ];
+    if rows.iter().filter(|on| **on).count() > 1 {
+        let mask = rows
+            .iter()
+            .enumerate()
+            .fold(0u8, |mask, (i, on)| mask | (u8::from(*on) << i));
+        SETTINGS_ROWS.store(mask, std::sync::atomic::Ordering::Relaxed);
+        e.register(crate::fov_slider::CREATE_MENU_ELEMENTS, settings_rows);
     }
+}
+
+/// Which of the Settings menu's added rows [`settings_rows`] makes: bit 0 the Field of View row,
+/// bit 1 the graphics rows, bit 2 the weighty combat rows.
+static SETTINGS_ROWS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// `StartMenu::CreateMenuElements` with the added rows of the rows that are on ([`install`]).
+fn settings_rows(e: &mut Engine, _: &[u32]) -> Ret {
+    engine::units::fallout_interface::startmenu::start_menu_create_menu_elements(e);
+    let mask = SETTINGS_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    if mask & 1 != 0 {
+        crate::fov_slider::add_row(e);
+    }
+    if mask & 2 != 0 {
+        crate::graphics_settings::add_rows(e);
+    }
+    if mask & 4 != 0 {
+        crate::gunplay::add_rows(e);
+    }
+    Ret::default()
 }
 
 /// The settings file: `NV_SETTINGS` when set; else `settings.ini` beside the program or in the
@@ -1030,8 +1064,9 @@ mod tests {
 
     /// Two rows replacing the same exe address would each drop the other's change when both are
     /// on: the addresses two rows share are `TESWorldSpace::Load` and the Settings menu's
-    /// `CreateMenuElements`, which `install` gives one function doing both
-    /// (`patch_data::strip_load_with_cell_offsets`; the Field of View and graphics rows). A new
+    /// `CreateMenuElements`, which `install` gives one function doing all that are on
+    /// (`patch_data::strip_load_with_cell_offsets`; the Field of View, graphics and weighty
+    /// combat rows). A new
     /// shared address needs the same.
     #[test]
     fn rows_share_an_address_only_where_install_joins_them() {
@@ -1051,6 +1086,11 @@ mod tests {
                     crate::fov_slider::CREATE_MENU_ELEMENTS,
                     crate::fov_slider::FIX.name,
                     crate::graphics_settings::FIX.name
+                ),
+                (
+                    crate::fov_slider::CREATE_MENU_ELEMENTS,
+                    crate::graphics_settings::FIX.name,
+                    crate::gunplay::FIX.name
                 ),
                 (
                     crate::patch_data::WORLD_SPACE_LOAD,

@@ -163,6 +163,7 @@ Each also has a `[nv-rs Fixes]` key in `Fallout.ini` (`bUncap` ... `bNVSEListGua
 | `NV_ACTOR_CAUSE` | Causes keep no witness lists | `host/fixes.rs` |
 | `NV_RADIO_LENGTHS` | Radio song lengths | `host/fixes.rs` |
 | `NV_FACIAL_HAIR_RACE` | Facial hair by race folder | `host/fixes.rs` |
+| `NV_WEIGHTY_COMBAT` | Weighty combat (docs/GUNPLAY.md; tuned by the variables below) | `host/gunplay.rs` |
 | `NV_STRIP_LOD_WATER` | No distant water under the Strip (patch data) | `host/patch_data.rs` |
 | `NV_DIRECT_FILES` | Direct file access | `host/direct_files.rs` |
 | `NV_COSAVE_KEEP` | Co-save keeps other plugins | `host/fixes.rs` (flag read by `nvse`) |
@@ -176,6 +177,24 @@ Each also has a `[nv-rs Fixes]` key in `Fallout.ini` (`bUncap` ... `bNVSEListGua
 | `NV_NVSE_CYCLE_GUARD` | Script array cycle guard | `host/fixes.rs` |
 | `NV_NVSE_UI_SORT_PATHS` | Script UI list sort by nested paths | `host/fixes.rs` |
 | `NV_NVSE_LIST_GUARD` | Script list and scan guard | `host/fixes.rs` |
+
+### Weighty combat's tuning (`[nv-rs Gunplay]`)
+
+Read in a launcher's play run from Fallout.ini's `[nv-rs Gunplay]`; each variable wins over its key, and a variable that is not a whole number in range stops the start. Only used while weighty combat (`bWeightyCombat`, `NV_WEIGHTY_COMBAT`) is on. Settings > Display in the game has rows for the first five marked * (and the on/off switch), which apply at once and save in a play run.
+
+| Variable (Fallout.ini key) | What it does | Default |
+| --- | --- | --- |
+| `NV_GUNPLAY_RECOIL` (`iRecoil`) * | The view kick of a gun's shot, percent | 100 |
+| `NV_GUNPLAY_RECOVERY` (`iRecoilRecovery`) | Percent of the kick that comes back by itself | 70 |
+| `NV_GUNPLAY_SWAY` (`iSway`) * | The weapon's sway and inertia in first person, percent | 100 |
+| `NV_GUNPLAY_HIT_STOP` (`bHitStop`) * | Melee hits and heavy kills stop time for a moment | 1 |
+| `NV_GUNPLAY_HIT_STOP_MS` (`iHitStopMs`) | The hit-stop of a light melee weapon, ms (heavier: up to 1.8 times) | 70 |
+| `NV_GUNPLAY_MELEE_REACH` (`iMeleeReach`) | The player's melee reach, percent of the game's | 115 |
+| `NV_GUNPLAY_IMPULSE` (`iImpulse`) | How hard a kill pushes the body, percent of the game's | 150 |
+| `NV_GUNPLAY_DISMEMBER_FORCE` (`iDismemberForce`) * | A killing hit this strong severs the limb (0: the game's chance only) | 45 |
+| `NV_GUNPLAY_EXPLODE_FORCE` (`iExplodeForce`) | A gun's killing hit this strong explodes an explodable limb (0: the game's chance only) | 110 |
+
+**To check in game (not yet run):** a pistol, a rifle, an automatic and a shotgun kick up by their weight and come mostly back without fighting the mouse; the weapon lags turns and bobs while walking (if it never moves, or moves the wrong way, say so: the sway's point or axes need changing); a melee hit pauses for a blink and nothing stays slowed; melee connects a little further; kills push bodies harder, more with a sledgehammer than a knife; a .44 Magnum or hunting rifle kill severs the struck limb, an anti-materiel rifle can explode it; the five Settings rows show, move, save and come back after a restart.
 
 ### 3. Set by Play.exe
 

@@ -1,4 +1,4 @@
-//! nv-rs's own player options in the run's `Fallout.ini`: the four `[nv-rs ...]` sections
+//! nv-rs's own player options in the run's `Fallout.ini`: the five `[nv-rs ...]` sections
 //! (the maintainer approved the design of measure/ini/DESIGN.md, 2026-11-09).
 //!
 //! The file is the one the game itself reads: `My Games\FalloutNV\Fallout.ini` in the Documents
@@ -108,6 +108,8 @@ pub struct Keys {
     pub render_thread: Option<bool>,
     /// The fix rows the file turns on or off, by `crate::fixes::Fix::env`.
     pub fixes: Vec<(&'static str, bool)>,
+    /// The `[nv-rs Gunplay]` keys the file sets (`crate::gunplay::KEYS`), in the table's order.
+    pub gunplay: Vec<(&'static str, i32)>,
     /// The lines whose value can't be used (`key=value`): the default stands for each.
     pub bad: Vec<String>,
 }
@@ -156,6 +158,15 @@ impl Keys {
                 "bRenderThread" => {
                     keys.render_thread = flag(raw);
                     keys.render_thread.is_some()
+                }
+                key if row.section == crate::gunplay::SECTION => {
+                    match crate::gunplay::parse(key, raw) {
+                        Some(value) => {
+                            keys.gunplay.push((row.key, value));
+                            true
+                        }
+                        None => false,
+                    }
                 }
                 _ => {
                     let fix = FIXES.iter().find(|f| f.env == row.switch);
@@ -484,7 +495,16 @@ mod tests {
                 "iMenuFrameLimit",
                 "bShowFrameRate",
                 "bSteppedThreads",
-                "bRenderThread"
+                "bRenderThread",
+                "iRecoil",
+                "iRecoilRecovery",
+                "iSway",
+                "bHitStop",
+                "iHitStopMs",
+                "iMeleeReach",
+                "iImpulse",
+                "iDismemberForce",
+                "iExplodeForce"
             ]
         );
     }
@@ -513,6 +533,11 @@ mod tests {
         );
         // The fix lines are commented out: the preset decides.
         assert!(keys.fixes.is_empty());
+        assert_eq!(
+            crate::gunplay::Tuning::from_parts(&keys.gunplay, |_| None),
+            Ok(crate::gunplay::Tuning::PLAY)
+        );
+        assert_eq!(keys.gunplay.len(), crate::gunplay::KEYS.len());
         assert!(keys.bad.is_empty(), "{:?}", keys.bad);
         for row in rows().iter().filter(|r| r.section == FIXES_SECTION) {
             assert_eq!(row.default, "1", "{row:?}");

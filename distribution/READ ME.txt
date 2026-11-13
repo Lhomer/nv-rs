@@ -99,6 +99,15 @@ original's, and Settings.cmd still has its slider. After a cinematic kill cam yo
 keep the slider's view (until this build they went back to the original's until you opened the
 Pip-Boy).
 
+Combat has more weight (an nv-rs addition, on with the fixes): guns kick the view up by their
+calibre and it comes mostly back by itself; your weapon lags your turns and bobs as you walk; a
+melee hit pauses the action for a blink; your melee reach is a little longer; kills push bodies
+harder, heavier melee weapons more; and a killing hit strong enough severs the limb it struck. It
+uses only the game's own animations and effects. Settings, then Display, has Weighty Combat (on or
+off), Recoil, Weapon Sway, Hit-Stop and Dismember Force; they change at once and are kept. More
+settings are in Fallout.ini's [nv-rs Gunplay] section. With Vanilla, or bWeightyCombat=0 in
+[nv-rs Fixes], combat is the original's.
+
 The game's own menu also has the launcher's graphics settings: Settings, then Display, after Field of
 View: Resolution, Anti-Aliasing, Anisotropic Filtering, Window Mode and V-Sync. They offer what
 Settings.cmd offers and save to the same lines, so each shows what the other saved. Window Mode

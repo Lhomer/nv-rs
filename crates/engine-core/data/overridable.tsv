@@ -31,6 +31,7 @@
 0050de20	0	JIP
 0050f9e0	0	JIP
 00518f00	1	ITR
+00523150	1	nv-rs weighty combat
 00525a90	0	JIP
 00525b20	3	yUI
 005702e0	0	ITR
@@ -65,6 +66,7 @@
 00646260	0	JIP
 00646360	0	JIP
 00646d00	1	JIP
+00646e50	1	nv-rs weighty combat
 00652140	0	nv-rs thread races
 00652160	0	nv-rs thread races
 00652190	0	nv-rs thread races
@@ -85,7 +87,7 @@
 007acb60	0	nv-rs facial hair by race folder
 007adce0	0	nv-rs facial hair by race folder
 007b4b50	1	nv-rs facial hair by race folder
-007cc6e0	3	nv-rs field of view in the game's settings,nv-rs graphics in the game's settings
+007cc6e0	4	nv-rs field of view in the game's settings,nv-rs graphics in the game's settings,nv-rs weighty combat
 007f3e00	0	nv-rs V.A.T.S. waits only for the camera
 008300c0	0	nv-rs radio song lengths
 00830b30	0	nv-rs radio song lengths
@@ -103,14 +105,17 @@
 00882b90	1	nv-rs half-loaded actor's level change
 00883240	1	nv-rs half-loaded actor's level change
 00883800	1	nv-rs half-loaded actor's level change
+00899cb0	1	nv-rs weighty combat
 008a06c0	0	ITR
 008a8dd0	2	JIP
+008ae000	2	nv-rs weighty combat
 008b39f0	0	ITR
 008bca90	0	JIP
 008d4e80	0	ITR
 00903180	0	kNVSE
 00932a00	1	nv-rs half-loaded actor's level change
 00932b70	1	nv-rs half-loaded actor's level change
+009445b0	2	nv-rs weighty combat
 0095de30	1	nv-rs field of view slider
 0095f6c0	1	nv-rs dragged bodies by time
 00960520	3	nv-rs dragged bodies by time
@@ -119,6 +124,7 @@
 009801b0	2	ITR
 00981520	0	ITR
 00986c60	0	ITR
+009a60e0	1	nv-rs weighty combat
 009ac5a0	1	fixes preset guard
 009b5a30	5	JIP
 009da7c0	0	ITR

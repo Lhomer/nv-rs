@@ -1,5 +1,5 @@
 #!/bin/bash
-# game-ini-sections.sh [OUT]: writes nv-rs's four [nv-rs ...] sections of Fallout.ini, each key
+# game-ini-sections.sh [OUT]: writes nv-rs's five [nv-rs ...] sections of Fallout.ini, each key
 # with its one comment line above it, from crates/host/data/game_ini.tsv (default OUT:
 # distribution/nv-rs-sections.ini: the block Play.exe puts into a Fallout.ini that has none, as
 # it is: at the top, or at the end of a file that starts with a UTF-8 byte order mark; and the one
