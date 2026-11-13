@@ -7,6 +7,13 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-13 (the game's settings now persist: WritePrivateProfileStringA writes)
+
+- **Patrick:** cinematic kill cams come back on at every start although he turns them off.
+- **Cause:** the kill camera is the Gameplay page's three-value row (`007d1260`: 0 off, 1 slow motion only, 2 the cinematic camera, the default), an `INIPrefSetting` at `011e087c` that the player copies into `eKillCameraSetting` (`+0x7c0`) when it is made (`00938180`). Leaving a changed Settings page the game writes FalloutPrefs.ini (`007d6d70` → the prefs collection's write → `INISettingCollection::WriteSetting` `00c43e90` → `WritePrivateProfileStringA`). The platform's `WritePrivateProfileStringA` answered success and wrote nothing, so no Settings-menu choice (kill cam, difficulty, volumes, controls, subtitles...) ever reached the file, and the next start read the default 2. Not a preset, our defaults or the pause-menu graphics code.
+- **Fix (engine-platform `ini.rs`, `files.rs`):** `WritePrivateProfileStringA` now edits the run's copy of the file as Windows does (`set_profile_value`: the key replaced where it stands in the first section of the name, else added after the section's last non-empty line, else a new section at the end; null value deletes the key, null key the section) through `files::write_whole` (the player's file taken into the run once, stamped). The player's own files are still never written by the platform; Play.exe's runs already copy the game's FalloutPrefs.ini out to the profile (`NV_PREFS_OUT`, `save_out`), which now carries the new values. The vanilla key is the game's own (the setting's name), untouched.
+- **Checked here:** the write's edits and the round trip (write, stamp, read back), engine-platform's tests (its 4 Linux-only file-search failures are the same before and after), host tests (3 known cell_offsets), clippy, fmt, repo_hygiene, the Windows build. **Not run here:** the game. **Next action:** Patrick: turn the kill cam off, back out of Settings, quit, start again: it should stay off (Difficulty and the other Settings choices too).
+
 ### Claude, 2026-11-13 (weighty combat: the sway shows; the hit-stop replaced by an impact punch)
 
 - **Patrick's play test of slice 1:** recoil works; no weapon sway with `iSway=100`; the hit-stop's slow motion on melee hits and shotgun shots "looks really bad and adds no weight".

@@ -329,6 +329,34 @@ pub fn read_whole(e: &Engine, path: &[u8]) -> Option<Vec<u8>> {
     std::fs::read(real_path(path)).ok()
 }
 
+/// The whole file at the full path `path` replaced by `bytes` in the run's files, as a profile
+/// write (`WritePrivateProfileStringA`, `crate::ini`) leaves it: a player's file is taken into the
+/// run first (its directory entry kept), a missing one is made; then its size and last write are
+/// now. The player's own file is never touched; the host's copy-out (`NV_PREFS_OUT`) sees the
+/// change by its stamp.
+pub fn write_whole(e: &mut Engine, path: &[u8], bytes: Vec<u8>) {
+    let k = key(path);
+    if !state_ref!(e).disk.files.contains_key(&k) {
+        let missing =
+            state_ref!(e).disk.deleted.contains(&k) || std::fs::metadata(real_path(path)).is_err();
+        if missing {
+            made(e, path, &k);
+        } else {
+            adopt(e, path, &k, false);
+        }
+    }
+    let now = file_clock(e);
+    let size = bytes.len() as u64;
+    state!(e).disk.files.insert(k.clone(), bytes);
+    state!(e).disk.changed(&k);
+    if let Some(entry) = state!(e).disk.entries.get_mut(&k) {
+        entry.size = size;
+        entry.accessed = now;
+        entry.written = now;
+        entry.attributes |= FILE_ATTRIBUTE_ARCHIVE;
+    }
+}
+
 /// The attributes of the full path `path` as Windows reports them: a file or directory the game
 /// made in this run, else the player's (`FILE_ATTRIBUTE_*` as the file system keeps them);
 /// `None` when there is none.

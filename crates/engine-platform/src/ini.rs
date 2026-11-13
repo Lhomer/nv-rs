@@ -1,7 +1,9 @@
 //! The profile (INI) file imports, `GetPrivateProfileIntA`, `GetPrivateProfileStringA` and
-//! `WritePrivateProfileStringA`: they read the files the game made in this run ([`files`]) and
-//! the Windows directory of the player's table ([`d3d9::windows_directory`]), so they are in the
-//! platform layer rather than the core (moved from `engine-core`'s `units/platform.rs`).
+//! `WritePrivateProfileStringA`: they read and write the files the game made in this run
+//! ([`files`]) and the Windows directory of the player's table ([`d3d9::windows_directory`]), so
+//! they are in the platform layer rather than the core (moved from `engine-core`'s
+//! `units/platform.rs`). A write changes the run's copy of the file only, never the player's;
+//! the host copies the game's `FalloutPrefs.ini` out where a launcher asks (`NV_PREFS_OUT`).
 
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -69,16 +71,22 @@ fn ini_value(text: &[u8], section: &[u8], key: &[u8]) -> Option<Vec<u8>> {
 /// player's table); the file as the game made it in this run when it did (`files`), else the
 /// player's file, read only. `None` when there is none.
 fn profile_text(e: &mut Engine, file: Ptr) -> Option<Vec<u8>> {
+    let path = profile_path(e, file);
+    files::read_whole(e, &path)
+}
+
+/// The full path of the profile file `file` names (a name without a full path is in the Windows
+/// directory).
+fn profile_path(e: &mut Engine, file: Ptr) -> Vec<u8> {
     let name = e.mem.cstr(file.addr());
-    let path = if files::is_full_path(&name) {
+    if files::is_full_path(&name) {
         name
     } else {
         let mut path = d3d9::windows_directory(e);
         path.push(b'\\');
         path.extend_from_slice(&name);
         path
-    };
-    files::read_whole(e, &path)
+    }
 }
 
 // Platform: replaces KERNEL32.DLL GetPrivateProfileIntA (import)
@@ -186,15 +194,153 @@ pub fn get_private_profile_string_a(
 }
 
 // Platform: replaces KERNEL32.DLL WritePrivateProfileStringA (import)
-/// Answers success without writing: the platform never changes the player's files.
+/// `WritePrivateProfileStringA(section, key, value, file)`: `key=value` set in `section` of the
+/// run's copy of the file ([`set_profile_value`]; the player's file is read once and never
+/// changed, [`files::write_whole`]); a null `value` deletes the key, a null `key` the whole
+/// section. Answers success. A null section (Windows' flush of its cache) changes nothing.
+///
+/// Until 2026-11-13 it answered success without writing anything, so every setting the game
+/// saves with it, the Settings menu's options in `FalloutPrefs.ini` above all
+/// (`INISettingCollection::WriteSetting`, `00c43e90`, run when the menu's changed page is left),
+/// was gone at the next start (Patrick: the kill cam came back on at every start).
 pub fn write_private_profile_string_a(
-    _e: &mut Engine,
-    _section: Ptr,
-    _key: Ptr,
-    _value: Ptr,
-    _file: Ptr,
+    e: &mut Engine,
+    section: Ptr,
+    key: Ptr,
+    value: Ptr,
+    file: Ptr,
 ) -> u32 {
+    if section.is_null() || file.is_null() {
+        return 1;
+    }
+    let path = profile_path(e, file);
+    let section = e.mem.cstr(section.addr());
+    let key = (!key.is_null()).then(|| e.mem.cstr(key.addr()));
+    let value = (!value.is_null()).then(|| e.mem.cstr(value.addr()));
+    let text = files::read_whole(e, &path).unwrap_or_default();
+    let changed = set_profile_value(&text, &section, key.as_deref(), value.as_deref());
+    if changed != text || files::read_whole(e, &path).is_none() {
+        files::write_whole(e, &path, changed);
+    }
     1
+}
+
+/// One line of an INI text and where it is: its bytes without the line end, and the range of the
+/// whole line with its end.
+fn lines_of(text: &[u8]) -> Vec<(usize, usize)> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let end = text[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(text.len(), |at| start + at + 1);
+        lines.push((start, end));
+        start = end;
+    }
+    lines
+}
+
+/// A line's text without its line end and outer spaces.
+fn line_text(text: &[u8], (start, end): (usize, usize)) -> &[u8] {
+    text[start..end].trim_spaces()
+}
+
+/// The section name of a heading line (`[name]`, up to the first `]`), `None` for any other line.
+fn heading(line: &[u8]) -> Option<&[u8]> {
+    let rest = line.strip_prefix(b"[")?;
+    Some(
+        rest.split(|&b| b == b']')
+            .next()
+            .unwrap_or(rest)
+            .trim_spaces(),
+    )
+}
+
+/// `text` (an INI file) after `WritePrivateProfileStringA`: in the first section named `section`
+/// (as the reads find it, names without case), the first `key=` line replaced by `key=value`, or,
+/// with no such line, `key=value` added after the section's last line that is not empty; with no
+/// such section, the section added at the end. `value` `None` removes the key's line, `key` `None`
+/// the section's heading and lines. Every other byte stays as it was; added lines end in CR LF.
+pub fn set_profile_value(
+    text: &[u8],
+    section: &[u8],
+    key: Option<&[u8]>,
+    value: Option<&[u8]>,
+) -> Vec<u8> {
+    let section = section.trim_spaces();
+    let lines = lines_of(text);
+    let Some(first) = lines.iter().position(|&l| {
+        heading(line_text(text, l)).is_some_and(|name| name.eq_ignore_ascii_case(section))
+    }) else {
+        // No such section: added at the end (nothing to delete).
+        let (Some(key), Some(value)) = (key, value) else {
+            return text.to_vec();
+        };
+        let mut out = text.to_vec();
+        if !out.is_empty() && !out.ends_with(b"\n") {
+            out.extend_from_slice(b"\r\n");
+        }
+        out.push(b'[');
+        out.extend_from_slice(section);
+        out.extend_from_slice(b"]\r\n");
+        out.extend_from_slice(key);
+        out.push(b'=');
+        out.extend_from_slice(value);
+        out.extend_from_slice(b"\r\n");
+        return out;
+    };
+    let body_end = lines[first + 1..]
+        .iter()
+        .position(|&l| heading(line_text(text, l)).is_some())
+        .map_or(lines.len(), |at| first + 1 + at);
+    let Some(key) = key else {
+        // The whole section: its heading and every line up to the next heading.
+        let (from, to) = (
+            lines[first].0,
+            lines.get(body_end).map_or(text.len(), |l| l.0),
+        );
+        return [&text[..from], &text[to..]].concat();
+    };
+    let found = (first + 1..body_end).find(|&i| {
+        let line = line_text(text, lines[i]);
+        line.iter()
+            .position(|&b| b == b'=')
+            .is_some_and(|at| line[..at].trim_spaces().eq_ignore_ascii_case(key))
+    });
+    let new_line = |value: &[u8]| {
+        let mut line = key.to_vec();
+        line.push(b'=');
+        line.extend_from_slice(value);
+        line.extend_from_slice(b"\r\n");
+        line
+    };
+    match (found, value) {
+        (Some(i), None) => {
+            let (from, to) = lines[i];
+            [&text[..from], &text[to..]].concat()
+        }
+        (Some(i), Some(value)) => {
+            let (from, to) = lines[i];
+            [&text[..from], &new_line(value), &text[to..]].concat()
+        }
+        (None, None) => text.to_vec(),
+        (None, Some(value)) => {
+            // After the section's last line that is not empty (its heading at least).
+            let last = (first..body_end)
+                .rev()
+                .find(|&i| !line_text(text, lines[i]).is_empty())
+                .unwrap_or(first);
+            let at = lines[last].1;
+            let mut out = text[..at].to_vec();
+            if !out.ends_with(b"\n") {
+                out.extend_from_slice(b"\r\n");
+            }
+            out.extend_from_slice(&new_line(value));
+            out.extend_from_slice(&text[at..]);
+            out
+        }
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +351,93 @@ mod tests {
         let mut e = Engine::new();
         e.mem.map(0x1000, 0x1000);
         e
+    }
+
+    /// `WritePrivateProfileStringA`'s edits: a key replaced where it stands (names without
+    /// case, only in the first section of the name, as the reads), added after the section's
+    /// last line that is not empty, a new section at the end; a null value deletes the key, a
+    /// null key the section; a commented line is never the key; every other byte is kept.
+    #[test]
+    fn profile_writes_edit_the_text_as_windows_does() {
+        let text = b"[Display]\r\niSize W=800\r\n\r\n[GamePlay]\r\n;iKill=9\r\nbSaveOnRest=1\r\n\r\n[Audio]\r\nfVol=1\r\n";
+        let set = |section: &[u8], key: &[u8], value: &[u8]| {
+            set_profile_value(text, section, Some(key), Some(value))
+        };
+        assert_eq!(
+            set(b"gameplay", b"BSAVEONREST", b"0"),
+            b"[Display]\r\niSize W=800\r\n\r\n[GamePlay]\r\n;iKill=9\r\nBSAVEONREST=0\r\n\r\n[Audio]\r\nfVol=1\r\n"
+        );
+        let added = set(b"GamePlay", b"iKill", b"0");
+        assert_eq!(
+            added,
+            b"[Display]\r\niSize W=800\r\n\r\n[GamePlay]\r\n;iKill=9\r\nbSaveOnRest=1\r\niKill=0\r\n\r\n[Audio]\r\nfVol=1\r\n"
+        );
+        assert_eq!(ini_value(&added, b"GamePlay", b"iKill").unwrap(), b"0");
+        let new_section = set(b"Controls", b"fSens", b"0.5");
+        assert!(new_section.ends_with(b"fVol=1\r\n[Controls]\r\nfSens=0.5\r\n"));
+        assert_eq!(
+            set_profile_value(b"[A]\r\nx=1", b"A", Some(b"y"), Some(b"2")),
+            b"[A]\r\nx=1\r\ny=2\r\n"
+        );
+        assert_eq!(
+            set_profile_value(b"", b"A", Some(b"y"), Some(b"2")),
+            b"[A]\r\ny=2\r\n"
+        );
+        // Only the first section of a name.
+        let twice = b"[A]\r\nx=1\r\n[A]\r\nx=5\r\n";
+        assert_eq!(
+            set_profile_value(twice, b"a", Some(b"x"), Some(b"2")),
+            b"[A]\r\nx=2\r\n[A]\r\nx=5\r\n"
+        );
+        // Deletions.
+        assert_eq!(
+            set_profile_value(text, b"GamePlay", Some(b"bSaveOnRest"), None),
+            b"[Display]\r\niSize W=800\r\n\r\n[GamePlay]\r\n;iKill=9\r\n\r\n[Audio]\r\nfVol=1\r\n"
+        );
+        assert_eq!(
+            set_profile_value(text, b"GamePlay", None, None),
+            b"[Display]\r\niSize W=800\r\n\r\n[Audio]\r\nfVol=1\r\n"
+        );
+        assert_eq!(set_profile_value(text, b"Nope", Some(b"k"), None), text);
+    }
+
+    /// A write reaches the run's copy of the file and the next read, stamped for the copy-out;
+    /// the setting the Settings menu saved is what the next start reads.
+    #[test]
+    fn a_profile_write_is_read_back_and_stamped() {
+        let mut e = engine();
+        let file = e.mem.alloc(0x40);
+        e.mem.write(file, b"C:\\nv-rs-test\\FalloutPrefs.ini\0");
+        let words = |e: &mut Engine, text: &[u8]| {
+            let at = e.mem.alloc(0x40);
+            let mut bytes = text.to_vec();
+            bytes.push(0);
+            e.mem.write(at, &bytes);
+            Ptr::new(at)
+        };
+        let section = words(&mut e, b"GamePlay");
+        let key = words(&mut e, b"iKillCam");
+        let value = words(&mut e, b"0");
+        let changes = crate::state(&e.kernel.platform).disk.changes;
+        assert_eq!(
+            write_private_profile_string_a(&mut e, section, key, value, Ptr::new(file)),
+            1
+        );
+        let disk = &crate::state(&e.kernel.platform).disk;
+        assert!(disk.changes > changes);
+        let k = b"c:\\nv-rs-test\\falloutprefs.ini".to_vec();
+        assert_eq!(disk.files.get(&k).unwrap(), b"[GamePlay]\r\niKillCam=0\r\n");
+        assert!(disk.stamps.contains_key(&k));
+        let two = words(&mut e, b"2");
+        assert_eq!(
+            get_private_profile_int_a(&mut e, section, key, 2, Ptr::new(file)),
+            0
+        );
+        write_private_profile_string_a(&mut e, section, key, two, Ptr::new(file));
+        assert_eq!(
+            get_private_profile_int_a(&mut e, section, key, 0, Ptr::new(file)),
+            2
+        );
     }
 
     #[test]
