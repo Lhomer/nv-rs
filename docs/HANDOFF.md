@@ -7,6 +7,14 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-13 (merge of slaterain aef48d1, 4 commits #549, #550, #552, #542)
+
+- **Merged:** slaterain/nv-rs main through aef48d1 (#542), a normal merge on 57aa10d (weighty combat slice 1). Upstream has four newer commits not merged: 1a934d3 #553, 1acb926 #551, a673a07 #555, 45c8e9a #554.
+- **Upstream brings:** xNVSE's run-time expression compiler for console lines and in-game scripts (#549, `crates/nvse/src/compiler.rs`, `compile_hooks.rs`); JIP's actor event hooks, hit-data routines and their eleven commands (#550, `crates/jip/src/actor_hooks.rs`, seams at call sites, not function replacements); JIP commands batch 8, effects and the first two conditions (#552); value packet B (#542: the set-ups hand helpers the packet's images, lighting 3.0's pass lights and the Group C copies through the packet; off until the drawing thread).
+- **Conflicts:** `draw/packet.rs` and `engine/tests/typed_shader.rs`. Upstream's #542 is its own value packet B, overlapping the fork's partial one (b25abcb: the world transform imaged in the tall grass's and the leaves' `SetupGeometry`, the ambient colour and the scene's first light taken by the cut). Taken upstream's whole: `packet.rs`, `speedtree.rs`, `tall_grass.rs`, `cut.rs`, `typed_shader.rs` are aef48d1's, so the drawing code is upstream's alone (keeping both would image an already imaged transform). The fork's two packet B tests went with it. stash@{0} untouched.
+- **Checked for overlap:** JIP's actor seams and xNVSE's compile seams reach none of the addresses the fork replaces (gunplay's six, `007cc6e0`, `0095de30`, the menus'). Cargo.lock is upstream's (one workspace dependency added, no third-party package): DEPENDENCY-LOCK.sha256 refreshed, notices unchanged. The generated and table files had no upstream changes.
+- **Next action:** Patrick's in-game check of weighty combat (the entry below) stands.
+
 ### Claude, 2026-11-13 (weighty combat, slice 1: recoil, sway, hit-stop, reach, kill impulse, dismemberment by force)
 
 - **What:** Patrick: guns and melee that feel weighty (recoil, kick, inertia, hit-stop, reach; hits that push bodies by calibre or weapon weight; limbs severed by force), then a Test Range from the main menu. Plan and the original's own systems: docs/GUNPLAY.md. Slice 1 is the new `[nv-rs Fixes]` row `bWeightyCombat` (`NV_WEIGHTY_COMBAT`, on in the fixes preset, `crates/host/src/gunplay.rs`), tuned in a new `[nv-rs Gunplay]` section (nine keys, `NV_GUNPLAY_*` variables) and five rows on Settings > Display after the graphics rows (Weighty Combat, Recoil, Weapon Sway, Hit-Stop, Dismember Force; live, saved in play runs).

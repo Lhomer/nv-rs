@@ -236,10 +236,11 @@ fn installed_records(installed: bool) {
                 || o == 0x2200
                 || o == 0x2210
                 || o == crate::main_loop::SET_GAME_MAIN_LOOP_CALLBACK
-                || crate::ui_hooks::COMMANDS.contains(&o))
+                || crate::ui_hooks::COMMANDS.contains(&o)
+                || crate::actor_hooks::COMMANDS.contains(&o))
         {
-            // The built commands, the identity, SetGameMainLoopCallback and the UI hooks' event
-            // commands, once installed.
+            // The built commands, the identity, SetGameMainLoopCallback and the UI and actor
+            // hooks' event commands, once installed.
             nvse::table::execute_address(o)
         } else {
             0
@@ -251,9 +252,15 @@ fn installed_records(installed: bool) {
         } else {
             DEFAULT_PARSE
         };
+        // A built condition's record has its eval too.
+        let eval = if installed && built && slot.kind == Kind::Condition {
+            nvse::table::eval_address(o)
+        } else {
+            0
+        };
         assert_eq!(
             (r.execute, r.parse, r.eval, r.flags),
-            (execute, parse, 0, slot.kind.flags()),
+            (execute, parse, eval, slot.kind.flags()),
             "{o:04x}"
         );
         assert_eq!(r.params == 0, slot.params.list.is_empty(), "{o:04x}");

@@ -3,7 +3,7 @@
 //! reads go through [`super::packet`], the shader constants it fills through [`super::own`]. Main
 //! thread only (the drawing thread replays main's draw with main's control word): `f32` maths.
 
-use super::{capture, group_c, own, packet, thunks};
+use super::{group_c, own, packet, thunks};
 use crate::anim_keys::narrow;
 use crate::shader::{self, accumulator, div_d, mul_d};
 use engine_core::ptr::Ptr;
@@ -66,31 +66,6 @@ pub fn setup_geometry(
     transform: u32,
     bound: u32,
 ) -> u32 {
-    // Value packet B: the transform is the geometry's world (`m_kWorld`, +0x68), which the cut takes; the set-up
-    // and every helper it hands the pointer to read a stack image of the copy (`capture::image`).
-    let (from, to) = super::cut::WORLD;
-    capture::image(e, transform.wrapping_sub(from), from, to, |e, object| {
-        let transform = object.wrapping_add(from);
-        setup_geometry_with(
-            e, this, geometry, word_2, word_3, word_4, state, word_6, transform, bound,
-        )
-    })
-}
-
-/// [`setup_geometry`] with `transform` the address its words are read at (the packet's image or guest memory).
-#[allow(clippy::too_many_arguments)]
-fn setup_geometry_with(
-    e: &mut Engine,
-    this: Ptr,
-    geometry: u32,
-    word_2: u32,
-    word_3: u32,
-    word_4: u32,
-    state: u32,
-    word_6: u32,
-    transform: u32,
-    bound: u32,
-) -> u32 {
     let this = this.addr();
     let renderer = e.global::<u32>(this.wrapping_add(0x18));
     typed_call!(
@@ -105,9 +80,9 @@ fn setup_geometry_with(
         let up = frame + 0x34;
         let transformed = frame + 0x84;
         let entry = |e: &Engine, index: u32| {
-            f32::from_bits(e.global::<u32>(transform.wrapping_add(4 * index)))
+            f32::from_bits(packet::transform_word(e, transform, 4 * index))
         };
-        let scale = f32::from_bits(e.global::<u32>(transform.wrapping_add(0x30)));
+        let scale = f32::from_bits(packet::transform_word(e, transform, 0x30));
         e.set_global(matrix, scale * entry(e, 0));
         let pass = packet::rendering_pass_type(e);
         e.set_global(frame + 0x40, pass);
@@ -116,7 +91,7 @@ fn setup_geometry_with(
             e.set_global(frame + place, value);
         }
         for (k, place) in (0u32..).zip([0x74u32, 0x78, 0x7c]) {
-            let value = e.global::<u32>(transform.wrapping_add(0x24 + 4 * k));
+            let value = packet::transform_word(e, transform, 0x24 + 4 * k);
             e.set_global(frame + place, value);
         }
         for place in [0x50u32, 0x60, 0x70] {
@@ -138,16 +113,13 @@ fn setup_geometry_with(
         if property == 0 || packet::property_kind(e, property) != 4 {
             return;
         }
-        let accumulator: u32 = typed_call!(
-            crate::render::FAMILY,
-            0x00b4_f5c0,
-            crate::render::passes::shader_accumulator(e)
-        );
+        // `BSShaderManager::GetAccumulator` (`00b4f5c0`): a read of `011f95ec`.
+        let accumulator = packet::shader_accumulator(e);
         let light = packet::first_light(e, packet::accumulator_lights(e, accumulator));
         if light != 0 {
             let direction = frame + 0x28;
             for (k, at) in [(2u32, 0xf8u32), (0, 0xf0), (1, 0xf4)] {
-                let word = packet::scene_light_value(e, light, at);
+                let word = packet::light_word(e, light, at);
                 e.set_global(direction + 4 * k, word);
             }
             typed_call!(
@@ -158,7 +130,7 @@ fn setup_geometry_with(
             for (source, target) in [(0xc8u32, LIGHT_COLOUR), (0xd4, LIGHT_AMBIENT)] {
                 // own: the targets are written through set_shader_global
                 for k in 0..3u32 {
-                    let value = packet::scene_light_value(e, light, source + 4 * k);
+                    let value = packet::light_word(e, light, source + 4 * k);
                     own::set_shader_global(e, target + 4 * k, value);
                 }
                 own::set_shader_global(e, target + 0xc, ONE);
@@ -175,7 +147,7 @@ fn setup_geometry_with(
         } else if packet::point_lights_on(e) != 0
             && e.call(ACTIVE_NON_SHADOW_LIGHTS, &args![property]).u16() != 0
         {
-            let scale = e.global::<u32>(transform.wrapping_add(0x30));
+            let scale = packet::transform_word(e, transform, 0x30);
             e.call(
                 UPDATE_POINT_LIGHTS,
                 &args![this, property, inverse, scale, pass],
@@ -229,10 +201,9 @@ pub fn setup_textures(e: &mut Engine, this: Ptr, state: Ptr) {
 pub fn copy_instances(e: &mut Engine, this: Ptr, _unused: u32, property: Ptr) {
     let base = this.addr();
     let data = packet::grass_instances(e, property.addr());
-    let source = packet::grass_instance_array(e, data);
     let count = packet::grass_instance_count(e, data);
     let target = e.global::<u32>(base.wrapping_add(0x1a4));
-    own::copy_constants(e, target, source, u32::from(count) << 4);
+    packet::copy_grass_instances(e, target, data, count);
     let active = packet::grass_active_instances(e, data);
     let model = packet::model_data(e, packet::grass_geometry(e, data));
     let triangles = if active == count {
@@ -280,14 +251,28 @@ const CYCLE: u32 = 0x0104_eea0;
 /// maps' constants ([`group_c::set_map_constants`]). Main thread only: `f32` maths (the steps with a
 /// `double` constant in `f64`, rounded once, as [`div_d`]/[`mul_d`]).
 pub fn setup_constants(e: &mut Engine, this: Ptr, state: Ptr) {
+    let geometry = packet::rendering_geometry(e);
+    // The geometry's world transform as the value packet holds it (value packet B).
+    packet::with_drawn(e, geometry, |e, transform, bound| {
+        constants_with(e, this, state, geometry, transform, bound);
+    });
+}
+
+/// [`setup_constants`] with the transform and the bound (`transform`: the geometry's +0x68, `bound`: its bound; or the
+/// packet's images of them).
+fn constants_with(
+    e: &mut Engine,
+    this: Ptr,
+    state: Ptr,
+    geometry: u32,
+    transform: u32,
+    bound: u32,
+) {
     let base = this.addr();
     let state = state.addr();
-    let geometry = packet::rendering_geometry(e);
-    let bound = packet::bound_of(e, geometry);
     let buffers = packet::buffer_data(e, packet::model_data(e, geometry));
     let skin = packet::skin_instance(e, geometry);
     let property = packet::state_property(e, state, 3);
-    let transform = geometry.wrapping_add(0x68);
     if crate::slot_target(e, base, SLOT_SETUP_GEOMETRY) == SETUP_GEOMETRY {
         let _: u32 = typed_call!(
             super::FAMILY,
