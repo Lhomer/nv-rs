@@ -540,7 +540,9 @@ mod tests {
         assert_eq!(keys.gunplay.len(), crate::gunplay::KEYS.len());
         assert!(keys.bad.is_empty(), "{:?}", keys.bad);
         for row in rows().iter().filter(|r| r.section == FIXES_SECTION) {
-            assert_eq!(row.default, "1", "{row:?}");
+            // A fix row writes what the fixes preset gives it: on, or off for a row off in every preset.
+            let off = crate::fixes::OFF_IN_EVERY_PRESET.contains(&row.switch);
+            assert_eq!(row.default, if off { "0" } else { "1" }, "{row:?}");
         }
     }
 

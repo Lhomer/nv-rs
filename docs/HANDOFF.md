@@ -7,6 +7,14 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-13 (merge of slaterain 25ca088, 7 commits #553, #551, #555, #554, #557, #559, #556)
+
+- **Merged:** slaterain/nv-rs main through 25ca088 (#556), a normal merge on 8f4cc9b (the settings-persistence fix), Patrick approved.
+- **Upstream brings:** JIP's actor AI hook handlers and ten commands (#553); the drawing thread's piece 8, its seam, joins and switch (#551; `[nv-rs Fixes] bWorldDrawThread`, `NV_DRAW_THREAD`, off in every preset; joins at `008706b0`, `00871dc0`, `008746d0`, `00874920`, `00875e40`, `00876850` and others); JIP commands batch 9 (#555); the drawing thread's whole-frame acceptance check (#554, test-only); the native map lookup at its second address and a multi-bound test without calls (#557); a launcher test fix (#559); own state B part 1 (#556).
+- **Conflict:** `crates/host/src/lib.rs` (the fork's `equipment_stats` and upstream's `draw_thread` modules: both kept). Everything else merged cleanly; the drawing code is upstream's. stash@{0} untouched.
+- **Checked for overlap:** upstream's draw joins are not in `00874c10`, which weighty combat's sway wraps (its wrap runs the translation, so a future join there still runs); `fixes::tests::rows_share_an_address_only_where_install_joins_them` passes with the new row. With `NV_DRAW_THREAD` on (experimental) the sway writes the first-person root on main before the first-person set-up, as the game itself does there.
+- **Cargo.lock:** one workspace dependency added (no third-party package): DEPENDENCY-LOCK.sha256 refreshed, notices unchanged. nv-rs-sections.ini regenerated from the merged table (identical).
+
 ### Claude, 2026-11-13 (the game's settings now persist: WritePrivateProfileStringA writes)
 
 - **Patrick:** cinematic kill cams come back on at every start although he turns them off.
