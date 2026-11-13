@@ -107,6 +107,8 @@ static CHANGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 /// of its rest (up to [`RETRY_MOST`] away, and then wgpu's wait for a frame).
 pub fn window_changed() {
     CHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // The frame-rate counter does not take the time away for a slow frame.
+    crate::frame_rate::gap();
 }
 
 /// The player's V-sync choice in play (the game's Settings menu, host `graphics_settings`): 0 the

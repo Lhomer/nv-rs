@@ -234,11 +234,10 @@ pub fn store_colour(
     /// The table.
     const COLOURS: u32 = 0x011f_a0c0;
     let entry = (index.one_word() << 4).wrapping_add(COLOURS);
-    // The shaders' constant rows: the drawing side's own copy there (`crate::draw_side`).
-    crate::draw_side::store_own_u32(e, entry, red.one_word());
-    crate::draw_side::store_own_u32(e, entry.wrapping_add(4), green.one_word());
-    crate::draw_side::store_own_u32(e, entry.wrapping_add(8), blue.one_word());
-    crate::draw_side::store_own_u32(e, entry.wrapping_add(12), alpha.one_word());
+    e.mem.set_u32(entry, red.one_word());
+    e.mem.set_u32(entry.wrapping_add(4), green.one_word());
+    e.mem.set_u32(entry.wrapping_add(8), blue.one_word());
+    e.mem.set_u32(entry.wrapping_add(12), alpha.one_word());
 }
 
 // Typed from 004b6190

@@ -146,7 +146,7 @@ function Save-Files($writes) {
 }
 
 $own = "Game's setting"
-$known = @('Renderer', 'Borderless', 'Resolution', 'AntiAliasing', 'Anisotropy', 'VSync', 'FOV', 'Preset', 'FrameLimit', 'MenuFrameLimit', 'NV_THREADS', 'NV_RENDER_THREAD')
+$known = @('Renderer', 'Borderless', 'Resolution', 'AntiAliasing', 'Anisotropy', 'VSync', 'FOV', 'Preset', 'FrameLimit', 'MenuFrameLimit', 'NV_SHOW_FPS', 'NV_THREADS', 'NV_RENDER_THREAD')
 # Play.exe makes the game's NV_PRESET, NV_FRAME_LIMIT and NV_MENU_FRAME_LIMIT from Preset, FrameLimit and
 # MenuFrameLimit, and NV_FIXES was never one of the game's switches: such lines would only look as if
 # they did something.
@@ -182,6 +182,7 @@ if ($seeded) {
     $cur['Preset'] = Get-IniValue $ini 'nv-rs General' 'sPreset'
     $cur['FrameLimit'] = Get-IniValue $ini 'nv-rs Display' 'iFrameLimit'
     $cur['MenuFrameLimit'] = Get-IniValue $ini 'nv-rs Display' 'iMenuFrameLimit'
+    $cur['NV_SHOW_FPS'] = Get-IniValue $ini 'nv-rs Display' 'bShowFrameRate'
     $cur['NV_THREADS'] = if ((Get-IniValue $ini 'nv-rs Threads' 'bSteppedThreads') -eq '1') { 'stepped' } else { '' }
     $cur['NV_RENDER_THREAD'] = if ((Get-IniValue $ini 'nv-rs Threads' 'bRenderThread') -eq '0') { '0' } else { '' }
     foreach ($name in @($cur.Keys)) { if ($null -eq $cur[$name]) { $cur.Remove($name) } }
@@ -197,6 +198,7 @@ if ($pending) {
             if ($value -eq '') { continue }
             if ($name -eq 'NV_THREADS' -and @('stepped', 'real') -notcontains $value) { continue }
             if ($name -eq 'NV_RENDER_THREAD' -and @('0', '1') -notcontains $value) { continue }
+            if ($name -eq 'NV_SHOW_FPS' -and @('0', '1') -notcontains $value) { continue }
             if ($name -eq 'Renderer' -and @('vulkan', 'd3d9') -notcontains $value.ToLower()) { continue }
             if ($name -eq 'FOV') { $pendingFov = $value }
             $cur[$name] = $value
@@ -214,7 +216,7 @@ $form.Text = 'nv-rs settings'
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
 $form.StartPosition = 'CenterScreen'
-$form.ClientSize = New-Object System.Drawing.Size(360, 558)
+$form.ClientSize = New-Object System.Drawing.Size(360, 594)
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 
 $y = 16
@@ -327,6 +329,14 @@ $menuLimit = Get-Setting 'MenuFrameLimit' '120'
 if ($menuLimit -eq '') { $menuLimit = '120' }
 $ml = New-Combo @('No limit', '30', '60', '90', '120', '144', '165', '240') $(if ($menuLimit -eq '0') { 'No limit' } else { $menuLimit })
 Add-Row 'Frame rate limit in menus' $ml
+# The frame-rate counter in the top-right corner from the start, or hidden (the default); F11 in the
+# game shows or hides it either way (Vulkan only). This '0' is the host table's default for bShowFrameRate
+# (crates/host/data/game_ini.tsv): scripts/launcher's test settings_cmd_shows_the_tables_frame_rate_default
+# compares the two.
+$fpsHidden = 'Hidden (F11 shows it)'
+$fpsShown = 'Shown (F11 hides it)'
+$fps = New-Combo @($fpsHidden, $fpsShown) $(if ((Get-Setting 'NV_SHOW_FPS' '0').Trim() -eq '1') { $fpsShown } else { $fpsHidden })
+Add-Row 'Frame rate counter' $fps
 # The game's threads side by side on their own cores (the default) or one at a time, slower: the
 # fallback if a game misbehaves with them side by side.
 $together = 'Side by side (recommended)'
@@ -348,13 +358,13 @@ $form.Controls.Add($note)
 
 $save = New-Object System.Windows.Forms.Button
 $save.Text = 'Save'
-$save.Location = New-Object System.Drawing.Point(184, 518)
+$save.Location = New-Object System.Drawing.Point(184, 554)
 $save.DialogResult = 'OK'
 $form.Controls.Add($save)
 $form.AcceptButton = $save
 $cancel = New-Object System.Windows.Forms.Button
 $cancel.Text = 'Cancel'
-$cancel.Location = New-Object System.Drawing.Point(268, 518)
+$cancel.Location = New-Object System.Drawing.Point(268, 554)
 $cancel.DialogResult = 'Cancel'
 $form.Controls.Add($cancel)
 $form.CancelButton = $cancel
@@ -372,6 +382,7 @@ function Get-Choices {
         Preset           = $(if ($pr.SelectedIndex -eq 1) { 'vanilla' } else { 'fixes' })
         FrameLimit       = $(if ($fl.SelectedIndex -eq 0) { '0' } else { "$($fl.SelectedItem)" })
         MenuFrameLimit   = $(if ($ml.SelectedIndex -eq 0) { '0' } else { "$($ml.SelectedItem)" })
+        NV_SHOW_FPS      = $(if ($fps.SelectedIndex -eq 1) { '1' } else { '0' })
         NV_THREADS       = $(if ($th.SelectedIndex -eq 1) { 'stepped' } else { '' })
         NV_RENDER_THREAD = $(if ($rt.SelectedIndex -eq 1) { '0' } else { '' })
     }
@@ -421,6 +432,7 @@ if ($noWindow -or $form.ShowDialog() -eq 'OK') {
                     'Preset' { $newIni = Set-IniKey $newIni 'nv-rs General' 'sPreset' $v }
                     'FrameLimit' { $newIni = Set-IniKey $newIni 'nv-rs Display' 'iFrameLimit' $v }
                     'MenuFrameLimit' { $newIni = Set-IniKey $newIni 'nv-rs Display' 'iMenuFrameLimit' $v }
+                    'NV_SHOW_FPS' { $newIni = Set-IniKey $newIni 'nv-rs Display' 'bShowFrameRate' $(if ($v -eq '1') { '1' } else { '0' }) }
                     'NV_THREADS' { $newIni = Set-IniKey $newIni 'nv-rs Threads' 'bSteppedThreads' $(if ($v -eq 'stepped') { '1' } else { '0' }) }
                     'NV_RENDER_THREAD' { $newIni = Set-IniKey $newIni 'nv-rs Threads' 'bRenderThread' $(if ($v -eq '0') { '0' } else { '1' }) }
                 }
@@ -450,6 +462,7 @@ if ($noWindow -or $form.ShowDialog() -eq 'OK') {
             if ($null -eq $world) { $world = 75.0 }
             if ($world -eq [double]$chosen['FOV']) { $lines += "FOV=$($chosen['FOV'])" }
         }
+        $lines += "NV_SHOW_FPS=$(if ($chosen['NV_SHOW_FPS'] -eq '1') { '1' } else { '0' })"
         $lines += "NV_THREADS=$(if ($chosen['NV_THREADS'] -eq 'stepped') { 'stepped' } else { 'real' })"
         $lines += "NV_RENDER_THREAD=$(if ($chosen['NV_RENDER_THREAD'] -eq '0') { '0' } else { '1' })"
         $lines += $kept

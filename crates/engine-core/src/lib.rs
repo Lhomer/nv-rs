@@ -65,7 +65,6 @@ pub(crate) mod alloc_count;
 pub mod call_trace;
 pub mod census;
 pub mod cxx_exception;
-pub mod draw_side;
 mod engine;
 pub mod exe;
 pub mod extend;

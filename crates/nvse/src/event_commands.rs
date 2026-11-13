@@ -1,11 +1,10 @@
 //! xNVSE's event commands (ADR-0016 §8; build step I-9), translated from `Commands_Script.cpp`
 //! (xNVSE): `SetEventHandler`, `SetEventHandlerAlt`, `RemoveEventHandler`,
 //! `GetCurrentEventName`, `DispatchEvent`, `DispatchEventAlt`, `GetEventHandlers`,
-//! `IsEventHandlerFirst`/`Last`, `GetHigher`/`LowerPriorityEventHandlers`, on
+//! `DumpEventHandlers`, `IsEventHandlerFirst`/`Last`, `GetHigher`/`LowerPriorityEventHandlers`, on
 //! [`crate::events`].
 //!
-//! Not here yet: `DumpEventHandlers` (a console listing; it needs the forms' and arrays' text
-//! forms), JIP's LN events behind `SetEventHandler` (`GetLNEventMask`, with JIP, I-13), and
+//! Not here yet: JIP's LN events behind `SetEventHandler` (`GetLNEventMask`, with JIP, I-13), and
 //! `GetCurrentEventName`'s `set ... to` target (`ExtractSetStatementVar`, with the script
 //! analyser, I-14): in a `set` statement its string is a temporary, as in xNVSE when that read
 //! fails; in an expression (`let`, `eval`) it is xNVSE's.
@@ -188,6 +187,14 @@ pub static COMMANDS: &[Command] = &[
         "dispatches a user - defined event to any registered listeners",
         DISPATCH_EVENT_ALT,
         dispatch_event_alt,
+        Returns::Default,
+    ),
+    cmd(
+        0x1648,
+        "DumpEventHandlers",
+        "dumps event handlers, optionally filtered by eventName, script and args.",
+        DUMP_EVENT_HANDLERS,
+        dump_event_handlers,
         Returns::Default,
     ),
     cmd(
@@ -374,10 +381,120 @@ fn extract_callback(
     Some((name, cb))
 }
 
+/// `atoi` as the C runtime has it: leading white space, a sign, digits up to the first other
+/// byte; past the range of an `int`, its end (MSVC's `atoi` saturates).
+fn atoi(text: &[u8]) -> i32 {
+    let mut i = 0;
+    while i < text.len() && matches!(text[i], b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') {
+        i += 1;
+    }
+    let negative = i < text.len() && text[i] == b'-';
+    if i < text.len() && (text[i] == b'-' || text[i] == b'+') {
+        i += 1;
+    }
+    let mut v: i64 = 0;
+    while i < text.len() && text[i].is_ascii_digit() {
+        v = (v * 10 + i64::from(text[i] - b'0')).min(1 << 40);
+        i += 1;
+    }
+    let v = if negative { -v } else { v };
+    v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+// Translated from xNVSE 6.4.9 (xNVSE/NVSE at 0ccd23a), Commands_Script.cpp: ProcessEventHandler
+// (its part for JIP LN NVSE's LN events).
+/// When JIP has given its LN events and `name` up to a colon is one of them: the handler set or
+/// removed by JIP (`Some` of JIP's answer), with the number after the colon (`atoi`) and the
+/// callback's `source` filter (a removal without one may give the form as filter 1). Adding takes
+/// only the default priority and not `SetEventHandlerAlt`; removing takes the default or no
+/// priority. `None` for any other event, which xNVSE's own manager handles.
+fn ln_event(
+    e: &mut Engine,
+    ev: &mut Eval,
+    name: &[u8],
+    cb: &Callback,
+    add: bool,
+    priority: i32,
+    alt: bool,
+) -> Option<bool> {
+    let ln = crate::plugins::ln_events(e)?;
+    let (base, number) = match name.iter().position(|&b| b == b':') {
+        Some(at) => (&name[..at], &name[at + 1..]),
+        None => (name, &name[name.len()..]),
+    };
+    let event_mask = (ln.mask)(e, base);
+    if event_mask == 0 {
+        return None;
+    }
+    let number = if number.is_empty() {
+        0
+    } else {
+        atoi(number) as u32
+    };
+    let mut form = cb.source;
+    if add {
+        if priority != PRIORITY_DEFAULT {
+            ev.error_text(format!(
+                "Cannot use non-default (non-{PRIORITY_DEFAULT}) priority {priority} for adding an LN event handler."
+            ));
+            return Some(false);
+        }
+        if alt {
+            ev.error_text(
+                "Cannot use SetEventHandlerAlt for LN events; use SetEventHandler instead."
+                    .to_string(),
+            );
+            return Some(false);
+        }
+    } else {
+        if priority != PRIORITY_DEFAULT && priority != PRIORITY_INVALID {
+            ev.error_text(format!(
+                "Cannot use non-default (non-{PRIORITY_DEFAULT}) and non-invalid (non-{PRIORITY_INVALID}) priority {priority} for removing an LN event."
+            ));
+            return Some(false);
+        }
+        if form == 0 {
+            // Support for using 1::SomeFilter instead of "source"::SomeFilter.
+            if let Some(filter) = cb.filters.get(&1) {
+                match filter {
+                    Data::Form(id) => {
+                        form = e.call(LOOKUP_FORM_BY_ID, &args![*id]).u32();
+                    }
+                    other => {
+                        let text =
+                            crate::commands::scripting_more::element_representation(e, other);
+                        ev.error_text(format!(
+                            "Cannot use non-form filter {} for an LN event.",
+                            String::from_utf8_lossy(&text)
+                        ));
+                        return Some(false);
+                    }
+                }
+            }
+        }
+    }
+    Some((ln.handler)(e, event_mask, cb.script, add, form, number))
+}
+
+/// `LookupFormByID` (`0x004839C0`).
+const LOOKUP_FORM_BY_ID: u32 = 0x0048_39c0;
+
+/// [`atoi`] for the tests.
+#[cfg(test)]
+pub(crate) fn tests_atoi(text: &[u8]) -> i32 {
+    atoi(text)
+}
+
 fn set_with(e: &mut Engine, ev: &mut Eval, toks: &[Tok], old: bool, new: bool) -> Option<f64> {
     let mut priority = PRIORITY_DEFAULT;
     let ok = match extract_callback(e, ev, toks, old, new, &mut priority) {
-        Some((name, cb)) => events::set_handler(e, &name, cb, priority, Some(ev)),
+        Some((name, cb)) => match ln_event(e, ev, &name, &cb, true, priority, new && !old) {
+            Some(ok) => {
+                events::release(e, &cb);
+                ok
+            }
+            None => events::set_handler(e, &name, cb, priority, Some(ev)),
+        },
         None => false,
     };
     Some(f64::from(u8::from(ok)))
@@ -396,7 +513,10 @@ fn remove_event_handler(e: &mut Engine, w: &[u32]) -> Ret {
         let mut priority = PRIORITY_INVALID;
         let ok = match extract_callback(e, ev, &toks, true, true, &mut priority) {
             Some((name, cb)) => {
-                let ok = events::remove_handler(e, &name, &cb, priority, Some(ev));
+                let ok = match ln_event(e, ev, &name, &cb, false, priority, false) {
+                    Some(ok) => ok,
+                    None => events::remove_handler(e, &name, &cb, priority, Some(ev)),
+                };
                 events::release(e, &cb);
                 ok
             }
@@ -590,6 +710,127 @@ fn callback_array(e: &mut Engine, cb: &Callback, modi: u8) -> u32 {
     vars::set_element(e, arr, &Key::Number(0.0), Value::Form(script));
     vars::set_element(e, arr, &Key::Number(1.0), Value::Array(filters));
     arr
+}
+
+// Translated from xNVSE 6.4.9 (xNVSE/NVSE at 0ccd23a), EventManager.cpp:
+// EventCallback::GetFiltersAsStr.
+/// A handler's filters as `DumpEventHandlers` prints them: `"first"::` and `"second"::` with the
+/// form's text, then each numbered filter as `index::element`, joined by ", "; `(None)` without.
+fn filters_text(e: &mut Engine, cb: &Callback) -> Vec<u8> {
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    if cb.source != 0 {
+        let mut s = b"\"first\"::".to_vec();
+        s.extend(crate::commands::scripting_more::form_representation(
+            e, cb.source,
+        ));
+        parts.push(s);
+    }
+    if cb.object != 0 {
+        let mut s = b"\"second\"::".to_vec();
+        s.extend(crate::commands::scripting_more::form_representation(
+            e, cb.object,
+        ));
+        parts.push(s);
+    }
+    for (index, data) in &cb.filters {
+        let mut s = format!("{index}::").into_bytes();
+        s.extend(crate::commands::scripting_more::element_representation(
+            e, data,
+        ));
+        parts.push(s);
+    }
+    if parts.is_empty() {
+        return b"(None)".to_vec();
+    }
+    parts.join(&b", "[..])
+}
+
+// Translated from xNVSE 6.4.9 (xNVSE/NVSE at 0ccd23a), Commands_Script.cpp:
+// Cmd_DumpEventHandlers_Execute; EventManager.cpp: EventCallback::GetCallbackFuncAsStr.
+/// The handlers to the console, filtered as `GetEventHandlers` filters them: "Beginning dump.",
+/// then per event its name line and a line per handler that matches (its priority, its script's
+/// text, its filters' text). Arguments to filter by without an event name are an error, after the
+/// first line. The result stays 0.
+fn dump_event_handlers(e: &mut Engine, w: &[u32]) -> Ret {
+    use crate::commands::{console::print_str, console_print};
+    run(e, w, |e, a, ev, toks| {
+        let mut only = None;
+        let mut script_filter = 0;
+        let mut priority_filter = PRIORITY_INVALID;
+        if let Some(first) = toks.first() {
+            let name = ev.get_string(e, first);
+            if !name.is_empty() {
+                only = Some(events::find(e, &name)?);
+            }
+            if let Some(t) = toks.get(1) {
+                script_filter = crate::tick::user_function(e, ev, t);
+                if let Some(t) = toks.get(2) {
+                    priority_filter = crate::args::f64_to_i32(ev.get_number(e, t));
+                }
+            }
+        }
+        let (raws, types) = raw_args(e, ev, &toks, 3);
+        let this_obj = a.this_obj;
+        with_words(e, &raws, |e, words| {
+            console_print(e, "DumpEventHandlers >> Beginning dump.", &[]);
+            let dump = |e: &mut Engine, ev: &mut Eval, at: usize| {
+                let info = events::state_info(e, at).clone();
+                events::with_guest_text(e, &info.name, |e, name| {
+                    console_print(e, "== Dumping for event %s ==", &[name]);
+                });
+                if !types.is_empty() && !events::validate_dispatched_types(e, at, &types, Some(ev))
+                {
+                    return;
+                }
+                let accurate = if info.flags & events::FLAG_UNKNOWN_ARG_TYPES != 0 {
+                    types.clone()
+                } else {
+                    info.arg_types()
+                };
+                for x in &info.callbacks {
+                    if priority_filter != PRIORITY_INVALID && x.priority != priority_filter {
+                        continue;
+                    }
+                    let cb = &x.callback;
+                    let matches = (script_filter == 0 || script_filter == cb.script)
+                        && !cb.removed
+                        && (words.is_empty()
+                            || events::filters_match_alt(
+                                e,
+                                cb,
+                                this_obj,
+                                &words,
+                                &accurate,
+                                &info.name,
+                                Some(ev),
+                            ));
+                    if matches {
+                        let mut line =
+                            format!(">> Priority: {}, handler: ", x.priority).into_bytes();
+                        line.extend(crate::commands::scripting_more::form_representation(
+                            e, cb.script,
+                        ));
+                        line.extend_from_slice(b", filters: ");
+                        line.extend(filters_text(e, cb));
+                        print_str(e, &line);
+                    }
+                }
+            };
+            match only {
+                Some(at) => dump(e, ev, at),
+                None => {
+                    if !words.is_empty() {
+                        ev.error_text("Args were passed to get filtered, but no eventName was passed; halting the function to prevent potential error message spam due to passing invalidly typed args for some events.".to_string());
+                        return None;
+                    }
+                    for at in 0..events::count(e) {
+                        dump(e, ev, at);
+                    }
+                }
+            }
+            None
+        })
+    })
 }
 
 // Translated from xNVSE 6.4.9 (xNVSE/NVSE at 0ccd23a), Commands_Script.cpp:

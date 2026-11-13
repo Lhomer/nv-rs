@@ -28,6 +28,10 @@ layout! {
     pub struct TESObjectREFR: 0x68 {
         /// `data.pObjectReference` (Xbox PDB): the base form.
         0x20 pObjectReference: u32,
+        /// `pParentCell` (Xbox PDB; JIP's `parentCell`, `// 40`): the exe's
+        /// `TESObjectREFR::GetParentCell`, `008d6f30`, returns `[ecx+0x40]` (engine-fallout-cell
+        /// `tesobjectrefr.rs`).
+        0x40 pParentCell: u32,
         /// `ExtraData` (Xbox PDB): the reference's extra data list.
         0x44 ExtraData: Inline<BaseExtraList>,
         /// `jipRefFlags5F` (JIP LN NVSE): JIP's flags (`kHookRefFlag5F_*`, `internal/hooks.h`) in
@@ -67,10 +71,47 @@ layout! {
     pub struct InterfaceManager: 0x580 {
         /// `iCurrentMode` (JIP's `currentMode`): 1 in game mode, 2 in menu mode.
         0x00C currentMode: u32,
+        /// `pActivateRef` (Xbox PDB; JIP's `crosshairRef`, `// 0FC`): the reference under the
+        /// crosshair; `InterfaceManager::InterfaceManager`, `0070a130`, zeroes `[edx+0xfc]`
+        /// (engine-fallout-interface `interfacemanager.rs`).
+        /// `pOverTileMenu` (Xbox PDB; JIP's `activeMenu`, `// 0D0`): the menu under the pointer,
+        /// which `InterfaceManager::Idle`, `0070c4a0`, sets as the pointer moves
+        /// (engine-fallout-interface `interfacemanager.rs`).
+        0x0D0 pOverTileMenu: u32,
+        0x0FC pActivateRef: u32,
         /// `menuStack[10]` (JIP LN NVSE): the open menus' ids, 0 after the last.
         0x114 menuStack: u32,
         /// `pipBoyMode` (JIP LN NVSE): 3 while the Pip-Boy is up.
         0x4BC pipBoyMode: u32,
+    }
+
+    /// `PlayerCharacter` (Xbox PDB), 0xE50 bytes (`PlayerCharacter::PlayerCharacter`, `00938180`,
+    /// engine-fallout-ai `playercharacter.rs`), the field JIP reads.
+    pub struct PlayerCharacter: 0xE50 {
+        /// `pGrabbedObject` (Xbox PDB; JIP's `grabbedRef`, `// 638`): the reference the player
+        /// holds; the constructor `00938180` clears it.
+        0x638 pGrabbedObject: u32,
+        /// `activeQuest`, `questObjectiveList` and `questTargetList` (JIP LN NVSE, `// 6B8`,
+        /// `6BC`, `6C4`): `GetCurrentQuestObjectiveTargets` (`00952BA0`) reads the quest at
+        /// +0x6B8 and the objectives at +0x6BC and answers the target list at +0x6C4.
+        0x6B8 activeQuest: u32,
+        0x6BC questObjectiveList: Inline<ListNode>,
+        0x6C4 questTargetList: Inline<ListNode>,
+    }
+
+    /// `OSInputGlobals` (JIP LN NVSE; the exe's `Controls`, `*0x011F35CC`), 0x1C04 bytes: the
+    /// button bound to each of the 28 controls, one byte each, 0xFF for none, per device. The
+    /// exe's action clear `00a25410` reads `[this + 0x1b94 + device * 0x1c + action]` for devices
+    /// 0 to 3 (engine-bs `xcontrols.rs`). Each field is a binding array's first byte.
+    pub struct OSInputGlobals: 0x1C04 {
+        /// `keyBinds[28]` (JIP LN NVSE, `// 1B94`): device 0, the keyboard.
+        0x1B94 keyBinds: u8,
+        /// `mouseBinds[28]` (`// 1BB0`): device 1.
+        0x1BB0 mouseBinds: u8,
+        /// `joystickBinds[28]` (`// 1BCC`): device 2.
+        0x1BCC joystickBinds: u8,
+        /// `controllerBinds[28]` (`// 1BE8`): device 3, the XInput pad.
+        0x1BE8 controllerBinds: u8,
     }
 
     /// `BGSListForm` (Xbox PDB): `ListOfForms`, a `BSSimpleList<TESForm *>` with its first node
@@ -163,16 +204,90 @@ layout! {
     pub struct TESQuest: 0x6C {
         /// `TESScriptableForm::pFormScript` (Xbox PDB).
         0x1C pFormScript: u32,
+        /// `questFlags` (JIP LN NVSE): the quest loader (`0060CEB0`) reads `DATA` (8 bytes) at
+        /// +0x3C, the flags its first byte.
+        0x3C questFlags: u8,
+        /// `lVarOrObjectives` (JIP LN NVSE): objectives and variables, a `tList`.
+        0x4C lVarOrObjectives: Inline<ListNode>,
         /// `pScriptLocals` (Xbox PDB): the event list.
         0x5C pScriptLocals: u32,
+        /// `currentStage` (JIP LN NVSE): `TESQuest::SetStage` (`0060D510`) writes the byte at
+        /// +0x60.
+        0x60 currentStage: u8,
     }
 
     /// `BGSPerk` (Xbox PDB), the fields JIP reads.
     pub struct BGSPerk: 0x50 {
+        /// `data.isTrait` (JIP LN NVSE): the perk loader `005EADA0` reads `DATA`'s
+        /// five bytes from +0x38 (trait, minimum level, ranks, playable, hidden).
+        0x38 isTrait: u8,
+        /// `data.minLevel` (JIP LN NVSE).
+        0x39 minLevel: u8,
         /// `data.cNumRanks` (Xbox PDB).
         0x3A cNumRanks: u8,
+        /// `data.isPlayable` (JIP LN NVSE).
+        0x3B isPlayable: u8,
+        /// `data.isHidden` (JIP LN NVSE).
+        0x3C isHidden: u8,
+        /// `entries` (JIP LN NVSE): a `tList<BGSPerkEntry>`, its first node inline (the perk loader
+        /// adds entries through `005EB410`, which works on +0x48).
+        0x48 entries: Inline<ListNode>,
+    }
+
+    /// A form's flag bytes JIP keeps in `TESForm`'s padding (`jipFormFlags6`, JIP LN NVSE's
+    /// `TESForm`, `// 06`): the exe's `TESForm::TESForm`, `00483370`, writes only the byte at `+4`
+    /// (`cFormType`) of that word, and nothing of the game reads `+5` to `+7`.
+    pub struct JipFormFlags: 0x18 {
+        /// `kHookFormFlag6_*` (`internal/hooks.h` (JIP LN NVSE)).
+        0x06 jipFormFlags6: u8,
+    }
+
+    /// An actor's flag bytes JIP keeps in `Actor`'s padding after `bInCombat` (`+0x104`, a bool:
+    /// engine-fallout-ai `actor.rs`); `Actor::Actor`, `0087d4a0`, writes none of `+0x105` to
+    /// `+0x107` (JIP LN NVSE's `jipActorFlags1..3`, `// 105`).
+    pub struct JipActorFlags: 0x1B4 {
+        /// `kHookActorFlag2_*` (`internal/hooks.h` (JIP LN NVSE)).
+        0x106 jipActorFlags2: u8,
+    }
+
+    /// `Menu` (Xbox PDB), the field JIP reads: the menu's id, which `TileMenu::PostParse`,
+    /// `00a1f160`, stores at `menu + 0x20` and `Menu::~Menu`, `00a1c520`, reads there (engine-bs
+    /// `tilemenu.rs`, `run_00a1c340.rs`).
+    pub struct Menu: 0x28 {
+        /// `iClass` (Xbox PDB; JIP's `id`, `// 20`).
+        0x20 iClass: u32,
+    }
+
+    /// `Tile` (Xbox PDB), 0x38 bytes, the fields JIP's component path reads (engine-bs
+    /// `tile.rs`; `Tile::Tile`, `009ff600`).
+    pub struct Tile: 0x38 {
+        /// `xChildren` (Xbox PDB): an `NiTPointerList<Tile *>` (JIP's `DList<Tile> children`).
+        0x04 xChildren: Inline<NiTPointerList>,
+        /// `xName` (Xbox PDB; JIP's `name`, `// 20`).
+        0x20 xName: Inline<BSStringT>,
+        /// `pParent` (Xbox PDB; JIP's `parent`, `// 28`).
+        0x28 pParent: u32,
+    }
+
+    /// `HackingMenu` (Xbox PDB), the fields JIP's terminal model reads (engine-fallout-interface
+    /// `hackingmenu.rs`).
+    pub struct HackingMenu: 0x1DC {
+        /// `xGuessTiles.m_uiCount` (the list at `+0x174`; JIP tests its low byte, `// 17C`):
+        /// `HackingMenu::MakeGuessBlock`, `0076ad50`, reads the count at `+0x17C`.
+        0x17C guessTileCount: u8,
+        /// `pTerminalRef` (Xbox PDB; JIP's `targetRef`, `// 198`).
+        0x198 pTerminalRef: u32,
+    }
+
+    /// `ComputersMenu` (Xbox PDB), the field JIP's terminal model reads: the terminal's
+    /// reference, which `ComputersMenu::Create`, `00757b70`, stores at `+0xAC`
+    /// (engine-fallout-interface `computersmenu.rs`; JIP's `targetRef`, `// AC`).
+    pub struct ComputersMenu: 0xC4 {
+        0xAC pTerminalRef: u32,
     }
 }
+
+pub use engine_core::types::{BSStringT, NiTListItem, NiTPointerList};
 
 /// `saveMods[index]`.
 pub const fn save_mod(index: u8) -> u32 {

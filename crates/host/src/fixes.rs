@@ -47,6 +47,7 @@ pub static FIXES: &[Fix] = &[
     SCRIPT_SIZE_CAPS,
     SCRIPT_NULL_GUARD,
     SCRIPT_CYCLE_GUARD,
+    SCRIPT_UI_SORT_PATHS,
     SCRIPT_LIST_GUARD,
     SHADER_WARM,
     IO_WAIT_ENDS_ON_COMPLETION,
@@ -65,6 +66,7 @@ pub static FIXES: &[Fix] = &[
     VATS_LAG,
     ACTOR_CAUSE_WITNESSES,
     RADIO_LENGTHS,
+    FACIAL_HAIR_BY_RACE_FOLDER,
     crate::patch_data::STRIP_LOD_WATER,
     crate::direct_files::FIX,
 ];
@@ -181,6 +183,47 @@ fn install_radio_lengths(e: &mut Engine) {
     let (at, f) = engine::entry!(
         0x0083_0b30,
         fallout_audio_media_thread_proc_radio_row(Ptr) -> u32
+    );
+    e.register(at, f);
+}
+
+/// The character menu's facial hair list offers every playable head part to every race
+/// (`005e7a60` tests only the playable bit), so a plugin's own race cannot keep its refitted beards
+/// to itself. With the row a race whose head model (for the chosen sex) lies in a directory of its
+/// own with playable head parts under it is offered only those parts, and every other race all
+/// parts but those (`engine::units::fallout_interface::racesexmenu::FacialHairFilter`): `_Create`
+/// (`007acb60`) builds the list so, and a click that changes the race or sex (`007adce0`) builds it
+/// again when the offered parts change, which the original never does. A worn playable part the
+/// choice is not offered is taken off there and after a face preset's copy (`SliderRelease`,
+/// `007b4b50`). For the game's own data nothing changes. Vanilla offers every part to every race.
+pub const FACIAL_HAIR_BY_RACE_FOLDER: Fix = Fix {
+    name: "facial hair by race folder",
+    env: "NV_FACIAL_HAIR_RACE",
+    addresses: &[0x007a_cb60, 0x007a_dce0, 0x007b_4b50],
+    summary:
+        "facial hair made for one race's head is offered only to that race in the character menu",
+    install: install_facial_hair_by_race_folder,
+};
+
+fn install_facial_hair_by_race_folder(e: &mut Engine) {
+    use engine::units::fallout_interface::racesexmenu::{
+        race_sex_menu_create_contents_facial_hair_by_race,
+        race_sex_menu_do_click_facial_hair_by_race,
+        race_sex_menu_slider_release_facial_hair_by_race, RaceSexMenu,
+    };
+    let (at, f) = engine::entry!(
+        0x007a_cb60,
+        race_sex_menu_create_contents_facial_hair_by_race(Ptr<RaceSexMenu>, i32)
+    );
+    e.register(at, f);
+    let (at, f) = engine::entry!(
+        0x007a_dce0,
+        race_sex_menu_do_click_facial_hair_by_race(Ptr<RaceSexMenu>, i32, u32)
+    );
+    e.register(at, f);
+    let (at, f) = engine::entry!(
+        0x007b_4b50,
+        race_sex_menu_slider_release_facial_hair_by_race(Ptr<RaceSexMenu>)
     );
     e.register(at, f);
 }
@@ -337,12 +380,25 @@ pub const SCRIPT_LIST_GUARD: Fix = Fix {
     env: "NV_NVSE_LIST_GUARD",
     addresses: &[],
     summary:
-        "an inventory list or a form list the script commands walk that runs back into itself, GetPaired asking for the same stack again, or a cell scan (GetFirstRef, GetNumRefs, GetRefs and the rest) whose depth takes it past the cell grid's 8-bit positions ends the walk; a name xNVSE copies into a 256- or 512-byte buffer (GetAgeClass's race name, AddAnimation's and DelAnimation's name, the setting and file names GetNumericGameSetting, IsModLoaded and the rest take) is read whole when it is longer; the list SetHotkeyItem gives a stack gets the game's vtable; the token commands (GetTokenValue, SetTokenValue and the rest) answer for an item only in the base container (the Pip-Boy, for one); none of these stops or hangs the game",
+        "an inventory list or a form list the script commands walk that runs back into itself, GetPaired asking for the same stack again, or a cell scan (GetFirstRef, GetNumRefs, GetRefs and the rest) whose depth takes it past the cell grid's 8-bit positions ends the walk; a name xNVSE copies into a 256- or 512-byte buffer (GetAgeClass's race name, AddAnimation's and DelAnimation's name, the setting and file names GetNumericGameSetting, IsModLoaded and the rest take) is read whole when it is longer; the list SetHotkeyItem gives a stack gets the game's vtable; the token commands (GetTokenValue, SetTokenValue and the rest) answer for an item only in the base container (the Pip-Boy, for one); OutputLocalMapPicturesOverride draws the whole grid square; none of these stops or hangs the game",
     install: install_script_list_guard,
 };
 
 fn install_script_list_guard(e: &mut Engine) {
     nvse::commands::array::set_fix(e, nvse::commands::array::LIST_GUARD, true);
+}
+
+pub const SCRIPT_UI_SORT_PATHS: Fix = Fix {
+    name: "script UI list sort by nested paths",
+    env: "NV_NVSE_UI_SORT_PATHS",
+    addresses: &[],
+    summary:
+        "SortUIListBox with a key, destination or increment path through a child tile finds it on every item; xNVSE finds it only on the first and the list does not sort",
+    install: install_script_ui_sort_paths,
+};
+
+fn install_script_ui_sort_paths(e: &mut Engine) {
+    nvse::commands::array::set_fix(e, nvse::commands::array::UI_SORT_PATHS, true);
 }
 
 /// The rows that register nothing at an exe address: the menu limit paces the uncapped step;
@@ -359,6 +415,7 @@ const NO_ADDRESS: &[&str] = &[
     SCRIPT_SIZE_CAPS.name,
     SCRIPT_NULL_GUARD.name,
     SCRIPT_CYCLE_GUARD.name,
+    SCRIPT_UI_SORT_PATHS.name,
     SCRIPT_LIST_GUARD.name,
     SHADER_WARM.name,
 ];
@@ -396,6 +453,12 @@ pub const PLAY_BORDERLESS: bool = true;
 /// that default, as [`PLAY_BORDERLESS`] is: `crates/host/data/game_ini.tsv`'s `sRenderer` row is held
 /// to it by a test. Only a launcher's play run that is no test takes it ([`is_play_run`]).
 pub const PLAY_RENDERER: Renderer = Renderer::Vulkan;
+
+/// Whether the frame-rate counter (`d3d9_wgpu::frame_rate`, F11 in the game) shows from the start
+/// when neither `NV_SHOW_FPS` nor `Fallout.ini`'s `bShowFrameRate` says ([`Choice::show_frame_rate`]):
+/// off, in every preset. `crates/host/data/game_ini.tsv`'s `bShowFrameRate` row is held to it by a
+/// test.
+pub const PLAY_SHOW_FRAME_RATE: bool = false;
 
 /// Who draws the game ([`Choice::renderer`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -489,6 +552,11 @@ pub struct Choice {
     /// the file doesn't say. `None` in every other run: a test or script without `NV_D3D9` draws
     /// nothing, whatever the play default is.
     pub renderer: Option<Renderer>,
+    /// Whether the frame-rate counter shows from the start (`d3d9_wgpu::frame_rate`; F11 in the
+    /// game shows or hides it whatever this says): `NV_SHOW_FPS` when set (`1` on, else off);
+    /// else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Display] bShowFrameRate`; else
+    /// [`PLAY_SHOW_FRAME_RATE`], off. Not part of any preset.
+    pub show_frame_rate: bool,
     /// The one log line naming `Fallout.ini` values that could not be used
     /// ([`crate::game_ini::Keys::bad_line`]): the default stood for each.
     pub ini_note: Option<String>,
@@ -507,6 +575,7 @@ impl Choice {
             render_thread: false,
             borderless: None,
             renderer: None,
+            show_frame_rate: PLAY_SHOW_FRAME_RATE,
             ini_note: None,
         }
     }
@@ -658,6 +727,7 @@ impl Choice {
             borderless: ini.borderless.or(play.then_some(PLAY_BORDERLESS)),
             // The same: play's renderer, the file's choice over it; none for any other run.
             renderer: ini.renderer.or(play.then_some(PLAY_RENDERER)),
+            show_frame_rate: ini.show_frame_rate.unwrap_or(PLAY_SHOW_FRAME_RATE),
             ini_note: ini.bad_line(),
         };
         for line in settings.unwrap_or("").lines() {
@@ -717,6 +787,9 @@ impl Choice {
         choice.overrides.extend(ini.fixes);
         if let Some(value) = env("NV_BORDERLESS").filter(|v| !v.trim().is_empty()) {
             choice.borderless = Some(value.trim() == "1");
+        }
+        if let Some(value) = env("NV_SHOW_FPS").filter(|v| !v.trim().is_empty()) {
+            choice.show_frame_rate = value.trim() == "1";
         }
         if test {
             choice.preset = Preset::Vanilla;
@@ -1500,6 +1573,29 @@ mod tests {
         );
         let real = with_ini(None, "[nv-rs Threads]\nbSteppedThreads=0\n", &[]);
         assert_eq!(real.threads, PLAY_THREADS);
+    }
+
+    /// The frame-rate counter is off from the start in every run and preset unless asked for:
+    /// `bShowFrameRate=1` in a launcher's play run, or `NV_SHOW_FPS=1` anywhere, which wins.
+    #[test]
+    fn the_frame_rate_counter_is_off_unless_asked_for() {
+        assert!(!Choice::vanilla().show_frame_rate);
+        for preset in ["fixes", "vanilla"] {
+            let file = format!("[nv-rs General]\nsPreset={preset}\n");
+            assert!(!with_ini(None, &file, &[]).show_frame_rate, "{preset}");
+        }
+        assert!(!Choice::from_parts(None, no_env).unwrap().show_frame_rate);
+        let on = "[nv-rs Display]\nbShowFrameRate=1\n";
+        assert!(with_ini(None, on, &[]).show_frame_rate);
+        assert!(!with_ini(None, "[nv-rs Display]\nbShowFrameRate=0\n", &[]).show_frame_rate);
+        let bad = with_ini(None, "[nv-rs Display]\nbShowFrameRate=yes\n", &[]);
+        assert!(!bad.show_frame_rate);
+        assert!(bad.ini_note.unwrap().ends_with("bShowFrameRate=yes"));
+        // A test never reads the file; the variable decides there and over the file.
+        assert!(!with_ini(None, on, &[("NV_SHOT", "x")]).show_frame_rate);
+        assert!(!with_ini(None, on, &[("NV_SHOW_FPS", "0")]).show_frame_rate);
+        let asked = Choice::from_parts(None, env_of(&[("NV_SHOW_FPS", "1")])).unwrap();
+        assert!(asked.show_frame_rate);
     }
 
     /// Lowest to highest: default, preset, settings.ini (the fallback), Fallout.ini, environment.

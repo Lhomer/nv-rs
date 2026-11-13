@@ -4,7 +4,7 @@
 use super::*;
 use crate::slots::SLOTS;
 use crate::test_support::*;
-use nvse::table::{guest_text, record_of, return_type, Record, DEFAULT_PARSE};
+use nvse::table::{guest_text, record_of, return_type, Record, DEFAULT_PARSE, EXPRESSION_PARSE};
 
 /// The rows of a committed list: tab-separated, after its `#` lines and its header.
 fn rows(text: &str) -> Vec<Vec<&str>> {
@@ -212,6 +212,7 @@ fn installed_records(installed: bool) {
     for slot in SLOTS.iter() {
         let at = record_of(&e, slot.opcode);
         let r = Record::read(&e, at);
+        let built = crate::commands::is_built(slot.opcode);
         let (name, alias) = if !installed {
             ("", "")
         } else if slot.opcode == 0x22c0 {
@@ -230,14 +231,29 @@ fn installed_records(installed: bool) {
         );
         let execute = if installed && slot.kind == Kind::Empty {
             EMPTY_EXECUTE
-        } else if installed && (o == 0x2200 || o == 0x2210) {
+        } else if installed
+            && (built
+                || o == 0x2200
+                || o == 0x2210
+                || o == crate::main_loop::SET_GAME_MAIN_LOOP_CALLBACK
+                || crate::ui_hooks::COMMANDS.contains(&o))
+        {
+            // The built commands, the identity, SetGameMainLoopCallback and the UI hooks' event
+            // commands, once installed.
             nvse::table::execute_address(o)
         } else {
             0
         };
+        // An expression-format command asks for xNVSE's expression parser
+        // (`Cmd_Expression_Plugin_Parse`), which its record gets as `Cmd_Expression_Parse`.
+        let parse = if slot.kind == Kind::Expression {
+            EXPRESSION_PARSE
+        } else {
+            DEFAULT_PARSE
+        };
         assert_eq!(
             (r.execute, r.parse, r.eval, r.flags),
-            (execute, DEFAULT_PARSE, 0, slot.kind.flags()),
+            (execute, parse, 0, slot.kind.flags()),
             "{o:04x}"
         );
         assert_eq!(r.params == 0, slot.params.list.is_empty(), "{o:04x}");
@@ -357,16 +373,32 @@ fn empty_slots_run_as_jips_once_installed() {
     }
 }
 
-/// A built command's handlers go to its record, at the extenders' places for its opcode, and
-/// its names with them (a built command answers whatever JIP does); handlers that do not match
-/// its kind are refused.
+/// A built command's handlers and names go to its record, at the extenders' places for its
+/// opcode, once JIP answers "installed"; until then the record stays as without the DLL (no
+/// handler, no name); handlers that do not match its kind are refused either way.
 #[test]
 fn handlers_match_the_kind() {
     fn ok(_: &mut Engine, _: &[u32]) -> Ret {
         nvse::handled(true)
     }
+    let mut off = engine();
+    crate::install_as(&mut off, false);
+    let before = Record::read(&off, record_of(&off, 0x2204));
+    set_handlers(&mut off, 0x2204, Some(ok), Some(ok));
+    let r = Record::read(&off, record_of(&off, 0x2204));
+    assert_eq!(
+        (r.execute, r.eval, r.long_name, r.short_name),
+        (
+            before.execute,
+            before.eval,
+            before.long_name,
+            before.short_name
+        ),
+        "not installed: as without the DLL"
+    );
+    assert_eq!((r.execute, guest_text(&off, r.long_name)), (0, Vec::new()));
     let mut e = engine();
-    crate::install_as(&mut e, false);
+    crate::install_as(&mut e, true);
     set_handlers(&mut e, 0x2204, Some(ok), Some(ok));
     let r = Record::read(&e, record_of(&e, 0x2204));
     assert_eq!(

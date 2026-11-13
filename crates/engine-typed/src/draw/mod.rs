@@ -47,8 +47,10 @@
 //!   1.0 at `01012070`).
 //!   A later step can feed the draw from a copied packet and give a drawing thread its own state by
 //!   changing those two files. Step 1 of that ([`detach`], `NV_DRAW_DETACH=1`, a check that is slower and
-//!   not for play) takes the pass lists' words out of guest memory while the world draw runs; nothing else
-//!   is copied, deferred or moved yet.
+//!   not for play) takes the pass lists' words out of guest memory while the world draw runs. Step 2
+//!   (`NV_DRAW_THREAD`, off) copies what the draw reads that the tail changes into a value packet at the cut
+//!   ([`cut`], [`capture`]) and holds the draw's own state there ([`statics`]: the shader statics and the
+//!   render-state cache), put back at the join by the device model's rule.
 //!
 //! The drawing itself (the batch renderer's lists, passes and state setters) is the shader family's,
 //! reached by `typed_call!`s that go direct while both families are on.
@@ -76,6 +78,7 @@ pub mod detach;
 pub mod drivers;
 pub mod group_c;
 pub mod layout;
+pub mod lighting30;
 pub mod lists;
 pub mod no_lighting;
 pub mod own;
@@ -85,10 +88,10 @@ pub mod packing;
 pub mod passes;
 pub mod setups;
 pub mod shapes;
-pub mod side;
 pub mod skin;
 pub mod sky;
 pub mod speedtree;
+pub mod statics;
 pub mod tall_grass;
 pub mod thunks;
 pub mod water;
@@ -140,6 +143,7 @@ fn funcs() -> Vec<(u32, AbiFn)> {
         entry!(0x00b9_9e20, lists::render_batches(Ptr<_>, u32, u32, u32)),
         // The decal pass and the fog-coloured ambient.
         entry!(0x00b6_4e30, drivers::decal_pass(Ptr<_>)),
+        entry!(0x00b4_f450, own::select_shader_mode(u32)),
         entry!(0x00bb_b840, own::fog_ambient()),
         // The camera handed to the scene renderer, with the camera getters it reads (game-wide).
         entry!(0x004e_9bb0, packet::hand_camera(u32, u32)),
@@ -248,5 +252,23 @@ fn funcs() -> Vec<(u32, AbiFn)> {
         entry!(0x00bb_1b50, speedtree::setup_fog(Ptr<()>, u32)),
         entry!(0x00b8_15e0, group_c::pass_flags(u32)),
         entry!(0x00c0_3180, group_c::material_colour_constant(u32)),
+        // Group C: the lighting 3.0 shader and the shared leftovers.
+        entry!(0x00bb_e650, lighting30::setup_textures(Ptr<()>, Ptr<()>)),
+        entry!(0x00bb_bda0, lighting30::emittance(Ptr<()>, Ptr<()>)),
+        entry!(0x00bb_bdf0, lighting30::glow(Ptr<()>, Ptr<()>)),
+        entry!(0x00bb_be30, lighting30::alpha(Ptr<()>)),
+        entry!(0x00bb_bcf0, lighting30::eye_position(Ptr<()>, Ptr<()>)),
+        entry!(0x00bb_ba00, lighting30::world_matrix(Ptr<()>, u32, Ptr<()>)),
+        entry!(0x00bb_b890, lighting30::light_position(Ptr<()>, [u32; 16], Ptr<()>)),
+        entry!(0x00bb_be80, lighting30::fog(Ptr<()>)),
+        entry!(0x00bb_e9c0, lighting30::material(Ptr<()>, u32, Ptr<()>, Ptr<()>, u32)),
+        entry!(0x00bb_ecd0, lighting30::colour(Ptr<()>, Ptr<()>, Ptr<()>)),
+        entry!(0x00bb_e6b0, lighting30::view_matrix(Ptr<()>, Ptr<()>, u32, u32, Ptr<()>)),
+        entry!(0x00bb_c050, lighting30::lights(Ptr<()>, Ptr<()>, Ptr<()>, u32, Ptr<()>, u32, u32, Ptr<()>)),
+        entry!(0x00bb_ef90, lighting30::setup_constants(Ptr<()>, Ptr<()>)),
+        entry!(0x00bb_e120, lighting30::setup_switches(Ptr<()>, u32)),
+        entry!(0x00bd_02e0, lighting30::setup_stage_textures(Ptr<()>, Ptr<()>)),
+        entry!(0x00bb_95e0, group_c::set_light_entry(u32, u32, u32, u32, u32, u32, u32, u32, u32)),
+        entry!(0x00bb_96d0, group_c::pass_end_flags(Ptr<()>, u32)),
     ]
 }

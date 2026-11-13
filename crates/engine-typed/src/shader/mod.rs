@@ -24,9 +24,10 @@
 //! set-ups in [`geometry`] and [`lighting`], the alpha sort's [`batch::compare_by_depth`], the light
 //! direction, colour and alpha in [`accumulator`]) in plain `f32`, the exe's own rounding at the main
 //! thread's 24-bit precision while the values stay inside the float range (the x87 keeps a wider
-//! exponent), with a step that has a `double` operand done by [`mul_d`] and its kin. No x87 helper is
-//! left in the family; a float the exe copies through the x87 stack is copied as it is (a signalling
-//! NaN keeps its payload).
+//! exponent), with a step that has a `double` operand done by [`mul_d`] and its kin. A float the exe copies
+//! through the x87 stack is copied as it is (a signalling NaN keeps its payload), but for the depth bias
+//! (`00b98320`), which the exe reloads through the x87 so that a signalling NaN comes out quiet
+//! (`x87_quiet_bits`, the one x87 helper left in the family).
 
 use engine_core::ptr::{Field, Ptr};
 use engine_core::typed::{Family, FamilyId, Threads};
@@ -112,6 +113,12 @@ fn funcs() -> Vec<(u32, AbiFn)> {
         entry!(0x00b9_7ed0, state::set_alpha_test_enable(u8, u32)),
         entry!(0x00b9_7fa0, state::set_alpha_blend_enable(u8, u32)),
         entry!(0x00b9_8380, state::set_color_write(u32, u32)),
+        entry!(0x00b9_8070, state::set_stencil_enable(u8, u32)),
+        entry!(
+            0x00b9_8280,
+            state::set_clip_planes(u8, u8, u8, u8, u8, u8, u32)
+        ),
+        entry!(0x00b9_8320, state::set_depth_bias(u32, u32)),
         entry!(0x00b9_7e80, state::set_z_function(u32, u32)),
         entry!(0x00b9_7f20, state::set_alpha_function(u32, u32, u32)),
         entry!(0x00b9_7ff0, state::set_blend(u32, u32, u32)),

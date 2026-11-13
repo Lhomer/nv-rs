@@ -59,9 +59,8 @@ pub fn set_shader_constants(
     word_11: u32,
 ) -> bool {
     let base = this.addr();
-    // m_pkLastShaderProgram: a word of a shared shader object the drawing side keeps its own copy of
-    // (`engine_core::draw_side`, copied at its first write).
-    engine_core::draw_side::store_own_u32(e, base.wrapping_add(0x30), program);
+    // m_pkLastShaderProgram.
+    e.mem.set_u32(base.wrapping_add(0x30), program);
     let mut failed = false;
     // The predefined entries (m_aspDefinedEntries: elements +0x20, size +0x26), through
     // SetDefinedConstant.
@@ -105,7 +104,14 @@ pub fn set_shader_constants(
                     let data = e.mem.u32(entry.wrapping_add(0x30));
                     let count = e.mem.u32(entry.wrapping_add(0x20));
                     let device = e.mem.u32(base.wrapping_add(0x38));
-                    u32::from(e.vcall(device, slot, &args![register, data, count]).i32() < 0)
+                    // The data is often the draw's own constants (the shader statics): an image of the packet's copy.
+                    let result = crate::draw::capture::own_image(
+                        e,
+                        data,
+                        count.wrapping_mul(16),
+                        |e, data| e.vcall(device, slot, &args![register, data, count]).i32(),
+                    );
+                    u32::from(result < 0)
                 }
                 _ => e.vcall(base, 0x90, &args![program, entry, word_10]).u32(),
             },

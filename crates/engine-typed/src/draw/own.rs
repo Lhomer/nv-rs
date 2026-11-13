@@ -6,6 +6,7 @@
 //! does what the exe does there, in its order; the pass lists' words go through the drawing thread's view
 //! ([`super::detach`]), which holds them while the cut's draw runs with `NV_DRAW_DETACH=1` (a check).
 
+use super::capture;
 use crate::shader::layout::{BSBatchRenderer, BSShaderAccumulator, PassGroup, PassHolder};
 use crate::shader::{self, batch, state};
 use engine_core::ptr::Ptr;
@@ -213,8 +214,8 @@ const GROUP_ZERO_FLAG: u32 = 0x011a_9608;
 /// it (condition 2).
 #[inline(always)]
 pub(crate) fn coverage_count_down(e: &mut Engine) {
-    let count = engine_core::draw_side::load_u32(e, state::COVERAGE_COUNTER).wrapping_sub(1);
-    engine_core::draw_side::store_u32(e, state::COVERAGE_COUNTER, count);
+    let count = capture::own_word(e, state::COVERAGE_COUNTER, 0).wrapping_sub(1);
+    capture::set_word(e, state::COVERAGE_COUNTER, 0, count);
 }
 
 /// The two list counters (`011ffa24`, then `011ff9e8`) counted down when not zero, as a list's draw ends
@@ -222,9 +223,10 @@ pub(crate) fn coverage_count_down(e: &mut Engine) {
 #[inline(always)]
 pub(crate) fn list_counters_down(e: &mut Engine) {
     for counter in [0x011f_fa24u32, 0x011f_f9e8] {
-        let count = engine_core::draw_side::load_u32(e, counter);
+        // own: read and written below through own_word/set_word
+        let count = capture::own_word(e, counter, 0);
         if count != 0 {
-            engine_core::draw_side::store_u32(e, counter, count - 1);
+            capture::set_word(e, counter, 0, count - 1);
         }
     }
 }
@@ -259,8 +261,8 @@ pub(crate) fn clip_planes(e: &mut Engine, on: u32) {
 /// global the draw of group 0 reads).
 #[inline(always)]
 pub(crate) fn swap_group_zero_flag(e: &mut Engine, value: u32) -> u32 {
-    let saved = engine_core::draw_side::load_u32(e, GROUP_ZERO_FLAG);
-    engine_core::draw_side::store_u32(e, GROUP_ZERO_FLAG, value);
+    let saved = capture::own_word(e, GROUP_ZERO_FLAG, 0);
+    capture::set_word(e, GROUP_ZERO_FLAG, 0, value);
     saved
 }
 
@@ -276,7 +278,7 @@ const LOCK_COUNT_3: u32 = 0x011f_f9e4;
 /// The decal state on: z-writes off and the decal depth bias (0 when not used; the float goes through
 /// x87, so a signalling NaN is quieted), both locked (condition 2).
 pub(crate) fn decal_state_on(e: &mut Engine) {
-    let mut bias = x87_quiet_bits(e.global::<u32>(DECAL_DEPTH_BIAS));
+    let mut bias = x87_quiet_bits(capture::own_at::<u32>(e, DECAL_DEPTH_BIAS));
     if e.global::<u8>(DECAL_DEPTH_BIAS_ENABLED) == 0 {
         bias = x87_store32(0.0);
     }
@@ -291,15 +293,15 @@ pub(crate) fn decal_state_on(e: &mut Engine) {
 /// The decal state off: the first lock given back by hand, z-writes on, the third lock given back,
 /// no depth bias (condition 2).
 pub(crate) fn decal_state_off(e: &mut Engine) {
-    let count = engine_core::draw_side::load_u32(e, LOCK_COUNT_1).wrapping_sub(1);
-    engine_core::draw_side::store_u32(e, LOCK_COUNT_1, count);
+    let count = capture::own_word(e, LOCK_COUNT_1, 0).wrapping_sub(1);
+    capture::set_word(e, LOCK_COUNT_1, 0, count);
     typed_call!(
         shader::FAMILY,
         0x00b9_7e30,
         state::set_z_write_enable(e, 1u8, 0u32)
     );
-    let count = engine_core::draw_side::load_u32(e, LOCK_COUNT_3).wrapping_sub(1);
-    engine_core::draw_side::store_u32(e, LOCK_COUNT_3, count);
+    let count = capture::own_word(e, LOCK_COUNT_3, 0).wrapping_sub(1);
+    capture::set_word(e, LOCK_COUNT_3, 0, count);
     e.call(SET_DEPTH_BIAS, &args![x87_store32(0.0), 0u32]);
 }
 
@@ -310,12 +312,12 @@ pub(crate) fn decal_state_off(e: &mut Engine) {
 pub fn fog_ambient(e: &mut Engine) {
     for index in 0..4u32 {
         let word = e.global::<u32>(FOG_COLOUR.wrapping_add(4 * index));
-        engine_core::draw_side::store_own_u32(e, AMBIENT.wrapping_add(4 * index), word);
+        capture::set_own_at(e, AMBIENT.wrapping_add(4 * index), word);
     }
-    let enable = e.global::<u32>(AMBIENT_ENABLE);
-    engine_core::draw_side::store_own_u8(e, enable.wrapping_add(8), 1u8);
-    engine_core::draw_side::store_own_u8(e, AMBIENT_SET, 1u8);
-    engine_core::draw_side::store_own_u8(e, AMBIENT_FOG, 1u8);
+    let enable = capture::own_at::<u32>(e, AMBIENT_ENABLE);
+    e.set_global(enable.wrapping_add(8), 1u8);
+    capture::set_own_at(e, AMBIENT_SET, 1u8);
+    capture::set_own_at(e, AMBIENT_FOG, 1u8);
 }
 const FOG_COLOUR: u32 = 0x011a_9bd0;
 const AMBIENT: u32 = 0x0120_1b30;
@@ -369,7 +371,7 @@ const SLOT_DELETE: u32 = 4;
 /// one, the old one's count goes down (deleted at 0, its slot 4), the new one is stored and, when
 /// not null, its count goes up.
 pub fn hold_accumulator(e: &mut Engine, object: u32) {
-    let old = e.global::<u32>(HELD_ACCUMULATOR);
+    let old = capture::own_at::<u32>(e, HELD_ACCUMULATOR);
     if old == object {
         return;
     }
@@ -381,7 +383,7 @@ pub fn hold_accumulator(e: &mut Engine, object: u32) {
             e.vcall(old, SLOT_DELETE, &[]);
         }
     }
-    e.set_global(HELD_ACCUMULATOR, object);
+    capture::set_own_at(e, HELD_ACCUMULATOR, object);
     if object != 0 {
         e.call(INTERLOCKED_INCREMENT, &args![object.wrapping_add(4)]);
     }
@@ -414,7 +416,9 @@ const SET_RENDER_TARGET: u32 = 0x00b6_b8d0;
 #[inline(always)]
 pub(crate) fn make_pass_tree(e: &mut Engine, accumulator: u32) {
     let tree = e.call(CREATE_RENDER_PASS_TREE, &args![accumulator]).u32();
-    e.call(PASS_TREE_ASSIGN, &args![PASS_TREE_OWNER, tree]);
+    capture::own_image(e, PASS_TREE_OWNER, 4, |e, owner| {
+        e.call(PASS_TREE_ASSIGN, &args![owner, tree]);
+    });
     e.set_global(super::packet::MAKE_PASS_TREE, 0u8);
 }
 
@@ -661,32 +665,32 @@ const COPY_COUNTED: u32 = 0x00c6_63d0;
 /// The current shader pass set (condition 2).
 #[inline(always)]
 pub(crate) fn set_current_pass(e: &mut Engine, pass: u32) {
-    engine_core::draw_side::store_u32(e, super::packet::CURRENT_PASS, pass);
+    capture::set_word(e, super::packet::CURRENT_PASS, 0, pass);
 }
 
 /// A pass stage's texture (+8) set (condition 2).
 #[inline(always)]
 pub(crate) fn set_stage_texture(e: &mut Engine, stage: u32, texture: u32) {
-    engine_core::draw_side::store_own_u32(e, stage.wrapping_add(8), texture);
+    e.set_global(stage.wrapping_add(8), texture);
 }
 
 /// A constant switch object's word +0x20 set (condition 2).
 #[inline(always)]
 pub(crate) fn set_switch_word(e: &mut Engine, switch: u32, value: u32) {
-    engine_core::draw_side::store_own_u32(e, switch.wrapping_add(0x20), value);
+    e.set_global(switch.wrapping_add(0x20), value);
 }
 
 /// A constant entry switched on or off (its byte +8) for the pass (condition 2).
 #[inline(always)]
 pub(crate) fn set_entry_enabled(e: &mut Engine, entry: u32, on: bool) {
-    engine_core::draw_side::store_own_u8(e, entry.wrapping_add(8), u8::from(on));
+    e.set_global(entry.wrapping_add(8), u8::from(on));
 }
 
 /// A word of the shader constants the pass begin fills (the fog constants `011fa280`, their colour's
 /// copies `011fd9b8`, the land toggles `011fa2d0`) (condition 2).
 #[inline(always)]
 pub(crate) fn set_constant_word(e: &mut Engine, at: u32, word: u32) {
-    engine_core::draw_side::store_own_u32(e, at, word);
+    capture::set_word(e, at, 0, word);
 }
 
 /// `count` vertex shader constant registers from `register` on (`data`) on `device`, of the kind the
@@ -701,7 +705,12 @@ pub(crate) fn device_vertex_constants_of(
     data: u32,
     count: u32,
 ) -> u32 {
-    e.vcall(device, slot, &args![register, data, count]).u32()
+    // The data may be the draw's own constants: the device reads an image of the packet's copy (16 bytes a
+    // float or integer register, 4 a boolean).
+    let size = if slot == 0x188 { 4 } else { 16 };
+    capture::own_image(e, data, count.wrapping_mul(size), |e, data| {
+        e.vcall(device, slot, &args![register, data, count]).u32()
+    })
 }
 
 /// `count` float vertex shader constant registers from `register` on (`data`) on `device` (condition 2).
@@ -762,13 +771,13 @@ pub(crate) fn copy_counted(e: &mut Engine, slot: u32, source: u32) {
 /// A pass stage's texture (+8) as the draw left it, read back.
 #[inline(always)]
 pub(crate) fn stage_texture(e: &Engine, stage: u32) -> u32 {
-    engine_core::draw_side::load_u32(e, stage.wrapping_add(8))
+    e.global::<u32>(stage.wrapping_add(8))
 }
 
 /// Whether a constant entry is switched on (its byte +8), read back.
 #[inline(always)]
 pub(crate) fn entry_is_enabled(e: &Engine, entry: u32) -> bool {
-    engine_core::draw_side::load_u8(e, entry.wrapping_add(8)) != 0
+    e.global::<u8>(entry.wrapping_add(8)) != 0
 }
 
 /// The shader's counted constant map at `offset` (+0x30 pixel, +0x34 vertex), read back.
@@ -778,14 +787,95 @@ pub(crate) fn constant_map(e: &Engine, shader: u32, offset: u32) -> u32 {
 }
 
 /// `size` bytes of constants from `from` copied into an entry's own buffer at `to` (`_memcpy`, the CRT
-/// family's) (condition 2).
+/// family's) (condition 2). A target in the draw's own state is copied into through [`capture::own_image`], so
+/// the packet's copy takes the bytes while it owns them.
 #[inline(always)]
 pub(crate) fn copy_constants(e: &mut Engine, to: u32, from: u32, size: u32) {
-    let _: u32 = typed_call!(
-        crate::crt::FAMILY,
-        0x00ec_44d0,
-        crate::crt::mem::memcpy(e, to, from, size)
-    );
+    capture::own_image(e, to, size, |e, to| {
+        let _: u32 = typed_call!(
+            crate::crt::FAMILY,
+            0x00ec_44d0,
+            crate::crt::mem::memcpy(e, to, from, size)
+        );
+    });
+}
+
+/// The 16-byte colour table (`011fa0c0`, in the shader statics: the light positions `011fa170` and directions
+/// `011fa1f0` are its rows 0xb and 0x13 on).
+const COLOUR_TABLE: u32 = 0x011f_a0c0;
+
+/// The colour table's store (`004e20c0`, the leaf family's `store_colour`), `cdecl(index, red, green, blue, alpha)`,
+/// as the per-light set-up calls it, with the row landing in the draw's own state either way: with the leaf family
+/// direct, [`store_light_row`] in the typed store's place (the call noted for the checks as `typed_call!` notes
+/// it); by address, the call made and the four words it wrote carried into the packet, guest memory given back
+/// its words (condition 2).
+pub(crate) fn light_row(e: &mut Engine, index: u32, red: u32, green: u32, blue: u32, alpha: f32) {
+    const STORE_COLOUR: u32 = 0x004e_20c0;
+    let words = args![index, red, green, blue, alpha];
+    if e.typed_direct(engine_core::typed::leaf::FAMILY, STORE_COLOUR) {
+        if cfg!(debug_assertions) && e.typed_noting_direct() {
+            e.typed_note_direct(STORE_COLOUR, &words);
+        }
+        e.typed_slice_step(STORE_COLOUR);
+        store_light_row(e, index, red, green, blue, alpha);
+        return;
+    }
+    if !capture::active() {
+        e.call(STORE_COLOUR, &words);
+        return;
+    }
+    let row = index.wrapping_shl(4).wrapping_add(COLOUR_TABLE); // own: an address, carried through set_own_at
+    let before = [0u32, 1, 2, 3].map(|k| e.global::<u32>(row.wrapping_add(4 * k))); // own: guest memory's words, given back
+    e.call(STORE_COLOUR, &words);
+    for (k, old) in (0u32..).zip(before) {
+        let new = e.global::<u32>(row.wrapping_add(4 * k)); // own: the words the call wrote
+        e.set_global(row.wrapping_add(4 * k), old); // own: guest memory given back its word
+        capture::set_own_at(e, row.wrapping_add(4 * k), new);
+    }
+}
+
+/// Four words into row `index` of the colour table (`004e20c0`'s store, made here so that it goes through the
+/// packet: the leaf family's `store_colour` writes guest memory) (condition 2).
+pub(crate) fn store_light_row(
+    e: &mut Engine,
+    index: u32,
+    red: u32,
+    green: u32,
+    blue: u32,
+    alpha: f32,
+) {
+    let row = index.wrapping_shl(4).wrapping_add(COLOUR_TABLE); // own: an address, written through set_own_at
+    for (k, word) in (0u32..).zip([red, green, blue, alpha.to_bits()]) {
+        capture::set_own_at(e, row.wrapping_add(4 * k), word);
+    }
+}
+
+/// The shader manager's mode (`011f91b8`) and the two function words it selects (`011f9f3c` from the table at
+/// `011f9f80`, `011f9f38` from the table at `011f9f40`; each table's first word when the mode's is null). The
+/// draw sets them for its render mode and main's tail for its own: own state.
+const SHADER_MODE: u32 = 0x011f_91b8;
+const MODE_FUNCTION_A: u32 = 0x011f_9f38;
+const MODE_FUNCTION_B: u32 = 0x011f_9f3c;
+const MODE_TABLE_A: u32 = 0x011f_9f40;
+const MODE_TABLE_B: u32 = 0x011f_9f80;
+
+// Typed from 00b4f450
+/// The shader manager's mode set to `index` (`cdecl`, one word), with its two function words: the entry `index`
+/// of each table, or the table's first entry when that is null (the tables are made at load) (condition 2).
+pub fn select_shader_mode(e: &mut Engine, index: u32) {
+    let mut second = e.global::<u32>(MODE_TABLE_B.wrapping_add(index.wrapping_mul(4)));
+    capture::set_own_at(e, MODE_FUNCTION_B, second);
+    capture::set_own_at(e, SHADER_MODE, index);
+    if second == 0 {
+        second = e.global::<u32>(MODE_TABLE_B);
+        capture::set_own_at(e, MODE_FUNCTION_B, second);
+    }
+    let mut first = e.global::<u32>(MODE_TABLE_A.wrapping_add(index.wrapping_mul(4)));
+    capture::set_own_at(e, MODE_FUNCTION_A, first);
+    if first == 0 {
+        first = e.global::<u32>(MODE_TABLE_A);
+        capture::set_own_at(e, MODE_FUNCTION_A, first);
+    }
 }
 
 // ---- Group C: the render states' lock counters (condition 2). ----
@@ -807,8 +897,8 @@ pub(crate) const COLOR_WRITE_LOCKS: u32 = 0x011f_fa18;
 /// subtracts).
 #[inline(always)]
 pub(crate) fn release_state_locks(e: &mut Engine, counter: u32, count: u32) {
-    let value = engine_core::draw_side::load_u32(e, counter).wrapping_sub(count);
-    engine_core::draw_side::store_u32(e, counter, value);
+    let value = capture::own_at::<u32>(e, counter).wrapping_sub(count);
+    capture::set_own_at(e, counter, value);
 }
 
 // ---- Group C: the shader constants' globals a set-up fills (condition 2). ----
@@ -819,13 +909,13 @@ pub(crate) fn release_state_locks(e: &mut Engine, counter: u32, count: u32) {
 /// alpha row +0x1d0 and phase +0x11c) and a constant entry's words (the instance count +0x20).
 #[inline(always)]
 pub(crate) fn set_shader_global(e: &mut Engine, at: u32, value: u32) {
-    engine_core::draw_side::store_own_u32(e, at, value);
+    capture::set_own_at(e, at, value);
 }
 
 /// A word of a shader's own constant storage, read back (the tall grass's phase +0x11c).
 #[inline(always)]
 pub(crate) fn shader_word(e: &Engine, at: u32) -> u32 {
-    engine_core::draw_side::load_u32(e, at)
+    e.global::<u32>(at)
 }
 
 /// The count a geometry data draws, set through its slot 0xa4 (a 16-bit count; condition 3).
@@ -859,5 +949,66 @@ pub(crate) fn update_texture_transform(e: &mut Engine, transform: u32) {
 /// A byte of the shader constants a set-up fills (the pass flags `011ff110` and `011ff118`).
 #[inline(always)]
 pub(crate) fn set_constant_byte(e: &mut Engine, at: u32, value: u8) {
-    engine_core::draw_side::store_own_u8(e, at, value);
+    capture::set_own_at(e, at, value);
+}
+
+/// A word and a byte of the shader constants the draw itself filled, read back (the lighting 3.0
+/// shader's material alpha, ambient, light colour and data; its ambient fog byte).
+#[inline(always)]
+pub(crate) fn constant_word(e: &Engine, at: u32) -> u32 {
+    capture::own_at::<u32>(e, at)
+}
+#[inline(always)]
+pub(crate) fn constant_byte(e: &Engine, at: u32) -> u8 {
+    capture::own_at::<u8>(e, at)
+}
+
+/// A constant entry's word at `offset` set (the light data entry's count, +0x20) (condition 2).
+#[inline(always)]
+pub(crate) fn set_entry_word(e: &mut Engine, entry: u32, offset: u32, value: u32) {
+    e.set_global(entry.wrapping_add(offset), value);
+}
+
+/// A clip plane set on the device (`IDirect3DDevice9::SetClipPlane`, slot 0xdc: the index and the plane)
+/// (condition 2).
+#[inline(always)]
+pub(crate) fn device_clip_plane(e: &mut Engine, device: u32, index: u32, plane: u32) {
+    e.vcall(device, 0xdc, &args![index, plane]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The light row by address (the leaf family not direct): the store at `004e20c0` writes guest memory, and
+    /// [`light_row`] carries its four words into the packet's own copy and gives guest memory its words back.
+    #[test]
+    fn a_light_row_by_address_lands_in_the_draws_own_state() {
+        let mut e = Engine::new();
+        e.map(0x011f_a000, 0x1000);
+        e.register(0x004e_20c0, |e, a| {
+            let row = (a[0] << 4).wrapping_add(COLOUR_TABLE);
+            for k in 0..4u32 {
+                e.mem.set_u32(row + 4 * k, a[1 + k as usize]);
+            }
+            engine_core::abi::Ret::default()
+        });
+        // What is registered over a member sends its family by address.
+        assert!(!e.typed_direct(engine_core::typed::leaf::FAMILY, 0x004e_20c0));
+        let row = COLOUR_TABLE + 0xb0;
+        for k in 0..4u32 {
+            e.mem.set_u32(row + 4 * k, 0x70 + k);
+        }
+        assert!(capture::begin(&e));
+        capture::own(&e, COLOUR_TABLE, 0, 0x200);
+        light_row(&mut e, 0xb, 1, 2, 3, 1.0);
+        let own: Vec<u32> = (0..4u32)
+            .map(|k| capture::own_at::<u32>(&e, row + 4 * k))
+            .collect();
+        let guest: Vec<u32> = (0..4u32).map(|k| e.mem.u32(row + 4 * k)).collect();
+        let _ = capture::end(&mut e);
+        assert_eq!(own, [1, 2, 3, 1.0f32.to_bits()]);
+        assert_eq!(guest, [0x70, 0x71, 0x72, 0x73]);
+        assert_eq!(e.mem.u32(row), 1, "the join puts the draw's row back");
+    }
 }

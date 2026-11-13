@@ -1207,9 +1207,6 @@ fn set_constants(e: &mut Engine, this: Ptr, kind: u8, start: u32, data: Ptr, cou
     }
     let words = if kind % 3 == 2 { 1 } else { 4 };
     let first = usize::from(kind) * CONSTANT_SLOTS + start as usize;
-    // On the drawing side the data may be in the render layer's shared state it keeps its own copy of (the
-    // shaders' constant rows: `engine_core::draw_side`): its bytes are laid over what is read.
-    let side = engine_core::draw_side::any_open().then(|| engine_core::draw_side::run_of(e));
     // The range is at most 4 KB (256 registers of 4 words), so it touches at most two pages:
     // when both are mapped no read can fault, and the registers are read straight into the
     // device's bindings (no copy of the range, no 4 KB buffer to clear per call).
@@ -1239,16 +1236,10 @@ fn set_constants(e: &mut Engine, this: Ptr, kind: u8, start: u32, data: Ptr, cou
                     mem.u32(at + 8),
                     mem.u32(at + 12),
                 ];
-                if let Some(run) = side {
-                    engine_core::draw_side::overlay_words(run, at, value);
-                }
             }
         } else {
             for (i, value) in registers.iter_mut().enumerate() {
                 *value = [mem.u32(at + 4 * i as u32), 0, 0, 0];
-                if let Some(run) = side {
-                    engine_core::draw_side::overlay_words(run, at + 4 * i as u32, &mut value[..1]);
-                }
             }
         }
         for slot in first..first + count as usize {
@@ -1263,9 +1254,6 @@ fn set_constants(e: &mut Engine, this: Ptr, kind: u8, start: u32, data: Ptr, cou
         let at = data.addr() + 4 * words * i as u32;
         for (w, slot) in value.iter_mut().enumerate().take(words as usize) {
             *slot = e.mem.u32(at + 4 * w as u32);
-        }
-        if let Some(run) = side {
-            engine_core::draw_side::overlay_words(run, at, &mut value[..words as usize]);
         }
     }
     super::d3d9draw::main_set_constants(&mut device!(e).device_objects.draw, first, count as usize);

@@ -243,8 +243,67 @@ pub mod op {
     pub const MAX: u8 = 45;
 }
 
+/// `Operator::precedence` and `symbol` (`s_operators`, `ScriptUtils.cpp` (xNVSE)), by `kOpType_*`.
+const OPERATORS: [(u8, &str); op::MAX as usize] = [
+    (2, ":="),
+    (5, "||"),
+    (7, "&&"),
+    (9, ":"),
+    (13, "=="),
+    (13, "!="),
+    (15, ">"),
+    (15, "<"),
+    (15, ">="),
+    (15, "<="),
+    (16, "|"),
+    (17, "&"),
+    (18, "<<"),
+    (18, ">>"),
+    (19, "+"),
+    (19, "-"),
+    (21, "*"),
+    (21, "/"),
+    (21, "%"),
+    (23, "^"),
+    (25, "-"),
+    (27, "!"),
+    (80, "("),
+    (80, ")"),
+    (90, "["),
+    (90, "]"),
+    (2, "<-"),
+    (25, "$"),
+    (2, "+="),
+    (2, "*="),
+    (2, "/="),
+    (2, "^="),
+    (2, "-="),
+    (25, "#"),
+    (25, "*"),
+    (90, "->"),
+    (3, "::"),
+    (25, "&"),
+    (91, "{"),
+    (91, "}"),
+    (90, "."),
+    (2, "|="),
+    (2, "&="),
+    (2, "%="),
+    (27, "~"),
+];
+
+/// An operator's precedence (`Operator::precedence`).
+pub(crate) fn op_precedence(o: u8) -> u8 {
+    OPERATORS[o as usize].0
+}
+
+/// An operator's symbol (`Operator::symbol`).
+pub(crate) fn op_symbol(o: u8) -> &'static str {
+    OPERATORS[o as usize].1
+}
+
 /// `Operator::numOperands` (`s_operators`).
-fn operand_count(o: u8) -> usize {
+pub(crate) fn operand_count(o: u8) -> usize {
     match o {
         op::NEGATION
         | op::LOGICAL_NOT
@@ -274,7 +333,7 @@ pub struct Eval {
     /// The address of the offset word.
     pub offset_ptr: u32,
     /// Read position (an address in the script data).
-    at: u32,
+    pub(crate) at: u32,
     /// Errors reported (`errorMessages`).
     pub errors: Vec<String>,
     pub suppress_errors: bool,
@@ -283,6 +342,17 @@ pub struct Eval {
     pub base_offset: Option<u32>,
     /// `m_inline`: a parenthesised parameter, no command named in its errors.
     pub inline: bool,
+    /// Where the script data ends: no read goes past it (`u32::MAX`: no bound). xNVSE has no such
+    /// bound; the port refuses data that runs past it rather than reading on (a corrupt script).
+    pub(crate) limit: u32,
+    /// The end of the expression being read (`u32::MAX` outside one): a string or a lambda
+    /// token longer than what is left of its expression is refused.
+    pub(crate) expr_end: u32,
+    /// A read ran past [`Eval::limit`] or [`Eval::expr_end`].
+    pub(crate) overrun: bool,
+    /// The variables the evaluation resolved (reference index, variable id): kept only when asked
+    /// (`Assert`), so an ordinary evaluation records nothing and allocates nothing.
+    pub(crate) resolved_vars: Option<Vec<(u16, u16)>>,
 }
 
 /// The per-thread stack of running evaluators' expected return types (`ExpectReturnType`,
@@ -440,6 +510,10 @@ impl Eval {
             suppress_errors: false,
             base_offset: Some(offset.wrapping_sub(4)),
             inline: false,
+            limit: u32::MAX,
+            expr_end: u32::MAX,
+            overrun: false,
+            resolved_vars: None,
         }
     }
 
@@ -457,27 +531,57 @@ impl Eval {
         self.read8(e)
     }
 
+    /// Steps over the next expression without evaluating it, by its length word (which counts
+    /// itself), as `TernaryEvaluator` skips the branch not taken: the read position and the offset
+    /// word both move by it.
+    pub fn skip_expression(&mut self, e: &mut Engine) {
+        let len = u32::from(e.mem.u16(self.at));
+        self.at = self.at.wrapping_add(len);
+        let offset = e.mem.u32(self.offset_ptr);
+        e.mem.set_u32(self.offset_ptr, offset.wrapping_add(len));
+    }
+
     /// `ScriptToken::Read`: one token as it is stored, not evaluated (`Call`'s version 0
     /// script argument).
     pub fn read_one_token(&mut self, e: &mut Engine) -> Option<Tok> {
         self.read_token(e)
     }
 
+    /// Whether `n` more bytes lie before the data's end and the expression's; when not, the
+    /// read is refused ([`Eval::overrun`]).
+    fn room(&mut self, n: u32) -> bool {
+        let end = u64::from(self.at) + u64::from(n);
+        let ok = end <= u64::from(self.limit.min(self.expr_end));
+        if !ok {
+            self.overrun = true;
+        }
+        ok
+    }
+
     fn read8(&mut self, e: &Engine) -> u8 {
+        if !self.room(1) {
+            return 0;
+        }
         let v = e.mem.u8(self.at);
-        self.at += 1;
+        self.at = self.at.wrapping_add(1);
         v
     }
 
     fn read16(&mut self, e: &Engine) -> u16 {
+        if !self.room(2) {
+            return 0;
+        }
         let v = e.mem.u16(self.at);
-        self.at += 2;
+        self.at = self.at.wrapping_add(2);
         v
     }
 
     fn read32(&mut self, e: &Engine) -> u32 {
+        if !self.room(4) {
+            return 0;
+        }
         let v = e.mem.u32(self.at);
-        self.at += 4;
+        self.at = self.at.wrapping_add(4);
         v
     }
 
@@ -490,14 +594,22 @@ impl Eval {
             b'I' | b'i' => Tok::number(f64::from(self.read16(e))),
             b'L' | b'l' => Tok::number(f64::from(self.read32(e))),
             b'Z' => {
+                if !self.room(8) {
+                    return None;
+                }
                 let v = e.mem.f64(self.at);
-                self.at += 8;
+                self.at = self.at.wrapping_add(8);
                 Tok::number(v)
             }
             b'S' => {
                 let len = u32::from(self.read16(e));
+                // A length past the expression's end: refused (a corrupt script).
+                if self.overrun || !self.room(len) {
+                    self.error("A string runs past the end of its expression");
+                    return None;
+                }
                 let s = e.mem.bytes(self.at, len);
-                self.at += len;
+                self.at = self.at.wrapping_add(len);
                 Tok::Str(s)
             }
             b'R' => {
@@ -543,6 +655,11 @@ impl Eval {
                     return None;
                 }
                 let args_len = u32::from(self.read16(e));
+                // Arguments past the expression's end: refused (a corrupt script).
+                if self.overrun || args_len < 2 || !self.room(args_len - 2) {
+                    self.error(format!("Failed to resolve command with opcode {opcode:X}"));
+                    return None;
+                }
                 let offset = self.at.wrapping_sub(self.data);
                 self.at = self.at.wrapping_add(args_len).wrapping_sub(2);
                 Tok::Command {
@@ -579,8 +696,13 @@ impl Eval {
                 // A lambda's script data, copied once (xNVSE copies it when it caches the
                 // expression's tokens).
                 let len = self.read32(e);
+                // A length past the expression's end: refused (a corrupt script), not copied.
+                if self.overrun || !self.room(len) {
+                    self.error("A lambda runs past the end of its expression");
+                    return None;
+                }
                 let data = crate::lambda::token_data(e, self.at, len);
-                self.at += len;
+                self.at = self.at.wrapping_add(len);
                 Tok::LambdaData { data, len }
             }
             b'K' => Tok::OptionalEmpty,
@@ -596,11 +718,27 @@ impl Eval {
     // ExpressionEvaluator::ParseBytecode, ParseShortCircuit, GetOperatorParent.
     fn parse(&mut self, e: &mut Engine) -> Option<Vec<Entry>> {
         let before = self.at;
+        self.overrun = false;
         let len = u32::from(self.read16(e));
         let end = self.at.wrapping_add(len).wrapping_sub(2);
+        // An expression running past the data's end is refused (a corrupt script); within it, no
+        // token reads past its end.
+        if self.overrun
+            || (len >= 2 && u64::from(self.at) + u64::from(len) - 2 > u64::from(self.limit))
+        {
+            return None;
+        }
+        let saved_end = self.expr_end;
+        if len >= 2 {
+            self.expr_end = end;
+        }
         let mut out = Vec::new();
         while self.at < end {
-            let tok = self.read_token(e)?;
+            let tok = self.read_token(e);
+            let Some(tok) = tok.filter(|_| !self.overrun) else {
+                self.expr_end = saved_end;
+                return None;
+            };
             out.push(Entry {
                 tok,
                 sc_parent: None,
@@ -608,7 +746,8 @@ impl Eval {
                 sc_offset: 0,
             });
         }
-        let increment = self.at - before;
+        self.expr_end = saved_end;
+        let increment = self.at.wrapping_sub(before);
         let now = e.mem.u32(self.offset_ptr);
         e.mem.set_u32(self.offset_ptr, now.wrapping_add(increment));
         let parent = |list: &[Entry], from: usize| -> usize {
@@ -659,6 +798,19 @@ impl Eval {
             }
         }
         Some(out)
+    }
+
+    /// `GetTokens`: the next expression's tokens as they are stored (variables not resolved, no
+    /// command run), the read position and the offset word past it; `None` when a token does not
+    /// read.
+    pub(crate) fn tokens(&mut self, e: &mut Engine) -> Option<Vec<Tok>> {
+        Some(self.parse(e)?.into_iter().map(|entry| entry.tok).collect())
+    }
+
+    /// `ScriptToken::ResolveVariable` of one stored token: a variable with its local, as the
+    /// evaluation resolves it; `None` when it does not resolve.
+    pub(crate) fn resolved(&mut self, e: &mut Engine, tok: &Tok) -> Option<Tok> {
+        self.resolve_variable(e, tok.clone())
     }
 
     // Translated from xNVSE 6.4.9 (xNVSE/NVSE at 0ccd23a), ScriptUtils.cpp:
@@ -806,6 +958,9 @@ impl Eval {
         if local == 0 {
             self.error("Failed to resolve variable");
             return None;
+        }
+        if let Some(v) = &mut self.resolved_vars {
+            v.push((ref_idx, var_idx));
         }
         if (ty == Ty::ArrayVar || ty == Ty::StringVar) && ref_idx == 0 {
             let kind = if ty == Ty::StringVar {
@@ -1964,7 +2119,6 @@ pub fn inline_argument(
     script: u32,
     event_list: u32,
 ) -> Option<crate::args::Arg> {
-    use crate::args::Arg;
     let this_obj = crate::context::current(e).map_or(0, |c| c.owner_ref);
     let start = *at + 2;
     let (tok, ev, end) = e.with_stack(16, |e, frame| {
@@ -1986,6 +2140,10 @@ pub fn inline_argument(
             suppress_errors: false,
             base_offset: Some(start.wrapping_sub(data).wrapping_sub(4)),
             inline: true,
+            limit: u32::MAX,
+            expr_end: u32::MAX,
+            overrun: false,
+            resolved_vars: None,
         };
         let tok = with_evaluator(e, |e| ev.evaluate(e));
         let end = data.wrapping_add(e.mem.u32(off));
@@ -1994,6 +2152,25 @@ pub fn inline_argument(
     report(e, &ev);
     *at = end;
     let tok = tok?;
+    convert_default_arg(e, &ev, kind, &tok, script, true)
+}
+
+// Translated from xNVSE 6.4.9 (xNVSE/NVSE at 0ccd23a), ScriptUtils.cpp:
+// ExpressionEvaluator::ConvertDefaultArg.
+/// An evaluated argument converted to a parameter of `kind`. With `convert_forms`
+/// (`bConvertTESForms`) a form must be a non-null form of the parameter's kind (and a cast pointer
+/// where xNVSE casts); without, any form token's form is passed as it is (null included).
+/// `None` when the value does not fit the parameter.
+pub fn convert_default_arg(
+    e: &mut Engine,
+    ev: &Eval,
+    kind: u32,
+    tok: &Tok,
+    script: u32,
+    convert_forms: bool,
+) -> Option<crate::args::Arg> {
+    use crate::args::Arg;
+    let tok = tok.clone();
     let modi = script_mod(e, script);
     // `handlePrimitiveStringVar`: a string variable gives its id, a string a new temporary id.
     let string_as_number = |e: &mut Engine, ev: &Eval, tok: &Tok| -> Option<f64> {
@@ -2015,7 +2192,7 @@ pub fn inline_argument(
     };
     Some(match kind {
         0x01 => {
-            if let Some(id) = string_as_number(e, &ev, &tok) {
+            if let Some(id) = string_as_number(e, ev, &tok) {
                 Arg::Int(to_u32(id) as i32)
             } else if ev.can_convert(e, &tok, Ty::Number) {
                 Arg::Int(to_u32(ev.get_number(e, &tok)) as i32)
@@ -2030,7 +2207,7 @@ pub fn inline_argument(
             Arg::Int(to_u32(ev.get_number(e, &tok)) as i32)
         }
         0x02 => {
-            if let Some(id) = string_as_number(e, &ev, &tok) {
+            if let Some(id) = string_as_number(e, ev, &tok) {
                 Arg::Float(id as f32)
             } else if ev.can_convert(e, &tok, Ty::Number) {
                 Arg::Float(ev.get_number(e, &tok) as f32)
@@ -2039,7 +2216,7 @@ pub fn inline_argument(
             }
         }
         0x2c => {
-            if let Some(id) = string_as_number(e, &ev, &tok) {
+            if let Some(id) = string_as_number(e, ev, &tok) {
                 Arg::Double(id)
             } else if ev.can_convert(e, &tok, Ty::Number) {
                 Arg::Double(ev.get_number(e, &tok))
@@ -2062,9 +2239,14 @@ pub fn inline_argument(
                 text: s,
             }
         }
-        // Axis, actor value, animation group, sex, magic effect: the token's names for them
-        // come later (a magic effect always fails in xNVSE too).
-        0x05 | 0x08 | 0x0a | 0x12 | 0x1f => return None,
+        // `kParamType_Array`: `GetArrayID` (0 for a token that is no array).
+        0x100 => Arg::Int(ev.get_array_id(e, &tok) as i32),
+        0x08 => Arg::Byte(token_axis(e, ev, &tok)?),
+        0x05 => Arg::Int(token_actor_value(e, ev, &tok)? as i32),
+        0x0a => Arg::Int(token_anim_group(e, ev, &tok)? as i32),
+        0x12 => Arg::Int(token_sex(e, ev, &tok)? as i32),
+        // `kParamType_MagicEffect`: never converts in xNVSE.
+        0x1f => return None,
         _ => {
             let number_form = matches!(
                 tok,
@@ -2077,12 +2259,92 @@ pub fn inline_argument(
                 return None;
             }
             let form = ev.get_form(e, &tok);
+            if !convert_forms {
+                return Some(Arg::Form(form));
+            }
             if form == 0 {
                 return None;
             }
             Arg::Form(convert_form(e, kind, form)?)
         }
     })
+}
+
+/// `g_actorValues` (`ActorValueInfo *` by code, `infoName` at `+0x38`) and how many of them xNVSE
+/// knows by name (`eActorVal_FalloutMax`, 76: the name search stops before it, a number may be it).
+const ACTOR_VALUES: u32 = 0x011d_61c8;
+const ACTOR_VALUE_MAX: i32 = 76;
+/// `g_animGroups`: 245 `AnimGroupInfo`s of `0x24` bytes, the name first (`kAnimGroup_Max`).
+const ANIM_GROUPS: u32 = 0x0119_77d8;
+const ANIM_GROUP_MAX: u32 = 245;
+
+/// `_stricmp(a, b) == 0` in the C locale.
+fn equal_ci(a: &[u8], b: &[u8]) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+// Translated from xNVSE 6.4.9 (xNVSE/NVSE at 0ccd23a), ScriptTokens.cpp: ScriptToken::GetAxis.
+/// `X`, `Y` or `Z` for a one-letter string of either case; `None` (`-1`) for anything else.
+fn token_axis(e: &mut Engine, ev: &Eval, tok: &Tok) -> Option<u8> {
+    match ev.get_string(e, tok).as_slice() {
+        [b'x' | b'X'] => Some(b'X'),
+        [b'y' | b'Y'] => Some(b'Y'),
+        [b'z' | b'Z'] => Some(b'Z'),
+        _ => None,
+    }
+}
+
+// Translated from xNVSE 6.4.9 (xNVSE/NVSE at 0ccd23a), ScriptTokens.cpp:
+// ScriptToken::GetActorValue, and GameAPI.cpp: GetActorValueForString.
+/// A number from 0 to 76, or an actor value's name (any case); `None`
+/// (`eActorVal_NoActorValue`) for anything else.
+fn token_actor_value(e: &mut Engine, ev: &Eval, tok: &Tok) -> Option<u32> {
+    if ev.can_convert(e, tok, Ty::Number) {
+        let n = f64_to_i32(ev.get_number(e, tok));
+        return (0..=ACTOR_VALUE_MAX).contains(&n).then_some(n as u32);
+    }
+    let name = ev.get_string(e, tok);
+    (0..ACTOR_VALUE_MAX as u32).find(|&i| {
+        let info = e.mem.u32(ACTOR_VALUES + 4 * i);
+        info != 0 && {
+            let text = e.mem.u32(info + 0x38);
+            text != 0 && equal_ci(&crate::table::guest_text(e, text), &name)
+        }
+    })
+}
+
+// Translated from xNVSE 6.4.9 (xNVSE/NVSE at 0ccd23a), ScriptTokens.cpp:
+// ScriptToken::GetAnimationGroup, and NiNodes.cpp: TESAnimGroup::AnimGroupForString.
+/// A number as a `UInt32` (any but 245), or a group's name (any case); `None`
+/// (`kAnimGroup_Max`) for anything else.
+fn token_anim_group(e: &mut Engine, ev: &Eval, tok: &Tok) -> Option<u32> {
+    let group = if ev.can_convert(e, tok, Ty::Number) {
+        to_u32(ev.get_number(e, tok))
+    } else if ev.can_convert(e, tok, Ty::String) {
+        let name = ev.get_string(e, tok);
+        (0..ANIM_GROUP_MAX)
+            .find(|&i| {
+                let text = e.mem.u32(ANIM_GROUPS + 0x24 * i);
+                text != 0 && equal_ci(&crate::table::guest_text(e, text), &name)
+            })
+            .unwrap_or(ANIM_GROUP_MAX)
+    } else {
+        ANIM_GROUP_MAX
+    };
+    (group != ANIM_GROUP_MAX).then_some(group)
+}
+
+// Translated from xNVSE 6.4.9 (xNVSE/NVSE at 0ccd23a), ScriptTokens.cpp: ScriptToken::GetSex.
+/// 0 for "male", 1 for "female" (any case); `None` (`-1`) for anything else.
+fn token_sex(e: &mut Engine, ev: &Eval, tok: &Tok) -> Option<u32> {
+    let s = ev.get_string(e, tok);
+    if equal_ci(&s, b"male") {
+        Some(0)
+    } else if equal_ci(&s, b"female") {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 /// `ConvertDefaultArg`'s form checks: the form (or the cast pointer) a parameter of `kind` takes.

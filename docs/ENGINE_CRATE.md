@@ -432,7 +432,7 @@ speed gate passed (G1, 2026-11-06: Goodsprings +7.1%, Doc's room +3.0%). It is n
 `leaves`, `topic_search`, `topic_order` and, since their speed gate (2026-11-08), `lockfree`, `culling`,
 `pathing`, `shader`, `crt` and `dispatch` are on, and since their gates `render` (2026-11-09), `draw`, `scene`,
 `particles`, `collision` and `multibound` (2026-11-10), and on their tests and reviews `animation`, `draw_f` and
-`anim_keys` (2026-11-11: no comparison runs for native code) (below); `NV_TYPED=off` turns every family off, and
+`anim_keys` (2026-11-11: no comparison runs for native code) and `process` and `lights` (2026-11-13) (below); `NV_TYPED=off` turns every family off, and
 `<family>:off` one. A family merged off (`geometry`, below) stays off until its gate, and `NV_TYPED=<family>` turns it
 on. A run compared call for call with the original's record (nv-trace's `NV_TRACE_OUT`,
 `NV_TRACE_LIST`) has every family off unless `NV_TYPED` says otherwise (`typed::switch_for`).
@@ -458,8 +458,10 @@ walk, stage 1, its float maths native since 2026-11-11 (the bounds' and planes' 
 `f64` rounded at the stores, a single operation on two floats in plain `f32`, the main-thread-only fade-node culler in
 `f32`); its tests are `crates/engine/tests/typed_culling.rs`. And `pathing` (same crate): what the AI's pathfinding threads
 run most (navmesh getters, matching edges, the triangle under a point, the search's keys, goal test and
-arrays, the point-of-view geometry, pathing locations, the point helpers), stage 1; its tests are
-`crates/engine/tests/typed_pathing.rs`.
+arrays, the point-of-view geometry, pathing locations, the point helpers), stage 1, its float maths native since
+2026-11-12 (sums of products, cross products and the barycentric height at the running thread's precision over
+`native::Real`, a single operation on two floats in plain `f32`, the square roots, absolute values and rounding down
+native; no x87 helper left); its tests are `crates/engine/tests/typed_pathing.rs`.
 And `crt` (same crate): the C runtime's square root with the x87 error path every square root takes on
 the main thread, `floor`, the float-to-integer conversions, the 64-bit helpers, and the copy, fill and
 string routines; its tests are `crates/engine/tests/typed_crt.rs`.
@@ -547,7 +549,12 @@ no-lighting shader (the pass choice `00bc6970`, its slots 0x78 `00bc8d40`, 0x7c 
 sub-textures `00bc6fa0`, the material constants `00bc6fe0`, the light fog `00bc7100`, the texture matrix
 `00bc8e00`); the sky shader (its slots 0x78 `00b89cc0` and 0x7c `00b89d80`); the water shader (its slots 0x78 `00b863a0` and
 0x7c `00b864d0`); the SpeedTree leaf shader (`SetupGeometry` `00bb25d0`, its slots 0x7c `00bb2760` and 0xfc
-`00bb1b50`); the pass types' flag bits (`00b815e0`) and a material's colour constant (`00c03180`). Each reads the frame only through
+`00bb1b50`); the pass types' flag bits (`00b815e0`) and a material's colour constant (`00c03180`); the lighting 3.0 shader (its
+slots 0x78 `00bbe650`, 0x7c `00bbef90` and 0xfc `00bbe120`, the helpers its slot 0x7c called as plain calls: the
+lights `00bbc050`, the view `00bbe6b0` and world `00bbba00` matrices, the eye `00bbbcf0` and light `00bbb890`
+positions, the emittance `00bbbda0`, the material `00bbe9c0`, the colour `00bbecd0`, the glow `00bbbdf0`, the alpha
+`00bbbe30`, the fog `00bbbe80`), the `010bb980` shader's slot 0x78 (`00bd02e0`), the light table entry (`00bb95e0`)
+and the pass end's flags (`00bb96d0`). Each reads the frame only through
 `draw::packet` and writes its constants, render states and counters through `draw::own` (each file's "Group C"
 section), with what is filled at load read in place (the shaders' own words, the passes' contents, the exe's
 constants).
@@ -606,8 +613,10 @@ one operation on two floats, plain `f32` on every thread: one operation rounds t
 bit for bit (NaN payloads aside) on the other threads' and within one ulp on the main thread's (the dispatch and
 culling functions it calls by address there); and for the rotation, grow-fade, simple colour and bound update
 modifiers and the update controller's emitter test, bit for bit under both at a fixed input where rounding every step
-and rounding once part. `scene` and `collision` keep the exact x87 helpers until their turn, so that byte identity
-with the translations holds where the main thread rounds at every step.
+and rounding once part. `scene` and `collision` are native the same way (2026-11-12): the quaternion of a rotation over
+`native::Real` with `FSQRT` roots, and the skinned bound's sums, the transform inverse's and the blend's reciprocals
+and the blend's scaled position (one float operation each) plain `f32` on every thread; their tests split the
+quaternion's comparisons by thread and check it bit for bit under both words at a fixed rounding input.
 And `multibound` (same crate, id 22), the update half's fourth group: the two passes main runs over the loaded world
 once a frame that keep the multibound culling current. The reset pass (`0045bc80`) takes every object's multibound
 shape back to "not tested"; the visibility pass (`0045b070`) tests each again from the camera through the shadow
@@ -624,6 +633,22 @@ x; the translation kept them in Rust locals, so it read whatever the stack held 
 `crates/engine/tests/typed_multibound.rs`. On since its gate (the differential tests with each planted mutant caught,
 and the recorded street run byte-identical with `NV_TYPED=multibound:off` in the fixes and vanilla presets);
 integers only, not a speed change by itself.
+And `process` (same crate, id 28), the update half's fifth group: the process lists' passes over the low, middle-low
+and middle-high process actors (`0096b050`, `0096b470`, `0096b810`), which `ProcessLists::UpdateProcessLists` runs on the
+main thread only, and the process array they walk (`ProcessArray`: the levels' starts and ends, the element store,
+`RemoveActor` with its search and removal, the cursors' correction) with the process's last-hour getter. The low pass
+runs on about one frame in three over about 2,000 actors in the crowded street, and `RemoveActor` searches the array
+from a level's start for each actor that leaves a level: on those frames a spike of about 1 ms (quiet machine, the
+profile of 2026-11-11). The search reads the element block a page at a time in a plain loop (the same first match,
+and a search that runs into an unmapped page stops at the same element). Floats: the hours only, `f32` on the main
+thread ([`Threads::Main`]), compared with the exe's doubles exactly. Its tests are `crates/engine/tests/typed_process.rs`.
+On by the native-code rule (differential tests, planted mutants, review).
+And `lights` (same crate, id 30): the walk each shadow scene light makes over its objects every frame, before the draw's
+cut, to find the geometry it lights: `ShadowSceneLight::AddObject` (`00ba0110`), the walks by the light's frustum
+(`00b9f5b0`) and by its radius (`00b9f6a0`), the add of a lit geometry to the light's list (`00b9f480`) and the two bound
+tests (`00b9bbb0`, `00b9dae0`). Main thread only ([`Threads::Main`]); the bound tests' distances are native `f32` in the
+exe's order, the square root `f32::sqrt` in place of the CRT's. About 0.2 ms a frame in the lit, crowded street (the
+profile of 2026-11-11). Its tests are `crates/engine/tests/typed_lights.rs`. On by the native-code rule.
 And `geometry` (same crate, id 23): the code that reads and writes `NiGeometryData`'s arrays (positions, normals
 with the binormals and tangents after them, colours, texture coordinates), typed so that stage 2 can keep those
 arrays outside the 32-bit space (about 23 to 40 MB of the guest heap on the census route, and what mesh mods grow).
