@@ -224,6 +224,16 @@ Code: `crates/host/src/test_range.rs`, part of the weighty combat row (on with
 6. **Saving is off** in the range. A manual save or quick save shows "Saving is off in the Test
    Range"; autosaves are dropped silently.
 
+If the range cannot start, the main menu shows why in a message box and the game's log
+(`userdata\logs\game-<date-time>.log`) has a line starting `Test Range:`:
+- no cell of that name in the loaded game;
+- the console could not be made;
+- the game did not start in the cell.
+
+The menu stays usable. Until 2026-11-14 the button did nothing on a start where the console had
+not been opened: the game makes its console only on first use, and the range now asks for it the
+way the console key does (`MenuConsole::Instance(1)`, `0071b160`).
+
 ### The place
 
 The default is **`QASmoke`**, the game's own test hall in FalloutNV.esm: interior, quiet and lit,

@@ -219,18 +219,128 @@ fn note(e: &mut Engine, text: &str) {
 
 /// The main menu's entry: the range's cell, from the main menu, as the console's `coc` starts
 /// a game there.
+///
+/// Until 2026-11-14 it ran the line on the console only when the console already existed: the
+/// game makes it on first use (`MenuConsole::Instance(1)`, `0071b160`), so on a start where the
+/// console had not been opened the click did nothing (Patrick, build 68956e3). Now the console is
+/// made the game's way ([`run_line`]), the cell is looked up first, and anything that stops the
+/// start is said in the log and on the screen, with the menu's list enabled again.
 fn start(e: &mut Engine) {
-    with_range(|r| {
-        *r = Range {
-            starting: true,
-            ..Range::default()
-        }
-    });
-    let line = format!("coc {}", cell());
-    if !run_line(e, &line) {
-        eprintln!("Test Range: the console is not there to run `{line}`");
+    let cell = cell();
+    eprintln!("Test Range: starting in {cell}");
+    let outcome = start_outcome(
+        cell_exists(e, &cell),
+        || {
+            with_range(|r| {
+                *r = Range {
+                    starting: true,
+                    ..Range::default()
+                }
+            });
+            run_line(e, &format!("coc {cell}"))
+        },
+        active,
+    );
+    if let Err(why) = outcome {
+        let text = why.text(&cell);
+        eprintln!("{text}");
         with_range(|r| *r = Range::default());
+        fail_on_menu(e, &text);
     }
+}
+
+/// Why the range did not start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartError {
+    /// No cell of the name in the loaded game (`sTestRangeCell`).
+    NoCell,
+    /// The game's console, whose compiler runs the `coc`, could not be had.
+    NoConsole,
+    /// The `coc` ran, but no new game began in the cell.
+    NotStarted,
+}
+
+impl StartError {
+    /// The line for the log and the screen.
+    pub fn text(self, cell: &str) -> String {
+        match self {
+            StartError::NoCell => format!(
+                "Test Range: no cell named {cell} in the loaded game. Set sTestRangeCell in Fallout.ini's [nv-rs Gunplay] to a cell's editor id."
+            ),
+            StartError::NoConsole => {
+                "Test Range: the game's console could not be made, so the range could not start."
+                    .to_string()
+            }
+            StartError::NotStarted => format!(
+                "Test Range: the game did not start in {cell}. The game's log says more."
+            ),
+        }
+    }
+}
+
+/// The start's steps in order: the cell must exist, then the `coc` must run (`run`, which marks
+/// the start), then the new game must have begun (`started`, the `CenterOnCell` new game's seam).
+pub fn start_outcome(
+    cell_found: bool,
+    run: impl FnOnce() -> bool,
+    started: impl FnOnce() -> bool,
+) -> Result<(), StartError> {
+    if !cell_found {
+        return Err(StartError::NoCell);
+    }
+    if !run() {
+        return Err(StartError::NoConsole);
+    }
+    if !started() {
+        return Err(StartError::NotStarted);
+    }
+    Ok(())
+}
+
+/// Whether the loaded game has a cell named `name`: an interior by its editor id
+/// (`TESDataHandler` `00461ae0`) or an exterior one (`00461cf0`, its worldspace), as
+/// `CenterOnCell` looks it up.
+fn cell_exists(e: &mut Engine, name: &str) -> bool {
+    let handler = e.global::<u32>(DATA_HANDLER);
+    if handler == 0 {
+        return false;
+    }
+    e.with_stack(0x60, |e, frame| {
+        let text = frame.addr();
+        let coordinates = text + 0x48;
+        e.mem.set_cstr(text, name.as_bytes());
+        if e.call(CELL_BY_EDITOR_ID, &args![handler, text]).u32() != 0 {
+            return true;
+        }
+        e.mem.set_u32(coordinates, 0);
+        e.mem.set_u32(coordinates + 4, 0);
+        e.call(
+            EXTERIOR_BY_EDITOR_ID,
+            &args![handler, text, coordinates, coordinates + 4],
+        )
+        .u32()
+            != 0
+    })
+}
+
+/// A failed start on the main menu: the menu's main list enabled again (the menu disables it
+/// before it calls an option's choose function) and the reason in the game's message box.
+fn fail_on_menu(e: &mut Engine, text: &str) {
+    let menu = e.global::<u32>(START_MENU);
+    if menu != 0 {
+        e.call(LIST_BOX_SET_ENABLED, &args![menu + MAIN_LIST, 1u32]);
+    }
+    e.with_stack(0x300, |e, frame| {
+        let base = frame.addr();
+        let bytes = &text.as_bytes()[..text.len().min(0x27f)];
+        e.mem.set_cstr(base, bytes);
+        let ok = base + 0x280;
+        e.mem.set_cstr(ok, b"OK");
+        let mut words = vec![base, 0, 0, GAME_BOX_CALLBACK, 0, 0x17, 0, 0, ok];
+        words.extend_from_slice(&[0u32; 9]);
+        words.push(0);
+        e.call(SHOW_MESSAGE_BOX, &words);
+    });
 }
 
 /// Once a frame of play (after weighty combat's frame): the set-up when it is due, the Home key,
@@ -276,8 +386,21 @@ const DIK_HOME: usize = 0xc7;
 
 // --- The game's words. --------------------------------------------------------------------------
 
-/// `MenuConsole::pInstance`; its compiler is its first word (`pConsoleCompiler`).
-const CONSOLE_INSTANCE: u32 = 0x011d_8ce8;
+/// `MenuConsole::Instance(create)` (`cdecl`): the console, made when there is none; its compiler
+/// is its first word (`pConsoleCompiler`).
+const CONSOLE_GET: u32 = 0x0071_b160;
+/// `TESDataHandler` (the pointer), its interior cell by editor id (`thiscall`: the id) and its
+/// exterior cell's worldspace by editor id (`thiscall`: the id, out x, out y), as `CenterOnCell`
+/// (`0093db60`) looks a `coc` cell up.
+const DATA_HANDLER: u32 = 0x011c_3f2c;
+const CELL_BY_EDITOR_ID: u32 = 0x0046_1ae0;
+const EXTERIOR_BY_EDITOR_ID: u32 = 0x0046_1cf0;
+/// `StartMenu::pMe`, its main list (`+0x84`) and `ListBox::SetEnabled` (`thiscall`: on).
+const START_MENU: u32 = 0x011d_aac0;
+const MAIN_LIST: u32 = 0x84;
+const LIST_BOX_SET_ENABLED: u32 = 0x007d_74f0;
+/// The game's own message box answer callback (`005b4a70`), for a box with only OK.
+const GAME_BOX_CALLBACK: u32 = 0x005b_4a70;
 /// `Script::Script`, `TESForm::SetTemporary`, `Script::SetText`, `Script::CompileAndRun` and the
 /// destructor, as the console runs a line (`menuconsole.rs`, `run_console_script`).
 const SCRIPT_NEW: u32 = 0x005a_a0f0;
@@ -332,7 +455,8 @@ const UNITS_PER_METRE: f32 = 70.0;
 /// Runs `line` as the console runs a typed line: a temporary script compiled and run by the
 /// console's compiler. False when there is no console.
 pub fn run_line(e: &mut Engine, line: &str) -> bool {
-    let console = e.global::<u32>(CONSOLE_INSTANCE);
+    // The console, made on first use as the game makes it when the console key is first pressed.
+    let console = e.call(CONSOLE_GET, &args![1u32]).u32();
     if console == 0 {
         return false;
     }
@@ -764,6 +888,87 @@ const QUIT_CHOOSE: u32 = 0x007d_0a10;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Patrick's click that did nothing: each step of the start is checked in order, and each
+    /// failure has a line for the log and the screen.
+    #[test]
+    fn a_start_that_cannot_happen_says_why() {
+        let mut ran = false;
+        assert_eq!(
+            start_outcome(
+                false,
+                || {
+                    ran = true;
+                    true
+                },
+                || true
+            ),
+            Err(StartError::NoCell)
+        );
+        assert!(!ran, "no coc for a cell that is not there");
+        assert_eq!(
+            start_outcome(true, || false, || true),
+            Err(StartError::NoConsole)
+        );
+        assert_eq!(
+            start_outcome(true, || true, || false),
+            Err(StartError::NotStarted)
+        );
+        assert_eq!(start_outcome(true, || true, || true), Ok(()));
+        for why in [
+            StartError::NoCell,
+            StartError::NoConsole,
+            StartError::NotStarted,
+        ] {
+            let text = why.text("QASmoke");
+            assert!(text.starts_with("Test Range: "), "{text}");
+            assert!(text.len() < 0x27f);
+        }
+        assert!(StartError::NoCell
+            .text("QASmoke")
+            .contains("sTestRangeCell"));
+    }
+
+    /// The console is made when there is none: `run_line` asks `MenuConsole::Instance` with
+    /// create set, and runs the line with the console's compiler.
+    #[test]
+    fn the_console_is_made_for_the_line() {
+        use std::sync::atomic::AtomicU32;
+        static ASKED: AtomicU32 = AtomicU32::new(u32::MAX);
+        static RAN: AtomicU32 = AtomicU32::new(0);
+        let mut e = Engine::new();
+        let console = e.mem.alloc(0x914);
+        e.mem.set_u32(console, 0x5000);
+        static CONSOLE: AtomicU32 = AtomicU32::new(0);
+        CONSOLE.store(console, Ordering::Relaxed);
+        e.register(CONSOLE_GET, |_, a| {
+            ASKED.store(a[0], Ordering::Relaxed);
+            CONSOLE.load(Ordering::Relaxed).into_ret()
+        });
+        for address in [SCRIPT_NEW, SET_TEMPORARY, SCRIPT_SET_TEXT, SCRIPT_DELETE] {
+            e.register(address, |_, _| Ret::default());
+        }
+        e.register(COMPILE_AND_RUN, |_, a| {
+            RAN.store(a[1], Ordering::Relaxed);
+            Ret::default()
+        });
+        assert!(run_line(&mut e, "coc QASmoke"));
+        assert_eq!(
+            ASKED.load(Ordering::Relaxed),
+            1,
+            "asked to make the console"
+        );
+        assert_eq!(
+            RAN.load(Ordering::Relaxed),
+            0x5000,
+            "run by the console's compiler"
+        );
+        // No console and none to be made: false, nothing run.
+        CONSOLE.store(0, Ordering::Relaxed);
+        RAN.store(0, Ordering::Relaxed);
+        assert!(!run_line(&mut e, "coc QASmoke"));
+        assert_eq!(RAN.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn the_option_goes_just_above_quit() {

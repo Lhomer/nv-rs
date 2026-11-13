@@ -7,6 +7,14 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (Test Range: the main menu's button did nothing)
+
+- **Patrick (build 68956e3, Intel Arc, Vulkan):** sway good; "Test Range" on the main menu does nothing, no load, no error.
+- **Cause:** the button was wired (the menu's `HandleClick`, `start_menu_do_click`, calls the option's choose function by address for mouse, keyboard and controller alike, and ours is registered at `7e0600c0`), but `run_line` took the console from `MenuConsole::pInstance` (`011d8ce8`), which the game only makes on first use (`MenuConsole::Instance(1)`, `0071b160`). Without the console opened since the start it was null, `run_line` gave up, `start` wrote one log line and returned, and the menu's list stayed disabled (the menu disables it before calling a choose function), so the click looked dead.
+- **Fix:** `run_line` asks `MenuConsole::Instance(1)` (the console made as the console key makes it). `start` now checks in order (`start_outcome`): the cell exists (`TESDataHandler` `00461ae0` interior / `00461cf0` exterior, as `CenterOnCell` looks it up), the `coc` ran, the new game began (the `CenterOnCell` seam fires inside the `coc`). A failure is written to the log (`Test Range: ...`) and shown in the game's message box on the main menu, and the main list is enabled again.
+- **Log for Patrick:** `userdata\logs\game-<date-time>.log` beside Play.cmd (the launcher's log of each run; the range's lines start with `Test Range:`).
+- **Checked here:** the start's steps and messages, the console made for a line (tests), host tests (3 known cell_offsets), repo_hygiene, clippy, fmt, the Windows build. **Not run here:** the game.
+
 ### Claude, 2026-11-13 (weighty combat slice 2: the Test Range)
 
 - **What:** Patrick: a main-menu Test Range to try and tune the weighty combat (his choices in docs/GUNPLAY.md, slice 2). `crates/host/src/test_range.rs`, part of the weighty combat row: the title menu's "Test Range" (above Quit) runs `coc QASmoke` (`[nv-rs Gunplay] sTestRangeCell`, `NV_TEST_RANGE_CELL`) as the console runs a line, so the game starts fresh there with a default character; ~30 frames in, a container with every playable named weapon of every loaded plugin (the form map `011c54c0`), 500 of every ammo, and a lane of passive targets (named NPC and creature bases, `PlaceAtMe` worker `005c4b30` then `MoveTo`) at 5-100 m. Home opens the range menu (the game's message box `00703e80`): Weapons, Fill Ammo, Make Targets Hostile/Passive, Respawn Targets (down the line faced now), Exit to Main Menu (`007d0a70`), Close.
