@@ -221,7 +221,14 @@ Code: `crates/host/src/test_range.rs`, part of the weighty combat row (on with
 
 5. **Tuning:** Esc > Settings > Display has Recoil, Weapon Sway, Impact Punch and Dismember
    Force. They change at once and are kept. The rest is in Fallout.ini's `[nv-rs Gunplay]`.
-6. **Saving is off** in the range. A manual save or quick save shows "Saving is off in the Test
+6. **No DLC or pack pop-ups** in the range. The DLC start quests' message boxes and the Caravan
+   Pack, Gun Runners' Arsenal and other packs' "added" notifications do not show in a range game:
+   a script's `ShowMessage` (`005b4630`) answers as shown without showing (the message form read
+   first, as the command reads it), and items a script gives the player come quietly (the
+   container's gift, `004821a0`, with its quiet flag). Only from the Test Range button to the end
+   of that game (a load, a new game, the main menu); the game's log names each one kept off. A
+   save or new game of your own shows them as always, and nothing is written anywhere.
+7. **Saving is off** in the range. A manual save or quick save shows "Saving is off in the Test
    Range"; autosaves are dropped silently.
 
 If the range cannot start, the main menu shows why in a message box and the game's log

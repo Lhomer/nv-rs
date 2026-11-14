@@ -93,6 +93,8 @@ pub const FIX: Fix = Fix {
         crate::movement::IN_AIR,
         crate::movement::JUMPING,
         crate::movement::MOBILE_MOVE,
+        crate::test_range::SHOW_MESSAGE_COMMAND,
+        crate::test_range::GIVE_ITEMS,
     ],
     summary: "guns kick the view and recover, the weapon lags fast turns and settles back, melee hits and heavy shots punch the viewmodel and camera (game time untouched), melee reaches a little further, kills push bodies by calibre and weapon weight, and a heavy enough hit severs the limb (Settings menu rows and [nv-rs Gunplay] tune it)",
     install,

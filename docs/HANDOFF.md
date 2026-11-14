@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (Test Range: no DLC and pack pop-ups)
+
+- **Patrick:** the DLC start quests' message boxes and the Caravan Pack / Gun Runners' Arsenal / pack item notifications show every time the range loads; hide them there only, never touch saves or normal games.
+- **Now (`test_range.rs`, the weighty combat row):** while `test_range::active()` (from the range's new game to its end: a load, a new game, the main menu), the `ShowMessage` script command (`005b4630`) parses its form as it does and answers shown without showing; `TESContainer`'s gift to a reference (`004821a0`, `AddItem`'s and `AddItemHealthPercent`'s last step) gets its quiet flag when the player is the target. Each is named in the log (first 40). Outside a range game both run the translation unchanged. Not run in game; a DLC message shown some other way than `ShowMessage` (none known) would still show.
+
 ### Claude, 2026-11-14 (snappy movement made authoritative; the debug log)
 
 - **Patrick (ebf57acb):** jumping left slows him in the air; a slowdown step after landing; still no quick change of direction; he suspected the original movement was still in charge.

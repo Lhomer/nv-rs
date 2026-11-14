@@ -38,7 +38,10 @@ use crate::range_cells::{Place, Spot};
 use crate::range_watch::{self, step};
 use engine::extend::{Owner, SiteSlot};
 use engine::prelude::*;
+use engine::units::fallout_shared::run_005b4550::fn_005b4630;
 use engine::units::fallout_shared::tes::fn_00453dc0;
+use engine::units::fallout_shared::tescontainer::fn_004821a0;
+use engine::units::fallout_shared::tesscriptfunctions::ScriptArgs;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -334,6 +337,66 @@ pub fn install(e: &mut Engine) {
     e.on_site(MENU_NEW_GAME, end);
     e.on_site(PRE_LOAD, end);
     e.on_site(TO_MAIN_MENU, end);
+    // The DLC's and the packs' messages (Patrick: every load of the range showed the DLC start
+    // quests' boxes and the Caravan Pack, Gun Runners' Arsenal and other packs' items
+    // notifications): in a range game only, a script's `ShowMessage` answers as shown without
+    // showing, and items given to the player by a script come quietly. Never in a save or a new
+    // game of the player's; nothing is written anywhere.
+    e.register(SHOW_MESSAGE_COMMAND, |e, a| {
+        if active() {
+            // The message form read as the command reads it (`Script::ParseParameters`: the
+            // seven words, then two outputs), so the script goes on as after a shown message.
+            let parsed = e.with_stack(8, |e, outs| {
+                let (form, second) = (outs.addr(), outs.addr() + 4);
+                e.mem.set_u32(form, 0);
+                e.mem.set_u32(second, 0);
+                let words = [a[0], a[1], a[7], a[2], a[3], a[4], a[5], form, second];
+                e.call(PARSE_PARAMETERS, &words)
+                    .bool()
+                    .then(|| e.mem.u32(form))
+            });
+            return match parsed {
+                Some(form) if form != 0 => {
+                    note_hidden(&format!(
+                        "a script's message {:08X}",
+                        e.mem.u32(form + FORM_ID)
+                    ));
+                    1u32.into_ret()
+                }
+                _ => 0u32.into_ret(),
+            };
+        }
+        let (_, show) = engine::entry!(0x005b4630, fn_005b4630(ScriptArgs) -> bool);
+        show(e, a)
+    });
+    e.register(GIVE_ITEMS, |e, a| {
+        let player = e.global::<u32>(PLAYER);
+        let quiet = if active() && a[1] == player && a[2] & 0xff == 0 {
+            note_hidden("an items-added notification");
+            1
+        } else {
+            a[2] as u8
+        };
+        fn_004821a0(e, Ptr::new(a[0]), Ptr::new(a[1]), quiet);
+        Ret::default()
+    });
+}
+
+/// The script command `ShowMessage` and `TESContainer`'s gift of its items to a reference
+/// (`AddItem`'s and `AddItemHealthPercent`'s last step; its third word silences the player's
+/// "added" message).
+pub const SHOW_MESSAGE_COMMAND: u32 = 0x005b_4630;
+pub const GIVE_ITEMS: u32 = 0x0048_21a0;
+/// `Script::ParseParameters` (`cdecl`: the parameter info, the script data, the offset, the three
+/// references, the event list, then the outputs).
+const PARSE_PARAMETERS: u32 = 0x005a_ccb0;
+
+/// A message the range kept off the screen, in the log (the first few of a range game).
+fn note_hidden(what: &str) {
+    static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if SAID.fetch_add(1, Ordering::Relaxed) < 40 {
+        eprintln!("Test Range: {what} not shown (a range game)");
+    }
 }
 
 /// Whether a save's name is the player's own (not the autosave or quick save names, which the

@@ -14,6 +14,7 @@
 0045dfe0	1	nv-rs dialogue topic index
 00474cb0	0	JG
 00482090	0	JIP
+004821a0	1	nv-rs weighty combat
 00483a00	0	JG
 00493800	0	kNVSE
 004a0370	1	NVTF
@@ -48,6 +49,7 @@
 005ac7a0	2	script or frame function
 005accb0	0	YUP,xNVSE
 005af3f0	1	xNVSE
+005b4630	0	nv-rs weighty combat
 005b5e40	6	YUP,xNVSE
 005b6cd0	0	NVTF
 005c67e0	0	YUP,xNVSE
