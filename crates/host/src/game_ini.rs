@@ -1,4 +1,4 @@
-//! nv-rs's own player options in the run's `Fallout.ini`: the five `[nv-rs ...]` sections
+//! nv-rs's own player options in the run's `Fallout.ini`: the six `[nv-rs ...]` sections
 //! (the maintainer approved the design of measure/ini/DESIGN.md, 2026-11-09).
 //!
 //! The file is the one the game itself reads: `My Games\FalloutNV\Fallout.ini` in the Documents
@@ -110,6 +110,8 @@ pub struct Keys {
     pub fixes: Vec<(&'static str, bool)>,
     /// The `[nv-rs Gunplay]` keys the file sets (`crate::gunplay::KEYS`), in the table's order.
     pub gunplay: Vec<(&'static str, i32)>,
+    /// The `[nv-rs Movement]` keys the file sets (`crate::movement::KEYS`), in the table's order.
+    pub movement: Vec<(&'static str, i32)>,
     /// `sTestRangeCell`: the Test Range's cell (`crate::test_range`).
     pub test_range_cell: Option<String>,
     /// The lines whose value can't be used (`key=value`): the default stands for each.
@@ -165,6 +167,15 @@ impl Keys {
                     keys.test_range_cell =
                         crate::test_range::valid_cell(raw).then(|| raw.to_string());
                     keys.test_range_cell.is_some()
+                }
+                key if row.section == crate::movement::SECTION => {
+                    match crate::movement::parse(key, raw) {
+                        Some(value) => {
+                            keys.movement.push((row.key, value));
+                            true
+                        }
+                        None => false,
+                    }
                 }
                 key if row.section == crate::gunplay::SECTION => {
                     match crate::gunplay::parse(key, raw) {
@@ -512,7 +523,14 @@ mod tests {
                 "iImpulse",
                 "iDismemberForce",
                 "iExplodeForce",
-                "sTestRangeCell"
+                "sTestRangeCell",
+                "bSnappyMovement",
+                "iAccelerate",
+                "iFriction",
+                "iStopSpeed",
+                "iAirAccelerate",
+                "iAirSpeedCap",
+                "iJumpGravity"
             ]
         );
     }
@@ -546,6 +564,11 @@ mod tests {
             Ok(crate::gunplay::Tuning::PLAY)
         );
         assert_eq!(keys.gunplay.len(), crate::gunplay::KEYS.len());
+        assert_eq!(
+            crate::movement::Tuning::from_parts(&keys.movement, |_| None),
+            Ok(crate::movement::Tuning::PLAY)
+        );
+        assert_eq!(keys.movement.len(), crate::movement::KEYS.len());
         assert_eq!(
             keys.test_range_cell.as_deref(),
             Some(crate::test_range::DEFAULT_CELL)

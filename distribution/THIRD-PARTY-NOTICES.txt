@@ -904,3 +904,20 @@ DXVK v3.1.1 (Philip Rebohle and contributors)
 
     – This notice may not be removed or altered from any source distribution.
   Modified: translated to Rust and altered (see Used for).
+
+Quake III Arena and Quake (id Software)
+  License: GPL-2.0-or-later
+  Repository: https://github.com/id-Software/Quake-III-Arena (also https://github.com/id-Software/Quake)
+  Used for: crates/host (src/movement.rs), the player's snappy movement. The ground friction and acceleration follow PM_Friction and PM_Accelerate of code/game/bg_pmove.c, and the air step PM_AirMove with Quake's SV_AirAccelerate cap; reimplemented in Rust over the game's own character controller. nv-rs is GPL-3.0, which the "or later" permits.
+  Notice:
+    Copyright (C) 1999-2005 Id Software, Inc.
+    Copyright (C) 1996-1997 Id Software, Inc.
+
+    This program is free software; you can redistribute it and/or modify it under the terms of
+    the GNU General Public License as published by the Free Software Foundation; either version 2
+    of the License, or (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+    without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+    See the GNU General Public License for more details.
+  Modified: reimplemented in Rust and fitted to the game's controller (see Used for).

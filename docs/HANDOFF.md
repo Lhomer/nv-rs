@@ -7,6 +7,12 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (snappy movement: the Quake model for the player)
+
+- **Patrick:** movement as snappy as Counter-Strike's: Quake's `PM_Accelerate`, `PM_Friction`, `PM_AirMove`, a less floaty jump, no camera smoothing, the player only, `[nv-rs Movement]` with `bSnappyMovement` and tunables written by the settings path without overwriting.
+- **Now:** `crates/host/src/movement.rs`, part of the weighty combat row: over Havok's movement util (`00d6aef0`) for the player's controller, the ground velocity is Quake's friction then acceleration toward the wish (the game's direction at the formula run/walk speed; none without a direction key, so the player stops instead of gliding out of the animation's blend), the air velocity a capped acceleration; over the air state (`00cd3fb0`) gravity is `iJumpGravity`% and over the jump state (`00cd4280`) the take-off speed its square root (same height). A script or AI moving the player (no key for 0.6 s, the animation still moving) keeps the original. The first-person camera had no movement smoothing to remove. `game_ini.tsv` has the seven `[nv-rs Movement]` keys; Play.exe's existing completion adds the missing section and keys to a Fallout.ini and keeps set values. Credit: module docs and THIRD-PARTY-NOTICES (Quake III Arena, GPL v2 or later).
+- **Not verified here:** no game run. The wish direction relies on the util's own frame (the game's direction), with the keys' `SideVec` only for the first frame from standing (its sign convention is assumed to match the controller's `Direction`). Run/walk read from `MoveMode` 0x200/0x100. **Next action:** Patrick: docs/PLAYTESTING.md, "Snappy movement"; tune `[nv-rs Movement]`.
+
 ### Claude, 2026-11-14 (Test Range: wide, open, flat floor)
 
 - **Patrick (097ad477):** the range loads now, but `NorthernPassageINT` is a narrow passage and the NPC targets stood in its walls. Wanted: a wide, open, flat place scored by usable width and floor area (a clear navmesh rectangle about 12 m by 100 m), corridors and tunnels dropped, exteriors allowed away from spawns, targets only on navmesh with room, lanes side by side.

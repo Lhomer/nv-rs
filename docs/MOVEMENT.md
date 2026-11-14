@@ -130,6 +130,42 @@ compared.
 | `fGrabMaxWeightRunning` | 50 | – | `0093e860` |
 | `fJumpMoveMult`, `fJumpMoveBase` (GMST) | 0.3, 0 | – | no reader; the controller uses its own statics |
 
+## Snappy movement (`crates/host/src/movement.rs`, an nv-rs addition)
+
+Patrick, 2026-11-14: movement as snappy as Counter-Strike's. Part of the weighty combat row
+(`bWeightyCombat`, off in the vanilla preset), its own switch `[nv-rs Movement] bSnappyMovement`.
+**Not 1:1 with the original**, and the player's character only: every other actor moves as before.
+
+The model is id Software's Quake player movement (Quake III Arena, `code/game/bg_pmove.c`:
+`PM_Friction`, `PM_Accelerate`, `PM_AirMove`; Quake's `SV_AirAccelerate` for the capped air step),
+GPL version 2 or later, credited in the module and in distribution/THIRD-PARTY-NOTICES.txt. Valve's
+Source SDK was not used.
+
+Where it sits: over Havok's movement util (`00d6aef0`), which the controller's ground state
+(`00cd4800`, gain 1) and air state (`00cd3fb0`, gain from `fAcrobatics`) call with the old
+velocity, the frame (forward, up, surface) and the wanted velocity in that frame. For the player's
+controller (`MobileObject::GetCharController` of the player), after the util ran:
+
+| Step | What | Tuning (default) |
+| --- | --- | --- |
+| Wish | The util's wanted direction (the animation's, rescaled by `PlayerMover::Update` to the keys' `SideVec`), or the keys' own when the animation gives none yet; at the formula speed (`Actor` vtable `+0x45c` run, `+0x458` walk by `MoveMode` 0x200/0x100, sneaking included), Havok units by `011c3d18`. No direction key (`MoveMode` & 0xF): no wish | |
+| Ground | `PM_Friction` (speed taken off from at least the stop speed), then `PM_Accelerate` toward the wish, across the surface | `iFriction` 6, `iStopSpeed` 100 units/s, `iAccelerate` 10 |
+| Air | The acceleration with the speed along the wish capped (a little air-strafe), no friction | `iAirAccelerate` 10, `iAirSpeedCap` 30 units/s |
+| Jump | Over the air state (`00cd3fb0`) gravity is a percentage of the game's; over the jump state (`00cd4280`) the take-off speed grows by its square root: as high, over sooner | `iJumpGravity` 130 |
+
+What the game keeps: the vertical speed, gravity, `ApplyVelocityMod` (pushes), the collision, the
+surface's own velocity. When no key has been down for 0.6 s and the animation still asks for
+movement (a script or an AI package moving the player), the original movement runs.
+
+The camera: the first-person camera is placed at the eye each frame; nothing in the original's
+camera path smooths it on movement, and nothing is added. The animations are the game's; at a
+steady walk or run the speed is the formula speed they are scaled to, as before. Starting and
+stopping are now quicker than the animation's blend.
+
+Tests (`movement::tests`): the spin-up (90 % in under 0.2 s), the stop (under 0.45 s, a slow slide
+at once), a reversal (under 0.4 s), the air step (run-up kept, the cap), the jump height under
+heavier gravity, the util's frame, the tuning. **Not run in the game here.**
+
 ## Checks and handoff
 
 Branch `claude/m1-movement`. Tests: `world` `locomotion::tests` (5),

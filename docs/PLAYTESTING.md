@@ -194,9 +194,25 @@ Read in a launcher's play run from Fallout.ini's `[nv-rs Gunplay]`; each variabl
 | `NV_GUNPLAY_IMPULSE` (`iImpulse`) | How hard a kill pushes the body, percent of the game's | 150 |
 | `NV_GUNPLAY_DISMEMBER_FORCE` (`iDismemberForce`) * | A killing hit this strong severs the limb (0: the game's chance only) | 45 |
 | `NV_GUNPLAY_EXPLODE_FORCE` (`iExplodeForce`) | A gun's killing hit this strong explodes an explodable limb (0: the game's chance only) | 110 |
-| `NV_TEST_RANGE_CELL` (`sTestRangeCell`) | The cell the main menu's Test Range starts in: `auto` = the longest quiet, lit, walkable interior of your FalloutNV.esm, else a cell's editor id; missing ones fall back to the next best (docs/GUNPLAY.md, slice 2); the range never saves, Home opens its menu | `auto` |
+| `NV_TEST_RANGE_CELL` (`sTestRangeCell`) | The place the main menu's Test Range starts in: `auto` = the widest, longest clear flat floor of your FalloutNV.esm (a quiet, lit interior, or the Mojave's open ground away from its people and creatures), else a cell's editor id; missing ones fall back to the next best (docs/GUNPLAY.md, slice 2); the range never saves, Home opens its menu | `auto` |
 
 **To check in game (not yet run):** a pistol, a rifle, an automatic and a shotgun kick up by their weight and come mostly back without fighting the mouse; the weapon lags a little behind fast turns and settles back, and bobs while walking (if it moves the wrong way, say so); a melee hit that connects and a shotgun or magnum shot punch the weapon and the view and snap back, and game time never slows; melee connects a little further; kills push bodies harder, more with a sledgehammer than a knife; a .44 Magnum or hunting rifle kill severs the struck limb, an anti-materiel rifle can explode it; the five Settings rows show, move, save and come back after a restart. The Test Range: Main menu > Test Range starts without a save in the cell the game's log names (`Test Range: started in ...`); the targets stand in the clear line you are turned to face, up to 100 m (say if one stands in a wall); Home opens its menu (Weapons opens the container, Fill Ammo, Make Targets Hostile/Passive, Respawn Targets, Exit to Main Menu); a save there says "Saving is off" and the Saves folder is unchanged.
+
+### Snappy movement (`[nv-rs Movement]`)
+
+Read like `[nv-rs Gunplay]`, used while weighty combat is on (docs/MOVEMENT.md, "Snappy movement"; the Quake movement model). Play.exe adds the section with these defaults to a Fallout.ini that lacks it and never changes a value already there.
+
+| Variable (Fallout.ini key) | What it does | Default |
+| --- | --- | --- |
+| `NV_MOVEMENT_SNAPPY` (`bSnappyMovement`) | 1 = the player speeds up and stops sharply, turns at once, steers a little in the air, lands sooner; 0 = the original's movement | 1 |
+| `NV_MOVEMENT_ACCELERATE` (`iAccelerate`) | Ground acceleration (Quake's `pm_accelerate`), 1-50 | 10 |
+| `NV_MOVEMENT_FRICTION` (`iFriction`) | Ground friction when you let go (Quake's `pm_friction`), 0-20 | 6 |
+| `NV_MOVEMENT_STOP_SPEED` (`iStopSpeed`) | Below this speed (game units/s; running is about 300) friction stops you as from it, 0-500 | 100 |
+| `NV_MOVEMENT_AIR_ACCELERATE` (`iAirAccelerate`) | Steering in the air, 0-100 | 10 |
+| `NV_MOVEMENT_AIR_SPEED_CAP` (`iAirSpeedCap`) | The most the air steering adds toward where you press, game units/s, 0-300 | 30 |
+| `NV_MOVEMENT_JUMP_GRAVITY` (`iJumpGravity`) | Gravity in the air, percent of the game's (the jump stays as high), 50-300 | 130 |
+
+**To check in game (not yet run):** from standing, W reaches full run almost at once and letting go stops you in a step or two; A/D and reversals change direction immediately; running and jumping keeps the run-up and you can bend the jump a little with A/D and the mouse; a jump is as high as before and lands sooner; NPCs walk and run as before; sneaking and walking (Caps Lock / the walk key) keep their slower speeds; a scripted move of the player (a cutscene, a forced walk) still happens; bSnappyMovement=0 brings the original back. Say if the legs or the weapon bob look out of step with the speed.
 
 ### 3. Set by Play.exe
 

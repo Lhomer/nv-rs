@@ -211,11 +211,14 @@
 00c73170	1	nv-rs high-frame-rate landing
 00cad480	5	ITR
 00caf4d0	0	ITR
+00cd3fb0	1	nv-rs weighty combat
+00cd4280	1	nv-rs weighty combat
 00d1f5a0	0	ITR
 00d1f690	0	ITR
 00d4cca0	0	ITR
 00d4cf10	0	ITR
 00d53a80	0	fixes preset guard
+00d6aef0	1	nv-rs weighty combat
 00e6dc40	0	nv-rs texture files read before the renderer's lock
 00e90c70	0	fixes preset guard
 00ec89e9	0	ImprovedConsole

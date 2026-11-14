@@ -585,6 +585,10 @@ pub struct Choice {
     /// set; else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Gunplay]`; else the built-in
     /// feel. Read by the weighty combat row only, so a preset without it never feels it.
     pub gunplay: crate::gunplay::Tuning,
+    /// The snappy movement's tuning ([`crate::movement::Tuning`]): its `NV_MOVEMENT_*` variables
+    /// when set; else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Movement]`; else the
+    /// built-in feel. Read by the weighty combat row only, so a preset without it never feels it.
+    pub movement: crate::movement::Tuning,
     /// The Test Range's cell ([`crate::test_range`]): `NV_TEST_RANGE_CELL` when set (an editor id,
     /// else the start stops); else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Gunplay]
     /// sTestRangeCell`; else `auto` (the best interior of the player's FalloutNV.esm).
@@ -609,6 +613,7 @@ impl Choice {
             renderer: None,
             show_frame_rate: PLAY_SHOW_FRAME_RATE,
             gunplay: crate::gunplay::Tuning::PLAY,
+            movement: crate::movement::Tuning::PLAY,
             test_range_cell: crate::test_range::DEFAULT_CELL.to_string(),
             ini_note: None,
         }
@@ -765,6 +770,7 @@ impl Choice {
             renderer: ini.renderer.or(play.then_some(PLAY_RENDERER)),
             show_frame_rate: ini.show_frame_rate.unwrap_or(PLAY_SHOW_FRAME_RATE),
             gunplay: crate::gunplay::Tuning::from_parts(&ini.gunplay, &env)?,
+            movement: crate::movement::Tuning::from_parts(&ini.movement, &env)?,
             test_range_cell: match env("NV_TEST_RANGE_CELL").filter(|v| !v.trim().is_empty()) {
                 Some(cell) if crate::test_range::valid_cell(cell.trim()) => cell.trim().to_string(),
                 Some(cell) => {
@@ -1025,6 +1031,7 @@ pub fn install(e: &mut Engine, choice: &Choice) {
     crate::uncap::set_frame_limit(choice.frame_limit);
     crate::uncap::set_menu_frame_limit(choice.bound_menu_frame_limit());
     crate::gunplay::set_tuning(choice.gunplay);
+    crate::movement::set_tuning(choice.movement);
     crate::test_range::set_cell(&choice.test_range_cell);
     for fix in FIXES.iter().filter(|f| choice.is_on(f)) {
         (fix.install)(e);

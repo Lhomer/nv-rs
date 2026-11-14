@@ -34,6 +34,7 @@ pub mod gunplay;
 pub mod half_loaded_move;
 pub mod menu_tiles;
 pub mod mod_fit_worn;
+pub mod movement;
 pub mod native_inflate;
 pub mod patch_data;
 pub mod perk_every_level;
