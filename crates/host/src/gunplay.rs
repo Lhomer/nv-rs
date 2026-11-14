@@ -158,6 +158,8 @@ pub struct Tuning {
     /// `iImpactStacking`: the half-life of a living actor's stacked impacts, milliseconds
     /// ([`crate::knockdown`]).
     pub impact_stacking: i32,
+    /// `iDetailsKey`: the detailed stats panel's key (a DirectInput code, [`crate::item_details`]).
+    pub details_key: i32,
 }
 
 impl Tuning {
@@ -180,6 +182,7 @@ impl Tuning {
         penetration: true,
         bullet_speed: 100,
         impact_stacking: 300,
+        details_key: 0x25,
     };
 
     /// Sets `key` (a [`KEYS`] key) to `value`; false for a key that isn't one or a value out of
@@ -209,6 +212,7 @@ impl Tuning {
             "bpenetration" => self.penetration = value != 0,
             "ibulletspeed" => self.bullet_speed = value,
             "iimpactstacking" => self.impact_stacking = value,
+            "idetailskey" => self.details_key = value,
             _ => return false,
         }
         true
@@ -234,6 +238,7 @@ impl Tuning {
             "bpenetration" => i32::from(self.penetration),
             "ibulletspeed" => self.bullet_speed,
             "iimpactstacking" => self.impact_stacking,
+            "idetailskey" => self.details_key,
             _ => return None,
         })
     }
@@ -272,7 +277,7 @@ impl Default for Tuning {
 }
 
 /// The keys of [`SECTION`]: key, its environment variable, lowest and highest value.
-pub const KEYS: [(&str, &str, i32, i32); 17] = [
+pub const KEYS: [(&str, &str, i32, i32); 18] = [
     ("iRecoil", "NV_GUNPLAY_RECOIL", 0, 300),
     ("iRecoilRecovery", "NV_GUNPLAY_RECOVERY", 0, 100),
     ("iSway", "NV_GUNPLAY_SWAY", 0, 300),
@@ -300,6 +305,7 @@ pub const KEYS: [(&str, &str, i32, i32); 17] = [
     ("bPenetration", "NV_GUNPLAY_PENETRATION", 0, 1),
     ("iBulletSpeed", "NV_GUNPLAY_BULLET_SPEED", 25, 200),
     ("iImpactStacking", "NV_GUNPLAY_IMPACT_STACKING", 100, 1000),
+    ("iDetailsKey", "NV_GUNPLAY_DETAILS_KEY", 1, 255),
 ];
 
 /// A value of `key` as the file or a variable holds it: `1`/`0` for a `b` key, a whole number for
@@ -815,6 +821,7 @@ pub fn install(e: &mut Engine) {
     crate::hit_force::install(e);
     crate::knockdown::install(e);
     crate::ballistics::install(e);
+    crate::item_details::install(e);
 }
 
 /// The weapon form the actor holds (0 for its fists or none).
@@ -1645,6 +1652,8 @@ pub fn add_rows(e: &mut Engine) {
     }
     crate::movement::add_rows(e);
     crate::perk_every_level::add_row(e);
+    crate::item_details::add_row(e);
+    crate::gun_velocity::start_scan(e);
     crate::test_range::add_option(e);
     crate::ballistics::apply_forms(e);
 }
@@ -1829,6 +1838,7 @@ mod tests {
             penetration: false,
             bullet_speed: 25,
             impact_stacking: 100,
+            details_key: 1,
         };
         for (row, key) in rows.iter().zip(KEYS) {
             assert_eq!(row.switch, key.1, "{row:?}");

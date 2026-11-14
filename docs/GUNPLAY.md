@@ -421,6 +421,37 @@ Classic / Projectile), `bPenetration` ("Penetration"), `iBulletSpeed` ("Bullet S
 | Slug (shotgun) | 1.1 | 8 | 4 | 1 | 0.9 |
 | Magnum (shotgun shell) | 1.1 | 1.2 | 1.1 | 1.1 | 1 |
 
+### Per-gun muzzle velocity (`crates/host/src/gun_velocity.rs`, `data/gun_velocity.tsv`)
+
+Patrick, 2026-11-14: each gun's bullets leave at its calibre's velocity times its own multiplier
+(1.0 by default), times the load, the barrel and suppressor mods and the game's projectile-speed
+multiplier. Momentum, flight (so drop) and penetration follow it: the penetration power goes with
+the square of the speed factor (load x mods x gun).
+- The table, `crates/host/data/gun_velocity.tsv`: the vanilla, DLC and Gun Runners' Arsenal guns
+  by editor ID (long or heavy barrels, pistol rounds from rifles and unique variants higher, snub,
+  sawed-off and integrally suppressed guns lower; 0.85 to 1.20). The game keeps no editor IDs in
+  memory: the official masters' `WEAP` records are read on a host thread when the main menu is
+  made (each plugin's own records, form IDs in the load order). The table was written without the
+  game's files: at the first shot the log names its entries that matched no weapon and the
+  official calibre guns without an entry (`Per-gun velocity: ...`), to correct it from.
+- A gun without an entry (modded guns, or a wrong editor ID): its damage against its calibre's
+  average loaded gun, `(damage / average)^0.25`, within 0.9 to 1.1.
+
+### Detailed stats (`crates/host/src/item_details.rs`)
+
+While a gun or an ammo of a known calibre is highlighted in the Pip-Boy's inventory, looting or
+barter, the item card (with the equipment stats row on, `bEquipmentStats`) says
+"K) Detailed stats", and K opens a panel (the game's message box): for a gun its calibre and
+load, the muzzle velocity with every factor (calibre, this gun's multiplier and where it came
+from, load, each mod), the bullet's mass and momentum and what it pushes into a body, the
+projectiles a shot, drop and range, penetration, the card's DAM and DPS, fire rate (shots/s),
+spread, AP cost, critical damage and chance, condition, clip, reload (by its animation: the
+weapon's data has no time) and the attached mods; for an ammo its calibre, load, velocity, mass,
+penetration, transfer and DT factors and the momentum it gives. The key is `[nv-rs Gunplay]
+iDetailsKey` (37 = K), on Settings > Controls ("Detailed Stats Key": K, J, L, H, G, U, I, O, P, N,
+B, Z, C, V, Insert, End), saved. DAM and DPS both stay visible (the equipment stats row never
+cycles them).
+
 ### Weapon mods (`crates/host/src/weapon_mods.rs`)
 
 Patrick, 2026-11-14 (Weapon Mods Expanded through Play with mods): everything above takes the
@@ -470,6 +501,7 @@ line; a bad variable stops the start.
 | `bPenetration` | `NV_GUNPLAY_PENETRATION` | 1 | 0/1 (Settings > Gameplay "Penetration") |
 | `iBulletSpeed` | `NV_GUNPLAY_BULLET_SPEED` | 100 | 25-200 (Settings > Gameplay "Bullet Speed", in 5s) |
 | `iImpactStacking` | `NV_GUNPLAY_IMPACT_STACKING` | 300 | 100-1000 ms half-life (Settings > Gameplay "Impact Stacking", in 50s) |
+| `iDetailsKey` | `NV_GUNPLAY_DETAILS_KEY` | 37 | a DirectInput key code (Settings > Controls "Detailed Stats Key") |
 
 ### In-game Settings menu
 

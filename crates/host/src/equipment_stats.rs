@@ -141,6 +141,8 @@ pub fn install(e: &mut Engine) {
     });
     e.register(FADE, |e, a| {
         set_item_card(e, a[0], a[1], a[2], a[3], a[4] as u8);
+        // Once a frame while a card shows: the detailed stats' key (`crate::item_details`).
+        crate::item_details::idle(e);
         Ret::default()
     });
 }
@@ -559,9 +561,31 @@ fn populate(e: &mut Engine, item: u32, display: u32) {
     }
     // The highlighted item last: its stats are what stays.
     interface_populate_item_stats_display(e, item, display);
+    if let Some(hint) = crate::item_details::hovered(e, item, display) {
+        lines.push(hint);
+    }
     if display != 0 {
         show_lines(e, display, &lines);
     }
+}
+
+/// The card's DAM and DPS as the game shows them for its item (`crate::item_details`), e.g.
+/// "DAM 30  DPS 120"; empty when the card has neither.
+pub(crate) fn card_damage(e: &mut Engine, display: u32) -> String {
+    if display == 0 {
+        return String::new();
+    }
+    cell_stats(e, display, &[CELL_DAM, CELL_DPS])
+        .iter()
+        .map(|(t, v)| {
+            format!(
+                "{} {}",
+                String::from_utf8_lossy(t),
+                String::from_utf8_lossy(v)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 /// The cells moved above their partners put back on them, for `display`.

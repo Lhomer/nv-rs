@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (per-gun velocity, detailed stats)
+
+- **Patrick:** a muzzle velocity multiplier per gun (table by editor ID, every vanilla/DLC/GRA gun, fallback from damage vs the calibre's average), momentum/drop/penetration following; a detailed stats panel on a key (rebindable on Settings > Controls) for guns and ammo in the Pip-Boy, looting and barter, with the hint on the item card.
+- **Now:** `gun_velocity.rs` + `data/gun_velocity.tsv` (EDIDs read from the official masters on a thread; report of unmatched entries and guns without one at the first shot); `ballistics::shot`/`weapon_round` x gun, penetration x speed factor^2; `ballistics::breakdown`/`gun_caliber`; `weapon_mods::Mod.object`, `mod_velocity`; `item_details.rs`: hint via `equipment_stats::populate`, key polled in its fade hook, message-box panel, Controls row (`7e0601f0`, mode 64, 16 keys), `iDetailsKey`. The EDIDs were written from memory: check the `Per-gun velocity:` log line. Not run in game.
+
 ### Claude, 2026-11-14 (get-up spot and watch)
 
 - **Patrick (a5644a3):** knocked NPCs still fly when getting up, mainly in cramped spaces and uneven ground; spots 58 units from another actor, 450 from the body, 20 units over the floor; the stored push grew every frame while down.

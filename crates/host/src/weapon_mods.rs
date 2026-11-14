@@ -71,6 +71,8 @@ pub struct Mod {
     pub value: f32,
     pub value_two: f32,
     pub barrel: Barrel,
+    /// The mod item (`TESObjectIMOD`), 0 when the slot has none.
+    pub object: u32,
 }
 
 /// The muzzle velocity a long or heavy barrel gives, a short one, and a silencer.
@@ -99,25 +101,27 @@ pub fn barrel_of(name: &str) -> Barrel {
     }
 }
 
-/// The velocity factor of the attached mods: barrels and a silencer, and, with `speed_mod`, the
-/// projectile speed effect (left out for the player's shots, which the game already scaled).
-pub fn velocity_factor(mods: &[Mod], speed_mod: bool) -> f32 {
-    let mut f = 1.0f32;
-    for m in mods {
-        f *= match m.barrel {
-            Barrel::Long => LONG_BARREL,
-            Barrel::Short => SHORT_BARREL,
-            Barrel::None => 1.0,
-        };
-        match m.effect {
-            Effect::Silence => f *= SUPPRESSOR,
-            Effect::ProjectileSpeed if speed_mod && m.value.is_finite() && m.value > 0.0 => {
-                f *= m.value.clamp(0.25, 4.0)
-            }
-            _ => {}
+/// One mod's velocity factor: its barrel, a silencer, and with `speed_mod` the projectile speed
+/// effect (left out for the player's shots, which the game already scaled).
+pub fn mod_velocity(m: &Mod, speed_mod: bool) -> f32 {
+    let mut f = match m.barrel {
+        Barrel::Long => LONG_BARREL,
+        Barrel::Short => SHORT_BARREL,
+        Barrel::None => 1.0,
+    };
+    match m.effect {
+        Effect::Silence => f *= SUPPRESSOR,
+        Effect::ProjectileSpeed if speed_mod && m.value.is_finite() && m.value > 0.0 => {
+            f *= m.value.clamp(0.25, 4.0)
         }
+        _ => {}
     }
     f
+}
+
+/// The velocity factor of the attached mods ([`mod_velocity`] of each).
+pub fn velocity_factor(mods: &[Mod], speed_mod: bool) -> f32 {
+    mods.iter().map(|m| mod_velocity(m, speed_mod)).product()
 }
 
 /// The projectiles a split beam adds.
@@ -205,6 +209,7 @@ pub fn attached(e: &mut Engine, item: u32) -> Vec<Mod> {
             value: e.mem.f32(weapon + MOD_VALUE + 4 * i),
             value_two: e.mem.f32(weapon + MOD_VALUE_TWO + 4 * i),
             barrel: barrel_of(&name),
+            object,
         });
     }
     mods
@@ -231,6 +236,7 @@ mod tests {
             value,
             value_two,
             barrel: Barrel::None,
+            object: 0,
         }
     }
 

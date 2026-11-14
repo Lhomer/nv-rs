@@ -349,6 +349,9 @@ const IMPACT_MATERIAL: u32 = 0x20;
 const WEAPON_PROJECTILE: u32 = 0x118;
 const WEAPON_AMMO: u32 = 0xa8;
 const WEAPON_PROJECTILES: u32 = 0x11e;
+/// `TESObjectWEAP`'s type (`eType`, 3 to 9 guns) and damage.
+const WEAPON_KIND: u32 = 0xf4;
+const WEAPON_DAMAGE: u32 = 0xa0;
 const AMMO_PROJECTILE: u32 = 0xb4;
 const WEAP: u8 = 0x28;
 const AMMO: u8 = 0x29;
@@ -400,12 +403,12 @@ fn on() -> bool {
     crate::gunplay::is_on() && crate::gunplay::tuning().ballistics
 }
 
-fn name_of(e: &Engine, form: u32) -> String {
+pub(crate) fn name_of(e: &Engine, form: u32) -> String {
     String::from_utf8_lossy(&jip::commands::the_name(e, form)).into_owned()
 }
 
 /// An ammo, or a form list's first ammo.
-fn ammo_form(e: &Engine, form: u32) -> u32 {
+pub(crate) fn ammo_form(e: &Engine, form: u32) -> u32 {
     if form == 0 {
         return 0;
     }
@@ -467,6 +470,9 @@ pub fn apply_forms(e: &mut Engine) {
             }
         }
     }
+    // The per-gun velocity's fallback (each calibre's average damage) worked out now, not at a
+    // shot.
+    crate::gun_velocity::prepare(e);
     let scale = t.bullet_speed.clamp(1, 1000) as f32 / 100.0;
     for (form, caliber) in found {
         let orig = match forms.get(&form) {
@@ -503,7 +509,7 @@ pub fn form_flight(caliber: Caliber, scale: f32, range: f32) -> (f32, f32, f32) 
 }
 
 /// The ammo effects' damage threshold multiplier (1 for none) and subtraction (0 for none).
-fn threshold_effects(e: &mut Engine, ammo: u32) -> (f32, f32) {
+pub(crate) fn threshold_effects(e: &mut Engine, ammo: u32) -> (f32, f32) {
     let (mut mult, mut minus) = (1.0f32, 0.0f32);
     let mut node = e.call(AMMO_EFFECTS, &args![ammo]).u32();
     for _ in 0..16 {
@@ -592,7 +598,11 @@ fn shot(e: &mut Engine, form: u32, shooter: u32, weapon: u32, projectile: u32) {
     } else {
         1.0
     };
-    let muzzle = given * mods.velocity * fitted;
+    // The gun's own multiplier (`crate::gun_velocity`), and the penetration with the speed: the
+    // round's energy goes with the square of its speed.
+    let gun = crate::gun_velocity::multiplier(e, weapon).0;
+    let muzzle = given * mods.velocity * fitted * gun;
+    let faster = (mods.velocity * fitted * gun).clamp(0.25, 4.0);
     e.mem.set_f32(projectile + SPEED_MULT, muzzle);
     let projectiles = u32::from(e.mem.u8(weapon + WEAPON_PROJECTILES))
         + crate::weapon_mods::extra_projectiles(&weapon_mods);
@@ -603,7 +613,7 @@ fn shot(e: &mut Engine, form: u32, shooter: u32, weapon: u32, projectile: u32) {
             caliber,
             load,
             passes: 0,
-            power: caliber.penetration * mods.penetration,
+            power: caliber.penetration * mods.penetration * faster * faster,
             pellet,
             muzzle,
             velocity: caliber.velocity * muzzle,
@@ -735,10 +745,102 @@ pub fn weapon_round(e: &mut Engine, weapon: u32, shooter: u32) -> Option<Round> 
     let pellet = projectiles > 1 && load != Load::Slug;
     Some(Round {
         mass: caliber.mass * mods.mass / 1000.0,
-        speed: caliber.velocity * mods.velocity * fitted,
+        speed: caliber.velocity
+            * mods.velocity
+            * fitted
+            * crate::gun_velocity::multiplier(e, weapon).0,
         share: transfer_share(load, pellet),
         threshold: mods.threshold,
         pellet,
+    })
+}
+
+/// A gun's calibre (by its default ammo) and its damage, `None` for a weapon of no calibre (melee,
+/// energy, launchers, thrown).
+pub fn gun_caliber(e: &mut Engine, weapon: u32) -> Option<(Caliber, f32)> {
+    if weapon == 0 || e.mem.u8(weapon + 4) != WEAP {
+        return None;
+    }
+    let kind = e.mem.i8(weapon + WEAPON_KIND);
+    if !(3..=9).contains(&kind) {
+        return None;
+    }
+    let ammo = ammo_form(e, e.mem.u32(weapon + WEAPON_AMMO));
+    if ammo == 0 {
+        return None;
+    }
+    let caliber = caliber_of(&name_of(e, ammo))?;
+    Some((caliber, f32::from(e.mem.u16(weapon + WEAPON_DAMAGE))))
+}
+
+/// A gun's round, told factor by factor (the detailed stats, `crate::item_details`).
+#[derive(Clone, Debug)]
+pub struct Breakdown {
+    pub caliber: Caliber,
+    pub ammo_name: String,
+    pub load: Load,
+    pub gun: f32,
+    pub gun_source: crate::gun_velocity::Source,
+    /// Each mod with a velocity factor: its name and factor.
+    pub mods: Vec<(String, f32)>,
+    /// m/s at the muzzle, the bullet's mass (kg), its projectiles a shot.
+    pub velocity: f32,
+    pub mass: f32,
+    pub projectiles: u32,
+    pub pellet: bool,
+    /// The penetration power and the share left in a body, the DT factor.
+    pub power: f32,
+    pub share: f32,
+    pub threshold: f32,
+}
+
+/// The breakdown of `weapon` as `item` (an `ItemChange`, 0 for none) fires it, with the ammo
+/// `holder` has loaded (the player's, else its default): `None` for a weapon of no calibre.
+pub fn breakdown(e: &mut Engine, weapon: u32, item: u32, holder: u32) -> Option<Breakdown> {
+    gun_caliber(e, weapon)?;
+    let current = e.call(GET_CURRENT_AMMO, &args![weapon, holder]).u32();
+    let mut ammo = ammo_form(e, current);
+    if ammo == 0 {
+        ammo = ammo_form(e, e.mem.u32(weapon + WEAPON_AMMO));
+    }
+    let ammo_name = name_of(e, ammo);
+    let caliber = caliber_of(&ammo_name).or_else(|| gun_caliber(e, weapon).map(|c| c.0))?;
+    let (mult, minus) = threshold_effects(e, ammo);
+    let load = load_of(&ammo_name, mult, minus);
+    let mods = load.mods();
+    let (gun, gun_source) = crate::gun_velocity::multiplier(e, weapon);
+    let attached = crate::weapon_mods::attached(e, item);
+    let mut named = Vec::new();
+    for m in &attached {
+        let f = crate::weapon_mods::mod_velocity(m, true);
+        if (f - 1.0).abs() > 1e-4 {
+            let name = if m.object == 0 {
+                "a mod".to_string()
+            } else {
+                name_of(e, m.object)
+            };
+            named.push((name, f));
+        }
+    }
+    let fitted = crate::weapon_mods::velocity_factor(&attached, true);
+    let projectiles = u32::from(e.mem.u8(weapon + WEAPON_PROJECTILES)).max(1)
+        + crate::weapon_mods::extra_projectiles(&attached);
+    let pellet = projectiles > 1 && load != Load::Slug;
+    let faster = (mods.velocity * fitted * gun).clamp(0.25, 4.0);
+    Some(Breakdown {
+        caliber,
+        ammo_name,
+        load,
+        gun,
+        gun_source,
+        mods: named,
+        velocity: caliber.velocity * mods.velocity * fitted * gun,
+        mass: caliber.mass * mods.mass / 1000.0,
+        projectiles,
+        pellet,
+        power: caliber.penetration * mods.penetration * faster * faster,
+        share: transfer_share(load, pellet),
+        threshold: mods.threshold,
     })
 }
 
