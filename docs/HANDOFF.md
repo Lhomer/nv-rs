@@ -7,6 +7,14 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (Test Range: the freeze after the loading screen)
+
+- **Patrick (2c9c823, RTX 4090, Vulkan, 2560x1440):** Test Range shows the loading screen, then the game freezes about 1 s later. The log ends with `Test Range: QASmoke is not in the loaded game` and nothing after; his Fallout.ini still had `sTestRangeCell=QASmoke`.
+- **Cause 1 (QASmoke):** the 68956e3 launcher wrote the nv-rs sections block with that build's default `sTestRangeCell=QASmoke` into his Fallout.ini, and a key already there is never rewritten, so the configured cell was tried before `auto`'s. Now `QASmoke` counts as `auto` (`test_range::is_legacy_cell`) and a play run writes `sTestRangeCell=auto` back (`game_ini::write_keys`).
+- **Cause 2 (the freeze), the likely one; not reproduced here:** the fallback did move on (the loading screen is the next candidate's `coc`), but the set-up started from a frame count from the new game's seam, which fires inside the `coc`. Frames the game runs during that load (the look hook) reached 30 (about 1 s) while the `coc`'s console script was still running and started the set-up nested inside it: hundreds of console lines compiled with the same compiler inside the running one. Now: phases (`Starting`, `Loading`, `WaitingForPlay`, `Ready`); nothing is set up during `Loading`; after the `coc` returns the set-up waits for 30 frames in a row with no loading screen (`011da0c0`), no main menu (`0070edf0`), the player in a cell and no console line running; `run_line` refuses a line while another runs; 90 s without play goes back to the main menu (`007d0a70`) and shows why there.
+- **Logging:** every step (`Test Range: running `coc X``, `CenterOnCell began a new game`, `attaching the cell <id> (TES 00453dc0)` / `the cell is attached` from a wrapper on `00453dc0`, `` `coc X` returned``, `started in X: the player is in the cell <id> at x, y, z`, `a frame ran while the cell loads`, `play has begun`, set-up counts, container, each target with base, ref and distance); a watchdog thread repeats the last step every 20 s (up to five times) while a start has not reached play, so a hang inside the `coc` itself is located too. That hang (if it is one) is not timed out: the main thread is inside the game's load and cannot be safely left; the watchdog says where it is.
+- **Next action:** Patrick: the Test Range again; send the log if it stops (the last `Test Range:` lines say where).
+
 ### Claude, 2026-11-14 (Test Range: the place from the player's own FalloutNV.esm)
 
 - **Patrick (d9b4aa8, Steam 1.4.0.525, all DLC):** "Test Range: no cell named QASmoke in the loaded game". `QASmoke` is a Fallout 3 cell; FalloutNV.esm has no such string.

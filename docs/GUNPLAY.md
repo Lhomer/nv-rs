@@ -230,6 +230,14 @@ If the range cannot start, the main menu shows why in a message box and the game
 - the console could not be made;
 - the game did not start in the cell.
 
+A start that never reaches play goes back to the main menu by itself: when the game has not
+been in play (no loading screen, not the main menu, the player in a cell) for 30 frames in a row
+within 90 s of the `coc` returning, the main menu comes back with a message box saying so. The
+log has a line for every step of a start (the cell tried, the `coc`, the new game, the cell
+attached, the player's cell and position, play begun, the container, the weapons, the ammo, the
+lane and each target placed); while a start hangs, a watchdog line repeats the last step every
+20 s, so a log that stops shows where.
+
 The menu stays usable. Until 2026-11-14 the button did nothing on a start where the console had
 not been opened: the game makes its console only on first use, and the range now asks for it the
 way the console key does (`MenuConsole::Instance(1)`, `0071b160`).
@@ -264,7 +272,9 @@ little ahead. The game's log lists the five best (`Test Range: candidate <cell> 
 ...)`) and the one used (`Test Range: started in <cell>`).
 
 **Fallbacks, tried in order** until a new game begins:
-1. `[nv-rs Gunplay] sTestRangeCell` (or `NV_TEST_RANGE_CELL`) when it names a cell;
+1. `[nv-rs Gunplay] sTestRangeCell` (or `NV_TEST_RANGE_CELL`) when it names a cell
+   (`QASmoke`, which the first builds wrote into Fallout.ini, counts as `auto`, and a play run
+   writes `auto` back);
 2. the ranked cells, best first (up to eight);
 3. the last resort: the Mojave's worldspace at Goodsprings (`cow WastelandNV -18 0`). This is not
    quiet; it is only used when no interior starts.

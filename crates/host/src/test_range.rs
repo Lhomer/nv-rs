@@ -35,6 +35,7 @@
 
 use engine::extend::{Owner, SiteSlot};
 use engine::prelude::*;
+use engine::units::fallout_shared::tes::fn_00453dc0;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
 
@@ -76,9 +77,48 @@ static CELL: Mutex<String> = Mutex::new(String::new());
 
 /// The range's cell (`sTestRangeCell`, `crate::fixes::install`): an editor id of letters, digits
 /// and `_`, up to 64; anything else keeps [`DEFAULT_CELL`].
+///
+/// `QASmoke`, the first builds' default, is a Fallout 3 cell FalloutNV.esm does not have; Play.exe
+/// wrote it into the `[nv-rs Gunplay]` block of players' Fallout.ini then, and it stayed there
+/// (Patrick, 2c9c823: the configured cell was tried before `auto`'s). It counts as `auto`, and a
+/// play run puts `auto` back in the file ([`forget_legacy_cell`]).
 pub fn set_cell(name: &str) {
-    let name = if valid_cell(name) { name } else { DEFAULT_CELL };
+    let name = if is_legacy_cell(name) {
+        eprintln!("Test Range: sTestRangeCell={name} is the first builds' default, which FalloutNV.esm does not have: auto instead");
+        forget_legacy_cell();
+        DEFAULT_CELL
+    } else if valid_cell(name) {
+        name
+    } else {
+        DEFAULT_CELL
+    };
     *CELL.lock().unwrap_or_else(|p| p.into_inner()) = name.to_string();
+}
+
+/// Whether `name` is a default an earlier build wrote that no FalloutNV.esm has.
+pub fn is_legacy_cell(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case("QASmoke")
+}
+
+/// `sTestRangeCell=auto` into the run's Fallout.ini (a launcher's play run only).
+fn forget_legacy_cell() {
+    if !crate::fixes::is_play_run(|name| std::env::var(name).ok()) {
+        return;
+    }
+    let Some(path) = crate::game_ini::path() else {
+        return;
+    };
+    let written = crate::game_ini::write_keys(
+        &path,
+        &[(crate::gunplay::SECTION, "sTestRangeCell", DEFAULT_CELL)],
+    );
+    match written {
+        Ok(()) => eprintln!(
+            "Test Range: {} now says sTestRangeCell=auto",
+            path.display()
+        ),
+        Err(why) => eprintln!("Test Range: {} not changed ({why})", path.display()),
+    }
 }
 
 fn cell() -> String {
@@ -97,16 +137,33 @@ pub fn valid_cell(name: &str) -> bool {
 
 // --- The state. --------------------------------------------------------------------------------
 
+/// Where the range is.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// No range.
+    #[default]
+    Off,
+    /// The main menu's entry was chosen and its `coc` runs.
+    Starting,
+    /// The `coc` began a new game (the `CenterOnCell` seam) and has not returned yet.
+    Loading,
+    /// The `coc` returned; waiting for play to begin (no loading screen, no main menu, the
+    /// player in a cell) before the set-up.
+    WaitingForPlay,
+    /// Set up; the range menu works.
+    Ready,
+}
+
 /// The range under way.
 #[derive(Debug, Default)]
 struct Range {
-    /// The main menu's entry was chosen and its `coc` runs.
-    starting: bool,
-    /// A range game is the one running.
-    active: bool,
-    /// Frames of play since the range game started, until it is set up.
-    frames: u32,
-    set_up: bool,
+    phase: Phase,
+    /// When the phase began (for the timeout).
+    since: Option<std::time::Instant>,
+    /// The place started (for the log).
+    place: String,
+    /// Frames of play in a row with no loading screen, no main menu and the player in a cell.
+    good_frames: u32,
     /// The weapons container and the targets (reference ids), whether the targets fight.
     container: u32,
     targets: Vec<u32>,
@@ -127,13 +184,81 @@ fn with_range<R>(f: impl FnOnce(&mut Range) -> R) -> R {
     f(guard.get_or_insert_with(Range::default))
 }
 
-/// Whether a range game is running.
+/// Whether a range game is running (from its new game on: its saves are refused).
 pub fn active() -> bool {
-    with_range(|r| r.active)
+    with_range(|r| {
+        matches!(
+            r.phase,
+            Phase::Loading | Phase::WaitingForPlay | Phase::Ready
+        )
+    })
+}
+
+/// The range's phase.
+pub fn phase() -> Phase {
+    with_range(|r| r.phase)
+}
+
+/// The range moves to `phase`, said in the log as a step ([`step`]).
+fn enter(phase: Phase, what: &str) {
+    with_range(|r| {
+        r.phase = phase;
+        r.since = Some(std::time::Instant::now());
+        r.good_frames = 0;
+    });
+    step(what);
+}
+
+/// The step the range is at, with when it began: the log line, and what the watchdog says when
+/// nothing moves on ([`watch`]).
+static STEP: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
+
+/// A step of the start or the set-up: one log line, and the watchdog's last known place.
+fn step(what: &str) {
+    eprintln!("Test Range: {what}");
+    *STEP.lock().unwrap_or_else(|p| p.into_inner()) =
+        Some((what.to_string(), std::time::Instant::now()));
+}
+
+/// The watchdog of a start: a host thread that, while the range is starting, loading or waiting
+/// for play, says in the log every 20 s that nothing moved on since the last step (up to five
+/// times), so a log that ends shows where the game stopped even when its main thread is stuck.
+fn watch() {
+    let _ = std::thread::Builder::new()
+        .name("test range watchdog".into())
+        .spawn(|| {
+            let mut said = 0;
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let phase = phase();
+                if !matches!(
+                    phase,
+                    Phase::Starting | Phase::Loading | Phase::WaitingForPlay
+                ) {
+                    return;
+                }
+                let stuck = STEP
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .as_ref()
+                    .map(|(what, at)| (what.clone(), at.elapsed().as_secs()));
+                if let Some((what, secs)) = stuck {
+                    if secs >= 20 * (said + 1) && said < 5 {
+                        said += 1;
+                        eprintln!(
+                            "Test Range: nothing moved on for {secs} s ({phase:?}); last step: {what}"
+                        );
+                    }
+                }
+            }
+        });
 }
 
 /// The range ends (a save loads, a new game, the main menu): nothing of it is kept.
 fn end(_: &mut Engine, _: &[u32]) -> Option<u32> {
+    if phase() != Phase::Off {
+        step("the range ends (a load, a new game or the main menu)");
+    }
     with_range(|r| *r = Range::default());
     ANSWER.store(NO_ANSWER, Ordering::Relaxed);
     None
@@ -186,17 +311,31 @@ pub fn install(e: &mut Engine) {
         Ret::default()
     });
     e.on_site(COC_NEW_GAME, |_, _| {
-        with_range(|r| {
-            if r.starting {
-                *r = Range {
-                    active: true,
-                    ..Range::default()
-                };
-            } else {
-                *r = Range::default();
-            }
-        });
+        if phase() == Phase::Starting {
+            enter(
+                Phase::Loading,
+                "CenterOnCell began a new game (loading the cell)",
+            );
+        } else {
+            with_range(|r| *r = Range::default());
+        }
         None
+    });
+    e.register(CELL_ATTACH, |e, a| {
+        let watched = matches!(phase(), Phase::Starting | Phase::Loading);
+        if watched {
+            let id = if a[1] == 0 {
+                0
+            } else {
+                e.mem.u32(a[1] + FORM_ID)
+            };
+            step(&format!("attaching the cell {id:08X} (TES 00453dc0)"));
+        }
+        fn_00453dc0(e, Ptr::new(a[0]), Ptr::new(a[1]), Ptr::new(a[2]));
+        if watched {
+            step("the cell is attached");
+        }
+        Ret::default()
     });
     e.on_site(MENU_NEW_GAME, end);
     e.on_site(PRE_LOAD, end);
@@ -343,6 +482,7 @@ fn start(e: &mut Engine) {
         "Test Range: starting (sTestRangeCell {configured}; tries {})",
         list.iter().map(Target::name).collect::<Vec<_>>().join(", ")
     );
+    watch();
     let outcome = first_start(
         e,
         &list,
@@ -353,16 +493,55 @@ fn start(e: &mut Engine) {
         |e, t| {
             with_range(|r| {
                 *r = Range {
-                    starting: true,
+                    place: t.name(),
                     ..Range::default()
                 }
             });
-            run_line(e, &t.line())
+            FRAME_IN_LOAD.store(false, Ordering::Relaxed);
+            enter(Phase::Starting, &format!("running `{}`", t.line()));
+            let ran = run_line(e, &t.line());
+            if ran {
+                step(&format!("`{}` returned", t.line()));
+            }
+            ran
         },
         |_| active(),
     );
     match outcome {
-        Ok(target) => eprintln!("Test Range: started in {}", target.name()),
+        Ok(target) => {
+            let player = e.global::<u32>(PLAYER);
+            let (cell, at) = if player == 0 {
+                (0, [0.0; 3])
+            } else {
+                let position = e.vcall(player, POSITION_SLOT, &args![]).u32();
+                let at = if position == 0 {
+                    [0.0; 3]
+                } else {
+                    [
+                        e.mem.f32(position),
+                        e.mem.f32(position + 4),
+                        e.mem.f32(position + 8),
+                    ]
+                };
+                let cell = e.mem.u32(player + PARENT_CELL);
+                let id = if cell == 0 {
+                    0
+                } else {
+                    e.mem.u32(cell + FORM_ID)
+                };
+                (id, at)
+            };
+            enter(
+                Phase::WaitingForPlay,
+                &format!(
+                    "started in {}: the player is in the cell {cell:08X} at {:.0}, {:.0}, {:.0}; waiting for play",
+                    target.name(),
+                    at[0],
+                    at[1],
+                    at[2]
+                ),
+            );
+        }
         Err(why) => {
             let text = why.text();
             eprintln!("{text}");
@@ -462,18 +641,53 @@ fn fail_on_menu(e: &mut Engine, text: &str) {
 
 /// Once a frame of play (after weighty combat's frame): the set-up when it is due, the Home key,
 /// the range menu's answer.
+///
+/// The set-up waits until the `coc` has returned and play has begun: no loading screen
+/// (`LoadingMenu`, `011da0c0`), no main menu (`0070edf0`), the player in a cell, for
+/// [`SETUP_FRAMES`] frames in a row, and never while a console line runs. Through 2c9c823 it only
+/// counted frames from the new game's seam, which fires inside the `coc`: frames the game ran
+/// during the load could start it there, nested inside the `coc`'s own script (Patrick: the
+/// loading screen, then a freeze). When play has not begun after [`PLAY_TIMEOUT`], the range goes
+/// back to the main menu and says so.
 pub fn frame(e: &mut Engine, player: u32) {
-    let (active, due) = with_range(|r| {
-        if r.active && !r.set_up {
-            r.frames += 1;
+    match phase() {
+        Phase::WaitingForPlay => {
+            let playing = !RUNNING.load(Ordering::Relaxed)
+                && e.global::<u32>(LOADING_MENU) == 0
+                && !e.call(IS_IN_START_MENU, &[]).bool()
+                && e.mem.u32(player + PARENT_CELL) != 0;
+            let next = with_range(|r| {
+                let waited = r.since.map_or(0, |s| s.elapsed().as_secs());
+                let next = wait(r.good_frames, playing, waited);
+                if let Wait::Keep(frames) = next {
+                    r.good_frames = frames;
+                }
+                next
+            });
+            if next == Wait::SetUp {
+                let cell = e.mem.u32(player + PARENT_CELL);
+                enter(
+                    Phase::Ready,
+                    &format!(
+                        "play has begun in the cell {:08X}: setting up",
+                        e.mem.u32(cell + FORM_ID)
+                    ),
+                );
+                setup(e, player);
+            } else if next == Wait::TimeOut {
+                time_out(e);
+            }
+            return;
         }
-        (r.active, r.active && !r.set_up && r.frames >= SETUP_FRAMES)
-    });
-    if !active {
-        return;
-    }
-    if due && e.mem.u32(player + PARENT_CELL) != 0 {
-        setup(e, player);
+        Phase::Ready => {}
+        Phase::Loading => {
+            // Said once a start: the game runs frames inside the `coc` (the set-up waits).
+            if !FRAME_IN_LOAD.swap(true, Ordering::Relaxed) {
+                step("a frame ran while the cell loads (the set-up waits for the coc to return)");
+            }
+            return;
+        }
+        _ => return,
     }
     if home_pressed() {
         open_menu(e);
@@ -484,8 +698,50 @@ pub fn frame(e: &mut Engine, player: u32) {
     }
 }
 
-/// Frames of play before the set-up (the cell's references settle in).
+/// A frame ran during the start's load ([`frame`]).
+static FRAME_IN_LOAD: AtomicBool = AtomicBool::new(false);
+
+/// What a frame of the wait for play does.
+#[derive(Debug, PartialEq, Eq)]
+enum Wait {
+    /// Keep waiting, with this many frames of play in a row.
+    Keep(u32),
+    SetUp,
+    TimeOut,
+}
+
+/// The wait for play: `frames` of play in a row so far, whether this frame is one, the seconds
+/// since the `coc` returned.
+fn wait(frames: u32, playing: bool, waited: u64) -> Wait {
+    let frames = if playing { frames + 1 } else { 0 };
+    if frames >= SETUP_FRAMES {
+        Wait::SetUp
+    } else if waited >= PLAY_TIMEOUT {
+        Wait::TimeOut
+    } else {
+        Wait::Keep(frames)
+    }
+}
+
+/// Frames of play in a row before the set-up (the cell's references settle in).
 const SETUP_FRAMES: u32 = 30;
+/// Seconds after the `coc` returned within which play must begin.
+const PLAY_TIMEOUT: u64 = 90;
+
+/// Play never began: back to the main menu, the reason shown there ([`add_option`]).
+fn time_out(e: &mut Engine) {
+    let place = with_range(|r| r.place.clone());
+    let text = format!(
+        "Test Range: {place} did not finish loading within {PLAY_TIMEOUT} s, so the range went back to the main menu. The game's log says where it stopped."
+    );
+    step(&text);
+    with_range(|r| *r = Range::default());
+    *PENDING_ERROR.lock().unwrap_or_else(|p| p.into_inner()) = Some(text);
+    e.call(CHOOSE_MAIN_MENU, &[]);
+}
+
+/// A reason to show on the main menu when it is made again ([`time_out`]).
+static PENDING_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 /// Home's press (its going down), on the real window's keyboard (Windows).
 fn home_pressed() -> bool {
@@ -539,6 +795,14 @@ const GET_MESSAGE_MENU_RESULT: u32 = 0x0070_3fa0;
 const QUEUE_UI_MESSAGE: u32 = 0x0070_52f0;
 /// `StartMenu::ChooseMainMenu`.
 const CHOOSE_MAIN_MENU: u32 = 0x007d_0a70;
+/// The player, the loading menu (`LoadingMenu`, set while a loading screen is up) and whether the
+/// main menu is up (`0070edf0`).
+const PLAYER: u32 = 0x011d_ea3c;
+const LOADING_MENU: u32 = 0x011d_a0c0;
+const IS_IN_START_MENU: u32 = 0x0070_edf0;
+/// `TES`'s switch of the loaded area to a cell (`thiscall`: the cell, the position), wrapped to
+/// say when the range's cell is attached.
+pub const CELL_ATTACH: u32 = 0x0045_3dc0;
 /// The game's map of every form (`NiTPointerMap`: hash size `+4`, table `+8`; an item's next,
 /// key and value at `+0`, `+4`, `+8`).
 const ALL_FORMS: u32 = 0x011c_54c0;
@@ -571,7 +835,23 @@ const UNITS_PER_METRE: f32 = 70.0;
 
 /// Runs `line` as the console runs a typed line: a temporary script compiled and run by the
 /// console's compiler. False when there is no console.
+///
+/// One line at a time: a line asked for while another runs (the game running the range's frame
+/// inside a `coc`) is refused and said in the log, never compiled inside the other.
 pub fn run_line(e: &mut Engine, line: &str) -> bool {
+    if RUNNING.swap(true, Ordering::Relaxed) {
+        eprintln!("Test Range: `{line}` refused: another console line is running");
+        return false;
+    }
+    let ran = run_line_now(e, line);
+    RUNNING.store(false, Ordering::Relaxed);
+    ran
+}
+
+/// A console line of the range's is running ([`run_line`]).
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
+fn run_line_now(e: &mut Engine, line: &str) -> bool {
     // The console, made on first use as the game makes it when the console key is first pressed.
     let console = e.call(CONSOLE_GET, &args![1u32]).u32();
     if console == 0 {
@@ -757,13 +1037,18 @@ pub fn facing_back(heading: f32) -> f32 {
 
 /// The range's set-up: the weapons container, the ammo, the targets.
 fn setup(e: &mut Engine, player: u32) {
-    with_range(|r| r.set_up = true);
     let forms = all_forms(e);
     let weapons = weapons(e, &forms);
     let mut ammo: Vec<u32> = weapons.iter().filter_map(|&w| ammo_of(e, w)).collect();
     ammo.sort_unstable_by_key(|&a| e.mem.u32(a + FORM_ID));
     ammo.dedup();
     let ammo: Vec<u32> = ammo.iter().map(|&a| e.mem.u32(a + FORM_ID)).collect();
+    step(&format!(
+        "set-up: {} forms, {} weapons, {} ammo types",
+        forms.len(),
+        weapons.len(),
+        ammo.len()
+    ));
     // The container, behind the player (opened from the range menu).
     let mut container_base = by_names(e, &forms, CONT, &CONTAINERS, 1);
     if container_base.is_empty() {
@@ -780,6 +1065,10 @@ fn setup(e: &mut Engine, player: u32) {
         let placed = e
             .call(PLACE_AT_ME, &args![player, base, 1u32, 0u32, 0u32, 1.0f32])
             .u32();
+        step(&format!(
+            "set-up: the container {:08X} placed as {placed:08X}",
+            e.mem.u32(base + FORM_ID)
+        ));
         if placed != 0 {
             container = e.mem.u32(placed + FORM_ID);
             let (x, y) = offset(heading, -1.8, 0.0);
@@ -790,13 +1079,17 @@ fn setup(e: &mut Engine, player: u32) {
                 let w = id(e.mem.u32(weapon + FORM_ID));
                 run_line(e, &format!("{c}.additem {w} 1 1"));
             }
+            step(&format!("set-up: the weapons are in the container {c}"));
         }
+    } else {
+        step("set-up: no container in the loaded game");
     }
     with_range(|r| {
         r.container = container;
         r.ammo = ammo;
     });
     fill_ammo(e);
+    step("set-up: the ammo is in the player's inventory");
     // Down the longest clear line of the room: the player turned to face it.
     let (best, clear) = best_heading(e, player, heading);
     if best != heading {
@@ -846,6 +1139,11 @@ fn place_targets(e: &mut Engine, player: u32, heading: f32) {
     }
     let creatures = by_names(e, &forms, CREA, &CREATURES, 4);
     let clear = clear_metres(e, player, heading);
+    step(&format!(
+        "targets: {} humanoid and {} creature kinds, {clear:.0} m clear",
+        humanoids.len(),
+        creatures.len()
+    ));
     let angle = facing_back(heading);
     let hostile = with_range(|r| r.hostile);
     let mut targets = Vec::new();
@@ -864,10 +1162,16 @@ fn place_targets(e: &mut Engine, player: u32, heading: f32) {
         let placed = e
             .call(PLACE_AT_ME, &args![player, base, 1u32, 0u32, 0u32, 1.0f32])
             .u32();
+        let base_id = e.mem.u32(base + FORM_ID);
         if placed == 0 {
+            step(&format!("targets: {base_id:08X} could not be placed"));
             continue;
         }
         let t = id(e.mem.u32(placed + FORM_ID));
+        step(&format!(
+            "targets: {} ({base_id:08X}) placed as {t} at {metres:.0} m, {side:+.1} m aside",
+            name(e, base)
+        ));
         let (x, y) = offset(heading, metres, side);
         run_line(e, &format!("{t}.moveto player {x:.0} {y:.0} 0"));
         run_line(e, &format!("{t}.setangle z {angle:.0}"));
@@ -876,6 +1180,7 @@ fn place_targets(e: &mut Engine, player: u32, heading: f32) {
         }
         targets.push(e.mem.u32(placed + FORM_ID));
     }
+    step(&format!("targets: {} in the lane", targets.len()));
     with_range(|r| r.targets = targets);
 }
 
@@ -1098,6 +1403,13 @@ fn act(e: &mut Engine, player: u32, answer: u8) {
 pub fn add_option(e: &mut Engine) {
     // The base game's master is read for the range's places while the menu is up.
     start_scan(e);
+    if let Some(text) = PENDING_ERROR
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
+    {
+        fail_on_menu(e, &text);
+    }
     let text = e.call(OPERATOR_NEW, &args![16u32]).u32();
     let block = e.call(OPERATOR_NEW, &args![0x10u32]).u32();
     if text == 0 || block == 0 {
@@ -1262,8 +1574,14 @@ mod tests {
         for address in [SCRIPT_NEW, SET_TEMPORARY, SCRIPT_SET_TEXT, SCRIPT_DELETE] {
             e.register(address, |_, _| Ret::default());
         }
-        e.register(COMPILE_AND_RUN, |_, a| {
+        static NESTED: AtomicU32 = AtomicU32::new(u32::MAX);
+        e.register(COMPILE_AND_RUN, |e, a| {
             RAN.store(a[1], Ordering::Relaxed);
+            // A line asked for while this one runs (the range's frame inside a `coc`): refused.
+            NESTED.store(
+                u32::from(run_line(e, "player.additem f 1")),
+                Ordering::Relaxed,
+            );
             Ret::default()
         });
         assert!(run_line(&mut e, "coc QASmoke"));
@@ -1277,11 +1595,38 @@ mod tests {
             0x5000,
             "run by the console's compiler"
         );
+        assert_eq!(
+            NESTED.load(Ordering::Relaxed),
+            0,
+            "a nested line is refused"
+        );
+        assert!(!RUNNING.load(Ordering::Relaxed), "the next line may run");
         // No console and none to be made: false, nothing run.
         CONSOLE.store(0, Ordering::Relaxed);
         RAN.store(0, Ordering::Relaxed);
         assert!(!run_line(&mut e, "coc QASmoke"));
         assert_eq!(RAN.load(Ordering::Relaxed), 0);
+    }
+
+    /// The set-up waits for 30 frames of play in a row (a loading screen, the main menu or a
+    /// running console line starts the count again) and gives up 90 s after the `coc` returned.
+    #[test]
+    fn the_set_up_waits_for_play() {
+        assert_eq!(wait(0, true, 0), Wait::Keep(1));
+        assert_eq!(wait(28, true, 5), Wait::Keep(29));
+        assert_eq!(wait(29, true, 5), Wait::SetUp);
+        assert_eq!(wait(29, false, 5), Wait::Keep(0));
+        assert_eq!(wait(10, false, PLAY_TIMEOUT), Wait::TimeOut);
+        assert_eq!(wait(29, true, PLAY_TIMEOUT), Wait::SetUp);
+    }
+
+    /// The first builds' `QASmoke` counts as `auto`; other names stay as given.
+    #[test]
+    fn the_old_default_cell_is_auto() {
+        assert!(is_legacy_cell("QASmoke"));
+        assert!(is_legacy_cell(" qasmoke "));
+        assert!(!is_legacy_cell("NorthernPassageINT"));
+        assert!(!is_legacy_cell(DEFAULT_CELL));
     }
 
     #[test]
