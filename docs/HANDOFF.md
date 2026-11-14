@@ -7,6 +7,13 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (Test Range: stuck in the cell's attach)
+
+- **Patrick (312dda26, RTX 4090, Vulkan):** the ini fix worked (`QASmoke` became `auto`), but it still froze on the loading screen. The log ends: `running `coc NorthernPassageINT``, `CenterOnCell began a new game`, `attaching the cell 00157A92 (TES 00453dc0)`. So the set-up was not the cause this time: the `coc`'s load itself never finished, inside `TES`'s switch to the cell, with the `coc` run from the main menu's click handler.
+- **Not found which call blocks** (no game here). `00453dc0` draws the menu background (`00871dc0`), attaches the cell, and waits for the IO manager's queued loads (`00c3dfa0`, the loading thread); the likeliest is that a load the wait needs cannot run while the main thread is inside the menu's click handling. The game itself never loads there: its New Game and Load are carried out later from the main loop.
+- **Now:** the click only asks for the start; it runs at the main loop's next pass (seam `0086b386`, owned by the row before xNVSE's tick: top of the loop, after the message pump, before the frame). While the `coc` loads an engine call hook (`Engine::set_call_hook`) writes `load: calls <addr>` for each call at `CenterOnCell`'s level and `attach: calls <addr>` inside `00453dc0`, with `returned after <n> ms` for slow ones, and keeps the chain of calls running now (`crates/host/src/range_watch.rs`). A watchdog thread writes the last step and that chain every 10 s without progress, and after 90 s stuck in the load (150 s once the `coc` returned) says so in the log and a message box and ends the run (`end_process(3)`): the main thread cannot be got back from inside the game's load. The 90 s frame timeout back to the main menu still applies once the `coc` returned.
+- **Next action:** Patrick: Test Range again. If it still sticks, the log's last `attach: calls ...` line and the watchdog's `running: ...` chain name the function to look at.
+
 ### Claude, 2026-11-14 (Test Range: the freeze after the loading screen)
 
 - **Patrick (2c9c823, RTX 4090, Vulkan, 2560x1440):** Test Range shows the loading screen, then the game freezes about 1 s later. The log ends with `Test Range: QASmoke is not in the loaded game` and nothing after; his Fallout.ini still had `sTestRangeCell=QASmoke`.

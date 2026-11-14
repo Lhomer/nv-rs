@@ -33,6 +33,7 @@
 //! or delete. The range ends with a save loaded (seam `00847fd9`), a new game from the menu
 //! (`007d33ce`) or the return to the main menu (`007d0b17`).
 
+use crate::range_watch::{self, step};
 use engine::extend::{Owner, SiteSlot};
 use engine::prelude::*;
 use engine::units::fallout_shared::tes::fn_00453dc0;
@@ -46,6 +47,9 @@ pub const ROW: Owner = Owner::Row("weighty combat");
 pub const COC_NEW_GAME: SiteSlot = SiteSlot::new(ROW, 0x0093_db69);
 pub const MENU_NEW_GAME: SiteSlot = SiteSlot::new(ROW, 0x007d_33ce);
 pub const PRE_LOAD: SiteSlot = SiteSlot::new(ROW, 0x0084_7fd9);
+/// The main loop's pass (`main`, before `Main::OnIdle`; the seam xNVSE's tick runs at): the
+/// range's start runs there.
+pub const TICK: SiteSlot = SiteSlot::new(ROW, 0x0086_b386);
 pub const TO_MAIN_MENU: SiteSlot = SiteSlot::new(ROW, 0x007d_0b17);
 
 /// `BGSSaveLoadManager::SaveGame` (`thiscall`: name, device, statistics), the quick save
@@ -209,53 +213,23 @@ fn enter(phase: Phase, what: &str) {
     step(what);
 }
 
-/// The step the range is at, with when it began: the log line, and what the watchdog says when
-/// nothing moves on ([`watch`]).
-static STEP: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
-
-/// A step of the start or the set-up: one log line, and the watchdog's last known place.
-fn step(what: &str) {
-    eprintln!("Test Range: {what}");
-    *STEP.lock().unwrap_or_else(|p| p.into_inner()) =
-        Some((what.to_string(), std::time::Instant::now()));
+/// The watchdog's view of a start ([`range_watch::watch`]): the phase and the seconds without a
+/// step that end the run, or `None` when no start is under way.
+fn watch_state() -> Option<(&'static str, u64)> {
+    match phase() {
+        Phase::Starting => Some(("starting", range_watch::STUCK_LOADING)),
+        Phase::Loading => Some(("loading", range_watch::STUCK_LOADING)),
+        Phase::WaitingForPlay => Some(("waiting for play", range_watch::STUCK_WAITING)),
+        Phase::Off | Phase::Ready => None,
+    }
 }
 
-/// The watchdog of a start: a host thread that, while the range is starting, loading or waiting
-/// for play, says in the log every 20 s that nothing moved on since the last step (up to five
-/// times), so a log that ends shows where the game stopped even when its main thread is stuck.
-fn watch() {
-    let _ = std::thread::Builder::new()
-        .name("test range watchdog".into())
-        .spawn(|| {
-            let mut said = 0;
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                let phase = phase();
-                if !matches!(
-                    phase,
-                    Phase::Starting | Phase::Loading | Phase::WaitingForPlay
-                ) {
-                    return;
-                }
-                let stuck = STEP
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .as_ref()
-                    .map(|(what, at)| (what.clone(), at.elapsed().as_secs()));
-                if let Some((what, secs)) = stuck {
-                    if secs >= 20 * (said + 1) && said < 5 {
-                        said += 1;
-                        eprintln!(
-                            "Test Range: nothing moved on for {secs} s ({phase:?}); last step: {what}"
-                        );
-                    }
-                }
-            }
-        });
-}
+/// The main menu's entry was chosen: the start runs at the main loop's next pass ([`TICK`]).
+static START_ASKED: AtomicBool = AtomicBool::new(false);
 
 /// The range ends (a save loads, a new game, the main menu): nothing of it is kept.
-fn end(_: &mut Engine, _: &[u32]) -> Option<u32> {
+fn end(e: &mut Engine, _: &[u32]) -> Option<u32> {
+    range_watch::end_trace(e);
     if phase() != Phase::Off {
         step("the range ends (a load, a new game or the main menu)");
     }
@@ -269,9 +243,22 @@ fn end(_: &mut Engine, _: &[u32]) -> Option<u32> {
 /// Registers the range's hooks, seams and functions (from `crate::gunplay::install`).
 pub fn install(e: &mut Engine) {
     use engine::units::fallout_misc::bgssaveloadmanager as manager;
-    e.register(CHOOSE_FN, |e, _| {
-        start(e);
+    // Chosen in the main menu's click handler (mouse, keys or pad): the start itself waits for
+    // the main loop ([`TICK`]), out of the menu's handling, where xNVSE runs its own deferred
+    // work. Until 312dda26 the `coc` ran inside the click handler and its load never finished
+    // there (Patrick: stuck in the cell's attach).
+    e.register(CHOOSE_FN, |_, _| {
+        if phase() == Phase::Off && !START_ASKED.swap(true, Ordering::Relaxed) {
+            step("chosen on the main menu: the start runs at the main loop's next pass");
+        }
         Ret::default()
+    });
+    e.on_site(TICK, |e, _| {
+        if START_ASKED.swap(false, Ordering::Relaxed) {
+            step("the main loop's pass: starting");
+            start(e);
+        }
+        None
     });
     e.register(MENU_CALLBACK, |e, _| {
         let answer = e.call(GET_MESSAGE_MENU_RESULT, &[]).u8();
@@ -310,12 +297,13 @@ pub fn install(e: &mut Engine) {
         manager::bgssaveloadmanager_update_queued_saves(e, Ptr::new(a[0]));
         Ret::default()
     });
-    e.on_site(COC_NEW_GAME, |_, _| {
+    e.on_site(COC_NEW_GAME, |e, _| {
         if phase() == Phase::Starting {
             enter(
                 Phase::Loading,
                 "CenterOnCell began a new game (loading the cell)",
             );
+            range_watch::begin_trace(e);
         } else {
             with_range(|r| *r = Range::default());
         }
@@ -330,9 +318,11 @@ pub fn install(e: &mut Engine) {
                 e.mem.u32(a[1] + FORM_ID)
             };
             step(&format!("attaching the cell {id:08X} (TES 00453dc0)"));
+            range_watch::attach(e, true);
         }
         fn_00453dc0(e, Ptr::new(a[0]), Ptr::new(a[1]), Ptr::new(a[2]));
         if watched {
+            range_watch::attach(e, false);
             step("the cell is attached");
         }
         Ret::default()
@@ -482,7 +472,7 @@ fn start(e: &mut Engine) {
         "Test Range: starting (sTestRangeCell {configured}; tries {})",
         list.iter().map(Target::name).collect::<Vec<_>>().join(", ")
     );
-    watch();
+    range_watch::watch(watch_state);
     let outcome = first_start(
         e,
         &list,
@@ -500,6 +490,7 @@ fn start(e: &mut Engine) {
             FRAME_IN_LOAD.store(false, Ordering::Relaxed);
             enter(Phase::Starting, &format!("running `{}`", t.line()));
             let ran = run_line(e, &t.line());
+            range_watch::end_trace(e);
             if ran {
                 step(&format!("`{}` returned", t.line()));
             }
@@ -727,6 +718,8 @@ fn wait(frames: u32, playing: bool, waited: u64) -> Wait {
 const SETUP_FRAMES: u32 = 30;
 /// Seconds after the `coc` returned within which play must begin.
 const PLAY_TIMEOUT: u64 = 90;
+// The watchdog gives the range's own timeout time to go back to the main menu first.
+const _: () = assert!(range_watch::STUCK_WAITING > PLAY_TIMEOUT);
 
 /// Play never began: back to the main menu, the reason shown there ([`add_option`]).
 fn time_out(e: &mut Engine) {
@@ -1618,6 +1611,27 @@ mod tests {
         assert_eq!(wait(29, false, 5), Wait::Keep(0));
         assert_eq!(wait(10, false, PLAY_TIMEOUT), Wait::TimeOut);
         assert_eq!(wait(29, true, PLAY_TIMEOUT), Wait::SetUp);
+    }
+
+    /// The watchdog watches a start from its `coc` until play begins, with more time once the
+    /// `coc` returned (where the range's own timeout goes back to the main menu first).
+    #[test]
+    fn the_watchdog_watches_the_start_only() {
+        let at = |phase| {
+            with_range(|r| r.phase = phase);
+            watch_state()
+        };
+        assert_eq!(at(Phase::Off), None);
+        assert_eq!(
+            at(Phase::Loading).map(|s| s.1),
+            Some(range_watch::STUCK_LOADING)
+        );
+        assert_eq!(
+            at(Phase::WaitingForPlay).map(|s| s.1),
+            Some(range_watch::STUCK_WAITING)
+        );
+        assert_eq!(at(Phase::Ready), None);
+        with_range(|r| *r = Range::default());
     }
 
     /// The first builds' `QASmoke` counts as `auto`; other names stay as given.

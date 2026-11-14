@@ -117,7 +117,7 @@ pub struct Entry {
 
 const NVSE: &[Owner] = &[Owner::Nvse];
 /// The weighty combat row's Test Range (`crates/host/src/test_range.rs`) before xNVSE: the range's
-/// start and end on a new game, a load and the return to the main menu.
+/// start (the main loop's pass) and its end on a new game, a load and the return to the main menu.
 const RANGE_NVSE: &[Owner] = &[Owner::Row("weighty combat"), Owner::Nvse];
 const JIP: &[Owner] = &[Owner::Jip];
 
@@ -606,10 +606,11 @@ pub const SITES: &[Entry] = &[
         owners: NVSE,
         step: "I-9",
     },
-    // main: the extender's tick, in place of the call to 0043c4b0, before Main::OnIdle.
+    // main: the extender's tick, in place of the call to 0043c4b0, before Main::OnIdle; the
+    // weighty combat row's Test Range starts there (out of the main menu's click handler).
     Entry {
         addr: 0x0086_b386,
-        owners: NVSE,
+        owners: RANGE_NVSE,
         step: "I-5",
     },
     // Main::OnIdle_UpdateImageSpace 0086fd90: OnRemoveIMOD, an instance that ran out.

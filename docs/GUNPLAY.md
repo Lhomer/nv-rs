@@ -230,13 +230,24 @@ If the range cannot start, the main menu shows why in a message box and the game
 - the console could not be made;
 - the game did not start in the cell.
 
-A start that never reaches play goes back to the main menu by itself: when the game has not
-been in play (no loading screen, not the main menu, the player in a cell) for 30 frames in a row
-within 90 s of the `coc` returning, the main menu comes back with a message box saying so. The
-log has a line for every step of a start (the cell tried, the `coc`, the new game, the cell
-attached, the player's cell and position, play begun, the container, the weapons, the ammo, the
-lane and each target placed); while a start hangs, a watchdog line repeats the last step every
-20 s, so a log that stops shows where.
+The start runs at the main loop's next pass after the click (the seam xNVSE's tick runs at,
+`0086b386`), not inside the main menu's click handler: from there the cell's load never finished
+(Patrick, 312dda26).
+
+A start that never reaches play does not sit forever:
+- once the `coc` has returned, the range waits up to 90 s for play (no loading screen, not the
+  main menu, the player in a cell, 30 frames in a row); then the main menu comes back with a
+  message box saying so;
+- inside the game's own load the range cannot take the game back, so a watchdog thread ends the
+  run after 90 s without progress there (150 s once the `coc` returned), with a message box and
+  the reason in the log.
+
+The log has a line for every step of a start: the click, the main loop's pass, the cell tried, the
+`coc`, the new game, every call the load makes at its own level and inside the cell's attach
+(`load: calls ...`, `attach: calls ...`, and how long the slow ones took), the player's cell and
+position, play begun, the container, the weapons, the ammo, the lane and each target placed.
+While nothing moves on, the watchdog writes the last step and the chain of calls running now
+every 10 s, so a log that stops names the function it stopped in.
 
 The menu stays usable. Until 2026-11-14 the button did nothing on a start where the console had
 not been opened: the game makes its console only on first use, and the range now asks for it the
