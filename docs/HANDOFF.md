@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (knockdowns by momentum transfer)
+
+- **Patrick:** the launch is the transferred momentum over the target's mass (rounds: mass x impact speed x share x armour; swings: weapon and arm mass x swing speed; blasts: from strength and distance); masses per body (ragdoll Havok masses when available); the knockdown decision physical too, `iKnockdownThreshold` scaling it, `iHitForce` the overall multiplier, a velocity cap.
+- **Now (`knockdown.rs` `transferred`, `topple_speed`, `body_mass`, `mass_of`/`measure`; `ballistics::Round`, `bullet_round`, `weapon_round`, `transfer_share`):** tables and formulas in docs/GUNPLAY.md. Bullet feel x15 (real bullet momentum topples nobody); pellets gathered over 150 ms; ragdoll masses measured once dynamic and cached per base form. Patrick's ini has `iKnockdownThreshold=25`: with the physics that makes a 5.56mm round topple a person (0.45 m/s vs 0.35); 100 is the tuned value. Not run in game.
+
 ### Claude, 2026-11-14 (knockdown crash, launch, get-up throw)
 
 - **Patrick (535c53a):** crash after leaving the range (`read of unmapped memory at 3e2aabe7 in 009445b0`); every launch "dropped: the ragdoll never went limp (knock state 1)"; still thrown on getting up.

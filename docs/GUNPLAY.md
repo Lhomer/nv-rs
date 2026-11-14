@@ -175,10 +175,53 @@ with `bKnockdownCompanions=1`.
   scale, threshold, the decision; why one was left standing), the game's `CanKnockDown` answer
   with each of its questions when it refuses, and after `KnockExplosion` whether the actor has a
   ragdoll (slot `0x38c`) and its knock state; at most 20 lines a second.
-- **Resistance**, in the same damage points, x the actor's scale squared x
-  `iKnockdownThreshold` %: human 45, super mutant or nightkin (by race name) 150; creatures by
-  type: animal 30, mutated animal 60, mutated insect 50, abomination (deathclaws) 200, super
-  mutant 150, feral ghoul 35, robot 120, giant 400.
+- **Physics (Patrick, 2026-11-14, replacing the per-body points):** the hit puts a momentum p
+  (N s) into the body; hits on the same actor within 150 ms add up (a shotgun's pellets, a burst).
+  Its speed is v = p / mass x `iHitForce` %, at most 12 m/s; it topples at the speed that lifts its
+  centre of mass (height h) over the edge of its stance (half-width b), times a recovery factor 3
+  (a standing body steps to catch itself below that), times `iKnockdownThreshold` %:
+  v_topple = 3 x sqrt(2 g (sqrt(h^2 + b^2) - h)), lengths x scale, mass x scale^3. Knockdown at
+  v_topple, stagger at 40 % of it (JIP's push, 100 per m/s, at most 200). The launch is v along
+  the hit (lifted 0.3).
+  - A round: p = mass x speed at impact x the share it leaves in the body x 15 (game feel: a .50
+    round's real 38 N s moves 80 kg only 0.5 m/s) x armour 1 / (1 + DT x load factor / 40). The
+    share: pellets and slugs 1 (they stop), a standard round 0.6 (it mostly goes through), times
+    the load's transfer (HP 0.84, JSP 0.72, AP 0.42). Speed: the tracked bullet's (less after a
+    pass), else the loaded ammo's calibre, load and weapon mods (Classic hitscan too).
+  - A swing: p = (weapon weight in lb x 0.4536 + 3 kg of arm) x 8 m/s x Strength (0.68-1.4) x
+    skill (0.8-1.2) x reach x 1.5 for a power attack x 0.8 x armour.
+  - A blast: p = 3.5 N s x the game's damage to the body at its distance (its falloff).
+  - No known calibre: 0.3 N s per damage point as a standard round.
+  - Mass: the ragdoll's own Havok masses (`hkpMotion::getMass`, `00c86430`, summed over its rigid
+    bodies once `KnockExplosion` has made them dynamic; keyframed bones weigh 0), measured at each
+    kind's first knockdown and used from then on (within a fifth to five times the figure),
+    else by body x scale^3.
+
+  | Body | Mass kg | h m | b m | v_topple m/s |
+  | --- | --- | --- | --- | --- |
+  | Human | 80 | 1.0 | 0.15 | 1.41 |
+  | Feral ghoul | 55 | 0.9 | 0.15 | 1.48 |
+  | Super mutant, nightkin | 250 | 1.2 | 0.25 | 2.13 |
+  | Robot | 200 | 1.0 | 0.3 | 2.79 |
+  | Animal (dogs, coyotes) | 30 | 0.4 | 0.2 | 2.89 |
+  | Deathclaw (abomination) | 400 | 1.4 | 0.5 | 3.91 |
+  | Mutated animal | 150 | 0.8 | 0.4 | 4.08 |
+  | Giant | 1500 | 2.0 | 0.8 | 5.22 |
+  | Mutated insect | 25 | 0.3 | 0.4 | 5.94 |
+
+  | Hit | p N s | human | dog | super mutant | deathclaw (m/s) |
+  | --- | --- | --- | --- | --- | --- |
+  | .50 MG | 340 | 4.25 | 11.3 | 1.36 | 0.85 |
+  | .45-70 | 112 | 1.40 | 3.74 | 0.45 | 0.28 |
+  | .308 | 86 | 1.08 | 2.88 | 0.35 | 0.22 |
+  | .44 Magnum | 63 | 0.79 | 2.11 | 0.25 | 0.16 |
+  | 5.56mm (HP) | 36 (48) | 0.45 (0.60) | 1.19 | 0.14 | 0.09 |
+  | 9mm | 26 | 0.32 | 0.86 | 0.10 | 0.06 |
+  | 12 ga, 8 pellets / slug | 168 / 208 | 2.10 / 2.60 | 5.6 / 6.9 | 0.67 / 0.83 | 0.42 / 0.52 |
+  | Sledgehammer / power | 77 / 116 | 0.97 / 1.45 | 2.6 / 3.9 | 0.31 / 0.46 | 0.19 / 0.29 |
+  | Knife / fists | 22 / 19 | 0.28 / 0.24 | | | |
+  | Frag blast, 100 damage | 350 | 4.38 | 11.7 | 1.40 | 0.88 |
+
 - **Knockdown** (momentum at or past the resistance): the game's own blast knock-down
   (`MiddleHighProcess::KnockExplosion`, `0091fee0`): the actor leaves its furniture, goes into its
   ragdoll and gets the game's push from a point 40 units behind the impact along the hit's
@@ -260,13 +303,11 @@ with `bKnockdownCompanions=1`.
 
 | Constant | Value |
 | --- | --- |
-| Human / super mutant | 45 / 150 |
-| Creature types 0-7 | 30, 60, 50, 200, 150, 35, 120, 400 |
-| Size | x scale^2 (scale 0.25 to 4) |
+| Size | mass x scale^3, lengths x scale (scale 0.25 to 4) |
 | Stagger share | 0.4 |
 | Knock-down push (ragdoll only) | 2 |
-| Launch | momentum x 6 units/s x Hit Force %, 150 to 700, lift 0.3 |
-| Stagger force | momentum x 2, at most 200 |
+| Launch | v = p / mass x Hit Force %, at most 12 m/s, lift 0.3 |
+| Stagger force | 100 per m/s, at most 200 |
 | Push origin behind the impact | 400 units |
 | Bone speed / spin while flying | 1,400 units/s / 20 rad/s, for 1.5 s |
 | Settling damping | 6 a second below 12 units/s (sideways and spin) |

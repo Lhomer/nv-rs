@@ -3,18 +3,20 @@
 //! `iKnockdownThreshold` (both on the Settings menu's Gameplay page) and `bKnockdownCompanions`.
 //! **Not 1:1 with FalloutNV.exe.** Never the player.
 //!
-//! **When.** Over `Actor::HitMe` (`0089a760`, every hit: projectiles, swings; on the main thread,
-//! the task queue's hits when they come back), after the game applied the hit: for a target that
-//! is alive, not the player, not a companion (unless `bKnockdownCompanions=1`), not already
-//! knocked down (its process's knock state `+0x13c`), the hit's momentum is worked out as the hit
-//! force works it out ([`crate::hit_force::momentum`]: damage less the damage threshold,
-//! projectiles, weight, reach, Strength, skill, power attack). Blasts are left to the game, which
-//! knocks actors down from them itself (scaled by `iHitForce` already).
+//! **When.** Over `Actor::HitMe` (`0089a760`, every hit: projectiles, swings, blasts; on the main
+//! thread, the task queue's hits when they come back), after the game applied the hit: for a
+//! target that is alive, not the player, not a companion (unless `bKnockdownCompanions=1`), not
+//! already knocked down (its process's knock state `+0x13c`).
 //!
-//! **How much it takes** ([`resistance`]): by body, in the same damage points, times the actor's
-//! scale squared and `iKnockdownThreshold` percent: a human [`HUMAN`], a super mutant or nightkin
-//! [`SUPER_MUTANT`], and by creature type (`0059f3a0`): animals, mutated animals and insects,
-//! abominations (deathclaws), super mutants, feral ghouls, robots and giants ([`CREATURE`]).
+//! **Physics** (Patrick, 2026-11-14: momentum transfer, not a score). The hit puts a momentum
+//! into the body ([`transferred`], N s); hits on the same actor within [`GATHER`] add up (a
+//! shotgun's pellets, a burst). The body's speed from it is that momentum over the body's mass
+//! ([`body_mass`]: the ragdoll's own Havok masses once measured, else by body and size), times
+//! `iHitForce` percent, at most [`MAX_LAUNCH`]. What topples the body ([`topple_speed`]) is the
+//! speed that lifts its centre of mass over the edge of its stance, times a recovery factor (a
+//! standing body steps to catch itself), times `iKnockdownThreshold` percent. At or past it: a
+//! knockdown, the body launched at that speed; at [`STAGGER_SHARE`] of it: a stagger.
+//!
 //! - At or past the resistance: a **knockdown**. The game's own blast knock-down
 //!   (`MiddleHighProcess::KnockExplosion`, `0091fee0`) puts the actor into its ragdoll: it leaves
 //!   its furniture, knock state 2, its bones go limp. Its own push is kept tiny
@@ -68,32 +70,65 @@
 //!
 //! Game time is never touched; the kill camera is not involved.
 
-use crate::hit_force::{momentum, shot_of, Shot};
+use crate::hit_force::{shot_of, Shot};
 use engine::prelude::*;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// The tuning constants (module documentation).
-pub const HUMAN: f32 = 45.0;
-pub const SUPER_MUTANT: f32 = 150.0;
-/// By creature type: animal, mutated animal, mutated insect, abomination, super mutant, feral
+///
+/// **Bodies** ([`figures`]): mass (kg), centre of mass height (m), half its stance (m), at scale 1.
+pub const HUMAN: Figure = Figure::new(80.0, 1.0, 0.15);
+pub const SUPER_MUTANT: Figure = Figure::new(250.0, 1.2, 0.25);
+/// By creature type (`0059f3a0`): animal (dogs, coyotes), mutated animal (bighorners, bears),
+/// mutated insect (ants, radscorpions, cazadores), abomination (deathclaws), super mutant, feral
 /// ghoul, robot, giant.
-pub const CREATURE: [f32; 8] = [30.0, 60.0, 50.0, 200.0, 150.0, 35.0, 120.0, 400.0];
+pub const CREATURE: [Figure; 8] = [
+    Figure::new(30.0, 0.4, 0.2),
+    Figure::new(150.0, 0.8, 0.4),
+    Figure::new(25.0, 0.3, 0.4),
+    Figure::new(400.0, 1.4, 0.5),
+    Figure::new(250.0, 1.2, 0.25),
+    Figure::new(55.0, 0.9, 0.15),
+    Figure::new(200.0, 1.0, 0.3),
+    Figure::new(1500.0, 2.0, 0.8),
+];
+/// Gravity (m/s2) and how much faster than the bare tip-over speed a standing body can be pushed
+/// before it can no longer step to catch itself.
+pub const GRAVITY: f32 = 9.81;
+pub const RECOVERY: f32 = 3.0;
+/// **Momentum transfer**: a bullet's real momentum topples nobody (a .50 round: 38 N s on 80 kg is
+/// 0.5 m/s), so the rounds' momentum is taken [`BULLET_FEEL`] times, as films and games show it; a
+/// swing ([`ARM_MASS`] of arm behind the weapon's mass at [`SWING_SPEED`], by Strength, skill,
+/// reach and power attack, leaving [`MELEE_SHARE`] of it) and a blast ([`BLAST_PER_POINT`] N s per
+/// point of the game's blast damage at that distance, its falloff included) as they are. Armour
+/// takes `1 / (1 + DT / ARMOUR_DT)` of a round's or a swing's (DT by the load's factor).
+/// A gun of no known calibre: [`DAMAGE_MOMENTUM`] N s per point of damage, as a standard round.
+pub const BULLET_FEEL: f32 = 15.0;
+pub const ARM_MASS: f32 = 3.0;
+pub const SWING_SPEED: f32 = 8.0;
+pub const MELEE_SHARE: f32 = 0.8;
+pub const BLAST_PER_POINT: f32 = 3.5;
+pub const ARMOUR_DT: f32 = 40.0;
+pub const DAMAGE_MOMENTUM: f32 = 0.3;
+pub const POUND: f32 = 0.4536;
+/// Hits on one actor this close in time add up.
+pub const GATHER: Duration = Duration::from_millis(150);
+/// The launch at most (m/s; outliers), and game units a metre.
+pub const MAX_LAUNCH: f32 = 12.0;
+pub const UNITS_PER_METRE: f32 = 70.0;
+/// The stagger's push (JIP's force) per m/s, at most [`MAX_STAGGER`].
+pub const STAGGER_PER_MPS: f32 = 100.0;
 pub const STAGGER_SHARE: f32 = 0.4;
 /// The game's own knock-down (`KnockExplosion`) only puts the body into its ragdoll: its push is
-/// this small. The launch is the knockdowns' own, given to the limp ragdoll ([`frame`]): game
-/// units a second per point of momentum, between [`MIN_LAUNCH`] and [`MAX_LAUNCH`] (about 2 to
-/// 10 m/s), lifted by [`LIFT`].
+/// this small. The launch is the knockdowns' own: the body's speed from the transferred momentum
+/// ([`transferred`] / [`body_mass`]), lifted by [`LIFT`].
 pub const KNOCK_STRENGTH: f32 = 2.0;
-pub const LAUNCH_PER_POINT: f32 = 6.0;
-pub const MIN_LAUNCH: f32 = 150.0;
-pub const MAX_LAUNCH: f32 = 700.0;
 pub const LIFT: f32 = 0.3;
 /// The launch is given again (at most this many times) when the next frame shows less than this
 /// share of it left (the ragdoll's own start took it back).
 pub const LAUNCH_TRIES: u8 = 2;
 pub const LAUNCH_KEPT: f32 = 0.4;
-pub const STAGGER_PER_POINT: f32 = 2.0;
 pub const MAX_STAGGER: f32 = 200.0;
 pub const ORIGIN_BACK: f32 = 400.0;
 /// No second knock-down this soon after one, nor this soon after getting up.
@@ -126,26 +161,124 @@ pub enum Body {
     Creature(i8),
 }
 
-/// The momentum it takes to knock `body` down: by body, times `scale` squared and `threshold`
-/// percent.
-pub fn resistance(body: Body, scale: f32, threshold: i32) -> f32 {
-    let base = match body {
+/// A body's mass (kg), the height of its centre of mass and half its stance (m), at scale 1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Figure {
+    pub mass: f32,
+    pub height: f32,
+    pub stance: f32,
+}
+
+impl Figure {
+    pub const fn new(mass: f32, height: f32, stance: f32) -> Figure {
+        Figure {
+            mass,
+            height,
+            stance,
+        }
+    }
+}
+
+pub fn figures(body: Body) -> Figure {
+    match body {
         Body::Human => HUMAN,
         Body::SuperMutant => SUPER_MUTANT,
         Body::Creature(kind) => CREATURE
             .get(usize::try_from(kind).unwrap_or(0))
             .copied()
             .unwrap_or(CREATURE[0]),
-    };
-    let scale = if scale.is_finite() {
+    }
+}
+
+fn sane_scale(scale: f32) -> f32 {
+    if scale.is_finite() {
         scale.clamp(0.25, 4.0)
     } else {
         1.0
-    };
-    base * scale * scale * threshold.max(0) as f32 / 100.0
+    }
 }
 
-/// What a hit of `momentum` does to a body of `resistance`.
+/// A body's mass by its kind and size: the figure's times `scale` cubed.
+pub fn body_mass(body: Body, scale: f32) -> f32 {
+    figures(body).mass * sane_scale(scale).powi(3)
+}
+
+/// The speed (m/s) a push must give a standing body to topple it: its centre of mass lifted over
+/// the stance's edge, `sqrt(2 g (sqrt(h^2 + b^2) - h))`, times [`RECOVERY`] (it steps to catch
+/// itself below that), lengths times `scale`, times `threshold` percent. A human: about 1.4 m/s.
+pub fn topple_speed(body: Body, scale: f32, threshold: i32) -> f32 {
+    let f = figures(body);
+    let s = sane_scale(scale);
+    let (h, b) = (f.height * s, f.stance * s);
+    let rise = (h * h + b * b).sqrt() - h;
+    RECOVERY * (2.0 * GRAVITY * rise).sqrt() * threshold.max(0) as f32 / 100.0
+}
+
+/// What pushed the body.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Push {
+    /// A round ([`crate::ballistics::Round`]).
+    Round(crate::ballistics::Round),
+    /// A swing: the weapon's weight (lb, 0 for fists), its reach, the attacker's Strength (1-10)
+    /// and skill (0-100), a power attack.
+    Swing {
+        weight: f32,
+        reach: f32,
+        strength: f32,
+        skill: f32,
+        power: bool,
+    },
+    /// A blast: the game's damage to the body (its falloff with distance included).
+    Blast { damage: f32 },
+    /// Something of no known calibre (a thrown weapon, an unknown gun): its damage.
+    Damage { damage: f32 },
+}
+
+/// Armour's share of a push left: `1 / (1 + DT / ARMOUR_DT)`.
+pub fn armour_left(dt: f32) -> f32 {
+    1.0 / (1.0 + dt.max(0.0) / ARMOUR_DT)
+}
+
+/// The momentum (N s) `push` puts into a body behind `dt` damage threshold (module documentation).
+pub fn transferred(push: Push, dt: f32) -> f32 {
+    let p = match push {
+        Push::Round(r) => r.momentum() * r.share * BULLET_FEEL * armour_left(dt * r.threshold),
+        Push::Swing {
+            weight,
+            reach,
+            strength,
+            skill,
+            power,
+        } => {
+            let mass = weight.max(0.0) * POUND + ARM_MASS;
+            let speed = SWING_SPEED
+                * crate::hit_force::strength_factor(strength)
+                * crate::hit_force::skill_factor(skill)
+                * reach.clamp(0.5, 2.0)
+                * if power {
+                    crate::hit_force::POWER_ATTACK
+                } else {
+                    1.0
+                };
+            mass * speed * MELEE_SHARE * armour_left(dt)
+        }
+        Push::Blast { damage } => damage.max(0.0) * BLAST_PER_POINT,
+        Push::Damage { damage } => {
+            damage.max(0.0)
+                * DAMAGE_MOMENTUM
+                * crate::ballistics::SHARE_THROUGH
+                * BULLET_FEEL
+                * armour_left(dt)
+        }
+    };
+    if p.is_finite() {
+        p.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+/// What a body does when a push gives it `speed` (m/s) and `topple` topples it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reaction {
     None,
@@ -153,12 +286,12 @@ pub enum Reaction {
     Knockdown,
 }
 
-pub fn reaction(momentum: f32, resistance: f32) -> Reaction {
-    if momentum.is_nan() || momentum <= 0.0 {
+pub fn reaction(speed: f32, topple: f32) -> Reaction {
+    if speed.is_nan() || speed <= 0.0 {
         Reaction::None
-    } else if momentum >= resistance {
+    } else if speed >= topple {
         Reaction::Knockdown
-    } else if momentum >= resistance * STAGGER_SHARE {
+    } else if speed >= topple * STAGGER_SHARE {
         Reaction::Stagger
     } else {
         Reaction::None
@@ -355,31 +488,82 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
         return;
     }
     let aggressor = e.mem.u32(hit + HIT_AGGRESSOR);
-    let stats = crate::gunplay::effective_stats(e, aggressor, e.mem.u32(hit + HIT_WEAPON));
+    let weapon = e.mem.u32(hit + HIT_WEAPON);
+    let stats = crate::gunplay::effective_stats(e, aggressor, weapon);
     let shot = shot_of(e, hit, stats.as_ref());
+    let source = e.mem.u32(hit + HIT_SOURCE);
+    let push = match shot {
+        Shot::Explosion { damage } => Push::Blast { damage },
+        Shot::Melee {
+            damage: _,
+            weight,
+            reach,
+            strength,
+            skill,
+            power,
+        } => Push::Swing {
+            weight,
+            reach,
+            strength,
+            skill,
+            power,
+        },
+        Shot::Bullet { .. } | Shot::Gun { .. } => {
+            match crate::ballistics::bullet_round(e, source)
+                .or_else(|| crate::ballistics::weapon_round(e, weapon, aggressor))
+            {
+                Some(round) => Push::Round(round),
+                None => Push::Damage {
+                    damage: stats.map_or(e.mem.f32(hit + HIT_HEALTH_DAMAGE), |s| s.damage),
+                },
+            }
+        }
+    };
     // A blast's damage already has the threshold taken; it pushes away from its centre.
-    let (threshold, (point, direction)) = match shot {
-        Shot::Explosion { .. } => (0.0, blast(e, hit, target)),
+    let (dt, (point, direction)) = match push {
+        Push::Blast { .. } => (0.0, blast(e, hit, target)),
         _ => (
             actor_value(e, target, AV_DAMAGE_THRESHOLD),
             impact(e, hit, target, aggressor),
         ),
     };
-    let m = momentum(shot, threshold);
+    let p = transferred(push, dt);
+    let total = gather(target, p);
     let scale = e.call(GET_SCALE, &args![target]).f64() as f32;
     let body = body_of(e, target);
-    let resist = resistance(body, scale, t.knockdown_threshold);
-    let decision = reaction(m, resist);
+    let (mass, measured) = mass_of(e, target, body, scale);
+    let speed = total / mass * t.hit_force.max(0) as f32 / 100.0;
+    let topple = topple_speed(body, scale, t.knockdown_threshold);
+    let decision = reaction(speed, topple);
     note(format!(
-        "{who}: {} momentum {m:.1} (DT {threshold:.0}) vs resistance {resist:.1} ({body:?}, scale \
-         {scale:.2}, threshold {}%) -> {decision:?}",
-        kind_of(shot),
-        t.knockdown_threshold
+        "{who}: {} {p:.1} N s (DT {dt:.0}){} -> {speed:.2} m/s on {mass:.0} kg ({body:?}, scale \
+         {scale:.2}, {}) vs topple {topple:.2} m/s (threshold {}%, Hit Force {}%) -> {decision:?}",
+        describe_push(push),
+        if total > p + 1e-3 {
+            format!(", {total:.1} N s with the hits just before")
+        } else {
+            String::new()
+        },
+        if measured {
+            "its ragdoll's mass"
+        } else {
+            "by body and size"
+        },
+        t.knockdown_threshold,
+        t.hit_force
     ));
     match decision {
-        Reaction::Knockdown => knock_down(e, target, aggressor, point, direction, m),
+        Reaction::Knockdown => {
+            if speed > MAX_LAUNCH {
+                note(format!(
+                    "{who}: clamp: launch {speed:.1} m/s held to {MAX_LAUNCH} m/s"
+                ));
+            }
+            forget_gathered(target);
+            knock_down(e, target, aggressor, point, direction, speed)
+        }
         Reaction::Stagger => {
-            let force = (m * STAGGER_PER_POINT).min(MAX_STAGGER);
+            let force = (speed * STAGGER_PER_MPS).min(MAX_STAGGER);
             let angle = direction[0].atan2(direction[1]).to_degrees();
             jip::push_living_actor(e, target, force, angle, false);
         }
@@ -387,12 +571,109 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
     }
 }
 
-fn kind_of(shot: Shot) -> &'static str {
-    match shot {
-        Shot::Gun { .. } => "gun",
-        Shot::Melee { .. } => "melee",
-        Shot::Explosion { .. } => "blast",
-        Shot::Bullet { .. } => "bullet",
+fn describe_push(push: Push) -> String {
+    match push {
+        Push::Round(r) => format!(
+            "{} {:.1} g at {:.0} m/s ({:.2} N s, {:.0}% left in the body, x{BULLET_FEEL}):",
+            if r.pellet { "pellet" } else { "round" },
+            r.mass * 1000.0,
+            r.speed,
+            r.momentum(),
+            r.share * 100.0
+        ),
+        Push::Swing {
+            weight,
+            strength,
+            power,
+            ..
+        } => format!(
+            "swing ({weight:.0} lb, Strength {strength:.0}{}):",
+            if power { ", power attack" } else { "" }
+        ),
+        Push::Blast { damage } => format!("blast ({damage:.0} damage here):"),
+        Push::Damage { damage } => format!("hit of no known calibre ({damage:.0} damage):"),
+    }
+}
+
+/// The momentum gathered on each actor lately: (actor, N s, the last hit).
+static GATHERED: Mutex<Vec<(u32, f32, Instant)>> = Mutex::new(Vec::new());
+
+/// `p` added to what hit `actor` in the last [`GATHER`]; the sum.
+fn gather(actor: u32, p: f32) -> f32 {
+    let mut list = GATHERED.lock().unwrap_or_else(|p| p.into_inner());
+    list.retain(|g| g.2.elapsed() < GATHER);
+    match list.iter_mut().find(|g| g.0 == actor) {
+        Some(g) => {
+            g.1 += p;
+            g.2 = Instant::now();
+            g.1
+        }
+        None => {
+            list.push((actor, p, Instant::now()));
+            p
+        }
+    }
+}
+
+fn forget_gathered(actor: u32) {
+    GATHERED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|g| g.0 != actor);
+}
+
+/// The ragdoll masses measured (base form -> kg at its scale then, and that scale).
+static MASSES: Mutex<Vec<(u32, f32, f32)>> = Mutex::new(Vec::new());
+
+/// The body's mass: its kind's measured ragdoll mass (Havok's own, scaled by the size cubed), else
+/// by body and size ([`body_mass`]); and whether it was measured.
+fn mass_of(e: &Engine, actor: u32, body: Body, scale: f32) -> (f32, bool) {
+    let base = e.mem.u32(actor + BASE_FORM);
+    let measured = MASSES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|m| m.0 == base)
+        .map(|m| m.1 * (sane_scale(scale) / sane_scale(m.2)).powi(3));
+    match measured {
+        Some(m) if m.is_finite() && m > 1.0 => (m, true),
+        _ => (body_mass(body, scale), false),
+    }
+}
+
+/// The ragdoll's Havok masses summed (`hkpMotion::getMass`, `00c86430`, of each rigid body's
+/// motion at `+0xE0`), once its bones are dynamic (a keyframed bone weighs 0): kept for its base
+/// form when every bone has a mass and the sum is within a fifth to five times the figure's.
+fn measure(e: &mut Engine, actor: u32, body: Body, scale: f32) {
+    let base = e.mem.u32(actor + BASE_FORM);
+    if base == 0 {
+        return;
+    }
+    let bones = bodies(e, actor);
+    let mut sum = 0.0f32;
+    for &(_, body) in &bones {
+        let m = e.call(GET_MASS, &args![body + MOTION]).f64() as f32;
+        if !(m.is_finite() && m > 0.0) {
+            return;
+        }
+        sum += m;
+    }
+    let expected = body_mass(body, scale);
+    let fits = !bones.is_empty() && sum > expected / 5.0 && sum < expected * 5.0;
+    note(format!(
+        "{}: ragdoll mass {sum:.0} kg over {} bones (by body and size {expected:.0} kg): {}",
+        describe(e, actor),
+        bones.len(),
+        if fits {
+            "used from now on for this kind"
+        } else {
+            "not used (out of range)"
+        }
+    ));
+    if fits {
+        let mut list = MASSES.lock().unwrap_or_else(|p| p.into_inner());
+        list.retain(|m| m.0 != base);
+        list.push((base, sum, sane_scale(scale)));
     }
 }
 
@@ -479,14 +760,12 @@ fn impact(e: &mut Engine, hit: u32, target: u32, aggressor: u32) -> ([f32; 3], [
     (chest, d)
 }
 
-/// The launch's speed (game units a second) for a momentum `m`: times [`LAUNCH_PER_POINT`] and
-/// `hit_force` percent, between [`MIN_LAUNCH`] and [`MAX_LAUNCH`].
-pub fn launch_speed(m: f32, hit_force: i32) -> f32 {
-    let f = m * LAUNCH_PER_POINT * hit_force.max(0) as f32 / 100.0;
-    if f.is_nan() {
-        MIN_LAUNCH
+/// The launch (game units a second) for a body's speed `speed` (m/s), at most [`MAX_LAUNCH`].
+pub fn launch_speed(speed: f32) -> f32 {
+    if speed.is_nan() {
+        0.0
     } else {
-        f.clamp(MIN_LAUNCH, MAX_LAUNCH)
+        speed.clamp(0.0, MAX_LAUNCH) * UNITS_PER_METRE
     }
 }
 
@@ -527,7 +806,7 @@ pub fn knock_down(
     aggressor: u32,
     point: [f32; 3],
     direction: [f32; 3],
-    m: f32,
+    body_speed: f32,
 ) {
     use engine::units::fallout_ai::middlehighprocess::middle_high_process_knock_explosion;
     let process = e.mem.u32(actor + PROCESS);
@@ -537,9 +816,8 @@ pub fn knock_down(
     if e.mem.u8(process + PROCESS_LEVEL) > MIDDLE_HIGH {
         return; // KnockExplosion is MiddleHighProcess's: a lower process has none
     }
-    let t = crate::gunplay::tuning();
     let strength = KNOCK_STRENGTH;
-    let speed = launch_speed(m, t.hit_force);
+    let speed = launch_speed(body_speed);
     let origin = [0, 1, 2].map(|i| point[i] - direction[i] * ORIGIN_BACK);
     let stood = position(e, actor);
     let start = stood.map_or(origin[2], |p| p[2]);
@@ -568,12 +846,6 @@ pub fn knock_down(
         return;
     }
     let ragdoll = e.vcall(actor, 0x38c, &args![]).bool();
-    let wanted = m * LAUNCH_PER_POINT * t.hit_force.max(0) as f32 / 100.0;
-    if wanted > MAX_LAUNCH || wanted < MIN_LAUNCH {
-        note(format!(
-            "{who}: clamp: launch {wanted:.0} units/s held to {speed:.0} ({MIN_LAUNCH}-{MAX_LAUNCH})"
-        ));
-    }
     // JIP's stagger push left on the character controller would keep moving it under the ragdoll.
     jip::push_living_actor(e, actor, 0.0, 0.0, false);
     KNOCKED
@@ -590,6 +862,18 @@ pub fn knock_down(
         strength,
     );
     let state = e.mem.u8(process + KNOCK_STATE) as i8;
+    if state == 2 {
+        let scale = e.call(GET_SCALE, &args![actor]).f64() as f32;
+        let body = body_of(e, actor);
+        let known = MASSES
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .any(|m| m.0 == e.mem.u32(actor + BASE_FORM));
+        if !known {
+            measure(e, actor, body, scale);
+        }
+    }
     let launch = launch_direction(direction);
     // Given right away, where the game gives its own blast's push: KnockExplosion has just set the
     // bones moving under physics (`bhkWorld::SetMotion`), knock state 2.
@@ -752,6 +1036,11 @@ const CONTROLLER_SET_VELOCITY: u32 = 0x0092_6980;
 const VELOCITY_MOD: u32 = 0x500;
 const VELOCITY_TIME: u32 = 0x524;
 const LOOKUP_FORM: u32 = 0x0048_39c0;
+/// `hkpMotion::getMass` and a rigid body's motion.
+const GET_MASS: u32 = 0x00c8_6430;
+const MOTION: u32 = 0xe0;
+/// `HitData`'s health damage.
+const HIT_HEALTH_DAMAGE: u32 = 0x14;
 /// `MiddleHighProcess::UpdateKnockState`: the get-up waits there ([`hold_get_up`]).
 pub const UPDATE_KNOCK_STATE: u32 = 0x0092_0150;
 /// The most nodes walked for one body.
@@ -1202,6 +1491,7 @@ pub fn clear() {
     LAUNCHES.lock().unwrap_or_else(|p| p.into_inner()).clear();
     GET_UPS.lock().unwrap_or_else(|p| p.into_inner()).clear();
     KNOCKED.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    GATHERED.lock().unwrap_or_else(|p| p.into_inner()).clear();
     UP.lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
 
@@ -1236,50 +1526,92 @@ fn land(e: &mut Engine, actor: u32, aggressor: u32, drop: f32) {
 mod tests {
     use super::*;
 
-    /// A deathclaw or a super mutant takes far more than a human, a giant more again; a bigger
-    /// one more; the threshold scales all.
+    /// Bodies by mass and stance: a human topples at about 1.4 m/s; a deathclaw, a giant and a
+    /// bigger one take more; the threshold scales it; mass grows with size cubed.
     #[test]
-    fn bodies_resist_by_kind_and_size() {
-        let human = resistance(Body::Human, 1.0, 100);
-        assert_eq!(human, HUMAN);
-        assert!(resistance(Body::SuperMutant, 1.0, 100) > 3.0 * human);
+    fn bodies_topple_by_stance_and_weigh_by_size() {
+        let human = topple_speed(Body::Human, 1.0, 100);
+        assert!((1.3..1.5).contains(&human), "{human}");
+        assert!(topple_speed(Body::SuperMutant, 1.0, 100) > human);
         assert!(
-            resistance(Body::Creature(3), 1.0, 100) > 4.0 * human,
-            "deathclaws"
+            topple_speed(Body::Creature(3), 1.0, 100) > 2.0 * human,
+            "deathclaw"
         );
         assert!(
-            resistance(Body::Creature(6), 1.0, 100) > 2.0 * human,
-            "robots"
+            topple_speed(Body::Creature(7), 1.0, 100) > topple_speed(Body::Creature(3), 1.0, 100)
         );
-        assert!(resistance(Body::Creature(7), 1.0, 100) > resistance(Body::Creature(3), 1.0, 100));
-        assert!(resistance(Body::Creature(0), 1.5, 100) > resistance(Body::Creature(0), 1.0, 100));
-        assert_eq!(resistance(Body::Human, 1.0, 200), 2.0 * HUMAN);
-        assert_eq!(resistance(Body::Creature(-1), 1.0, 100), CREATURE[0]);
+        assert!(
+            topple_speed(Body::Creature(0), 1.5, 100) > topple_speed(Body::Creature(0), 1.0, 100)
+        );
+        assert!((topple_speed(Body::Human, 1.0, 200) - 2.0 * human).abs() < 1e-4);
+        assert_eq!(body_mass(Body::Human, 1.0), 80.0);
+        assert!((body_mass(Body::Human, 2.0) - 640.0).abs() < 1e-3);
+        assert_eq!(figures(Body::Creature(-1)), CREATURE[0]);
     }
 
-    /// A hit at the resistance knocks down, a moderate one staggers, a light one does nothing.
+    /// Momentum transfer: an anti-materiel round knocks an unarmoured human down and launches a
+    /// dog farther; a 5.56mm round only staggers at most; a deathclaw stands; pellets add up; a
+    /// sledgehammer's power attack topples, a knife does not; a grenade's close blast does.
     #[test]
-    fn a_hit_knocks_down_staggers_or_not() {
-        assert_eq!(reaction(50.0, 45.0), Reaction::Knockdown);
-        assert_eq!(reaction(20.0, 45.0), Reaction::Stagger);
-        assert_eq!(reaction(10.0, 45.0), Reaction::None);
-        assert_eq!(reaction(f32::NAN, 45.0), Reaction::None);
-        // A 50-damage rifle round knocks an unarmoured human down, not a deathclaw.
-        let rifle = crate::hit_force::momentum(
-            crate::hit_force::Shot::Gun {
-                damage: 50.0,
-                projectiles: 1,
-            },
-            0.0,
+    fn hits_push_by_momentum_over_mass() {
+        use crate::ballistics::Round;
+        let round = |g: f32, v: f32, share: f32, pellet| Round {
+            mass: g / 1000.0,
+            speed: v,
+            share,
+            threshold: 1.0,
+            pellet,
+        };
+        let human = topple_speed(Body::Human, 1.0, 100);
+        let speed = |push: Push, body: Body| transferred(push, 0.0) / body_mass(body, 1.0);
+        let fifty = Push::Round(round(42.0, 900.0, 0.6, false));
+        assert_eq!(
+            reaction(speed(fifty, Body::Human), human),
+            Reaction::Knockdown
+        );
+        assert!(
+            speed(fifty, Body::Creature(0)) > 2.0 * speed(fifty, Body::Human),
+            "a dog flies"
+        );
+        let claw = topple_speed(Body::Creature(3), 1.0, 100);
+        assert_eq!(
+            reaction(speed(fifty, Body::Creature(3)), claw),
+            Reaction::None
+        );
+        let rifle = Push::Round(round(4.0, 990.0, 0.6, false));
+        assert_ne!(
+            reaction(speed(rifle, Body::Human), human),
+            Reaction::Knockdown
+        );
+        let pellet = transferred(Push::Round(round(3.5, 400.0, 1.0, true)), 0.0);
+        assert!(
+            8.0 * pellet / 80.0 > human,
+            "a close shotgun blast, all pellets"
+        );
+        assert!(pellet / 80.0 < human * STAGGER_SHARE, "one pellet");
+        let swing = |weight: f32, power| Push::Swing {
+            weight,
+            reach: 1.0,
+            strength: 5.0,
+            skill: 50.0,
+            power,
+        };
+        assert_eq!(
+            reaction(speed(swing(20.0, true), Body::Human), human),
+            Reaction::Knockdown
         );
         assert_eq!(
-            reaction(rifle, resistance(Body::Human, 1.0, 100)),
+            reaction(speed(swing(1.0, false), Body::Human), human),
+            Reaction::None
+        );
+        assert_eq!(
+            reaction(speed(Push::Blast { damage: 100.0 }, Body::Human), human),
             Reaction::Knockdown
         );
-        assert_ne!(
-            reaction(rifle, resistance(Body::Creature(3), 1.0, 100)),
-            Reaction::Knockdown
-        );
+        // Armour takes its share of a round, none of a blast's (the game took it already).
+        assert!(transferred(fifty, 20.0) < transferred(fifty, 0.0));
+        assert_eq!(armour_left(0.0), 1.0);
+        assert_eq!(reaction(f32::NAN, human), Reaction::None);
     }
 
     /// The game's fall formula: nothing within the minimum, more the further past it.
@@ -1295,14 +1627,9 @@ mod tests {
     /// The launch grows with the momentum and Hit Force, within its bounds.
     #[test]
     fn the_launch_is_bounded() {
-        assert_eq!(launch_speed(50.0, 100), 300.0);
-        assert_eq!(launch_speed(50.0, 200), 600.0);
-        assert_eq!(launch_speed(1000.0, 300), MAX_LAUNCH);
-        assert_eq!(launch_speed(1.0, 100), MIN_LAUNCH);
-        assert_eq!(launch_speed(f32::NAN, 100), MIN_LAUNCH);
-        // A human's threshold (45): about 4 m/s; an anti-materiel rifle's (100): about 8.6 m/s.
-        assert!((200.0..350.0).contains(&launch_speed(HUMAN, 100)));
-        assert!(launch_speed(100.0, 100) > 500.0);
+        assert_eq!(launch_speed(4.0), 280.0);
+        assert_eq!(launch_speed(100.0), MAX_LAUNCH * UNITS_PER_METRE);
+        assert_eq!(launch_speed(f32::NAN), 0.0);
         // Along the hit, a little up, of unit length.
         let d = launch_direction([1.0, 0.0, 0.0]);
         assert!(d[0] > 0.9 && d[2] > 0.2);

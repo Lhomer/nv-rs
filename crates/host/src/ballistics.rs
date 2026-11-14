@@ -652,6 +652,96 @@ pub fn bullet_momentum(e: &Engine, projectile: u32) -> Option<(f32, f32)> {
     ))
 }
 
+/// A round's momentum as it reaches the target: its mass (kg), its speed there (m/s), the share of
+/// its momentum it leaves in the body ([`transfer_share`]), the factor the damage threshold counts
+/// by (its load's), and whether it is one of several pellets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Round {
+    pub mass: f32,
+    pub speed: f32,
+    pub share: f32,
+    pub threshold: f32,
+    pub pellet: bool,
+}
+
+impl Round {
+    /// Its momentum, N s.
+    pub fn momentum(&self) -> f32 {
+        self.mass * self.speed
+    }
+}
+
+/// The share of its momentum a round leaves in a body: a pellet or a slug stops in it (all); a
+/// rifle or pistol bullet mostly goes on through it ([`SHARE_THROUGH`] for a standard round, times
+/// the load's transfer: a hollow point expands and gives more, an armour-piercing round less),
+/// never more than all.
+pub fn transfer_share(load: Load, pellet: bool) -> f32 {
+    if pellet || load == Load::Slug {
+        1.0
+    } else {
+        (SHARE_THROUGH * load.mods().transfer).clamp(0.05, 1.0)
+    }
+}
+
+/// A standard round's share of its momentum left in the body it hits.
+pub const SHARE_THROUGH: f32 = 0.6;
+
+/// The round of the remembered bullet `projectile` (Projectile mode): its speed now against its
+/// speed at the muzzle (less after each pass); `None` for none (Classic, energy).
+pub fn bullet_round(e: &Engine, projectile: u32) -> Option<Round> {
+    if projectile == 0 || !on() {
+        return None;
+    }
+    let b = bullet(projectile)?;
+    let mods = b.load.mods();
+    let now = e.mem.f32(projectile + SPEED_MULT);
+    let left = if b.muzzle > 0.0 && now.is_finite() {
+        (now / b.muzzle).clamp(0.0, 1.5)
+    } else {
+        1.0
+    };
+    Some(Round {
+        mass: b.caliber.mass * mods.mass / 1000.0,
+        speed: b.velocity * left,
+        share: transfer_share(b.load, b.pellet),
+        threshold: mods.threshold,
+        pellet: b.pellet,
+    })
+}
+
+/// The round `shooter`'s `weapon` fires now (Classic hitscan, or a bullet not remembered): its
+/// loaded ammo's calibre and load, the weapon mods' velocity; `None` for no calibre (energy,
+/// flame, launchers, melee).
+pub fn weapon_round(e: &mut Engine, weapon: u32, shooter: u32) -> Option<Round> {
+    if weapon == 0 || e.mem.u8(weapon + 4) != WEAP {
+        return None;
+    }
+    let current = e.call(GET_CURRENT_AMMO, &args![weapon, shooter]).u32();
+    let mut ammo = ammo_form(e, current);
+    if ammo == 0 {
+        ammo = ammo_form(e, e.mem.u32(weapon + WEAPON_AMMO));
+    }
+    if ammo == 0 {
+        return None;
+    }
+    let caliber = caliber_of(&name_of(e, ammo))?;
+    let (mult, minus) = threshold_effects(e, ammo);
+    let load = load_of(&name_of(e, ammo), mult, minus);
+    let mods = load.mods();
+    let weapon_mods = crate::weapon_mods::on_weapon(e, shooter, weapon);
+    let fitted = crate::weapon_mods::velocity_factor(&weapon_mods, true);
+    let projectiles = u32::from(e.mem.u8(weapon + WEAPON_PROJECTILES))
+        + crate::weapon_mods::extra_projectiles(&weapon_mods);
+    let pellet = projectiles > 1 && load != Load::Slug;
+    Some(Round {
+        mass: caliber.mass * mods.mass / 1000.0,
+        speed: caliber.velocity * mods.velocity * fitted,
+        share: transfer_share(load, pellet),
+        threshold: mods.threshold,
+        pellet,
+    })
+}
+
 /// The projectile's first impact, when it has not been processed yet: collidee, location,
 /// material.
 fn first_impact(e: &Engine, projectile: u32) -> Option<(u32, [f32; 3], u32)> {
@@ -825,6 +915,26 @@ mod tests {
         let ap = Load::ArmorPiercing.mods();
         assert!(hp.transfer > 1.0 && hp.penetration < 0.5 && hp.threshold > 1.0);
         assert!(ap.transfer < 1.0 && ap.penetration > 2.0 && ap.threshold < 1.0);
+    }
+
+    /// Pellets and slugs stay in the body; a hollow point leaves more there than a standard
+    /// round, an armour-piercing round less.
+    #[test]
+    fn rounds_leave_their_share() {
+        assert_eq!(transfer_share(Load::Standard, true), 1.0);
+        assert_eq!(transfer_share(Load::Slug, false), 1.0);
+        let standard = transfer_share(Load::Standard, false);
+        assert_eq!(standard, SHARE_THROUGH);
+        assert!(transfer_share(Load::HollowPoint, false) > standard);
+        assert!(transfer_share(Load::ArmorPiercing, false) < standard);
+        let fifty = Round {
+            mass: 0.042,
+            speed: 900.0,
+            share: 0.6,
+            threshold: 1.0,
+            pellet: false,
+        };
+        assert!((fifty.momentum() - 37.8).abs() < 1e-3);
     }
 
     /// A pass costs power; too little left stops the round. A 9mm stops in a body, a 5.56mm
