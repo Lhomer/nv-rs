@@ -178,7 +178,7 @@ fn arg(read: &Read, i: usize) -> Option<u32> {
 
 /// The actors of the high and middle-high process levels, in the array's order, as JIP walks
 /// them (`objects.data + beginOffsets[n]` up to `+ endOffsets[n]`; null entries included).
-fn high_actors(e: &Engine) -> Vec<u32> {
+pub fn high_actors(e: &Engine) -> Vec<u32> {
     let pm = Ptr::<ProcessManager>::new(PROCESS_MANAGER);
     let data = e.get(pm, ProcessManager::objects);
     let begin = PROCESS_MANAGER + ProcessManager::beginOffsets.off;

@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (get-up spot and watch)
+
+- **Patrick (a5644a3):** knocked NPCs still fly when getting up, mainly in cramped spaces and uneven ground; spots 58 units from another actor, 450 from the body, 20 units over the floor; the stored push grew every frame while down.
+- **Now (`knockdown.rs`):** `fit_spot` at the pelvis (`pelvis_of`) on `ground_under`, nudges 16-64 clear of statics (`navmesh_check`/`IsValidLocation`) and actors (`overlapping`, `jip::commands::jip_fn_effect::high_actors` now pub); `clear_stored_push` also zeroes `PushDelta`/`iPushCount` (`characterInteractionCallback` `00c6f500`); `watch_get_up` for 2 s: pushes cleared 0.6 s, rising held to 60 units/s (controller via `00807080`/`00926980`, bones), `get-up +t` log lines. No ray cast in the host yet: the ground is the navmesh or the lowest bone. Not run in game.
+
 ### Claude, 2026-11-14 (impact stacking)
 
 - **Patrick:** impacts stack: a running transferred momentum per living actor, decaying with a half-life (Settings > Gameplay "Impact Stacking", 0.1-1.0 s, default 0.3, `[nv-rs Gunplay]`); every landed hit (each landed pellet) adds its own; decisions and launch use the total, direction momentum-weighted; reset on knockdown; logged.

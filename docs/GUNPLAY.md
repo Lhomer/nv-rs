@@ -236,6 +236,28 @@ with `bKnockdownCompanions=1`.
   attacker through the chest), so the part hit is pushed hardest and the body spins or flies from
   there; strength = momentum x 0.35 x `iHitForce` %, between 8 and 40. The game gets it up again
   through its get-up idle (`UpdateKnockState`).
+- **Fourth 2026-11-14 fix (Patrick on a5644a3: still thrown on getting up, mostly in cramped
+  places and on uneven ground; the log ended at "get-up allowed ... set at ..."):**
+  - Causes: the get-up spot was a navmesh point up to 200 units from the body (one 58 units from
+    another actor set there 4 s before, one 450 units away) and kept the higher of the bones' and
+    the navmesh's height (about 20 units over the floor): overlapping capsules and a capsule in a
+    slope were pushed out violently. And the stored push grew every frame while the body lay
+    (1, 5, 7, 11, 16): `bhkCharacterController::characterInteractionCallback` (`00c6f500`) adds
+    to the knocked-down actor's standing capsule a push (`PushDelta` `+0x580`, `iPushCount`
+    `+0x590`, and `SetVelocityModifier` with a 0.01 s time, a hundredfold velocity) from every
+    character that walks into it; only the stored velocity was being cleared.
+  - Now the actor stands where the ragdoll ended up: its pelvis (`Bip01 Pelvis`, the node's
+    `m_kName` `+0x08`) on the ground under it (the navmesh floor within 24 units across and 40
+    under the lowest bone, else the lowest bone less 6). Moved only when a capsule (22 units
+    times its scale, 120 tall) does not fit there: to the nearest of 16, 32, 48 and 64 units
+    (eight ways) clear of walls and statics (`IsValidLocation`'s line of sight, the navmesh point
+    within 12 units) and of other standing actors' capsules (the high and middle-high process
+    lists, JIP's walk); else left at the body, never far.
+  - The pushes are cleared with the stored velocity while it lies and for 0.6 s after the get-up
+    starts; for 2 s the controller's rising speed and the bones' are held to 60 units/s, and a
+    `get-up +t s` line every 0.2 s (or at once on a clamp or overlap) gives the position, how far
+    it was moved off its spot across and up (depenetration), the controller's velocity, the
+    clamps and any actor overlapping.
 - **Third 2026-11-14 fix (Patrick on 535c53a: a crash after leaving the range, still no
   momentum, still thrown on getting up):**
   - The crash (`read of unmapped memory at 3e2aabe7 in 009445b0`): `3e2aabe7` is `0x3e2aaaab`

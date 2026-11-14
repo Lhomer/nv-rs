@@ -42,10 +42,16 @@
 //!   body is still or lying. Its states 1 and 3 now wait until every bone is slower than
 //!   [`STILL_SPEED`] for [`STILL_FRAMES`] frames and the body lies (its bones within
 //!   [`LYING_HEIGHT`] in height), at most [`HOLD_MAX`]; then, on the main thread, the actor and
-//!   its character controller are set at a clear spot by the body with no velocity (the game's
-//!   `PathingLocation` moved onto the closest navmesh triangle and checked clear [`SPOT_RADIUS`]
-//!   around, within [`SPOT_DISTANCE`]; else, or for a body that never lay down, where it was
-//!   knocked from), and the game's get-up goes on from there.
+//!   its character controller are set where the ragdoll ended up, with no velocity: its pelvis
+//!   (`Bip01 Pelvis`) on the ground under it ([`ground_under`]: the navmesh floor right under it,
+//!   else the lowest bone less its radius), moved only when the capsule does not fit there, to
+//!   the nearest nudge (16 to 64 units) clear of walls and statics (the navmesh's line of sight)
+//!   and of other actors' capsules ([`fit_spot`]); else left at the body. (a5644a3 moved it to a
+//!   navmesh point up to 200 units away, next to other actors and 20 units over the floor, and
+//!   the physics threw them apart.) For [`WATCH`] after that ([`watch_get_up`]) its controller's
+//!   stored push and the pushes other characters give it are zeroed for [`HOLD_PUSH`], its rising
+//!   speed and its bones' are held to [`MAX_RISE`], and its position, velocity, overlaps and any
+//!   depenetration are logged every [`WATCH_STEP`].
 //! - **Once:** an actor knocked down in the last [`KNOCK_COOLDOWN`] or got up in the last
 //!   [`UP_COOLDOWN`] is not knocked again, the game's own blast knock-down
 //!   ([`crate::hit_force::KNOCK_EXPLOSION`]) adds no second push to an actor knocked here a moment
@@ -143,14 +149,31 @@ pub const MAX_BONE_SPIN: f32 = 20.0;
 pub const FLIGHT: Duration = Duration::from_millis(1500);
 /// The get-up waits ([`hold_get_up`]) until every bone is slower than [`STILL_SPEED`] for
 /// [`STILL_FRAMES`] frames in a row and the body lies (its bones within [`LYING_HEIGHT`] of each
-/// other in height), at most [`HOLD_MAX`]; then the actor stands at a clear navmesh spot within
-/// [`SPOT_DISTANCE`] of the body ([`SPOT_RADIUS`] clear around it), else where it was knocked from.
+/// other in height), at most [`HOLD_MAX`]; then the actor stands where the body lies
+/// ([`fit_spot`]).
 pub const STILL_SPEED: f32 = 30.0;
 pub const STILL_FRAMES: u32 = 20;
 pub const LYING_HEIGHT: f32 = 70.0;
 pub const HOLD_MAX: Duration = Duration::from_secs(8);
-pub const SPOT_DISTANCE: f32 = 200.0;
-pub const SPOT_RADIUS: f32 = 25.0;
+/// The get-up's spot: a capsule of [`CAPSULE_RADIUS`] (times the actor's scale) and
+/// [`CAPSULE_HEIGHT`] fits at the ragdoll's pelvis, or at the nearest nudge ([`NUDGES`], eight
+/// ways each, at most [`MAX_NUDGE`]) where it does (a navmesh point within [`NUDGE_SNAP`] of it);
+/// the ground: the navmesh within [`GROUND_REACH`] across and [`GROUND_BELOW`] under the lowest
+/// bone, else the lowest bone less [`BONE_RADIUS`].
+pub const CAPSULE_RADIUS: f32 = 22.0;
+pub const CAPSULE_HEIGHT: f32 = 120.0;
+pub const NUDGES: [f32; 4] = [16.0, 32.0, 48.0, 64.0];
+pub const MAX_NUDGE: f32 = 64.0;
+pub const NUDGE_SNAP: f32 = 12.0;
+pub const GROUND_REACH: f32 = 24.0;
+pub const GROUND_BELOW: f32 = 40.0;
+pub const BONE_RADIUS: f32 = 6.0;
+/// After the get-up starts: watched (and logged every [`WATCH_STEP`]) for [`WATCH`], the
+/// controller's pushes zeroed for [`HOLD_PUSH`], rising held to [`MAX_RISE`] game units a second.
+pub const WATCH: Duration = Duration::from_secs(2);
+pub const WATCH_STEP: Duration = Duration::from_millis(200);
+pub const HOLD_PUSH: Duration = Duration::from_millis(600);
+pub const MAX_RISE: f32 = 60.0;
 pub const FOLLOW_FOR: Duration = Duration::from_secs(12);
 
 /// What kind of body takes the hit.
@@ -1033,6 +1056,8 @@ pub fn knock_down(
             still_frames: 0,
             held_said: false,
             allowed: false,
+            placed: None,
+            next_log: 0.0,
         });
     }
     note(format!(
@@ -1155,6 +1180,11 @@ const CONTROLLER_SET_VELOCITY: u32 = 0x0092_6980;
 /// `bhkCharacterController::VelocityMod` and `fVelocityTime`; `LookupFormByID`.
 const VELOCITY_MOD: u32 = 0x500;
 const VELOCITY_TIME: u32 = 0x524;
+const PUSH_DELTA: u32 = 0x580;
+const PUSH_COUNT: u32 = 0x590;
+/// The controller's linear velocity (a Havok vector, `00807080`), a node's name.
+const CONTROLLER_VELOCITY: u32 = 0x0080_7080;
+const NODE_NAME: u32 = 0x08;
 const LOOKUP_FORM: u32 = 0x0048_39c0;
 /// `hkpMotion::getMass` and a rigid body's motion.
 const GET_MASS: u32 = 0x00c8_6430;
@@ -1326,6 +1356,9 @@ struct GetUp {
     held_said: bool,
     /// Placed at its spot: the game's get-up may run.
     allowed: bool,
+    /// When and where it was set for the get-up, and the watch's next log time (seconds after).
+    placed: Option<(Instant, [f32; 3])>,
+    next_log: f32,
 }
 
 static GET_UPS: Mutex<Vec<GetUp>> = Mutex::new(Vec::new());
@@ -1345,8 +1378,8 @@ pub fn hold_get_up(e: &Engine, process: u32, actor: u32) -> bool {
 
 /// Once a frame (the main thread): each knocked-down body held still and damped while it lies,
 /// and its get-up let go once it is still and lying ([`may_get_up`]): the actor and its character
-/// controller set at a clear spot by the body with no velocity ([`clear_spot`], else where it was
-/// knocked from).
+/// controller set where the body lies with no velocity ([`fit_spot`]), then watched
+/// ([`watch_get_up`]).
 fn get_ups(e: &mut Engine) {
     let list: Vec<GetUp> = GET_UPS.lock().unwrap_or_else(|p| p.into_inner()).clone();
     if list.is_empty() {
@@ -1366,6 +1399,13 @@ fn get_ups(e: &mut Engine) {
             continue;
         }
         let state = e.mem.u8(process + KNOCK_STATE) as i8;
+        if let Some((at, spot)) = g.placed {
+            // The watch after the get-up (module documentation): kept for [`WATCH`].
+            if watch_get_up(e, &mut g, process, state, at, spot, scale) {
+                keep.push(g);
+            }
+            continue;
+        }
         if state == 0 && g.since.elapsed() > Duration::from_millis(500) {
             continue; // up again
         }
@@ -1433,23 +1473,16 @@ fn get_ups(e: &mut Engine) {
         } else {
             sum.map(|x| x / bones.len() as f32)
         };
-        let lying = height <= LYING_HEIGHT && !bones.is_empty();
-        let spot = if lying {
-            clear_spot(e, g.actor, [centre[0], centre[1], low])
+        // Where the ragdoll ended up: its pelvis (else its bones' centre), on the ground under it.
+        let pelvis = pelvis_of(e, &bones).unwrap_or(centre);
+        let (ground, ground_why) = if bones.is_empty() {
+            (g.start[2], "where it stood (no bones)")
         } else {
-            None
+            ground_under(e, g.actor, pelvis, low)
         };
-        let (at, why) = match spot {
-            Some(at) => (at, "a clear navmesh spot by the body"),
-            None => (
-                g.start,
-                if lying {
-                    "where it was knocked from (no clear spot by the body)"
-                } else {
-                    "where it was knocked from (it never lay down)"
-                },
-            ),
-        };
+        let body_at = [pelvis[0], pelvis[1], ground];
+        let fit = fit_spot(e, g.actor, body_at);
+        let at = fit.at;
         // Nothing carried into the get-up: the bones still, the controller's stored push gone.
         for &(_, body) in &bones {
             set_velocity(e, SET_LINEAR_VELOCITY, body, [0.0; 3]);
@@ -1458,25 +1491,71 @@ fn get_ups(e: &mut Engine) {
         let _ = clear_stored_push(e, g.actor);
         place(e, g.actor, at);
         g.allowed = true;
+        g.placed = Some((Instant::now(), at));
+        g.next_log = 0.0;
         note(format!(
-            "{}: get-up allowed after {:.1} s ({}): set at ({:.0}, {:.0}, {:.0}), {why}; bones, controller and its stored push zeroed",
+            "{}: get-up allowed after {:.1} s ({}): the body's pelvis at ({:.0}, {:.0}, {:.0}), \
+             ground {ground:.0} ({ground_why}); set at ({:.0}, {:.0}, {:.0}), {:.0} units from it ({}); \
+             bones, controller velocity and stored push zeroed",
             describe(e, g.actor),
             held.as_secs_f32(),
-            if held >= HOLD_MAX { "held too long" } else { "still and lying" },
+            if held >= HOLD_MAX {
+                "held too long"
+            } else {
+                "still and lying"
+            },
+            pelvis[0],
+            pelvis[1],
+            pelvis[2],
             at[0],
             at[1],
-            at[2]
+            at[2],
+            fit.moved,
+            fit.why
         ));
         keep.push(g);
     }
     *GET_UPS.lock().unwrap_or_else(|p| p.into_inner()) = keep;
 }
 
-/// A clear navmesh spot by `near` (the body's centre at the floor's height): the game's
-/// `PathingLocation` of the point in the actor's cell, moved onto its closest navmesh triangle
-/// (`ResolveToClosestNavmeshAndTriangle`, `006ddc00`) and valid with [`SPOT_RADIUS`] clear around
-/// it (`IsValidLocation`, `006ded70`: line of sight four ways), within [`SPOT_DISTANCE`].
-fn clear_spot(e: &mut Engine, actor: u32, near: [f32; 3]) -> Option<[f32; 3]> {
+/// The world position of the ragdoll's pelvis (the node named `Bip01 Pelvis`, `m_kName` at
+/// `+0x08`), when it has one.
+fn pelvis_of(e: &Engine, bones: &[(u32, u32)]) -> Option<[f32; 3]> {
+    bones.iter().find_map(|&(node, _)| {
+        let name = e.mem.u32(node + NODE_NAME);
+        (name != 0 && e.mem.cstr(name).eq_ignore_ascii_case(b"Bip01 Pelvis"))
+            .then(|| read3(e, node + WORLD_TRANSLATION))
+    })
+}
+
+/// The ground under the body (`near` its pelvis, `low` its lowest bone's height): the walkable
+/// floor there (the game's navmesh triangle under the pelvis, `ResolveToClosestNavmeshAndTriangle`,
+/// when within [`GROUND_REACH`] across and between [`GROUND_BELOW`] under and [`BONE_RADIUS`]
+/// over the lowest bone); else the lowest bone less [`BONE_RADIUS`] (a bone lies on the ground:
+/// the down cast the ragdoll itself made). Answers the height and how it was found.
+fn ground_under(e: &mut Engine, actor: u32, near: [f32; 3], low: f32) -> (f32, &'static str) {
+    let from_bones = low - BONE_RADIUS;
+    match navmesh_point(e, actor, [near[0], near[1], low]) {
+        Some(at)
+            if ((at[0] - near[0]).powi(2) + (at[1] - near[1]).powi(2)).sqrt() <= GROUND_REACH
+                && at[2] >= low - GROUND_BELOW
+                && at[2] <= low + BONE_RADIUS =>
+        {
+            (at[2], "the navmesh floor under the pelvis")
+        }
+        _ => (from_bones, "the lowest bone, less its radius"),
+    }
+}
+
+/// The point `near` moved onto the closest navmesh triangle of the actor's cell, and whether a
+/// capsule of `radius` stands clear there (`IsValidLocation`: line of sight `radius` away four
+/// ways, so no wall or static within it).
+fn navmesh_check(
+    e: &mut Engine,
+    actor: u32,
+    near: [f32; 3],
+    radius: f32,
+) -> Option<([f32; 3], bool)> {
     e.with_stack(0x60, |e, frame| {
         let location = (frame.addr() + 15) & !15;
         let point = location + 0x40;
@@ -1488,18 +1567,217 @@ fn clear_spot(e: &mut Engine, actor: u32, near: [f32; 3]) -> Option<[f32; 3]> {
             return None;
         }
         let at = read3(e, location + PATHING_POSITION);
-        let away = ((at[0] - near[0]).powi(2) + (at[1] - near[1]).powi(2)).sqrt();
-        if !at.iter().all(|x| x.is_finite()) || away > SPOT_DISTANCE {
+        if !at.iter().all(|x| x.is_finite()) {
             return None;
         }
-        if !e
-            .call(IS_VALID_LOCATION, &args![location, SPOT_RADIUS])
-            .bool()
-        {
-            return None;
-        }
-        Some([at[0], at[1], near[2].max(at[2])])
+        let clear = radius <= 0.0 || e.call(IS_VALID_LOCATION, &args![location, radius]).bool();
+        Some((at, clear))
     })
+}
+
+fn navmesh_point(e: &mut Engine, actor: u32, near: [f32; 3]) -> Option<[f32; 3]> {
+    navmesh_check(e, actor, near, 0.0).map(|(at, _)| at)
+}
+
+/// The capsule radius of an actor (game units): [`CAPSULE_RADIUS`] times its scale.
+fn capsule(e: &mut Engine, actor: u32) -> f32 {
+    let scale = e.call(GET_SCALE, &args![actor]).f64() as f32;
+    CAPSULE_RADIUS * sane_scale(scale)
+}
+
+/// The other standing actors (high and middle-high processes, alive, not knocked down) whose
+/// capsule a capsule of `radius` at `at` would overlap: (actor, distance across).
+fn overlapping(e: &mut Engine, actor: u32, at: [f32; 3], radius: f32) -> Vec<(u32, f32)> {
+    let mut found = Vec::new();
+    for other in jip::commands::jip_fn_effect::high_actors(e) {
+        if other == 0 || other == actor || matches!(e.mem.u32(other + LIFE_STATE), 1 | 2) {
+            continue;
+        }
+        let process = e.mem.u32(other + PROCESS);
+        if process != 0
+            && e.mem.u8(process + PROCESS_LEVEL) <= MIDDLE_HIGH
+            && e.mem.u8(process + KNOCK_STATE) as i8 == 2
+        {
+            continue; // a ragdoll, not a capsule
+        }
+        let p = read3(e, other + REFR_POSITION);
+        let across = ((p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2)).sqrt();
+        let need = radius + capsule(e, other);
+        if across < need && (p[2] - at[2]).abs() < CAPSULE_HEIGHT {
+            found.push((other, across));
+        }
+    }
+    found
+}
+
+/// Where the get-up stands: the body's spot when its capsule fits there; else the nearest nudge
+/// ([`NUDGES`], at most [`MAX_NUDGE`]) where it fits clear of walls and statics (the navmesh's
+/// line of sight) and of other actors' capsules; else the body's spot anyway (never a far point).
+#[derive(Clone, Copy, Debug)]
+struct Fit {
+    at: [f32; 3],
+    moved: f32,
+    why: &'static str,
+}
+
+fn fit_spot(e: &mut Engine, actor: u32, body: [f32; 3]) -> Fit {
+    let radius = capsule(e, actor);
+    let fits = |e: &mut Engine, p: [f32; 3]| -> Option<[f32; 3]> {
+        if !overlapping(e, actor, p, radius).is_empty() {
+            return None;
+        }
+        match navmesh_check(e, actor, p, radius) {
+            Some((at, true))
+                if ((at[0] - p[0]).powi(2) + (at[1] - p[1]).powi(2)).sqrt() <= NUDGE_SNAP
+                    && (at[2] - p[2]).abs() <= GROUND_BELOW =>
+            {
+                Some([p[0], p[1], p[2].min(at[2].max(p[2] - GROUND_BELOW))])
+            }
+            // No navmesh here (some places have none): free of other actors is all that is known.
+            None => Some(p),
+            _ => None,
+        }
+    };
+    if let Some(at) = fits(e, body) {
+        return Fit {
+            at,
+            moved: 0.0,
+            why: "the capsule fits at the body",
+        };
+    }
+    for ring in NUDGES {
+        for k in 0..8 {
+            let a = k as f32 * std::f32::consts::FRAC_PI_4;
+            let p = [body[0] + ring * a.cos(), body[1] + ring * a.sin(), body[2]];
+            if let Some(at) = fits(e, p) {
+                return Fit {
+                    at,
+                    moved: ring,
+                    why: "nudged to the nearest spot where the capsule fits",
+                };
+            }
+        }
+    }
+    let crowd = overlapping(e, actor, body, radius);
+    Fit {
+        at: body,
+        moved: 0.0,
+        why: if crowd.is_empty() {
+            "no clear spot within reach: left at the body (statics close)"
+        } else {
+            "no clear spot within reach: left at the body (actors close)"
+        },
+    }
+}
+
+/// The first [`WATCH`] after the get-up began (module documentation): the controller's stored
+/// push and pushes zeroed for [`HOLD_PUSH`], its vertical speed held within
+/// [`MAX_RISE`] up, the bones' upward speed likewise, and a log line every [`WATCH_STEP`]
+/// (position, controller velocity, other actors overlapping, how far it was moved off its spot).
+/// False when the watch is over.
+fn watch_get_up(
+    e: &mut Engine,
+    g: &mut GetUp,
+    process: u32,
+    state: i8,
+    since: Instant,
+    spot: [f32; 3],
+    scale: f32,
+) -> bool {
+    let t = since.elapsed().as_secs_f32();
+    if t > WATCH.as_secs_f32() {
+        note(format!(
+            "{}: get-up watch over (knock state {state})",
+            describe(e, g.actor)
+        ));
+        return false;
+    }
+    let _ = process;
+    let controller = e.call(CHAR_CONTROLLER, &args![g.actor]).u32();
+    let mut cleared = None;
+    let mut clamped = None;
+    let mut velocity = [0.0f32; 3];
+    if controller != 0 {
+        if t < HOLD_PUSH.as_secs_f32() {
+            cleared = clear_stored_push(e, g.actor);
+        }
+        let at = e.call(CONTROLLER_VELOCITY, &args![controller]).u32();
+        if at != 0 {
+            velocity = read3(e, at).map(|x| x * scale);
+            if velocity[2] > MAX_RISE {
+                let held = [velocity[0], velocity[1], MAX_RISE];
+                set_controller_velocity(e, controller, held);
+                clamped = Some(velocity[2]);
+            }
+        }
+    }
+    // The ragdoll's bones while the get-up blends: none may fly up.
+    let most_up = MAX_RISE / scale;
+    let mut bones_held = 0;
+    for (_, body) in bodies(e, g.actor) {
+        if let Some(v) = linear(e, body) {
+            if v[2] > most_up {
+                set_velocity(e, SET_LINEAR_VELOCITY, body, [v[0], v[1], most_up]);
+                bones_held += 1;
+            }
+        }
+    }
+    let p = read3(e, g.actor + REFR_POSITION);
+    let off = [p[0] - spot[0], p[1] - spot[1], p[2] - spot[2]];
+    let across = (off[0] * off[0] + off[1] * off[1]).sqrt();
+    let radius = capsule(e, g.actor);
+    let crowd = overlapping(e, g.actor, p, radius);
+    let due = t >= g.next_log;
+    let alarm = clamped.is_some() || bones_held > 0 || cleared.is_some() || !crowd.is_empty();
+    if due || (alarm && t >= g.next_log - WATCH_STEP.as_secs_f32() / 2.0) {
+        g.next_log = t + WATCH_STEP.as_secs_f32();
+        note(format!(
+            "{}: get-up +{t:.2} s (knock state {state}): at ({:.0}, {:.0}, {:.0}), moved off its spot \
+             {across:.0} across and {:.0} up (depenetration); controller velocity ({:.0}, {:.0}, \
+             {:.0}) units/s{}{}{}{}",
+            describe(e, g.actor),
+            p[0],
+            p[1],
+            p[2],
+            off[2],
+            velocity[0],
+            velocity[1],
+            velocity[2],
+            clamped.map_or(String::new(), |v| format!(
+                "; clamp: rising {v:.0} held to {MAX_RISE}"
+            )),
+            if bones_held > 0 {
+                format!("; clamp: {bones_held} bones rising held")
+            } else {
+                String::new()
+            },
+            cleared.map_or(String::new(), |c| format!("; stored push {c:.0} cleared")),
+            if crowd.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; overlapping {}",
+                    crowd
+                        .iter()
+                        .map(|(a, d)| format!("{:08X} at {d:.0}", e.mem.u32(a + FORM_ID)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        ));
+    }
+    true
+}
+
+/// The controller's velocity set to `v` (game units a second; `bhkCharacterProxy::SetLinearVelocity`).
+fn set_controller_velocity(e: &mut Engine, controller: u32, v: [f32; 3]) {
+    e.with_stack(16, |e, frame| {
+        let at = frame.addr();
+        for (i, x) in v.into_iter().enumerate() {
+            e.mem.set_f32(at + 4 * i as u32, x);
+        }
+        e.call(CONTROLLER_SET_VELOCITY, &args![controller, at]);
+    });
 }
 
 /// The actor's reference and character controller set at `at`, the controller's velocity zero.
@@ -1579,8 +1857,11 @@ fn hold_bones(e: &mut Engine, actor: u32, scale: f32) {
 }
 
 /// The knockback the actor's character controller holds for its next move (`VelocityMod`,
-/// `+0x500`, and `fVelocityTime`, `+0x524`, as `SetVelocityModifier` stores them) cleared; its
-/// size (game units a second, roughly) when there was one.
+/// `+0x500`, and `fVelocityTime`, `+0x524`, as `SetVelocityModifier` stores them) and the pushes
+/// other characters' controllers gave it (`PushDelta` `+0x580`, `iPushCount` `+0x590`:
+/// `characterInteractionCallback`, `00c6f500`, every frame one walks into the knocked-down actor's
+/// standing capsule, with a 0.01 s time, a hundredfold velocity) cleared; its size (game units a
+/// second, roughly) when there was one.
 fn clear_stored_push(e: &mut Engine, actor: u32) -> Option<f32> {
     let controller = e.call(CHAR_CONTROLLER, &args![actor]).u32();
     if controller == 0 {
@@ -1592,8 +1873,10 @@ fn clear_stored_push(e: &mut Engine, actor: u32) -> Option<f32> {
     let stored = time != 0.0 || size != 0.0;
     for i in 0..4 {
         e.mem.set_f32(controller + VELOCITY_MOD + 4 * i, 0.0);
+        e.mem.set_f32(controller + PUSH_DELTA + 4 * i, 0.0);
     }
     e.mem.set_f32(controller + VELOCITY_TIME, 0.0);
+    e.mem.set_u32(controller + PUSH_COUNT, 0);
     (stored && size.is_finite() && size > 1e-3).then(|| size * hk_scale(e) * time.max(0.0))
 }
 
