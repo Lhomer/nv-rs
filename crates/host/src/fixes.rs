@@ -594,6 +594,10 @@ pub struct Choice {
     /// else the start stops); else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Gunplay]
     /// sTestRangeCell`; else `auto` (the best interior of the player's FalloutNV.esm).
     pub test_range_cell: String,
+    /// Perks per level in halves ([`crate::perk_every_level`]): `NV_PERKS_PER_LEVEL` when set (0.5
+    /// to 3, else the start stops); else, in a launcher's play run, `Fallout.ini`'s `[nv-rs
+    /// Gameplay] sPerksPerLevel`; else 2. Read by the perk row only.
+    pub perks_per_level: u32,
     /// Whether `NV_DRAW_THREAD` is `poison` (the environment only: the drawing thread with the packet's POISON check,
     /// for stepped threads; `crate::draw_thread::install` decides the draw family's capture mode from it).
     pub draw_poison: bool,
@@ -619,6 +623,7 @@ impl Choice {
             gunplay: crate::gunplay::Tuning::PLAY,
             movement: crate::movement::Tuning::PLAY,
             test_range_cell: crate::test_range::DEFAULT_CELL.to_string(),
+            perks_per_level: crate::perk_every_level::DEFAULT_HALVES,
             ini_note: None,
             draw_poison: false,
         }
@@ -787,6 +792,19 @@ impl Choice {
                     .test_range_cell
                     .clone()
                     .unwrap_or_else(|| crate::test_range::DEFAULT_CELL.to_string()),
+            },
+            perks_per_level: match env("NV_PERKS_PER_LEVEL").filter(|v| !v.trim().is_empty()) {
+                Some(raw) => match crate::perk_every_level::parse_rate(&raw) {
+                    Some(halves) => halves,
+                    None => {
+                        return Err(format!(
+                            "NV_PERKS_PER_LEVEL={raw}: use 0.5 to 3, in halves (2 = two a level)"
+                        ))
+                    }
+                },
+                None => ini
+                    .perks_per_level
+                    .unwrap_or(crate::perk_every_level::DEFAULT_HALVES),
             },
             ini_note: ini.bad_line(),
             draw_poison: env(DRAW_THREAD.env).as_deref().map(str::trim) == Some("poison"),
@@ -1039,6 +1057,7 @@ pub fn install(e: &mut Engine, choice: &Choice) {
     crate::gunplay::set_tuning(choice.gunplay);
     crate::movement::set_tuning(choice.movement);
     crate::test_range::set_cell(&choice.test_range_cell);
+    crate::perk_every_level::set_rate(choice.perks_per_level);
     for fix in FIXES.iter().filter(|f| choice.is_on(f)) {
         (fix.install)(e);
     }

@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (perks per level)
+
+- **Patrick:** two perks every level (vanilla: one every second level) as a Settings > Gameplay row, saved in the ini, default 2, from 0.5 (vanilla) to about 3; in normal and modded games; both picked in a row on the level-up menu; plugin/DLC perks and traits; say whether saves past level 2 get anything retroactively.
+- **Now (`perk_every_level.rs`, the existing "perk every level" row):** `sPerksPerLevel` in a new `[nv-rs Gameplay]` section (keys must start b/i/s; text `2`, `1.5`, `0.5`), `Choice::perks_per_level` in halves, `NV_PERKS_PER_LEVEL`; `Create` (`00784c80`) runs with `iLevelsPerPerk` 1 or out of reach by `perks_at(level, rate)`, then `iMaxPoints[1]` = min(count, offered); `DoClick` (`00785aa0`) on the perk page adds a perk while fewer than the count are chosen; `Close` gives all chosen. Row "Perks per Level" (meter of 6, change function `7e0601d0`) made from `gunplay::add_rows` when the row is installed. No retroactive grant (not trivial without a perk-points pool). Not run in game: whether the menu's XML enables Done by `_CurrPoints == _MaxPoints` (the count is capped at the perks offered, so it can always be finished either way).
+
 ### Claude, 2026-11-14 (Test Range prepared save)
 
 - **Patrick:** giving every item at each Test Range start froze the game for about a minute, then slow level-ups. Wanted: a prepared save with god mode, carry weight, every item (all plugins, WMX mods included) at the range's spot, no tutorials or pop-ups; made once per load order, in a folder apart from the save profiles, loaded directly afterwards; never touching his save folders; out of git and the package.

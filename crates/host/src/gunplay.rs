@@ -1626,6 +1626,7 @@ pub fn add_rows(e: &mut Engine) {
         });
     }
     crate::movement::add_rows(e);
+    crate::perk_every_level::add_row(e);
     crate::test_range::add_option(e);
     crate::ballistics::apply_forms(e);
 }

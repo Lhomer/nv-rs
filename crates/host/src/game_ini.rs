@@ -114,6 +114,8 @@ pub struct Keys {
     pub movement: Vec<(&'static str, i32)>,
     /// `sTestRangeCell`: the Test Range's cell (`crate::test_range`).
     pub test_range_cell: Option<String>,
+    /// `sPerksPerLevel`: perks per level, in halves (`crate::perk_every_level`).
+    pub perks_per_level: Option<u32>,
     /// The lines whose value can't be used (`key=value`): the default stands for each.
     pub bad: Vec<String>,
 }
@@ -162,6 +164,10 @@ impl Keys {
                 "bRenderThread" => {
                     keys.render_thread = flag(raw);
                     keys.render_thread.is_some()
+                }
+                "sPerksPerLevel" => {
+                    keys.perks_per_level = crate::perk_every_level::parse_rate(raw);
+                    keys.perks_per_level.is_some()
                 }
                 "sTestRangeCell" => {
                     keys.test_range_cell =
@@ -540,7 +546,8 @@ mod tests {
                 "iJumpGravity",
                 "iRunSpeed",
                 "iJumpStrength",
-                "bMovementLog"
+                "bMovementLog",
+                "sPerksPerLevel"
             ]
         );
     }
@@ -582,6 +589,10 @@ mod tests {
         assert_eq!(
             keys.test_range_cell.as_deref(),
             Some(crate::test_range::DEFAULT_CELL)
+        );
+        assert_eq!(
+            keys.perks_per_level,
+            Some(crate::perk_every_level::DEFAULT_HALVES)
         );
         assert!(keys.bad.is_empty(), "{:?}", keys.bad);
         for row in rows().iter().filter(|r| r.section == FIXES_SECTION) {

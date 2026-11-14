@@ -40,6 +40,7 @@ nv-rs Movement	iJumpGravity	NV_MOVEMENT_JUMP_GRAVITY	130	Gravity while you are i
 nv-rs Movement	iRunSpeed	NV_MOVEMENT_RUN_SPEED	100	Your top speed on the ground, running and walking, in percent of the game's (50 to 200; the animations are made for 100).
 nv-rs Movement	iJumpStrength	NV_MOVEMENT_JUMP_STRENGTH	100	How high you jump, in percent of the game's (50 to 200).
 nv-rs Movement	bMovementLog	NV_MOVEMENT_LOG	0	1 = the game's log gets a line for each of your movement steps saying which path set the final velocity (snappy, original, the controller zeroing it): for checking the movement; 0 = no lines.
+nv-rs Gameplay	sPerksPerLevel	NV_PERKS_PER_LEVEL	2	Perks per level (with bPerkEveryLevel in [nv-rs Fixes]; the Settings menu's Gameplay page has a Perks per Level row, which saves it): 0.5 (the original's one every second level) to 3, in halves; 2 = two perks at every level-up, picked one after another on the level-up menu's perk page; 1.5 = two and one in turn. Applies from the next level-up; levels gained before are not made up for.
 nv-rs Fixes	bUncap	NV_UNCAP	1	Uncapped frame rate: the game's frame step without its sleep, so frames are not held to the original's pace (iFrameLimit paces it).
 nv-rs Fixes	bHighFrameRateLanding	NV_HF_LANDING	1	High-frame-rate landing: the player landing standing still falls as far as at 60 frames a second.
 nv-rs Fixes	bHighFrameRateSlowMotion	NV_HF_SLOWMO	1	High-frame-rate slow motion: the game's time multiplier moves to its target by the time passed, not by the frame.
