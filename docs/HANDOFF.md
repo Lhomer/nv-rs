@@ -7,6 +7,13 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (Test Range: the place from the player's own FalloutNV.esm)
+
+- **Patrick (d9b4aa8, Steam 1.4.0.525, all DLC):** "Test Range: no cell named QASmoke in the loaded game". `QASmoke` is a Fallout 3 cell; FalloutNV.esm has no such string.
+- **Now:** `sTestRangeCell` defaults to `auto`: `crates/host/src/range_cells.rs` reads the player's own FalloutNV.esm (the load order's base master, `cell_offsets::loaded_plugin_paths`) with `esm` on a host thread from when the main menu is made, measures every interior cell (references' 5-95 % span, statics, actors, navmesh, `XCLL`/`LTMP` light) and ranks the quiet (no actors), walkable (navmesh), built (40+ statics), lit, 20 m+ ones by length (to 115 m), light only nudging, test/QA cells a little ahead; the log lists the five best. Fallbacks in order: the configured cell (unless `auto`), the ranked cells (up to eight), `cow WastelandNV -18 0` (Goodsprings, the worldspace whose editor id the repo's viewer runs used). Each is checked to be in the loaded game and that a new game began before the next is tried.
+- **The lane fits the space:** after set-up the range casts the game's pick (`TES::Pick`, the mask and height `PlaceAtMe` probes with) along the lane's middle and side lines, turns the player down the longest clear line of eight directions, and places the standard 5-100 m targets that fit 2 m short of the wall (four spread over the room where fewer fit). Respawn keeps the player's facing and fits it the same way.
+- **Not verified here:** the real file is not in this repository and no machine with the game was reachable from the session, so no cell name was checked against it; the choice is made from the file at run time instead. The ignored test `range_cells::tests::the_range_has_a_place_in_the_real_falloutnv_esm` (NV_DATA) prints the ten best and checks the chosen cell and `WastelandNV` are in the file. **Next action:** Patrick: the Test Range again; send `userdata\logs\game-<date-time>.log` (its `Test Range:` lines name the candidates and the cell used); optionally run the ignored test with NV_DATA.
+
 ### Claude, 2026-11-14 (Test Range: the main menu's button did nothing)
 
 - **Patrick (build 68956e3, Intel Arc, Vulkan):** sway good; "Test Range" on the main menu does nothing, no load, no error.

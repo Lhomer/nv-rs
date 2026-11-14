@@ -3,8 +3,10 @@
 //! weighty combat (recoil, sway, impact punch, reach, hit reactions, dismemberment). Part of the
 //! weighty combat row ([`crate::gunplay::FIX`]); **not 1:1 with FalloutNV.exe**.
 //!
-//! **Only the game's own content and machinery.** The range is the game's own `QASmoke` test cell
-//! (FalloutNV.esm, the developers' item hall; `[nv-rs Gunplay] sTestRangeCell` names another).
+//! **Only the game's own content and machinery.** The range's place is chosen from the player's
+//! own FalloutNV.esm ([`crate::range_cells`]: the longest quiet, lit, walkable interior, read with
+//! the plugin reader), unless `[nv-rs Gunplay] sTestRangeCell` names a cell; the next ranked
+//! cells, then the Mojave at Goodsprings ([`LAST_RESORT`]), are the fallbacks ([`candidates`]).
 //! Everything is done the way the console does it: the console's own compile-and-run of a line
 //! ([`run_line`], as `MenuConsole::Idle` runs a typed line) for `coc`, `MoveTo`, `AddItem`,
 //! `SetRestrained` and the rest, the game's `PlaceAtMe` worker (`005c4b30`) for the references
@@ -14,10 +16,12 @@
 //! No asset is added.
 //!
 //! **Flow.** The main menu's "Test Range" (made with the game's own options, just above Quit)
-//! runs `coc <cell>`: from the main menu the game starts a fresh game there, with a default
+//! runs `coc <cell>` for the first place that starts: from the main menu the game starts a fresh game there, with a default
 //! character, no save needed. The `CenterOnCell` new game's seam (`0093db69`) marks the range
 //! active. Some frames into play the range is set up ([`setup`]): a container with one of every
-//! weapon, 500 of every ammo, and a lane of targets in front of the player at 5 to 100 m, passive
+//! weapon, 500 of every ammo, the player turned down the longest clear line of the room (the
+//! game's own pick, as `PlaceAtMe` probes: [`clear_metres`]) and a lane of targets fitted to it
+//! ([`fit_lane`]: 5 to 100 m where there is room), passive
 //! (`SetRestrained 1`: they stand and take hits). Home opens the range menu: Weapons (the
 //! container), Fill Ammo, Make Hostile / Make Passive, Respawn Targets (a fresh lane down the line
 //! the player now faces), Exit to Main Menu, Close.
@@ -56,8 +60,17 @@ const QUEUE_BYTES: [u32; 3] = [0x0f, 0x10, 0x11];
 pub const CHOOSE_FN: u32 = 0x7e06_00c0;
 pub const MENU_CALLBACK: u32 = 0x7e06_00b0;
 
-/// The cell the range starts in when the file names none.
-pub const DEFAULT_CELL: &str = "QASmoke";
+/// The range's cell when the file names none: `auto`, the best interior of the player's own
+/// FalloutNV.esm ([`crate::range_cells`]).
+pub const DEFAULT_CELL: &str = "auto";
+/// The last resort when no interior can be had: the Mojave's worldspace (`WastelandNV`, whose
+/// editor id the base game has) at the cell of Goodsprings' streets, a place every game reaches.
+/// Not quiet; only when nothing else starts.
+pub const LAST_RESORT: Target = Target::World {
+    space: "WastelandNV",
+    x: -18,
+    y: 0,
+};
 
 static CELL: Mutex<String> = Mutex::new(String::new());
 
@@ -217,84 +230,188 @@ fn note(e: &mut Engine, text: &str) {
     });
 }
 
-/// The main menu's entry: the range's cell, from the main menu, as the console's `coc` starts
-/// a game there.
+/// Where the range can start: an interior cell by editor id (`coc`), or a worldspace's cell
+/// (`cow`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Interior(String),
+    World { space: &'static str, x: i32, y: i32 },
+}
+
+impl Target {
+    /// The console line that starts a game there from the main menu.
+    pub fn line(&self) -> String {
+        match self {
+            Target::Interior(cell) => format!("coc {cell}"),
+            Target::World { space, x, y } => format!("cow {space} {x} {y}"),
+        }
+    }
+
+    pub fn name(&self) -> String {
+        match self {
+            Target::Interior(cell) => cell.clone(),
+            Target::World { space, x, y } => format!("{space} {x},{y}"),
+        }
+    }
+}
+
+/// The places tried, in order: the configured cell (unless `auto`), the ranked interiors of the
+/// player's FalloutNV.esm (up to eight), then [`LAST_RESORT`].
+pub fn candidates(configured: &str, ranked: &[String]) -> Vec<Target> {
+    let mut list = Vec::new();
+    if !configured.eq_ignore_ascii_case(DEFAULT_CELL) && valid_cell(configured) {
+        list.push(Target::Interior(configured.to_string()));
+    }
+    for cell in ranked.iter().take(8) {
+        if !cell.eq_ignore_ascii_case(configured) && valid_cell(cell) {
+            list.push(Target::Interior(cell.clone()));
+        }
+    }
+    list.push(LAST_RESORT);
+    list
+}
+
+/// Why the range did not start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartError {
+    /// No place of the list is in the loaded game.
+    NoPlace,
+    /// The game's console, whose compiler runs the `coc`, could not be had.
+    NoConsole,
+    /// The places were there, but no new game began in any.
+    NotStarted(String),
+}
+
+impl StartError {
+    /// The line for the log and the screen.
+    pub fn text(&self) -> String {
+        match self {
+            StartError::NoPlace => "Test Range: no place for the range in the loaded game. Set sTestRangeCell in Fallout.ini's [nv-rs Gunplay] to a cell's editor id.".to_string(),
+            StartError::NoConsole => {
+                "Test Range: the game's console could not be made, so the range could not start."
+                    .to_string()
+            }
+            StartError::NotStarted(last) => format!(
+                "Test Range: the game did not start in {last}. The game's log says more."
+            ),
+        }
+    }
+}
+
+/// The start: the first place of `list` that is in the game (`there`) and where the `coc` or
+/// `cow` (`run`, which marks the start) begins a new game (`started`); a place missing or not
+/// started is passed for the next. `cx` is what the three steps work on (the engine).
+pub fn first_start<C>(
+    cx: &mut C,
+    list: &[Target],
+    there: impl Fn(&mut C, &Target) -> bool,
+    run: impl Fn(&mut C, &Target) -> bool,
+    started: impl Fn(&mut C) -> bool,
+) -> Result<Target, StartError> {
+    let mut last = None;
+    for target in list {
+        if !there(cx, target) {
+            eprintln!("Test Range: {} is not in the loaded game", target.name());
+            continue;
+        }
+        if !run(cx, target) {
+            return Err(StartError::NoConsole);
+        }
+        if started(cx) {
+            return Ok(target.clone());
+        }
+        eprintln!("Test Range: the game did not start in {}", target.name());
+        last = Some(target.name());
+    }
+    Err(last.map_or(StartError::NoPlace, StartError::NotStarted))
+}
+
+/// The main menu's entry: the first place that starts ([`candidates`], [`first_start`]), as the
+/// console's `coc` starts a game there from the main menu.
 ///
-/// Until 2026-11-14 it ran the line on the console only when the console already existed: the
-/// game makes it on first use (`MenuConsole::Instance(1)`, `0071b160`), so on a start where the
-/// console had not been opened the click did nothing (Patrick, build 68956e3). Now the console is
-/// made the game's way ([`run_line`]), the cell is looked up first, and anything that stops the
+/// 2026-11-14: the console is made the game's way ([`run_line`]: the game makes it on first use,
+/// so before that the click did nothing, Patrick on 68956e3); the default `QASmoke` was a Fallout
+/// 3 cell FalloutNV.esm does not have (Patrick on d9b4aa8), so the place is now chosen from the
+/// player's own FalloutNV.esm ([`crate::range_cells`]), with fallbacks. Anything that stops the
 /// start is said in the log and on the screen, with the menu's list enabled again.
 fn start(e: &mut Engine) {
-    let cell = cell();
-    eprintln!("Test Range: starting in {cell}");
-    let outcome = start_outcome(
-        cell_exists(e, &cell),
-        || {
+    start_scan(e);
+    let configured = cell();
+    let ranked = ranked_places();
+    let list = candidates(&configured, &ranked);
+    eprintln!(
+        "Test Range: starting (sTestRangeCell {configured}; tries {})",
+        list.iter().map(Target::name).collect::<Vec<_>>().join(", ")
+    );
+    let outcome = first_start(
+        e,
+        &list,
+        |e, t| match t {
+            Target::Interior(cell) => cell_exists(e, cell),
+            Target::World { .. } => true,
+        },
+        |e, t| {
             with_range(|r| {
                 *r = Range {
                     starting: true,
                     ..Range::default()
                 }
             });
-            run_line(e, &format!("coc {cell}"))
+            run_line(e, &t.line())
         },
-        active,
+        |_| active(),
     );
-    if let Err(why) = outcome {
-        let text = why.text(&cell);
-        eprintln!("{text}");
-        with_range(|r| *r = Range::default());
-        fail_on_menu(e, &text);
-    }
-}
-
-/// Why the range did not start.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StartError {
-    /// No cell of the name in the loaded game (`sTestRangeCell`).
-    NoCell,
-    /// The game's console, whose compiler runs the `coc`, could not be had.
-    NoConsole,
-    /// The `coc` ran, but no new game began in the cell.
-    NotStarted,
-}
-
-impl StartError {
-    /// The line for the log and the screen.
-    pub fn text(self, cell: &str) -> String {
-        match self {
-            StartError::NoCell => format!(
-                "Test Range: no cell named {cell} in the loaded game. Set sTestRangeCell in Fallout.ini's [nv-rs Gunplay] to a cell's editor id."
-            ),
-            StartError::NoConsole => {
-                "Test Range: the game's console could not be made, so the range could not start."
-                    .to_string()
-            }
-            StartError::NotStarted => format!(
-                "Test Range: the game did not start in {cell}. The game's log says more."
-            ),
+    match outcome {
+        Ok(target) => eprintln!("Test Range: started in {}", target.name()),
+        Err(why) => {
+            let text = why.text();
+            eprintln!("{text}");
+            with_range(|r| *r = Range::default());
+            fail_on_menu(e, &text);
         }
     }
 }
 
-/// The start's steps in order: the cell must exist, then the `coc` must run (`run`, which marks
-/// the start), then the new game must have begun (`started`, the `CenterOnCell` new game's seam).
-pub fn start_outcome(
-    cell_found: bool,
-    run: impl FnOnce() -> bool,
-    started: impl FnOnce() -> bool,
-) -> Result<(), StartError> {
-    if !cell_found {
-        return Err(StartError::NoCell);
+/// The ranked interiors of the player's FalloutNV.esm, read on a host thread from when the main
+/// menu is made ([`start_scan`]); waited for (up to a minute) when the range starts first.
+static RANKED: Mutex<Option<Vec<String>>> = Mutex::new(None);
+static RANKED_READY: std::sync::Condvar = std::sync::Condvar::new();
+static SCAN_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Starts reading the base game's master for the range's places, once per run.
+fn start_scan(e: &Engine) {
+    if SCAN_STARTED.load(Ordering::Relaxed) {
+        return;
     }
-    if !run() {
-        return Err(StartError::NoConsole);
+    let paths = crate::cell_offsets::loaded_plugin_paths(e);
+    let Some(path) = crate::range_cells::base_master(&paths).cloned() else {
+        return;
+    };
+    if SCAN_STARTED.swap(true, Ordering::Relaxed) {
+        return;
     }
-    if !started() {
-        return Err(StartError::NotStarted);
+    let spawned = std::thread::Builder::new()
+        .name("test range cells".into())
+        .spawn(move || {
+            let ranked = crate::range_cells::ranked_cells(&path);
+            *RANKED.lock().unwrap_or_else(|p| p.into_inner()) = Some(ranked);
+            RANKED_READY.notify_all();
+        });
+    if spawned.is_err() {
+        *RANKED.lock().unwrap_or_else(|p| p.into_inner()) = Some(Vec::new());
     }
-    Ok(())
+}
+
+/// The ranked places, once the reading is done; none when it never started.
+fn ranked_places() -> Vec<String> {
+    if !SCAN_STARTED.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
+    let guard = RANKED.lock().unwrap_or_else(|p| p.into_inner());
+    let (guard, _) = RANKED_READY
+        .wait_timeout_while(guard, std::time::Duration::from_secs(60), |r| r.is_none())
+        .unwrap_or_else(|p| p.into_inner());
+    guard.clone().unwrap_or_default()
 }
 
 /// Whether the loaded game has a cell named `name`: an interior by its editor id
@@ -590,10 +707,29 @@ fn by_names(e: &Engine, forms: &[u32], of: u8, names: &[&str], most: usize) -> V
     found
 }
 
-/// The lane: the distances in metres and which kind of target stands at each (humanoids and
-/// creatures alternate), with a small step to the side so none hides another.
-pub fn lane() -> Vec<(f32, bool, f32)> {
-    [5.0, 10.0, 20.0, 35.0, 50.0, 75.0, 100.0]
+/// The standard distances of the lane, in metres.
+pub const DISTANCES: [f32; 7] = [5.0, 10.0, 20.0, 35.0, 50.0, 75.0, 100.0];
+
+/// The lane's distances for `clear_m` metres of clear line ahead (a target needs 2 m of room
+/// before the wall): the standard ones that fit when four or more do, else four spread evenly
+/// over the room there is (at least 2 m out), else one at 2 m.
+pub fn fit_lane(clear_m: f32) -> Vec<f32> {
+    let room = (clear_m - 2.0).max(0.0);
+    let standard: Vec<f32> = DISTANCES.into_iter().filter(|&m| m <= room).collect();
+    if standard.len() >= 4 {
+        return standard;
+    }
+    if room < 3.0 {
+        return vec![2.0];
+    }
+    (1..=4).map(|k| (room * k as f32 / 4.0).max(2.0)).collect()
+}
+
+/// The lane for `clear_m` metres of clear line ([`fit_lane`]): the distances and which kind of
+/// target stands at each (humanoids and creatures alternate), with a small step to the side so
+/// none hides another.
+pub fn lane(clear_m: f32) -> Vec<(f32, bool, f32)> {
+    fit_lane(clear_m)
         .into_iter()
         .enumerate()
         .map(|(i, metres)| {
@@ -661,7 +797,22 @@ fn setup(e: &mut Engine, player: u32) {
         r.ammo = ammo;
     });
     fill_ammo(e);
-    place_targets(e, player);
+    // Down the longest clear line of the room: the player turned to face it.
+    let (best, clear) = best_heading(e, player, heading);
+    if best != heading {
+        run_line(
+            e,
+            &format!(
+                "player.setangle z {:.0}",
+                best.to_degrees().rem_euclid(360.0)
+            ),
+        );
+    }
+    eprintln!(
+        "Test Range: the lane runs {clear:.0} m clear at {:.0} degrees",
+        best.to_degrees().rem_euclid(360.0)
+    );
+    place_targets(e, player, best);
     eprintln!(
         "Test Range: {} weapons, a lane of targets; Home opens the range menu",
         weapons.len()
@@ -680,8 +831,9 @@ fn fill_ammo(e: &mut Engine) {
     }
 }
 
-/// A fresh lane of targets in front of the player, passive or hostile as the range is.
-fn place_targets(e: &mut Engine, player: u32) {
+/// A fresh lane of targets in front of the player facing `heading`, fitted to the clear line
+/// there ([`clear_metres`], [`fit_lane`]), passive or hostile as the range is.
+fn place_targets(e: &mut Engine, player: u32, heading: f32) {
     let forms = all_forms(e);
     let mut humanoids = by_names(e, &forms, NPC, &HUMANOIDS, 4);
     if humanoids.is_empty() {
@@ -693,12 +845,12 @@ fn place_targets(e: &mut Engine, player: u32) {
         }
     }
     let creatures = by_names(e, &forms, CREA, &CREATURES, 4);
-    let heading = e.vcall(player, HEADING_SLOT, &args![0u32]).f64() as f32;
+    let clear = clear_metres(e, player, heading);
     let angle = facing_back(heading);
     let hostile = with_range(|r| r.hostile);
     let mut targets = Vec::new();
     let (mut h, mut c) = (0usize, 0usize);
-    for (metres, humanoid, side) in lane() {
+    for (metres, humanoid, side) in lane(clear) {
         let base = if humanoid || creatures.is_empty() {
             h += 1;
             humanoids.get((h - 1) % humanoids.len().max(1)).copied()
@@ -726,6 +878,111 @@ fn place_targets(e: &mut Engine, player: u32) {
     }
     with_range(|r| r.targets = targets);
 }
+
+/// The longest clear line of the room from the player: the current `heading` and the eight
+/// compass headings, the first longest kept (the current one wins a tie).
+fn best_heading(e: &mut Engine, player: u32, heading: f32) -> (f32, f32) {
+    let mut best = (heading, clear_metres(e, player, heading));
+    for k in 0..8 {
+        let h = k as f32 * std::f32::consts::FRAC_PI_4;
+        let clear = clear_metres(e, player, h);
+        if clear > best.1 + 0.5 {
+            best = (h, clear);
+        }
+    }
+    best
+}
+
+/// How far, in metres, the lane facing `heading` is clear: the least of its middle line and its
+/// two side lines ([`lane`]'s step to each side), each found by halving with the game's pick
+/// ([`blocked`]) from 1 m ahead of the player, up to 105 m.
+fn clear_metres(e: &mut Engine, player: u32, heading: f32) -> f32 {
+    let position = e.vcall(player, POSITION_SLOT, &args![]).u32();
+    if position == 0 {
+        return 0.0;
+    }
+    let at = [
+        e.mem.f32(position),
+        e.mem.f32(position + 4),
+        e.mem.f32(position + 8) + PICK_HEIGHT,
+    ];
+    let mut clear = MAX_CLEAR;
+    for side in [-1.5f32, 0.0, 1.5] {
+        let start = |m: f32| {
+            let (x, y) = offset(heading, m, side);
+            [at[0] + x, at[1] + y, at[2]]
+        };
+        let from = start(1.0);
+        let free = |e: &mut Engine, m: f32| !blocked(e, from, start(1.0 + m));
+        let line = if free(e, MAX_CLEAR - 1.0) {
+            MAX_CLEAR
+        } else {
+            let (mut low, mut high) = (0.0f32, MAX_CLEAR - 1.0);
+            for _ in 0..9 {
+                let middle = (low + high) / 2.0;
+                if free(e, middle) {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            low + 1.0
+        };
+        clear = clear.min(line);
+    }
+    clear
+}
+
+/// Whether something solid lies between `from` and `to`: the game's pick (`TES::Pick`) with the
+/// mask its `PlaceAtMe` worker probes with (`005c4b30`: low bits `0x26`, high bits 3).
+fn blocked(e: &mut Engine, from: [f32; 3], to: [f32; 3]) -> bool {
+    let tes = e.global::<u32>(TES);
+    if tes == 0 {
+        return false;
+    }
+    e.with_stack(0x100, |e, frame| {
+        let pick = frame.addr();
+        let mask = pick + 0xc0;
+        let start = pick + 0xd0;
+        let end = pick + 0xe0;
+        let hit = pick + 0xf0;
+        e.call(PICK_CONSTRUCT, &args![pick]);
+        e.call(STORE_VALUE, &args![mask, 0u32]);
+        e.call(MASK_SET_LOW_BITS, &args![mask, 0x26u32]);
+        e.call(MASK_SET_HIGH_BITS, &args![mask, 3u32]);
+        let mask_value = e.mem.u32(mask);
+        e.call(PICK_SET_MASK, &args![pick, mask_value]);
+        for (k, (a, b)) in from.iter().zip(to).enumerate() {
+            e.mem.set_f32(start + 4 * k as u32, *a);
+            e.mem.set_f32(end + 4 * k as u32, b);
+        }
+        e.call(PICK_SET_START, &args![pick, start]);
+        e.call(PICK_SET_END, &args![pick, end]);
+        e.call(TES_PICK, &args![tes, pick]);
+        let flag = e.call(PICK_HIT, &args![pick + 0x30, hit]).u32();
+        e.call(BYTE_IS_SET, &args![flag]).bool()
+    })
+}
+
+/// The pick's words, as `PlaceAtMe`'s worker uses them (`tesscriptfunctions_p3.rs`): `TES`, a
+/// pick's constructor (`0xbc` bytes), a mask's store and its low and high bits, the pick's mask,
+/// start and end, `TES::Pick`, the hit test of the pick's result (`+0x30`) and the byte test.
+const TES: u32 = 0x011d_ea10;
+const PICK_CONSTRUCT: u32 = 0x004a_3c20;
+const STORE_VALUE: u32 = 0x008c_71b0;
+const MASK_SET_LOW_BITS: u32 = 0x004a_39f0;
+const MASK_SET_HIGH_BITS: u32 = 0x0059_ce80;
+const PICK_SET_MASK: u32 = 0x004a_3f70;
+const PICK_SET_START: u32 = 0x004a_3da0;
+const PICK_SET_END: u32 = 0x004a_3eb0;
+const TES_PICK: u32 = 0x0045_8420;
+const PICK_HIT: u32 = 0x005c_53f0;
+const BYTE_IS_SET: u32 = 0x0056_09f0;
+/// A reference's position (virtual `+0x1f4`), the height above the feet the lines are cast at
+/// (as `PlaceAtMe`'s, 64 units), and the longest line looked along, in metres.
+const POSITION_SLOT: u32 = 0x1f4;
+const PICK_HEIGHT: f32 = 64.0;
+const MAX_CLEAR: f32 = 105.0;
 
 /// The console lines that make a target passive (it stands and takes hits) or hostile.
 pub fn stance(target: &str, hostile: bool) -> Vec<String> {
@@ -825,7 +1082,8 @@ fn act(e: &mut Engine, player: u32, answer: u8) {
                 run_line(e, &format!("{t}.disable"));
                 run_line(e, &format!("{t}.markfordelete"));
             }
-            place_targets(e, player);
+            let heading = e.vcall(player, HEADING_SLOT, &args![0u32]).f64() as f32;
+            place_targets(e, player, heading);
         }
         4 => {
             with_range(|r| *r = Range::default());
@@ -838,6 +1096,8 @@ fn act(e: &mut Engine, player: u32, answer: u8) {
 /// The main menu's "Test Range" entry: a plain option of the title menu (modes 1), made as
 /// `CreateMenuElements` makes its own and moved to just above Quit (`007d0a10`).
 pub fn add_option(e: &mut Engine) {
+    // The base game's master is read for the range's places while the menu is up.
+    start_scan(e);
     let text = e.call(OPERATOR_NEW, &args![16u32]).u32();
     let block = e.call(OPERATOR_NEW, &args![0x10u32]).u32();
     if text == 0 || block == 0 {
@@ -889,44 +1149,98 @@ const QUIT_CHOOSE: u32 = 0x007d_0a10;
 mod tests {
     use super::*;
 
-    /// Patrick's click that did nothing: each step of the start is checked in order, and each
-    /// failure has a line for the log and the screen.
+    /// Patrick's clicks: the configured cell first (unless `auto`), the ranked interiors of the
+    /// player's FalloutNV.esm, the last resort; a place not in the game or not started is passed
+    /// for the next, a missing console stops; each failure has a line for the log and the screen.
     #[test]
-    fn a_start_that_cannot_happen_says_why() {
-        let mut ran = false;
+    fn the_range_tries_its_places_in_order() {
+        let ranked = vec!["BigHall".to_string(), "Hangar".to_string()];
+        let list = candidates("auto", &ranked);
         assert_eq!(
-            start_outcome(
-                false,
-                || {
-                    ran = true;
-                    true
-                },
-                || true
-            ),
-            Err(StartError::NoCell)
+            list,
+            [
+                Target::Interior("BigHall".into()),
+                Target::Interior("Hangar".into()),
+                LAST_RESORT
+            ]
         );
-        assert!(!ran, "no coc for a cell that is not there");
+        let list = candidates("MyCell", &ranked);
+        assert_eq!(list[0], Target::Interior("MyCell".into()));
+        assert_eq!(list.len(), 4);
+        assert_eq!(candidates("hangar", &ranked).len(), 3, "no place twice");
+        assert_eq!(LAST_RESORT.line(), "cow WastelandNV -18 0");
+        assert_eq!(list[0].line(), "coc MyCell");
+
+        // MyCell is missing, BigHall does not start, Hangar does.
+        struct Game {
+            missing: Vec<&'static str>,
+            dead: Vec<&'static str>,
+            last: String,
+            ran: Vec<String>,
+            console: bool,
+        }
+        let there = |g: &mut Game, t: &Target| !g.missing.contains(&t.name().as_str());
+        let run = |g: &mut Game, t: &Target| {
+            g.ran.push(t.line());
+            g.last = t.name();
+            g.console
+        };
+        let started = |g: &mut Game| !g.dead.contains(&g.last.as_str());
+        let mut g = Game {
+            missing: vec!["MyCell"],
+            dead: vec!["BigHall"],
+            last: String::new(),
+            ran: Vec::new(),
+            console: true,
+        };
         assert_eq!(
-            start_outcome(true, || false, || true),
+            first_start(&mut g, &list, there, run, started),
+            Ok(Target::Interior("Hangar".into()))
+        );
+        assert_eq!(g.ran, ["coc BigHall", "coc Hangar"]);
+        // Nothing there: the last resort starts.
+        let mut g = Game {
+            missing: vec!["MyCell", "BigHall", "Hangar"],
+            dead: vec![],
+            last: String::new(),
+            ran: Vec::new(),
+            console: true,
+        };
+        assert_eq!(
+            first_start(&mut g, &list, there, run, started),
+            Ok(LAST_RESORT)
+        );
+        // No console: stops at once.
+        let mut g = Game {
+            missing: vec![],
+            dead: vec![],
+            last: String::new(),
+            ran: Vec::new(),
+            console: false,
+        };
+        assert_eq!(
+            first_start(&mut g, &list, there, run, started),
             Err(StartError::NoConsole)
         );
-        assert_eq!(
-            start_outcome(true, || true, || false),
-            Err(StartError::NotStarted)
-        );
-        assert_eq!(start_outcome(true, || true, || true), Ok(()));
-        for why in [
-            StartError::NoCell,
-            StartError::NoConsole,
-            StartError::NotStarted,
-        ] {
-            let text = why.text("QASmoke");
-            assert!(text.starts_with("Test Range: "), "{text}");
-            assert!(text.len() < 0x27f);
+        assert_eq!(g.ran.len(), 1);
+        // Nothing starts anywhere.
+        let mut g = Game {
+            missing: vec![],
+            dead: vec!["MyCell", "BigHall", "Hangar", "WastelandNV -18,0"],
+            last: String::new(),
+            ran: Vec::new(),
+            console: true,
+        };
+        let err = first_start(&mut g, &list, there, run, started).unwrap_err();
+        assert_eq!(err, StartError::NotStarted("WastelandNV -18,0".into()));
+        for why in [StartError::NoPlace, StartError::NoConsole, err] {
+            let text = why.text();
+            assert!(
+                text.starts_with("Test Range: ") && text.len() < 0x27f,
+                "{text}"
+            );
         }
-        assert!(StartError::NoCell
-            .text("QASmoke")
-            .contains("sTestRangeCell"));
+        assert!(StartError::NoPlace.text().contains("sTestRangeCell"));
     }
 
     /// The console is made when there is none: `run_line` asks `MenuConsole::Instance` with
@@ -991,7 +1305,7 @@ mod tests {
     /// to each side, and the targets face back at the player.
     #[test]
     fn the_lane_is_ahead_of_the_player() {
-        let lane = lane();
+        let lane = lane(105.0);
         assert_eq!(lane.first().unwrap().0, 5.0);
         assert_eq!(lane.last().unwrap().0, 100.0);
         assert!(lane.windows(2).all(|w| w[0].1 != w[1].1));
@@ -1005,6 +1319,29 @@ mod tests {
         assert!((x - 700.0).abs() < 1e-2 && y.abs() < 1e-2);
         assert!((facing_back(0.0) - 180.0).abs() < 1e-3);
         assert!((facing_back(std::f32::consts::PI) - 0.0).abs() < 1e-3);
+    }
+
+    /// The lane fits the room: the standard distances that fit, else four spread over the room,
+    /// never past the wall less 2 m.
+    #[test]
+    fn the_lane_fits_the_room() {
+        assert_eq!(fit_lane(105.0), DISTANCES.to_vec());
+        assert_eq!(fit_lane(60.0), [5.0, 10.0, 20.0, 35.0, 50.0]);
+        assert_eq!(fit_lane(38.0), [5.0, 10.0, 20.0, 35.0]);
+        let short = fit_lane(22.0);
+        assert_eq!(short, [5.0, 10.0, 15.0, 20.0]);
+        let tiny = fit_lane(6.0);
+        assert_eq!(tiny.len(), 4);
+        assert!(tiny.iter().all(|&m| (2.0..=4.0).contains(&m)), "{tiny:?}");
+        assert_eq!(fit_lane(1.0), [2.0]);
+        for clear in [3.0, 9.0, 30.0, 80.0, 105.0] {
+            let lane = lane(clear);
+            assert!(
+                lane.iter().all(|l| l.0 <= (clear - 2.0).max(2.0)),
+                "{clear}: {lane:?}"
+            );
+            assert!(lane.windows(2).all(|w| w[0].1 != w[1].1));
+        }
     }
 
     #[test]

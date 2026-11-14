@@ -159,6 +159,21 @@ fn plugin_path(e: &Engine, file: Ptr) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(&full).into_owned())
 }
 
+/// The host paths of the load order's plugins, as the data handler holds them (none before it is
+/// made); also what the Test Range reads the base game's master from (`crate::test_range`).
+pub(crate) fn loaded_plugin_paths(e: &Engine) -> Vec<PathBuf> {
+    let handler = e.mem.u32(DATA_HANDLER);
+    if handler == 0 {
+        return Vec::new();
+    }
+    let count = e.mem.u32(handler + COMPILE_COUNT).min(0xff);
+    (0..count)
+        .map(|i| e.mem.u32(handler + FILE_INDEX + 4 * i))
+        .filter(|&file| file != 0)
+        .map(|file| plugin_path(e, Ptr::new(file)))
+        .collect()
+}
+
 /// Starts building every plugin of the load order on a host thread, once per run (the first
 /// world space record loaded): by the time a later plugin's records load, its tables are made.
 fn start_building(e: &Engine) {
@@ -170,16 +185,10 @@ fn start_building(e: &Engine) {
         }
         *started = Some(e.kernel.id());
     }
-    let handler = e.mem.u32(DATA_HANDLER);
-    if handler == 0 {
+    let paths = loaded_plugin_paths(e);
+    if paths.is_empty() {
         return;
     }
-    let count = e.mem.u32(handler + COMPILE_COUNT).min(0xff);
-    let paths: Vec<PathBuf> = (0..count)
-        .map(|i| e.mem.u32(handler + FILE_INDEX + 4 * i))
-        .filter(|&file| file != 0)
-        .map(|file| plugin_path(e, Ptr::new(file)))
-        .collect();
     let _ = std::thread::Builder::new()
         .name("cell offsets".into())
         .spawn(move || {

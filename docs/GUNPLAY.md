@@ -199,12 +199,12 @@ Code: `crates/host/src/test_range.rs`, part of the weighty combat row (on with
 ### How to use it
 
 1. On the main menu choose **Test Range** (just above Quit).
-2. The game starts fresh in the range cell, with a default character: no character creation and
-   no save.
+2. The game starts fresh in the range's cell (chosen from your FalloutNV.esm, "The place"
+   below), with a default character: no character creation and no save.
 3. About half a second into play the range is set up:
    - a container behind you with one of every weapon;
    - 500 rounds of every ammo type in your inventory;
-   - a lane of targets straight ahead at 5, 10, 20, 35, 50, 75 and 100 m, humanoids and
+   - you turned down the room's longest clear line, and a lane of targets along it at 5, 10, 20, 35, 50, 75 and 100 m as far as it is clear ("The place" below), humanoids and
      creatures alternating, a step to each side.
 
    A note says "press Home for the range menu".
@@ -236,13 +236,61 @@ way the console key does (`MenuConsole::Instance(1)`, `0071b160`).
 
 ### The place
 
-The default is **`QASmoke`**, the game's own test hall in FalloutNV.esm: interior, quiet and lit,
-with no wildlife or random encounters. `[nv-rs Gunplay] sTestRangeCell` (or `NV_TEST_RANGE_CELL`)
-names another cell by its editor id, interior or exterior (letters, digits and `_` only, as it
-goes on a console line).
+**`auto`, the default:** the range reads the player's own FalloutNV.esm with the repo's plugin
+reader (`esm`), in the background while the main menu is up, and picks its cell from what is
+really there (`crates/host/src/range_cells.rs`). Only the base game's master is read, so the
+choice is the same with or without DLC. No cell name is taken from memory: the first version's
+`QASmoke` is a Fallout 3 cell that FalloutNV.esm does not have (Patrick, 2026-11-14).
 
-Not checked in the game: whether QASmoke's longest line reaches 100 m. The far targets may stand
-in or behind a wall. Respawn Targets lays the lane along whatever line you face.
+**What is measured, for every interior cell:**
+- its editor id;
+- its placed references, and how many of them are walls, floors and other architecture (`STAT`,
+  `SCOL`, `MSTT`);
+- its actors (`ACHR`, `ACRE`);
+- whether it has a navmesh;
+- its light (the cell's ambient and directional colours, or a lighting template);
+- its length: the longer side of the box the middle 90 % of its references stand in.
+
+**What is fit for the range:** a cell that
+- has a navmesh (a space made to be walked);
+- has no actors (nobody to fight back, no quest NPC to break);
+- has at least 40 statics;
+- is lit;
+- is at least 20 m long;
+- is not one of the editor's holding, storage or dummy cells.
+
+The longest wins, up to 115 m; beyond that the light decides. A developers' test or QA cell goes a
+little ahead. The game's log lists the five best (`Test Range: candidate <cell> (<n> m long,
+...)`) and the one used (`Test Range: started in <cell>`).
+
+**Fallbacks, tried in order** until a new game begins:
+1. `[nv-rs Gunplay] sTestRangeCell` (or `NV_TEST_RANGE_CELL`) when it names a cell;
+2. the ranked cells, best first (up to eight);
+3. the last resort: the Mojave's worldspace at Goodsprings (`cow WastelandNV -18 0`). This is not
+   quiet; it is only used when no interior starts.
+
+A cell that is not in the loaded game, or where no game begins, is passed for the next. When
+nothing starts, the main menu says why.
+
+**The lane fits the space.** After the cell loads, the range measures the clear line ahead with
+the game's own pick (`TES::Pick`, cast 64 units above the floor as `PlaceAtMe`'s worker does). It
+checks the lane's middle line and both side lines, halving up to 105 m.
+- At set-up it turns the player down the longest clear line of eight directions.
+- Respawn Targets keeps your facing.
+- The targets stand at the standard 5 to 100 m distances that fit, 2 m short of the wall. Where
+  fewer than four fit, four are spread over the room there is.
+
+**Checked here:** the scan on a plugin made in memory, the ranking, the fallbacks, and the lane's
+fit. **Not checked here:** the real file, which is not in this repository. The ignored test
+`range_cells::tests::the_range_has_a_place_in_the_real_falloutnv_esm` checks it on a machine with
+the game:
+
+```text
+NV_DATA="C:\...\Fallout New Vegas\Data" cargo test -p host --lib range_cells -- --ignored --nocapture
+```
+
+It prints the ten best cells and checks that the chosen one is an interior cell of the file and
+that `WastelandNV` is there.
 
 ### How it is built: the game's own content and machinery only
 

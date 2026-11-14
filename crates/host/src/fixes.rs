@@ -587,7 +587,7 @@ pub struct Choice {
     pub gunplay: crate::gunplay::Tuning,
     /// The Test Range's cell ([`crate::test_range`]): `NV_TEST_RANGE_CELL` when set (an editor id,
     /// else the start stops); else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Gunplay]
-    /// sTestRangeCell`; else `QASmoke`.
+    /// sTestRangeCell`; else `auto` (the best interior of the player's FalloutNV.esm).
     pub test_range_cell: String,
     /// The one log line naming `Fallout.ini` values that could not be used
     /// ([`crate::game_ini::Keys::bad_line`]): the default stood for each.

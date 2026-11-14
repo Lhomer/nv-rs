@@ -110,9 +110,10 @@ settings are in Fallout.ini's [nv-rs Gunplay] section. With Vanilla, or bWeighty
 [nv-rs Fixes], combat is the original's.
 
 To try it out, choose Test Range on the main menu (above Quit). It starts a throwaway game in the
-game's own test hall, with no character creation: a container with every weapon of your game and
-its add-ons, 500 rounds of every ammo, and a row of targets from 5 to 100 metres that stand still
-and take hits. Press Home there for the range menu: open the weapons, fill the ammo, make the
+longest quiet, lit hall your game has (picked from your own FalloutNV.esm), with no character
+creation, turned to face the longest clear line: a container with every weapon of your game and
+its add-ons, 500 rounds of every ammo, and a row of targets from 5 metres out, up to 100 as
+far as the hall allows, that stand still and take hits. Press Home there for the range menu: open the weapons, fill the ammo, make the
 targets fight back or stand still again, bring fresh targets (along the way you are facing), or
 go back to the main menu. Nothing there is ever saved, and your own saves are never touched.
 
