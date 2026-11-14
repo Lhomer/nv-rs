@@ -102,8 +102,10 @@ pub const FIX: Fix = Fix {
         crate::hit_force::MELEE_HIT,
         crate::hit_force::KNOCK_EXPLOSION,
         crate::knockdown::HIT_ME,
+        crate::ballistics::CREATE_PROJECTILE,
+        crate::ballistics::PROCESS_IMPACTS,
     ],
-    summary: "guns kick the view and recover, the weapon lags fast turns and settles back, melee hits and heavy shots punch the viewmodel and camera (game time untouched), melee reaches a little further, kills push bodies by calibre and weapon weight, and a heavy enough hit severs the limb (Settings menu rows and [nv-rs Gunplay] tune it)",
+    summary: "guns kick the view and recover, the weapon lags fast turns and settles back, melee hits and heavy shots punch the viewmodel and camera (game time untouched), melee reaches a little further, kills push bodies by calibre and weapon weight, hard hits knock down, bullets fly by calibre and load and penetrate, weapon mods count, and a heavy enough hit severs the limb (Settings menu rows and [nv-rs Gunplay] tune it)",
     install,
 };
 
@@ -143,6 +145,13 @@ pub struct Tuning {
     /// `iExplodeForce`: the force from which a gun's killing hit explodes an explodable limb; 0 =
     /// only the game's own chance.
     pub explode_force: i32,
+    /// `bBallistics`: bullets fly as projectiles with travel time and drop ([`crate::ballistics`]);
+    /// off is the game's hitscan (Classic).
+    pub ballistics: bool,
+    /// `bPenetration`: rounds go through bodies and thin objects ([`crate::ballistics`]).
+    pub penetration: bool,
+    /// `iBulletSpeed`: the bullets' speed, percent of each calibre's.
+    pub bullet_speed: i32,
 }
 
 impl Tuning {
@@ -161,6 +170,9 @@ impl Tuning {
         knockdown_companions: false,
         dismember_force: 45,
         explode_force: 110,
+        ballistics: true,
+        penetration: true,
+        bullet_speed: 100,
     };
 
     /// Sets `key` (a [`KEYS`] key) to `value`; false for a key that isn't one or a value out of
@@ -186,6 +198,9 @@ impl Tuning {
             "bknockdowncompanions" => self.knockdown_companions = value != 0,
             "idismemberforce" => self.dismember_force = value,
             "iexplodeforce" => self.explode_force = value,
+            "bballistics" => self.ballistics = value != 0,
+            "bpenetration" => self.penetration = value != 0,
+            "ibulletspeed" => self.bullet_speed = value,
             _ => return false,
         }
         true
@@ -207,6 +222,9 @@ impl Tuning {
             "bknockdowncompanions" => i32::from(self.knockdown_companions),
             "idismemberforce" => self.dismember_force,
             "iexplodeforce" => self.explode_force,
+            "bballistics" => i32::from(self.ballistics),
+            "bpenetration" => i32::from(self.penetration),
+            "ibulletspeed" => self.bullet_speed,
             _ => return None,
         })
     }
@@ -245,7 +263,7 @@ impl Default for Tuning {
 }
 
 /// The keys of [`SECTION`]: key, its environment variable, lowest and highest value.
-pub const KEYS: [(&str, &str, i32, i32); 13] = [
+pub const KEYS: [(&str, &str, i32, i32); 16] = [
     ("iRecoil", "NV_GUNPLAY_RECOIL", 0, 300),
     ("iRecoilRecovery", "NV_GUNPLAY_RECOVERY", 0, 100),
     ("iSway", "NV_GUNPLAY_SWAY", 0, 300),
@@ -269,6 +287,9 @@ pub const KEYS: [(&str, &str, i32, i32); 13] = [
     ),
     ("iDismemberForce", "NV_GUNPLAY_DISMEMBER_FORCE", 0, 1000),
     ("iExplodeForce", "NV_GUNPLAY_EXPLODE_FORCE", 0, 1000),
+    ("bBallistics", "NV_GUNPLAY_BALLISTICS", 0, 1),
+    ("bPenetration", "NV_GUNPLAY_PENETRATION", 0, 1),
+    ("iBulletSpeed", "NV_GUNPLAY_BULLET_SPEED", 25, 200),
 ];
 
 /// A value of `key` as the file or a variable holds it: `1`/`0` for a `b` key, a whole number for
@@ -358,11 +379,14 @@ const WEAPON_DAMAGE: u32 = 0xA0;
 const WEAPON_TYPE: u32 = 0xF4;
 const WEAPON_FLAGS: u32 = 0xF4 + 0x0C;
 const WEAPON_PROJECTILES: u32 = 0xF4 + 0x2A;
-/// The automatic flag of `cFlags`.
+/// The automatic and scope flags of `cFlags`; `fMinSpread`.
 const FLAG_AUTOMATIC: u8 = 2;
+const FLAG_SCOPE: u8 = 4;
+const WEAPON_MIN_SPREAD: u32 = 0x104;
 
-/// What a weapon form gives the feel (none for no form).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// What a weapon gives the feel (none for no form): its form's stats, with the attached weapon
+/// mods for [`effective_stats`] ([`crate::weapon_mods`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WeaponStats {
     /// `eType`: 0 to 2 melee, 3 to 9 guns, 10 to 13 thrown and placed.
     pub kind: i32,
@@ -370,6 +394,27 @@ pub struct WeaponStats {
     pub projectiles: u32,
     pub weight: f32,
     pub automatic: bool,
+    /// A scope: the weapon's own, or a scope mod's.
+    pub scoped: bool,
+    /// A silencer mod.
+    pub silenced: bool,
+    /// The sway and kick left by spread-reducing mods (1 for none).
+    pub steady: f32,
+}
+
+impl Default for WeaponStats {
+    fn default() -> WeaponStats {
+        WeaponStats {
+            kind: 0,
+            damage: 0.0,
+            projectiles: 1,
+            weight: 0.0,
+            automatic: false,
+            scoped: false,
+            silenced: false,
+            steady: 1.0,
+        }
+    }
 }
 
 impl WeaponStats {
@@ -393,7 +438,37 @@ pub(crate) fn weapon_stats(e: &Engine, weapon: u32) -> Option<WeaponStats> {
         projectiles: u32::from(e.mem.u8(weapon + WEAPON_PROJECTILES)).max(1),
         weight: sane(e.mem.f32(weapon + WEAPON_WEIGHT), 0.0, 200.0),
         automatic: e.mem.u8(weapon + WEAPON_FLAGS) & FLAG_AUTOMATIC != 0,
+        scoped: e.mem.u8(weapon + WEAPON_FLAGS) & FLAG_SCOPE != 0,
+        silenced: false,
+        steady: 1.0,
     })
+}
+
+/// The stats of `weapon` as `actor` holds it: with the weapon mods attached to the actor's held
+/// item when that item is `weapon` (damage, weight, split-beam projectiles, scope, silencer,
+/// spread: [`crate::weapon_mods`]); the form's own otherwise.
+pub(crate) fn effective_stats(e: &mut Engine, actor: u32, weapon: u32) -> Option<WeaponStats> {
+    let stats = weapon_stats(e, weapon)?;
+    let mods = crate::weapon_mods::on_weapon(e, actor, weapon);
+    if mods.is_empty() {
+        return Some(stats);
+    }
+    let min_spread = sane(e.mem.f32(weapon + WEAPON_MIN_SPREAD), 0.0, 90.0);
+    Some(crate::weapon_mods::apply(stats, &mods, min_spread))
+}
+
+/// The aim's steadiness for the sway: spread-reducing mods, and a scope in sights (0.6 of iron
+/// sights').
+pub fn aim_steadiness(stats: Option<&WeaponStats>, sights: bool) -> f32 {
+    let Some(s) = stats else {
+        return 1.0;
+    };
+    let steady = if s.steady.is_finite() {
+        s.steady.clamp(0.2, 1.0)
+    } else {
+        1.0
+    };
+    steady * if sights && s.scoped { 0.6 } else { 1.0 }
 }
 
 /// `value` inside `low..=high`, `low` for NaN.
@@ -434,8 +509,12 @@ pub fn kick_degrees(stats: &WeaponStats, sights: bool) -> f32 {
     } else {
         1.0
     };
-    let steady = if sights { 0.7 } else { 1.0 };
-    base * kind * auto * steady
+    let sighted = match (sights, stats.scoped) {
+        (true, true) => 0.6,
+        (true, false) => 0.7,
+        _ => 1.0,
+    };
+    base * kind * auto * sighted * aim_steadiness(Some(stats), false)
 }
 
 /// How much harder a kill with the weapon pushes the body, before `iImpulse`: melee by weight
@@ -491,7 +570,8 @@ pub fn melee_punch(tuning: &Tuning, stats: Option<&WeaponStats>, side: f32) -> O
 }
 
 /// The firmer kick of a heavy shot (a force of 25 or more: a shotgun, a magnum, a rifle), growing
-/// to a force of 110; lighter shots have only their recoil. Iron sights halve the viewmodel's part.
+/// to a force of 110; lighter shots have only their recoil. Iron sights halve the viewmodel's part,
+/// a scope leaves it a third.
 pub fn shot_punch(tuning: &Tuning, stats: &WeaponStats, sights: bool, side: f32) -> Option<Punch> {
     if !stats.is_gun() {
         return None;
@@ -502,7 +582,11 @@ pub fn shot_punch(tuning: &Tuning, stats: &WeaponStats, sights: bool, side: f32)
     }
     let h = ((force - 25.0) / 85.0).clamp(0.0, 1.0);
     let seconds = punch_seconds(tuning, 0.8 + 0.5 * h)?;
-    let model = if sights { 0.5 } else { 1.0 };
+    let model = match (sights, stats.scoped) {
+        (true, true) => 0.3,
+        (true, false) => 0.5,
+        _ => 1.0,
+    };
     Some(Punch {
         back: (1.0 + 2.0 * h) * model,
         lift: (1.0 + 2.5 * h).to_radians() * model,
@@ -638,6 +722,7 @@ pub fn install(e: &mut Engine) {
             frame(e, a[0], f32::from_bits(a[1]));
             crate::test_range::frame(e, a[0]);
             crate::knockdown::frame(e);
+            crate::ballistics::frame(e);
         }
         Ret {
             eax: u32::from(used),
@@ -675,7 +760,7 @@ pub fn install(e: &mut Engine) {
             && e.mem.i32(VATS_MODE) == 0
         {
             let weapon = held_weapon(e, a[0]);
-            let stats = weapon_stats(e, weapon);
+            let stats = effective_stats(e, a[0], weapon);
             if stats.map_or(true, |s| s.is_melee()) {
                 with_state(|s| {
                     let side = wobble(&mut s.seed);
@@ -719,6 +804,7 @@ pub fn install(e: &mut Engine) {
     crate::movement::install(e);
     crate::hit_force::install(e);
     crate::knockdown::install(e);
+    crate::ballistics::install(e);
 }
 
 /// The weapon form the actor holds (0 for its fists or none).
@@ -740,7 +826,7 @@ fn shot(e: &mut Engine, weapon: u32, player: u32) {
     if e.mem.i32(VATS_MODE) != 0 {
         return;
     }
-    let Some(stats) = weapon_stats(e, weapon) else {
+    let Some(stats) = effective_stats(e, player, weapon) else {
         return;
     };
     let sights = e.call(ACTOR_GET_IRON_SIGHTS, &args![player]).bool();
@@ -768,7 +854,7 @@ fn kill_impulse(e: &mut Engine, aggressor: u32, hit: u32) {
         return;
     }
     let tuning = tuning();
-    let stats = weapon_stats(e, e.mem.u32(hit + HIT_WEAPON));
+    let stats = effective_stats(e, aggressor, e.mem.u32(hit + HIT_WEAPON));
     if tuning.hit_force > 0 {
         crate::hit_force::push_body(e, aggressor, hit, stats.as_ref());
         return;
@@ -910,8 +996,10 @@ fn frame(e: &mut Engine, player: u32, time_step: f32) {
     }
     let sights = e.call(ACTOR_GET_IRON_SIGHTS, &args![player]).bool();
     let weapon = held_weapon(e, player);
-    let weight = weapon_stats(e, weapon).map_or(0.0, |w| w.weight);
-    let strength = sway_strength(tuning.sway, weight, sights);
+    let stats = effective_stats(e, player, weapon);
+    let weight = stats.map_or(0.0, |w| w.weight);
+    let strength =
+        sway_strength(tuning.sway, weight, sights) * aim_steadiness(stats.as_ref(), sights);
     let recoil = tuning.recoil as f32 / 100.0;
     let sway = sway_step(
         &mut s.sway,
@@ -1285,7 +1373,7 @@ fn unplace_pose(e: &mut Engine, placed: &Placed) {
 
 /// The rows' change functions, after the graphics rows' (`0x7e06_0010` to `0x7e06_0050`), in the
 /// platform's area that no exe or platform code uses.
-pub const CHANGE_FNS: [u32; 8] = [
+pub const CHANGE_FNS: [u32; 11] = [
     0x7e06_0060,
     0x7e06_0070,
     0x7e06_0080,
@@ -1296,6 +1384,10 @@ pub const CHANGE_FNS: [u32; 8] = [
     0x7e06_0170,
     0x7e06_0180,
     0x7e06_0190,
+    // Ballistics, Penetration and Bullet Speed, on the Gameplay page.
+    0x7e06_01a0,
+    0x7e06_01b0,
+    0x7e06_01c0,
 ];
 
 /// A row of the Settings menu's Display page.
@@ -1317,10 +1409,16 @@ pub enum Row {
     Knockdowns,
     /// A meter of `iKnockdownThreshold` (25 to 400), on the Gameplay page.
     KnockThreshold,
+    /// Classic / Projectile: `bBallistics`, on the Gameplay page.
+    Ballistics,
+    /// Off / On: `bPenetration`, on the Gameplay page.
+    Penetration,
+    /// A meter of `iBulletSpeed` (25 to 200), on the Gameplay page.
+    BulletSpeed,
 }
 
 /// The rows, in the order they are made.
-pub const ROWS: [Row; 8] = [
+pub const ROWS: [Row; 11] = [
     Row::Enabled,
     Row::Recoil,
     Row::Sway,
@@ -1329,6 +1427,9 @@ pub const ROWS: [Row; 8] = [
     Row::HitForce,
     Row::Knockdowns,
     Row::KnockThreshold,
+    Row::Ballistics,
+    Row::Penetration,
+    Row::BulletSpeed,
 ];
 
 impl Row {
@@ -1343,13 +1444,16 @@ impl Row {
             Row::HitForce => (SECTION, "iHitForce"),
             Row::Knockdowns => (SECTION, "bKnockdowns"),
             Row::KnockThreshold => (SECTION, "iKnockdownThreshold"),
+            Row::Ballistics => (SECTION, "bBallistics"),
+            Row::Penetration => (SECTION, "bPenetration"),
+            Row::BulletSpeed => (SECTION, "iBulletSpeed"),
         }
     }
 
     /// A meter's lowest value (its first setting).
     fn low(self) -> i32 {
         match self {
-            Row::KnockThreshold => 25,
+            Row::KnockThreshold | Row::BulletSpeed => 25,
             _ => 0,
         }
     }
@@ -1357,7 +1461,12 @@ impl Row {
     /// The Settings page the row is on: Display, or Gameplay for Hit Force.
     pub fn page(self) -> u32 {
         match self {
-            Row::HitForce | Row::Knockdowns | Row::KnockThreshold => GAMEPLAY,
+            Row::HitForce
+            | Row::Knockdowns
+            | Row::KnockThreshold
+            | Row::Ballistics
+            | Row::Penetration
+            | Row::BulletSpeed => GAMEPLAY,
             _ => DISPLAY,
         }
     }
@@ -1369,7 +1478,18 @@ impl Row {
             Row::Dismember => Some((5, 31)),
             Row::HitForce => Some((10, 31)),
             Row::KnockThreshold => Some((25, 16)),
-            Row::Enabled | Row::HitStop | Row::Knockdowns => None,
+            Row::BulletSpeed => Some((5, 36)),
+            Row::Enabled | Row::HitStop | Row::Knockdowns | Row::Ballistics | Row::Penetration => {
+                None
+            }
+        }
+    }
+
+    /// A list's two texts (off, on).
+    pub fn choices(self) -> (&'static str, &'static str) {
+        match self {
+            Row::Ballistics => ("Classic", "Projectile"),
+            _ => ("Off", "On"),
         }
     }
 
@@ -1419,6 +1539,9 @@ impl Row {
             Row::HitForce => format!("Hit Force: {value}%"),
             Row::Knockdowns => "Knockdowns".to_string(),
             Row::KnockThreshold => format!("Knockdown Threshold: {value}%"),
+            Row::Ballistics => "Ballistics".to_string(),
+            Row::Penetration => "Penetration".to_string(),
+            Row::BulletSpeed => format!("Bullet Speed: {value}%"),
         }
     }
 }
@@ -1486,8 +1609,9 @@ pub fn add_rows(e: &mut Engine) {
             None => args![block, text, change_fn, row.page(), LIST, 2u32, 0u32],
         };
         if row.meter().is_none() {
-            let off = heap_text(e, "Off", 8);
-            let on = heap_text(e, "On", 8);
+            let (off, on) = row.choices();
+            let off = heap_text(e, off, 16);
+            let on = heap_text(e, on, 16);
             if off == 0 || on == 0 {
                 continue;
             }
@@ -1501,6 +1625,7 @@ pub fn add_rows(e: &mut Engine) {
     }
     crate::movement::add_rows(e);
     crate::test_range::add_option(e);
+    crate::ballistics::apply_forms(e);
 }
 
 /// Registers the rows' change functions.
@@ -1509,7 +1634,7 @@ pub fn install_change_fns(e: &mut Engine) {
         change(e, ROWS[N], Ptr::new(a[0]));
         Ret::default()
     }
-    let fns: [AbiFn; 8] = [
+    let fns: [AbiFn; 11] = [
         row_fn::<0>,
         row_fn::<1>,
         row_fn::<2>,
@@ -1518,6 +1643,9 @@ pub fn install_change_fns(e: &mut Engine) {
         row_fn::<5>,
         row_fn::<6>,
         row_fn::<7>,
+        row_fn::<8>,
+        row_fn::<9>,
+        row_fn::<10>,
     ];
     for (address, f) in CHANGE_FNS.into_iter().zip(fns) {
         e.register(address, f);
@@ -1559,6 +1687,9 @@ fn change(e: &mut Engine, row: Row, option: Ptr) {
             tuning.set(row.key().1, value);
             set_tuning(tuning);
         }
+    }
+    if matches!(row, Row::Enabled | Row::Ballistics | Row::BulletSpeed) {
+        crate::ballistics::apply_forms(e);
     }
     write_label(e, menu, option, row.label(value));
     let saved = save(row, value);
@@ -1632,6 +1763,7 @@ mod tests {
             projectiles,
             weight: 4.0,
             automatic,
+            ..WeaponStats::default()
         }
     }
 
@@ -1642,6 +1774,7 @@ mod tests {
             projectiles: 1,
             weight,
             automatic: false,
+            ..WeaponStats::default()
         }
     }
 
@@ -1670,6 +1803,9 @@ mod tests {
             knockdown_companions: false,
             dismember_force: 0,
             explode_force: 0,
+            ballistics: false,
+            penetration: false,
+            bullet_speed: 25,
         };
         for (row, key) in rows.iter().zip(KEYS) {
             assert_eq!(row.switch, key.1, "{row:?}");
@@ -2086,5 +2222,34 @@ mod tests {
             );
         }
         assert_eq!(Row::Enabled.key(), ("nv-rs Fixes", "bWeightyCombat"));
+        assert_eq!(Row::Ballistics.choices(), ("Classic", "Projectile"));
+        assert_eq!(Row::Penetration.choices(), ("Off", "On"));
+        assert_eq!(
+            Row::BulletSpeed.value_of(Row::BulletSpeed.setting_of(200)),
+            200
+        );
+        assert_eq!(Row::BulletSpeed.value_of(0), 25);
+    }
+
+    /// A scope steadies the aim more than iron sights; a spread mod steadies kick and sway.
+    #[test]
+    fn scopes_and_spread_mods_steady_the_aim() {
+        let rifle = gun(5, 40.0, 1, false);
+        let scoped = WeaponStats {
+            scoped: true,
+            ..rifle
+        };
+        let modded = WeaponStats {
+            steady: 0.7,
+            ..rifle
+        };
+        assert!(kick_degrees(&scoped, true) < kick_degrees(&rifle, true));
+        assert_eq!(kick_degrees(&scoped, false), kick_degrees(&rifle, false));
+        assert!(kick_degrees(&modded, false) < kick_degrees(&rifle, false));
+        assert_eq!(aim_steadiness(Some(&scoped), true), 0.6);
+        assert_eq!(aim_steadiness(Some(&scoped), false), 1.0);
+        assert_eq!(aim_steadiness(None, true), 1.0);
+        let p = |s: &WeaponStats| shot_punch(&Tuning::PLAY, s, true, 1.0).unwrap().back;
+        assert!(p(&scoped) < p(&rifle));
     }
 }

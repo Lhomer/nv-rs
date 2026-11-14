@@ -16,7 +16,7 @@
 //!
 //! **The momentum** ([`momentum`], in the units of the game's strength: damage points), from
 //! [`Shot`]:
-//! - a gun: its damage per projectile less the target's damage threshold (never below
+//! - a gun (Classic hitscan): its damage per projectile, with its weapon mods, less the target's damage threshold (never below
 //!   [`MIN_THROUGH`] of it), over its projectiles: `n^`[`PELLET_EXPONENT`] (a shotgun's pellets
 //!   spread over the bones they hit; the one killing pellet's point gets their share);
 //! - a melee or unarmed hit: the weapon's damage made heavier by its weight (`1 + weight /`
@@ -26,6 +26,9 @@
 //!   less the damage threshold as for a gun;
 //! - an explosion: the game's own (its health damage, the threshold already taken), the falloff
 //!   the game's;
+//! - a ballistic bullet (Projectile mode, [`crate::ballistics`]): its mass times its speed where
+//!   it hit, times its load's transfer, less the threshold by its load's factor, over the pellets
+//!   as for a gun;
 //! - then times `iHitForce` and `iImpulse` (percent each), at most [`MAX_MOMENTUM`]: bodies are
 //!   thrown, never launched.
 //!
@@ -70,6 +73,14 @@ pub enum Shot {
     },
     /// A blast: the game's own strength (its health damage).
     Explosion { damage: f32 },
+    /// A ballistic bullet ([`crate::ballistics`]): its momentum where it hit (mass times speed,
+    /// times its load's transfer, in damage points), the factor the damage threshold counts by
+    /// (its load's), and the weapon's projectiles (a shotgun's pellets).
+    Bullet {
+        momentum: f32,
+        threshold: f32,
+        projectiles: u32,
+    },
 }
 
 /// Strength's share of a swing: 0.68 at 1, 1.0 at 5, 1.4 at 10.
@@ -113,6 +124,14 @@ pub fn momentum(shot: Shot, threshold: f32) -> f32 {
             through(swing, threshold)
         }
         Shot::Explosion { damage } => damage.max(0.0),
+        Shot::Bullet {
+            momentum,
+            threshold: factor,
+            projectiles,
+        } => {
+            through(momentum, threshold * factor)
+                * (projectiles.clamp(1, 20) as f32).powf(PELLET_EXPONENT)
+        }
     };
     if m.is_finite() {
         m
@@ -189,6 +208,13 @@ pub fn shot_of(e: &mut Engine, hit: u32, stats: Option<&WeaponStats>) -> Shot {
     if source != 0 && e.vcall(source, 0x224, &args![]).bool() {
         return Shot::Explosion {
             damage: e.mem.f32(hit + HIT_HEALTH_DAMAGE),
+        };
+    }
+    if let Some((momentum, threshold)) = crate::ballistics::bullet_momentum(e, source) {
+        return Shot::Bullet {
+            momentum,
+            threshold,
+            projectiles: stats.map_or(1, |s| s.projectiles),
         };
     }
     let aggressor = e.mem.u32(hit + HIT_AGGRESSOR);

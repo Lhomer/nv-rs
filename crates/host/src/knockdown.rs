@@ -249,7 +249,8 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
     {
         return;
     }
-    let stats = crate::gunplay::weapon_stats(e, e.mem.u32(hit + HIT_WEAPON));
+    let aggressor = e.mem.u32(hit + HIT_AGGRESSOR);
+    let stats = crate::gunplay::effective_stats(e, aggressor, e.mem.u32(hit + HIT_WEAPON));
     let shot = shot_of(e, hit, stats.as_ref());
     if matches!(shot, Shot::Explosion { .. }) {
         return; // the game knocks down from blasts itself
@@ -259,7 +260,6 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
     let scale = e.call(GET_SCALE, &args![target]).f64() as f32;
     let body = body_of(e, target);
     let resist = resistance(body, scale, t.knockdown_threshold);
-    let aggressor = e.mem.u32(hit + HIT_AGGRESSOR);
     let (point, direction) = impact(e, hit, target, aggressor);
     match reaction(m, resist) {
         Reaction::Knockdown => knock_down(e, target, aggressor, point, direction, m),

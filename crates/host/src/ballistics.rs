@@ -1,0 +1,860 @@
+//! Ballistic bullets (Patrick, 2026-11-14: Battlefield-style). Part of the weighty combat row;
+//! `[nv-rs Gunplay] bBallistics` (Classic hitscan / Projectile), `bPenetration`, `iBulletSpeed`,
+//! all three on the Settings menu's Gameplay page. **Not 1:1 with FalloutNV.exe.**
+//!
+//! **Flight: the game's own.** A bullet's projectile form (`BGSProjectile`, its `DATA` at `+0x60`)
+//! is hitscan when bit 0x1 of its flags is set: the shot casts one ray. With it clear the game
+//! flies the projectile (`MissileProjectile::UpdateProjectile`), its speed `fSpeed`, its drop
+//! `fGravity` (through its character controller), its range `fRange`, shows its model (a hitscan
+//! bullet only shows one as a tracer), and the combat AI leads it: `GetProjectedPointForTarget`
+//! (`009a8df0`) answers the target's point for hitscan and otherwise iterates on the target's
+//! velocity with the flight time from the form's speed and gravity. So in Projectile mode every
+//! bullet form a gun of a known calibre uses ([`apply_forms`]: the weapon's `+0x118`, its ammo's
+//! override `+0xB4`) is made a flying one with its calibre's speed, drop and range ([`CALIBERS`]);
+//! the originals are kept, and Classic (or the row off) puts them back.
+//!
+//! **Per shot** (over `CreateProjectile`, `009bca60`, which every shot of `TESObjectWEAP::Fire`
+//! goes through): the shooter's loaded ammo (`TESObjectWEAP::GetCurrentAmmo`, `00525980`) gives
+//! the load ([`Load`]: by its name, else by its effects: a damage threshold multiplied up is a
+//! hollow point, one subtracted an armour-piercing round); its velocity factor and the weapon
+//! mods' ([`crate::weapon_mods`]: a long or heavy barrel faster, a short one or a silencer slower,
+//! the projectile speed effect for anyone but the player, whose shot the game scaled) go into the
+//! projectile's speed multiplier (`+0xD0`), and the bullet is remembered (calibre, load, its muzzle
+//! speed, whether it is one of several pellets, a split beam's included).
+//!
+//! **Momentum at impact** ([`bullet_momentum`]): the bullet's mass times its speed where it hits
+//! (its muzzle speed, less after each pass; `iBulletSpeed` changes the flight, not the hit), times
+//! the load's transfer (a hollow point gives more of
+//! it to the body, an armour-piercing round less), in the hit force's damage points
+//! ([`POINTS_PER_NEWTON_SECOND`]); the damage threshold counts by the load's factor. The hit force
+//! and the knockdowns use it ([`crate::hit_force::Shot::Bullet`]).
+//!
+//! **Penetration** (over `Projectile::ProcessImpacts`, `009c1b70`): after the game processed a
+//! bullet's impact, a round with energy left goes on: through a body ([`BODY_COST`]), or through a
+//! thin object of a penetrable material (glass, wood, sheet and hollow metal, cloth, fences:
+//! [`material`]: the material's usual thickness in a level, not measured, as the host has no ray
+//! cast into the game's world to call yet) it can pass. Each pass costs its share of the round's penetration power
+//! ([`Caliber::penetration`] times the load's), the speed and damage going down with it; a
+//! continuation is a new projectile of the same form, shooter and weapon, started a little past a
+//! thin object or a body's depth past a body at the next frame (never inside the game's impact code), at most [`MAX_PASSES`] passes a bullet and
+//! [`MAX_CONTINUATIONS`] a second. A shotgun's pellets never penetrate (a slug can).
+//!
+//! **Cheap:** one table lookup a shot; nothing per frame but the queued continuations.
+
+use engine::prelude::*;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Instant;
+
+/// A calibre: muzzle velocity (m/s), bullet mass (g), drop factor (the form's gravity: the drag the
+/// game does not model, more for slow, light-for-calibre rounds), penetration power and range (m).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Caliber {
+    pub name: &'static str,
+    pub velocity: f32,
+    pub mass: f32,
+    pub drop: f32,
+    pub penetration: f32,
+    pub range: f32,
+}
+
+const fn cal(
+    name: &'static str,
+    velocity: f32,
+    mass: f32,
+    drop: f32,
+    penetration: f32,
+    range: f32,
+) -> Caliber {
+    Caliber {
+        name,
+        velocity,
+        mass,
+        drop,
+        penetration,
+        range,
+    }
+}
+
+/// The calibres, by the words of the ammo's name that pick them (the first match wins, so the
+/// longer names come first).
+pub const CALIBERS: [(&[&str], Caliber); 21] = [
+    (
+        &[".45-70", "45-70"],
+        cal(".45-70 Gov't", 480.0, 26.0, 1.4, 45.0, 400.0),
+    ),
+    (
+        &[".50 mg", ".50 bmg", ".50 cal", "50mg", ".50"],
+        cal(".50 MG", 900.0, 42.0, 0.9, 120.0, 1800.0),
+    ),
+    (
+        &["12.7mm", "12.7"],
+        cal("12.7mm", 450.0, 20.0, 1.3, 30.0, 300.0),
+    ),
+    (
+        &[".308", "7.62"],
+        cal(".308", 850.0, 11.3, 1.0, 60.0, 1200.0),
+    ),
+    (&["5.56"], cal("5.56mm", 990.0, 4.0, 1.0, 40.0, 800.0)),
+    (
+        &["4.73"],
+        cal("4.73mm caseless", 930.0, 3.3, 1.0, 35.0, 700.0),
+    ),
+    (&["5mm"], cal("5mm", 900.0, 2.6, 1.1, 30.0, 600.0)),
+    (
+        &["2mm ec", "2mm"],
+        cal("2mm EC", 1800.0, 2.0, 0.5, 150.0, 2000.0),
+    ),
+    (&[".357"], cal(".357 Magnum", 440.0, 10.2, 1.4, 25.0, 250.0)),
+    (&[".44"], cal(".44 Magnum", 450.0, 15.6, 1.4, 28.0, 250.0)),
+    (
+        &[".45 auto", ".45acp", ".45"],
+        cal(".45 Auto", 260.0, 14.9, 1.7, 18.0, 150.0),
+    ),
+    (&["10mm"], cal("10mm", 400.0, 11.7, 1.5, 22.0, 200.0)),
+    (&["9mm"], cal("9mm", 360.0, 8.0, 1.6, 18.0, 150.0)),
+    (&[".32"], cal(".32", 280.0, 5.0, 1.8, 10.0, 100.0)),
+    (&[".22"], cal(".22LR", 330.0, 2.6, 1.9, 8.0, 120.0)),
+    (
+        &["12 ga", "12 gauge", "12ga", "shotgun shell"],
+        cal("12 gauge", 400.0, 3.5, 2.0, 6.0, 80.0),
+    ),
+    (
+        &["20 ga", "20 gauge", "20ga"],
+        cal("20 gauge", 400.0, 2.6, 2.0, 5.0, 70.0),
+    ),
+    (
+        &["railway spike"],
+        cal("railway spike", 300.0, 150.0, 1.5, 40.0, 150.0),
+    ),
+    (&["bb"], cal("BB", 100.0, 0.35, 2.5, 1.0, 40.0)),
+    (
+        &["harpoon", "spear"],
+        cal("harpoon", 120.0, 300.0, 2.0, 20.0, 60.0),
+    ),
+    (
+        &["round", "cartridge", "bullet"],
+        cal("unknown round", 600.0, 8.0, 1.2, 25.0, 400.0),
+    ),
+];
+
+/// An ammo name's calibre, `None` for ammo that is no bullet (energy cells, fuel, grenades).
+pub fn caliber_of(name: &str) -> Option<Caliber> {
+    let n = name.to_ascii_lowercase();
+    let energy = [
+        "cell",
+        "charge",
+        "fuel",
+        "rocket",
+        "grenade",
+        "missile",
+        "mini nuke",
+        "battery",
+        "flare",
+    ];
+    if energy.iter().any(|w| n.contains(w)) {
+        return None;
+    }
+    CALIBERS
+        .iter()
+        .find(|(words, _)| words.iter().any(|w| n.contains(w)))
+        .map(|&(_, c)| c)
+}
+
+/// An ammo subtype.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Load {
+    Standard,
+    HollowPoint,
+    ArmorPiercing,
+    Jsp,
+    Surplus,
+    HandLoad,
+    Match,
+    Incendiary,
+    Explosive,
+    Slug,
+    Magnum,
+}
+
+/// What a load changes: velocity, mass, penetration and transfer factors, and how much the damage
+/// threshold counts against its momentum.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LoadMods {
+    pub velocity: f32,
+    pub mass: f32,
+    pub penetration: f32,
+    pub transfer: f32,
+    pub threshold: f32,
+}
+
+impl Load {
+    /// Whether the round goes on through a body (an expanding or bursting one stops in it).
+    pub fn over_penetrates(self) -> bool {
+        !matches!(self, Load::HollowPoint | Load::Explosive)
+    }
+
+    pub fn mods(self) -> LoadMods {
+        let m = |velocity, mass, penetration, transfer, threshold| LoadMods {
+            velocity,
+            mass,
+            penetration,
+            transfer,
+            threshold,
+        };
+        match self {
+            Load::Standard => m(1.0, 1.0, 1.0, 1.0, 1.0),
+            // Expands: stops in the body, gives it most of its momentum, armour stops it well.
+            Load::HollowPoint => m(0.97, 1.0, 0.25, 1.4, 1.6),
+            // Hard core: through armour, cover and bodies, little of its push stays in the target.
+            Load::ArmorPiercing => m(1.03, 0.95, 2.5, 0.7, 0.4),
+            Load::Jsp => m(1.0, 1.0, 0.8, 1.2, 1.1),
+            Load::Surplus => m(0.9, 1.0, 0.9, 0.9, 1.1),
+            Load::HandLoad => m(1.1, 1.0, 1.1, 1.05, 1.0),
+            Load::Match => m(1.08, 1.0, 1.05, 1.0, 1.0),
+            Load::Incendiary => m(1.0, 0.95, 0.8, 1.0, 1.0),
+            Load::Explosive => m(0.95, 1.05, 0.3, 1.3, 1.2),
+            // One heavy ball for the shotgun: eight times a pellet's mass, penetrates.
+            Load::Slug => m(1.1, 8.0, 4.0, 1.0, 0.9),
+            Load::Magnum => m(1.1, 1.2, 1.1, 1.1, 1.0),
+        }
+    }
+}
+
+/// The ammo's load: by the words of its name; else, from its effects, `dt_mult` (the damage
+/// threshold's multiplier, 1 for none) and `dt_minus` (its subtraction, 0 for none).
+pub fn load_of(name: &str, dt_mult: f32, dt_minus: f32) -> Load {
+    let n = name.to_ascii_lowercase();
+    let has = |w: &[&str]| w.iter().any(|x| n.contains(x));
+    if has(&["hollow point", " hp", "(hp)", "hp)", "jhp"]) {
+        Load::HollowPoint
+    } else if has(&["armor piercing", "armour piercing", " ap", "(ap)", "ap)"]) {
+        Load::ArmorPiercing
+    } else if has(&["jsp", "soft point"]) {
+        Load::Jsp
+    } else if has(&["surplus"]) {
+        Load::Surplus
+    } else if has(&["hand load", "handload", "hand-load"]) {
+        Load::HandLoad
+    } else if has(&["match"]) {
+        Load::Match
+    } else if has(&["incendiary", "dragon"]) {
+        Load::Incendiary
+    } else if has(&["explosive"]) {
+        Load::Explosive
+    } else if has(&["slug"]) {
+        Load::Slug
+    } else if has(&["magnum"]) && (n.contains("ga") || n.contains("gauge") || n.contains("shell")) {
+        Load::Magnum
+    } else if dt_mult > 1.5 {
+        Load::HollowPoint
+    } else if dt_minus > 0.0 || dt_mult < 0.75 {
+        Load::ArmorPiercing
+    } else {
+        Load::Standard
+    }
+}
+
+/// Damage points of the hit force per newton-second of momentum (a 5.56mm round, 4 N s: 24).
+pub const POINTS_PER_NEWTON_SECOND: f32 = 6.0;
+/// The share of the muzzle velocity the form's speed is set to (the average over a usual range:
+/// the drag the game does not model).
+pub const AVERAGE_SPEED: f32 = 0.9;
+/// The fastest a form is made, in units a second (about 1,700 m/s).
+pub const MAX_FORM_SPEED: f32 = 120_000.0;
+/// What a body costs a round (penetration power), and the most passes and continuations.
+pub const BODY_COST: f32 = 15.0;
+pub const MAX_PASSES: u8 = 2;
+pub const MAX_CONTINUATIONS: u32 = 24;
+/// The share of power a round needs left to go on.
+pub const MIN_LEFT: f32 = 0.2;
+/// A body's depth the continuation starts past, in units.
+pub const BODY_DEPTH: f32 = 45.0;
+
+/// A penetrable material (the game's `eMaterial`): its usual thickness in a level (cm) and what a
+/// centimetre of it costs a round; `None` for one no round passes (stone, concrete, earth, heavy
+/// metal, water).
+pub fn material(material: u32) -> Option<(f32, f32)> {
+    Some(match material {
+        1 => (0.5, 1.0),            // cloth
+        3 => (0.6, 3.0),            // glass
+        6 => (10.0, 1.0),           // organic
+        9 => (4.0, 1.5),            // wood: a plank, a door
+        12 => (10.0, 1.5),          // heavy wood: a beam, a table top
+        13 | 28 => (0.3, 3.0),      // chain (fences), a shopping cart
+        16 => (0.4, 40.0),          // hollow metal: two walls of a locker, a box
+        17 => (0.15, 40.0),         // sheet metal
+        20 | 22 => (0.4, 40.0),     // a car's body, a hollow part
+        23 => (0.3, 40.0),          // a barrel's wall
+        24 | 25 | 29 => (0.3, 1.5), // a bottle, a soda can, a lunchbox
+        _ => return None,
+    })
+}
+
+/// What passing a thin object of `material` costs a round, `None` for one it cannot pass.
+pub fn material_cost(material_id: u32) -> Option<f32> {
+    material(material_id).map(|(thickness, per)| thickness * per)
+}
+
+/// The power left after a pass costing `cost` of a round of power `power` (the share of its
+/// speed it keeps is the square root of the share of power left), `None` when it stops.
+pub fn after_pass(power: f32, cost: f32) -> Option<f32> {
+    let left = power - cost;
+    (power > 0.0 && left >= power * MIN_LEFT).then_some(left)
+}
+
+/// Momentum points (the hit force's damage points) of `mass` grams at `speed` m/s.
+pub fn momentum_points(mass: f32, speed: f32) -> f32 {
+    mass / 1000.0 * speed * POINTS_PER_NEWTON_SECOND
+}
+
+// --- The game's words. -------------------------------------------------------------------------
+
+pub const CREATE_PROJECTILE: u32 = 0x009b_ca60;
+pub const PROCESS_IMPACTS: u32 = 0x009c_1b70;
+const GET_CURRENT_AMMO: u32 = 0x0052_5980;
+/// `TESAmmo`'s effect list (`00923000`); a `TESAmmoEffect`'s type (`0059bb30`: 2 is the damage
+/// threshold), its operation (`+0x28`: 0 adds, 1 multiplies, 2 subtracts) and value (`00759450`).
+const AMMO_EFFECTS: u32 = 0x0092_3000;
+const EFFECT_TYPE: u32 = 0x0059_bb30;
+const EFFECT_OPERATION: u32 = 0x28;
+const EFFECT_VALUE: u32 = 0x0075_9450;
+const EFFECT_THRESHOLD: u32 = 2;
+/// `BGSProjectile`: flags, gravity, speed, range.
+const PROJ_FLAGS: u32 = 0x60;
+const PROJ_GRAVITY: u32 = 0x64;
+const PROJ_SPEED: u32 = 0x68;
+const PROJ_RANGE: u32 = 0x6c;
+const HITSCAN: u32 = 0x1;
+const TYPE_MASK: u32 = 0x1f_0000;
+const TYPE_MISSILE: u32 = 0x1_0000;
+/// The projectile instance: its impact list and whether it was processed, its speed multiplier,
+/// damage, weapon, shooter, direction; a reference's base form, rotation (x, z).
+const IMPACTS: u32 = 0x88;
+const IMPACT_PROCESSED: u32 = 0x90;
+const SPEED_MULT: u32 = 0xd0;
+const DAMAGE: u32 = 0xdc;
+const WEAPON: u32 = 0xf8;
+const SHOOTER: u32 = 0xfc;
+const DIRECTION: u32 = 0x104;
+const BASE_FORM: u32 = 0x20;
+const ROT_X: u32 = 0x24;
+const ROT_Z: u32 = 0x2c;
+/// `Projectile::ImpactData`: collidee, location, material.
+const IMPACT_COLLIDEE: u32 = 0x00;
+const IMPACT_LOCATION: u32 = 0x04;
+const IMPACT_MATERIAL: u32 = 0x20;
+/// `TESObjectWEAP`: its projectile, its ammo, its projectiles per shot; `TESAmmo`: its projectile
+/// override; form types; a form list's first entry.
+const WEAPON_PROJECTILE: u32 = 0x118;
+const WEAPON_AMMO: u32 = 0xa8;
+const WEAPON_PROJECTILES: u32 = 0x11e;
+const AMMO_PROJECTILE: u32 = 0xb4;
+const WEAP: u8 = 0x28;
+const AMMO: u8 = 0x29;
+const FLST: u8 = 0x55;
+const LIST_FIRST: u32 = 0x18;
+/// The player (`PlayerCharacter*` global).
+const PLAYER: u32 = 0x011d_ea3c;
+pub const UNITS_PER_METRE: f32 = 70.0;
+/// Where a continuation starts past a thin object, in units.
+const THIN_DEPTH: f32 = 6.0;
+
+/// A converted form's originals (flags, gravity, speed, range) and its calibre.
+type Forms = HashMap<u32, ([u32; 4], Caliber)>;
+static FORMS: Mutex<Option<Forms>> = Mutex::new(None);
+
+/// A bullet in flight: its calibre, load, passes so far, power left, whether it is a pellet, its
+/// speed multiplier and its speed (m/s) at the muzzle, the time it was made.
+#[derive(Clone, Copy, Debug)]
+struct Bullet {
+    caliber: Caliber,
+    load: Load,
+    passes: u8,
+    power: f32,
+    pellet: bool,
+    muzzle: f32,
+    velocity: f32,
+    made: Instant,
+}
+
+static BULLETS: Mutex<Option<HashMap<u32, Bullet>>> = Mutex::new(None);
+
+/// A continuation waiting for the next frame.
+#[derive(Clone, Copy, Debug)]
+struct Continuation {
+    form: u32,
+    shooter: u32,
+    weapon: u32,
+    at: [f32; 3],
+    rot_x: f32,
+    rot_z: f32,
+    speed_mult: f32,
+    damage: f32,
+    bullet: Bullet,
+}
+static QUEUE: Mutex<Vec<Continuation>> = Mutex::new(Vec::new());
+static SPAWNED: Mutex<(Option<Instant>, u32)> = Mutex::new((None, 0));
+
+fn on() -> bool {
+    crate::gunplay::is_on() && crate::gunplay::tuning().ballistics
+}
+
+fn name_of(e: &Engine, form: u32) -> String {
+    String::from_utf8_lossy(&jip::commands::the_name(e, form)).into_owned()
+}
+
+/// An ammo, or a form list's first ammo.
+fn ammo_form(e: &Engine, form: u32) -> u32 {
+    if form == 0 {
+        return 0;
+    }
+    match e.mem.u8(form + 4) {
+        AMMO => form,
+        FLST => {
+            let first = e.mem.u32(form + LIST_FIRST);
+            if first != 0 && e.mem.u8(first + 4) == AMMO {
+                first
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Every bullet form of the loaded guns made a flying one (Projectile mode) or put back
+/// (module documentation). Run when the main menu is made and when a row changes.
+pub fn apply_forms(e: &mut Engine) {
+    let t = crate::gunplay::tuning();
+    let flying = on();
+    let mut guard = FORMS.lock().unwrap_or_else(|p| p.into_inner());
+    let forms = guard.get_or_insert_with(HashMap::new);
+    // Put back first, so a speed change starts from the originals.
+    for (&form, &(orig, _)) in forms.iter() {
+        for (i, word) in orig.into_iter().enumerate() {
+            e.mem.set_u32(form + PROJ_FLAGS + 4 * i as u32, word);
+        }
+    }
+    if !flying {
+        if !forms.is_empty() {
+            eprintln!(
+                "Ballistics: {} bullet projectiles back to hitscan (Classic)",
+                forms.len()
+            );
+        }
+        forms.clear();
+        return;
+    }
+    let mut found: Vec<(u32, Caliber)> = Vec::new();
+    for weapon in crate::test_range::all_forms(e) {
+        if e.mem.u8(weapon + 4) != WEAP {
+            continue;
+        }
+        let ammo = ammo_form(e, e.mem.u32(weapon + WEAPON_AMMO));
+        if ammo == 0 {
+            continue;
+        }
+        let Some(caliber) = caliber_of(&name_of(e, ammo)) else {
+            continue;
+        };
+        for projectile in [
+            e.mem.u32(weapon + WEAPON_PROJECTILE),
+            e.mem.u32(ammo + AMMO_PROJECTILE),
+        ] {
+            if projectile != 0 {
+                found.push((projectile, caliber));
+            }
+        }
+    }
+    let scale = t.bullet_speed.clamp(1, 1000) as f32 / 100.0;
+    for (form, caliber) in found {
+        let orig = match forms.get(&form) {
+            Some(&(orig, _)) => orig,
+            None => [0, 4, 8, 12].map(|o| e.mem.u32(form + PROJ_FLAGS + o)),
+        };
+        if orig[0] & HITSCAN == 0 || orig[0] & TYPE_MASK != TYPE_MISSILE {
+            continue;
+        }
+        forms.insert(form, (orig, caliber));
+        let (speed, gravity, range) = form_flight(caliber, scale, f32::from_bits(orig[3]));
+        e.mem.set_u32(form + PROJ_FLAGS, orig[0] & !HITSCAN);
+        e.mem.set_f32(form + PROJ_GRAVITY, gravity);
+        e.mem.set_f32(form + PROJ_SPEED, speed);
+        e.mem.set_f32(form + PROJ_RANGE, range);
+    }
+    eprintln!(
+        "Ballistics: {} bullet projectiles fly (Projectile mode, speed {}%)",
+        forms.len(),
+        t.bullet_speed
+    );
+}
+
+/// A calibre's form speed (units a second), gravity and range (units, never below the form's own
+/// `range`), at `scale` times the speed.
+pub fn form_flight(caliber: Caliber, scale: f32, range: f32) -> (f32, f32, f32) {
+    let speed = (caliber.velocity * AVERAGE_SPEED * UNITS_PER_METRE * scale).min(MAX_FORM_SPEED);
+    let range = if range.is_finite() { range } else { 0.0 };
+    (
+        speed,
+        caliber.drop,
+        range.max(caliber.range * UNITS_PER_METRE),
+    )
+}
+
+/// The ammo effects' damage threshold multiplier (1 for none) and subtraction (0 for none).
+fn threshold_effects(e: &mut Engine, ammo: u32) -> (f32, f32) {
+    let (mut mult, mut minus) = (1.0f32, 0.0f32);
+    let mut node = e.call(AMMO_EFFECTS, &args![ammo]).u32();
+    for _ in 0..16 {
+        if node == 0 {
+            break;
+        }
+        let effect = e.mem.u32(node);
+        if effect != 0 && e.call(EFFECT_TYPE, &args![effect]).u32() == EFFECT_THRESHOLD {
+            let value = e.call(EFFECT_VALUE, &args![effect]).f64() as f32;
+            if value.is_finite() {
+                match e.mem.u32(effect + EFFECT_OPERATION) {
+                    1 => mult *= value,
+                    2 => minus += value,
+                    0 => minus -= value,
+                    _ => {}
+                }
+            }
+        }
+        node = e.mem.u32(node + 4);
+    }
+    (mult, minus)
+}
+
+/// Registers the hooks (from `crate::gunplay::install`).
+pub fn install(e: &mut Engine) {
+    e.register(CREATE_PROJECTILE, |e, a| {
+        let (_, create) = engine::entry!(
+            0x009bca60,
+            engine::units::fallout_ai::projectile::fn_009bca60(
+                Ptr, u32, u32, u32, u32, u32, u32, f32, f32, u32, u32, u8, u8, f32, f32, u32
+            ) -> Ptr<engine::units::fallout_ai::projectile::Projectile>
+        );
+        let made = create(e, a);
+        if a.len() >= 4 && on() {
+            shot(e, a[0], a[1], a[3], made.eax);
+        }
+        made
+    });
+    e.register(PROCESS_IMPACTS, |e, a| {
+        use engine::units::fallout_ai::projectile::projectile_process_impacts;
+        let projectile = a[0];
+        let first = if on() {
+            first_impact(e, projectile)
+        } else {
+            None
+        };
+        let processed = projectile_process_impacts(e, Ptr::new(projectile));
+        if processed {
+            if let Some(impact) = first {
+                penetrate(e, projectile, impact);
+            }
+        }
+        processed.into_ret()
+    });
+}
+
+/// A new shot's projectile: its load's velocity, and the bullet remembered.
+fn shot(e: &mut Engine, form: u32, shooter: u32, weapon: u32, projectile: u32) {
+    if projectile == 0 || weapon == 0 {
+        return;
+    }
+    let caliber = {
+        let guard = FORMS.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.as_ref().and_then(|f| f.get(&form)) {
+            Some(&(_, c)) => c,
+            None => return,
+        }
+    };
+    let ammo = e.call(GET_CURRENT_AMMO, &args![weapon, shooter]).u32();
+    let ammo = ammo_form(e, ammo);
+    let load = if ammo == 0 {
+        Load::Standard
+    } else {
+        let (mult, minus) = threshold_effects(e, ammo);
+        load_of(&name_of(e, ammo), mult, minus)
+    };
+    let mods = load.mods();
+    // The weapon mods on the shooter's gun: barrels, a silencer, a split beam's projectiles, and
+    // (for anyone but the player, whose shot the game scaled) the projectile speed effect.
+    let weapon_mods = crate::weapon_mods::on_weapon(e, shooter, weapon);
+    let player = e.global::<u32>(PLAYER);
+    let fitted = crate::weapon_mods::velocity_factor(&weapon_mods, shooter != player);
+    let given = e.mem.f32(projectile + SPEED_MULT);
+    let given = if given.is_finite() && given > 0.0 {
+        given
+    } else {
+        1.0
+    };
+    let muzzle = given * mods.velocity * fitted;
+    e.mem.set_f32(projectile + SPEED_MULT, muzzle);
+    let projectiles = u32::from(e.mem.u8(weapon + WEAPON_PROJECTILES))
+        + crate::weapon_mods::extra_projectiles(&weapon_mods);
+    let pellet = projectiles > 1 && load != Load::Slug;
+    remember(
+        projectile,
+        Bullet {
+            caliber,
+            load,
+            passes: 0,
+            power: caliber.penetration * mods.penetration,
+            pellet,
+            muzzle,
+            velocity: caliber.velocity * muzzle,
+            made: Instant::now(),
+        },
+    );
+}
+
+fn remember(projectile: u32, bullet: Bullet) {
+    let mut guard = BULLETS.lock().unwrap_or_else(|p| p.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    if map.len() > 512 {
+        map.retain(|_, b| b.made.elapsed().as_secs() < 10);
+    }
+    map.insert(projectile, bullet);
+}
+
+fn bullet(projectile: u32) -> Option<Bullet> {
+    BULLETS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()?
+        .get(&projectile)
+        .copied()
+}
+
+/// The momentum of the bullet `projectile` where it hits, in the hit force's points, and the
+/// factor the damage threshold counts by; `None` for no remembered bullet (Classic, energy).
+pub fn bullet_momentum(e: &Engine, projectile: u32) -> Option<(f32, f32)> {
+    if projectile == 0 || !on() {
+        return None;
+    }
+    let b = bullet(projectile)?;
+    let mods = b.load.mods();
+    // Its speed now against its speed at the muzzle: less after each pass.
+    let now = e.mem.f32(projectile + SPEED_MULT);
+    let share = if b.muzzle > 0.0 && now.is_finite() {
+        (now / b.muzzle).clamp(0.0, 1.5)
+    } else {
+        1.0
+    };
+    let speed = b.velocity * share;
+    Some((
+        momentum_points(b.caliber.mass * mods.mass, speed) * mods.transfer,
+        mods.threshold,
+    ))
+}
+
+/// The projectile's first impact, when it has not been processed yet: collidee, location,
+/// material.
+fn first_impact(e: &Engine, projectile: u32) -> Option<(u32, [f32; 3], u32)> {
+    if e.mem.u8(projectile + IMPACT_PROCESSED) != 0 || bullet(projectile).is_none() {
+        return None;
+    }
+    let data = e.mem.u32(projectile + IMPACTS);
+    if data == 0 {
+        return None;
+    }
+    let at = [0, 4, 8].map(|o| e.mem.f32(data + IMPACT_LOCATION + o));
+    Some((
+        e.mem.u32(data + IMPACT_COLLIDEE),
+        at,
+        e.mem.u32(data + IMPACT_MATERIAL),
+    ))
+}
+
+/// After the game processed an impact: a continuation past it when the round has power left
+/// (module documentation).
+fn penetrate(e: &mut Engine, projectile: u32, (collidee, at, material_id): (u32, [f32; 3], u32)) {
+    let Some(b) = bullet(projectile) else {
+        return;
+    };
+    if !crate::gunplay::tuning().penetration || b.pellet || b.passes >= MAX_PASSES {
+        return;
+    }
+    if !at.iter().all(|v| v.is_finite()) {
+        return;
+    }
+    let d = [0, 4, 8].map(|o| e.mem.f32(projectile + DIRECTION + o));
+    let length = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if length.is_nan() || length <= 1e-3 {
+        return;
+    }
+    let d = d.map(|v| v / length);
+    let body = collidee != 0 && e.vcall(collidee, 0x100, &args![]).bool();
+    let (cost, depth) = if body {
+        if !b.load.over_penetrates() {
+            return;
+        }
+        (BODY_COST, BODY_DEPTH)
+    } else {
+        match material_cost(material_id) {
+            Some(cost) => (cost, THIN_DEPTH),
+            None => return,
+        }
+    };
+    let Some(left) = after_pass(b.power, cost) else {
+        return;
+    };
+    let keep = (left / b.power).sqrt();
+    let next = Continuation {
+        form: e.mem.u32(projectile + BASE_FORM),
+        shooter: e.mem.u32(projectile + SHOOTER),
+        weapon: e.mem.u32(projectile + WEAPON),
+        at: [0, 1, 2].map(|i| at[i] + d[i] * depth),
+        rot_x: e.mem.f32(projectile + ROT_X),
+        rot_z: e.mem.f32(projectile + ROT_Z),
+        speed_mult: e.mem.f32(projectile + SPEED_MULT) * keep,
+        damage: e.mem.f32(projectile + DAMAGE) * keep * keep,
+        bullet: Bullet {
+            passes: b.passes + 1,
+            power: left,
+            made: Instant::now(),
+            ..b
+        },
+    };
+    if next.form == 0 {
+        return;
+    }
+    QUEUE.lock().unwrap_or_else(|p| p.into_inner()).push(next);
+}
+
+/// Once a frame: the queued continuations made (at most [`MAX_CONTINUATIONS`] a second).
+pub fn frame(e: &mut Engine) {
+    let queued = std::mem::take(&mut *QUEUE.lock().unwrap_or_else(|p| p.into_inner()));
+    for c in queued {
+        {
+            let mut s = SPAWNED.lock().unwrap_or_else(|p| p.into_inner());
+            if s.0.map_or(true, |t| t.elapsed().as_secs() >= 1) {
+                *s = (Some(Instant::now()), 0);
+            }
+            if s.1 >= MAX_CONTINUATIONS {
+                continue;
+            }
+            s.1 += 1;
+        }
+        let made = e
+            .call(
+                CREATE_PROJECTILE,
+                &args![
+                    c.form, c.shooter, 0u32, c.weapon, c.at[0], c.at[1], c.at[2], c.rot_z, c.rot_x,
+                    0u32, 0u32, 0u32, 0u32, 0.0f32, 0.0f32, 0u32
+                ],
+            )
+            .u32();
+        if made != 0 {
+            e.mem.set_f32(made + SPEED_MULT, c.speed_mult);
+            e.mem.set_f32(made + DAMAGE, c.damage);
+            remember(made, c.bullet);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The calibres by name: the longer names first, energy ammo is no bullet.
+    #[test]
+    fn calibres_are_found_by_name() {
+        assert_eq!(caliber_of("9mm Round").unwrap().name, "9mm");
+        assert_eq!(caliber_of("5.56mm Round, AP").unwrap().name, "5.56mm");
+        assert_eq!(
+            caliber_of(".45-70 Gov't Round").unwrap().name,
+            ".45-70 Gov't"
+        );
+        assert_eq!(caliber_of(".45 Auto Round").unwrap().name, ".45 Auto");
+        assert_eq!(caliber_of(".50 MG Round").unwrap().name, ".50 MG");
+        assert_eq!(caliber_of("12.7mm Round").unwrap().name, "12.7mm");
+        assert_eq!(caliber_of("12 Ga. Shotgun Shell").unwrap().name, "12 gauge");
+        assert_eq!(caliber_of("Energy Cell"), None);
+        assert_eq!(caliber_of("Microfusion Cell"), None);
+        assert_eq!(
+            caliber_of("Some Modded Round").unwrap().name,
+            "unknown round"
+        );
+    }
+
+    /// 9mm is slow and drops, 5.56 fast and flat, .50 heavy and long.
+    #[test]
+    fn calibres_differ_as_their_rounds() {
+        let nine = caliber_of("9mm Round").unwrap();
+        let five = caliber_of("5.56mm Round").unwrap();
+        let fifty = caliber_of(".50 MG Round").unwrap();
+        assert!(nine.velocity < five.velocity / 2.0 && nine.drop > five.drop);
+        assert!(fifty.mass > 10.0 * five.mass && fifty.range > five.range);
+    }
+
+    /// Loads by name and, for modded ammo, by their effects.
+    #[test]
+    fn loads_by_name_and_effects() {
+        assert_eq!(load_of("5.56mm Round, AP", 1.0, 0.0), Load::ArmorPiercing);
+        assert_eq!(
+            load_of(".357 Magnum Round, JHP", 1.0, 0.0),
+            Load::HollowPoint
+        );
+        assert_eq!(load_of(".357 Magnum Round", 1.0, 0.0), Load::Standard);
+        assert_eq!(load_of("9mm Round, HP", 1.0, 0.0), Load::HollowPoint);
+        assert_eq!(load_of(".308 Round, JSP", 1.0, 0.0), Load::Jsp);
+        assert_eq!(load_of("10mm Round, Surplus", 1.0, 0.0), Load::Surplus);
+        assert_eq!(load_of(".44 Round, Hand Load", 1.0, 0.0), Load::HandLoad);
+        assert_eq!(load_of("12 Ga. Shotgun Shell, Slug", 1.0, 0.0), Load::Slug);
+        assert_eq!(
+            load_of("12 Ga. Shotgun Shell, Magnum", 1.0, 0.0),
+            Load::Magnum
+        );
+        assert_eq!(load_of("Modded Round X", 3.0, 0.0), Load::HollowPoint);
+        assert_eq!(load_of("Modded Round Y", 1.0, 15.0), Load::ArmorPiercing);
+        let hp = Load::HollowPoint.mods();
+        let ap = Load::ArmorPiercing.mods();
+        assert!(hp.transfer > 1.0 && hp.penetration < 0.5 && hp.threshold > 1.0);
+        assert!(ap.transfer < 1.0 && ap.penetration > 2.0 && ap.threshold < 1.0);
+    }
+
+    /// A pass costs power; too little left stops the round. A 9mm stops in a body, a 5.56mm
+    /// goes through one, a .308 through two; glass and a door cost little, a car's body a lot.
+    #[test]
+    fn passes_cost_power() {
+        assert_eq!(after_pass(60.0, 15.0), Some(45.0));
+        let nine = caliber_of("9mm Round").unwrap().penetration;
+        let five = caliber_of("5.56mm Round").unwrap().penetration;
+        let rifle = caliber_of(".308 Round").unwrap().penetration;
+        assert_eq!(after_pass(nine, BODY_COST), None);
+        assert!(after_pass(five, BODY_COST).is_some());
+        let once = after_pass(rifle, BODY_COST).unwrap();
+        assert!(after_pass(once, BODY_COST).is_some());
+        let ap = five * Load::ArmorPiercing.mods().penetration;
+        assert!(
+            after_pass(ap, material_cost(20).unwrap()).is_some(),
+            "AP through a car door"
+        );
+        assert_eq!(after_pass(nine, material_cost(20).unwrap()), None);
+        assert!(material_cost(3).unwrap() < 2.0, "glass");
+        assert_eq!(material_cost(0), None, "stone stops it");
+        assert!(!Load::HollowPoint.over_penetrates() && Load::Jsp.over_penetrates());
+    }
+
+    /// The forms fly at their calibre's speed (times the slider), drop by their calibre and reach
+    /// at least as far as before; momentum is mass times speed.
+    #[test]
+    fn forms_fly_by_calibre() {
+        let five = caliber_of("5.56mm Round").unwrap();
+        let (speed, gravity, range) = form_flight(five, 1.0, 5000.0);
+        assert!((speed - 990.0 * AVERAGE_SPEED * UNITS_PER_METRE).abs() < 1.0);
+        assert_eq!(gravity, five.drop);
+        assert_eq!(range, five.range * UNITS_PER_METRE);
+        assert_eq!(form_flight(five, 1.0, 1e9).2, 1e9, "never shorter");
+        assert_eq!(form_flight(five, 0.5, 0.0).0, speed / 2.0);
+        let gauss = caliber_of("2mm Electromagnetic Cartridge").unwrap();
+        assert_eq!(form_flight(gauss, 2.0, 0.0).0, MAX_FORM_SPEED);
+        assert!((momentum_points(4.0, 990.0) - 23.76).abs() < 0.01);
+        assert!(momentum_points(26.0, 480.0) > 3.0 * momentum_points(4.0, 990.0));
+    }
+}

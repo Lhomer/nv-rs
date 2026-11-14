@@ -1031,7 +1031,7 @@ fn id(form_id: u32) -> String {
 // --- The forms. --------------------------------------------------------------------------------
 
 /// Every form the game holds, in id order.
-fn all_forms(e: &Engine) -> Vec<u32> {
+pub(crate) fn all_forms(e: &Engine) -> Vec<u32> {
     let map = e.mem.u32(ALL_FORMS);
     if map == 0 {
         return Vec::new();

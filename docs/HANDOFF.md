@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (ballistic bullets, weapon mods)
+
+- **Patrick:** Battlefield-style bullets: every bullet and pellet a real projectile with travel time, mass and drop per calibre and load (HP, AP, JSP, surplus, hand load, match, incendiary, explosive, slugs), momentum into the hit force and knockdowns, penetration of bodies and thin objects, cheap for shotguns and automatics, NPCs leading and allowing for drop, Gameplay rows Ballistics (Classic / Projectile), Penetration, Bullet Speed. Then: with WMX, everything new on the weapon's effective stats with mods, read generically.
+- **Now (`crates/host/src/ballistics.rs`, `weapon_mods.rs`):** bullet forms of known calibres made non-hitscan with the calibre's speed, gravity and range (the game flies them and its AI leads them, `009a8df0`); over `CreateProjectile` (`009bca60`) the load (ammo name, else DT effects) and the mods (barrel names, silencer, speed effect) scale `fSpeedMult` and the bullet is remembered; `hit_force::Shot::Bullet` gives mass x speed x transfer; over `ProcessImpacts` (`009c1b70`) a continuation past a body or a penetrable material is queued and made at the next frame. `gunplay::effective_stats` (damage, weight, split beam, scope, silencer, spread) feeds recoil, sway, punch, hit force and knockdowns. Rows `7e0601a0`-`7e0601c0`. Tables in docs/GUNPLAY.md. Not run in game; WMX not loaded here (no game data in this container). Unknowns: whether a continuation started 6 units past a thin object clears thicker props; the material thickness is assumed, not measured (no host ray cast yet).
+
 ### Claude, 2026-11-14 (knockdowns of living actors)
 
 - **Patrick:** Skyrim-style knockdowns on the hit force: past the target's resistance (mass/size/race: deathclaws, super mutants, robots) a living actor goes into ragdoll launched from the hit point along the hit; moderate hits stagger; real fall damage and leg crippling with the kill credited to the player; gets up normally; never the player; companions only by setting; Gameplay rows Knockdowns and Knockdown Threshold; a hook for the leg-loss fall.

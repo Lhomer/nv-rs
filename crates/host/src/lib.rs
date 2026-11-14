@@ -16,6 +16,7 @@
 //! thread). What it is connected to: docs/ENGINE_CRATE.md
 //! ("In the running game").
 
+pub mod ballistics;
 pub mod cell_entry_wait;
 pub mod cell_offsets;
 pub mod compact_menus;
@@ -52,6 +53,7 @@ pub mod test_range;
 pub mod thread_races;
 pub mod topic_index;
 pub mod uncap;
+pub mod weapon_mods;
 
 use engine::Engine;
 use std::path::{Path, PathBuf};

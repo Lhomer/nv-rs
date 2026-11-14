@@ -197,6 +197,107 @@ with `bKnockdownCompanions=1`.
 | Push origin behind the impact | 40 units |
 | Fall followed for | 12 s |
 
+### Ballistic bullets (`crates/host/src/ballistics.rs`)
+
+Patrick, 2026-11-14: Battlefield-style bullets. `bBallistics` (Settings > Gameplay "Ballistics":
+Classic / Projectile), `bPenetration` ("Penetration"), `iBulletSpeed` ("Bullet Speed", 25-200 %).
+
+- **Flight, the game's own.** A bullet's projectile form (`BGSProjectile`, `DATA` at `+0x60`) is
+  hitscan with bit 1 of its flags. In Projectile mode every missile-type hitscan form a weapon of a
+  known calibre uses (its `+0x118` and its ammo's override `+0xB4`) has that bit cleared, its speed
+  set to the calibre's (0.9 of the muzzle velocity, the drag the game doesn't model, x 70 units/m x
+  `iBulletSpeed` %, at most 120,000), its gravity to the calibre's drop factor and its range to at
+  least the calibre's. The game then flies it (travel time, drop, its model as a tracer) and the
+  combat AI leads it: `GetProjectedPointForTarget` (`009a8df0`) iterates on the target's velocity
+  with the form's speed and gravity, where a hitscan form gets the target's point. Originals are
+  kept; Classic (or the row off) puts them back. Converted when the main menu is made and when the
+  Ballistics, Bullet Speed or Weighty Combat row changes. Energy, flame, launcher and thrown ammo is
+  never matched.
+- **Per shot** (over `CreateProjectile`, `009bca60`, every shot of `TESObjectWEAP::Fire`, players'
+  and NPCs'): the loaded ammo (`GetCurrentAmmo`, `00525980`) gives the load by its name, else by its
+  effects (DT x more than 1.5: hollow point; DT subtracted: armour piercing); the load's velocity
+  and the weapon mods' (below) go into the projectile's speed multiplier (`+0xD0`).
+- **Momentum at impact:** mass x speed (the calibre's muzzle velocity x the load's and mods'
+  factors x the share of speed left after passes; `iBulletSpeed` changes the flight, not the hit)
+  x the load's transfer, 6 damage points per N s (a 5.56 mm round: 24). The hit force and the
+  knockdowns take it (`Shot::Bullet`); the damage threshold counts by the load's factor; pellets as
+  for a gun (`n^0.75`).
+- **Penetration** (over `Projectile::ProcessImpacts`, `009c1b70`): after the game processed a
+  bullet's first impact, a body costs 15 power, a thin object its material's usual thickness x cost
+  per cm (glass 0.6 cm x 3, wood 4 x 1.5, heavy wood 10 x 1.5, sheet metal 0.15 x 40, hollow metal
+  and car bodies 0.4 x 40, chain fences 0.3 x 3, cloth 0.5 x 1, bottles and cans 0.3 x 1.5); stone,
+  concrete, earth, heavy metal and water stop it. The thickness is the material's usual one, not
+  measured: the host has no ray cast into the game's world it can call yet. A round goes on when at
+  least a fifth of its power is left; it keeps sqrt(left / power) of its speed and that squared of
+  its damage. The continuation is a new projectile of the same form, shooter and weapon, started
+  6 units past a thin object or 45 past a body at the next frame, with the original's rotation; at
+  most 2 passes a bullet and 24 continuations a second. Hollow-point and explosive rounds never
+  over-penetrate bodies; pellets never penetrate (slugs do).
+- **Cheap:** one table lookup a shot (shotguns and automatics included); per frame only the queued
+  continuations.
+
+| Calibre (ammo name has) | m/s | g | Drop | Penetration | Range m | Momentum pts |
+| --- | --- | --- | --- | --- | --- | --- |
+| .22LR (`.22`) | 330 | 2.6 | 1.9 | 8 | 120 | 5.1 |
+| .32 | 280 | 5 | 1.8 | 10 | 100 | 8.4 |
+| 9mm | 360 | 8 | 1.6 | 18 | 150 | 17.3 |
+| 10mm | 400 | 11.7 | 1.5 | 22 | 200 | 28.1 |
+| .45 Auto (`.45`) | 260 | 14.9 | 1.7 | 18 | 150 | 23.2 |
+| .357 Magnum | 440 | 10.2 | 1.4 | 25 | 250 | 26.9 |
+| .44 Magnum | 450 | 15.6 | 1.4 | 28 | 250 | 42.1 |
+| 12.7mm | 450 | 20 | 1.3 | 30 | 300 | 54 |
+| 5mm | 900 | 2.6 | 1.1 | 30 | 600 | 14 |
+| 4.73mm caseless | 930 | 3.3 | 1.0 | 35 | 700 | 18.4 |
+| 5.56mm | 990 | 4 | 1.0 | 40 | 800 | 23.8 |
+| .308 / 7.62 | 850 | 11.3 | 1.0 | 60 | 1200 | 57.6 |
+| .45-70 Gov't | 480 | 26 | 1.4 | 45 | 400 | 74.9 |
+| .50 MG | 900 | 42 | 0.9 | 120 | 1800 | 226.8 (push clamped at 160) |
+| 2mm EC | 1800 | 2 | 0.5 | 150 | 2000 | 21.6 |
+| 12 gauge (per pellet) | 400 | 3.5 | 2.0 | 6 | 80 | 8.4 |
+| 20 gauge (per pellet) | 400 | 2.6 | 2.0 | 5 | 70 | 6.2 |
+| Railway spike | 300 | 150 | 1.5 | 40 | 150 | 270 |
+| BB | 100 | 0.35 | 2.5 | 1 | 40 | 0.2 |
+| Harpoon / spear | 120 | 300 | 2.0 | 20 | 60 | 216 |
+| Unknown round (modded: `round`, `cartridge`, `bullet`) | 600 | 8 | 1.2 | 25 | 400 | 28.8 |
+
+| Load (name has; else effects) | Velocity | Mass | Penetration | Transfer | DT counts |
+| --- | --- | --- | --- | --- | --- |
+| Standard | 1 | 1 | 1 | 1 | 1 |
+| Hollow point (`HP`, `hollow point`; DT x > 1.5) | 0.97 | 1 | 0.25 | 1.4 | 1.6 |
+| Armour piercing (`AP`, `armor piercing`; DT subtracted) | 1.03 | 0.95 | 2.5 | 0.7 | 0.4 |
+| JSP / soft point | 1 | 1 | 0.8 | 1.2 | 1.1 |
+| Surplus | 0.9 | 1 | 0.9 | 0.9 | 1.1 |
+| Hand load | 1.1 | 1 | 1.1 | 1.05 | 1 |
+| Match | 1.08 | 1 | 1.05 | 1 | 1 |
+| Incendiary / Dragon's breath | 1 | 0.95 | 0.8 | 1 | 1 |
+| Explosive | 0.95 | 1.05 | 0.3 | 1.3 | 1.2 |
+| Slug (shotgun) | 1.1 | 8 | 4 | 1 | 0.9 |
+| Magnum (shotgun shell) | 1.1 | 1.2 | 1.1 | 1.1 | 1 |
+
+### Weapon mods (`crates/host/src/weapon_mods.rs`)
+
+Patrick, 2026-11-14 (Weapon Mods Expanded through Play with mods): everything above takes the
+weapon's effective stats with its attached mods, read generically from the game's own data: the
+item's attached slots (`ItemChange::GetModSlots`, `004bd820`, bits 1/2/4), each slot's action type
+(`+0x180`), values (`+0x18C`, `+0x1AC`) and mod item (`+0x350`) on the weapon form. No plugin or mod
+is named. The action types' meanings are those of the game's own readers:
+
+| Action | Game's reader | Used for |
+| --- | --- | --- |
+| 1 damage + | the damage formula | hit force, knockdowns, kick |
+| 3 spread - | `00524b80`, `00524be0` | steadiness: sway and kick down by up to 40 % (a cut of 1 degree or the weapon's minimum spread is all of it) |
+| 4 weight - | `GetFormWeight` | melee swing force, sway, punch |
+| 9 projectile speed x | `009bca60` (the player's shots only) | bullets: anyone's (the player's already scaled by the game) |
+| 11 silence | the sounds | bullets: muzzle velocity x 0.96 |
+| 12 split beam: + projectiles | `GetNumProjectiles`, `Fire` | pellets for hit force and penetration |
+| 14 scope | `Fire`'s aiming | sway in sights 0.6, kick 0.6 (iron sights 0.7), punch 0.3 (0.5) |
+
+A mod item whose name has `barrel` makes the round faster (x 1.06) or, with `short`, `snub`,
+`sawed`, `sawn`, `compact` or `cut down`, slower (x 0.95). The weapon's own scope flag (`cFlags`
+bit 4) counts as a scope. The Test Range's inventory already has every named IMOD of every loaded
+plugin. The game's own item card (`00707e30`) shows the attached mods' stats itself; nv-rs adds no
+compare of its own. The dismember roll (`00646e50`) gets no attacker, so it keeps the form's stats.
+
 ### Tuning
 
 `[nv-rs Gunplay]` in Fallout.ini is read in a launcher's play run. The `NV_GUNPLAY_*` variables
@@ -218,6 +319,9 @@ line; a bad variable stops the start.
 | `bKnockdownCompanions` | `NV_GUNPLAY_KNOCKDOWN_COMPANIONS` | 0 | 0/1 |
 | `iDismemberForce` | `NV_GUNPLAY_DISMEMBER_FORCE` | 45 | 0-1000 (0 = only the game's chance) |
 | `iExplodeForce` | `NV_GUNPLAY_EXPLODE_FORCE` | 110 | 0-1000 (0 = only the game's chance) |
+| `bBallistics` | `NV_GUNPLAY_BALLISTICS` | 1 | 0/1 (Settings > Gameplay "Ballistics": Classic / Projectile) |
+| `bPenetration` | `NV_GUNPLAY_PENETRATION` | 1 | 0/1 (Settings > Gameplay "Penetration") |
+| `iBulletSpeed` | `NV_GUNPLAY_BULLET_SPEED` | 100 | 25-200 (Settings > Gameplay "Bullet Speed", in 5s) |
 
 ### In-game Settings menu
 
