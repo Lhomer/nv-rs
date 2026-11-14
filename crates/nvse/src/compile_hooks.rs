@@ -27,11 +27,20 @@
 //!   table lets a double parameter be a variable.
 //! - `005B3A8D` (`StandardCompile`'s end-of-line check): off while a nested command parses.
 //!
-//! Not here: xNVSE's compiled script cache on disk (`ScriptDataCache`, a file of compiled data
-//! keyed by the text's hash, only a speed-up: plan 3.8's next part), and its two fixes of the
-//! game's own expression reader's buffers (`ExpressionParserBufferOverflowHook_1/_2`, the
-//! 0x400-byte string buffer at `00593DB6`), which are fixes of the game's `set`/`if` compiler
-//! rather than xNVSE's compiler.
+//! Also from `Hook_Script_Init`: xNVSE's two fixes of the game's own `set`/`if` expression code,
+//! a 0x500-byte token buffer for the infix-to-postfix conversion (`ExpressionParserBufferOverflow
+//! Hook_1/_2`, `005935D0`/`005937DE`) and `CExpression::Eval`'s token buffer moved clear of the
+//! expression's bytes (`00593DB6`, `00593E5A`): the buffer is made here and handed to the
+//! translation through `Engine::set_expression_alt_buffer` (engine-forms' `expression.rs` reads
+//! it).
+//!
+//! Not here: xNVSE's compiled script cache on disk (`ScriptDataCache`, `script_data_cache.bin`).
+//! It is a speed cache only: a hit loads the bytes, variables and references a compile of the
+//! same text made in an earlier run, in place of compiling (the plugins then hear no
+//! `ScriptPrecompile`), and it is read and written only around the first frame (loaded before
+//! `DeferredInit`, saved after the function files compile; once saved it is off for the run).
+//! A script compiled from the cache is the one the compile would make, so nothing a mod or a
+//! script can see changes without it; nv-rs compiles every time.
 
 use crate::compiler::{self, is_space, ln, opt_text, sb, sc, show_error, state, str_equal, vt};
 
@@ -77,7 +86,15 @@ pub fn install(e: &mut Engine) {
     if e.mem.is_mapped(DOUBLE_PARAMETER_TYPE) {
         e.mem.set_u16(DOUBLE_PARAMETER_TYPE, 1);
     }
+    // `s_ExpressionParserAltBuffer` (`char[0x500]`, zeroed) and the hooks that use it.
+    if e.expression_alt_buffer() == 0 {
+        let buffer = crate::table::alloc(e, EXPRESSION_ALT_BUFFER_SIZE);
+        e.set_expression_alt_buffer(buffer);
+    }
 }
+
+/// The size of xNVSE's token buffer for the game's expression code.
+pub const EXPRESSION_ALT_BUFFER_SIZE: u32 = 0x500;
 
 // ---- the seams ----
 
@@ -138,10 +155,12 @@ fn script_size_limit(e: &mut Engine, w: &[u32]) -> Option<u32> {
 // Translated from xNVSE 6.4.9 (xNVSE/NVSE at 0ccd23a), Hooks_Script.cpp: HandleBeginCompile,
 // Runtime::HandleBeginCompile_SetNotCompiled, Runtime::HookBeginScriptCompile.
 /// `005AEBB1`, words (the script, the script buffer): the compile starts. The script goes on the
-/// compile stack; its error code and compiled flag are cleared; the `#version` tags become
-/// comments (a plugin it names that is not built in fails the compile); the plugins hear
-/// `ScriptPrecompile`; the outermost script is preprocessed. Answers 1 to go on, 0 to fail, 2
-/// when a plugin compiled it.
+/// compile stack; its error code and compiled flag are cleared. A script in the new language
+/// (its text starting with `name`, any case) is compiled by [`crate::newlang`]; otherwise the
+/// `#version` tags become comments (a plugin it names that is not built in fails the compile)
+/// and the plugins hear `ScriptPrecompile`. A compiled script (the new language's, or a
+/// plugin's) is finished and answers 2; else the outermost script is preprocessed. Answers 1 to
+/// go on, 0 to fail.
 fn begin_compile(e: &mut Engine, w: &[u32]) -> Option<u32> {
     let (script, buf) = (w[0], w[1]);
     let s = state(e);
@@ -152,28 +171,19 @@ fn begin_compile(e: &mut Engine, w: &[u32]) -> Option<u32> {
     let text_at = e.mem.u32(buf + sb::TEXT);
     let text = opt_text(e, text_at).unwrap_or_default();
     if text.len() >= 4 && text[..4].eq_ignore_ascii_case(b"name") {
-        // The new script language (`Compiler::CompileNVSEScript`): that compiler is not built
-        // (plan step 3.8, deferred), so the script does not compile here.
-        return Some(0);
-    }
-    for (at, plugin) in version_tags(&text) {
-        e.mem.set_u8(text_at + at as u32, b';');
-        if let Some(r) = state(e).pound_restores.last_mut() {
-            r.push(at as u32);
-        }
-        if !plugin.eq_ignore_ascii_case(b"nvse") && crate::plugins::listed(e, &plugin).is_none() {
-            let name = plugin.to_ascii_lowercase();
-            let message = compiler::format(
-                "Script compilation failed: No plugin with name %s could be found.",
-                &[compiler::A::S(&name)],
-                0x800,
-            );
-            crate::errors::show(e, 0, &String::from_utf8_lossy(&message));
+        // The new script language (`Compiler::CompileNVSEScript`, [`crate::newlang`]). xNVSE
+        // prints "Script compiled successfully." to its standard output, which in the game is a
+        // Windows console window of its own: `AllocateScriptConsole` opens one on the first
+        // compile that prints anything (every success prints "[Requirements]", every error its
+        // message), in the run-time build too (its `#ifdef IS_EDITOR` is always true, the macro
+        // being defined as 0 or 1). A deliberate difference: the port opens no window and prints
+        // nothing there (the errors still go to the game's console as in xNVSE). A compiled
+        // script is finished below as a plugin's would be.
+        let partial = e.mem.u8(buf + sb::PARTIAL) != 0;
+        if !crate::newlang::compile(e, &text, script, partial) {
             return Some(0);
         }
-    }
-    dispatch_script_message(e, crate::plugins::msg::SCRIPT_PRECOMPILE, script, buf);
-    if e.mem.u32(buf + sb::ERROR) >= 1 {
+    } else if !old_syntax_precompile(e, script, buf, text_at, &text) {
         return Some(0);
     }
     if e.mem.u8(script + sc::COMPILED) != 0 {
@@ -187,6 +197,30 @@ fn begin_compile(e: &mut Engine, w: &[u32]) -> Option<u32> {
         return Some(0);
     }
     Some(1)
+}
+
+/// The old syntax's part of `HandleBeginCompile`: the `#version` tags made comments (a plugin
+/// one names that is not built in fails the compile), then the plugins hear `ScriptPrecompile`;
+/// false when the compile fails.
+fn old_syntax_precompile(e: &mut Engine, script: u32, buf: u32, text_at: u32, text: &[u8]) -> bool {
+    for (at, plugin) in version_tags(text) {
+        e.mem.set_u8(text_at + at as u32, b';');
+        if let Some(r) = state(e).pound_restores.last_mut() {
+            r.push(at as u32);
+        }
+        if !plugin.eq_ignore_ascii_case(b"nvse") && crate::plugins::listed(e, &plugin).is_none() {
+            let name = plugin.to_ascii_lowercase();
+            let message = compiler::format(
+                "Script compilation failed: No plugin with name %s could be found.",
+                &[compiler::A::S(&name)],
+                0x800,
+            );
+            crate::errors::show(e, 0, &String::from_utf8_lossy(&message));
+            return false;
+        }
+    }
+    dispatch_script_message(e, crate::plugins::msg::SCRIPT_PRECOMPILE, script, buf);
+    e.mem.u32(buf + sb::ERROR) < 1
 }
 
 // Translated from xNVSE 6.4.9 (xNVSE/NVSE at 0ccd23a), Hooks_Script.cpp:
@@ -236,8 +270,9 @@ fn dispatch_script_message(e: &mut Engine, kind: u32, script: u32, buf: u32) {
 
 /// The `#version("plugin", major[, minor[, beta]])` tags of a text (`#` and `version` without
 /// case; at least one blank after the commas of the second and third numbers, any after the
-/// first's), each by the position of its `#` and its plugin's name. The numbers are only kept
-/// for the new script language, which is not built: they are not read here.
+/// first's), each by the position of its `#` and its plugin's name. xNVSE keeps the numbers
+/// in a map nothing of the old syntax reads (the new language's parser fills its own), so they
+/// are not read here.
 fn version_tags(text: &[u8]) -> Vec<(usize, Vec<u8>)> {
     let mut out = Vec::new();
     let mut i = 0;

@@ -40,6 +40,11 @@ its draws reach and the shader passes' begin and end, the first step towards dra
 is on after its gate: the recorded street run byte-identical with it off; no speed claim of its own. Its group C,
 the shader set-ups the world draw still reached as translations (the tall grass, no-lighting, sky, water, SpeedTree leaf and lighting 3.0 shaders),
 is typed with native maths and reads the frame only through the draw's packet accessors.
+Since 2026-11-14 every light list the world draw walks reads the frame's copy too (the lighting properties' lists,
+their walks and counts, the tall grass's and lighting 3.0's light set-ups, the water's lights, the accumulators'
+shadow scene nodes), the pass lights' clip-plane caches are the draw's own state, and the render-state cache's last
+two slots the skinned and particle draws reached as translations are typed: groundwork for the drawing thread, no
+change a player sees.
 The update half (what main runs besides drawing) began on 2026-11-10 with `scene`: the scene graph's
 downward update pass across geometries, fade nodes and particle systems, and the skinned bound, on once proven
 identical (differential tests, the recorded run byte-identical with it off); not a speed change by itself.
@@ -63,6 +68,13 @@ planted mutants): first `shader`, whose set-ups the main thread alone runs in pl
 in `f64`; then `dispatch` (the transforms' and matrices' arithmetic, which every thread runs: its sums of products
 in `f64`, a single operation in `f32`); then `culling` (the bounds, the planes and the merge the visibility walk and
 the bound updates use, on the main thread and the helper threads: likewise).
+
+The built-in xNVSE (step 3 of the pace plan, with JIP LN after it) has all 654 of its commands since 2026-11-14:
+its run-time compiler for the old script syntax and its new script language (scripts that start with `name`),
+compiled to the same bytes as xNVSE writes them (byte tests from its source's rules, read back by its decompiler),
+`CompileScript` and the function files, the documentation dumps and the console's help listing; its
+compiled-script cache file is left out as a speed cache only. JIP LN NVSE's commands are in progress (README's
+system table has the counts).
 
 An interim Windows preview (maintainer, 2026-11-06) can be built with `scripts/package-playtest.ps1`:
 a ZIP a player can run with no build, labelled a preview, wgpu remaining the big release. It has only
