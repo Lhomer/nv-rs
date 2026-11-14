@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (Launcher.exe asks Play or Play with mods)
+
+- **Patrick:** after the update check (unchanged), the launcher should not start the game by itself but ask: Play (as Play.cmd) or Play with mods (as Play with mods.cmd); the last choice may be the default, always ask; an offline or failed check still lets him pick.
+- **Now (`scripts/updater`):** every place that started Play.exe (newest build, no update wanted, offline or failed check, after an update, after a failed update) shows a small window: the check's result and two buttons, Play (`Play.exe`) and Play with mods (`Play.exe --mods`); the last choice is the default button (Enter, focus) from `userdata\launcher-choice.txt` (`choice.rs`, tested); closing it starts nothing. The release and `latest.txt` address are unchanged. Not run on Windows here (clippy for the Windows target clean; the choice logic tested on Linux).
+
 ### Claude, 2026-11-14 (movement keys all going right; the range's place hangar-sized)
 
 - **Patrick (0881adee):** in Snappy mode W, A, S and D all moved him to the right (Classic fine). **Cause:** `movement::key_direction` took the mover's `SideVec` whenever it was not zero; with the keyboard the control handler (`0093e860`) sets `MoveMode` 0x40 and leaves in `SideVec` a scaled axis that `PlayerMover::Update` does not read then, so the replaced move vector pointed one way for every key. **Fix (1c9b585d):** `SideVec` only with 0x40 clear (a stick); else the bits (Forward 0x1, Back 0x2, Left 0x4, Right 0x8); test `wasd_move_forward_left_back_right`.

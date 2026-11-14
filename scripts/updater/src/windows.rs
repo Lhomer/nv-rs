@@ -1,8 +1,10 @@
 //! Launcher.exe's Windows side: its windows (messages and a small window saying what it is
 //! doing, as Play.exe's own), the downloads (Windows' own `curl.exe`, HTTPS), the unpacking
 //! (Windows' own `tar.exe`, which reads zip files, else PowerShell's `Expand-Archive`), and
-//! starting Play.exe. Both tools come with Windows 10 (1803) and 11, so nothing is installed.
+//! asking what to start (Play or Play with mods) and starting Play.exe. Both tools come with
+//! Windows 10 (1803) and 11, so nothing is installed.
 
+use crate::choice::{self, Choice};
 use crate::update::{self, Latest};
 use std::ffi::c_void;
 use std::os::windows::process::CommandExt;
@@ -38,6 +40,15 @@ extern "system" {
     fn SetWindowTextW(window: isize, text: *const u16) -> i32;
     fn GetSystemMetrics(index: i32) -> i32;
     fn GetSysColorBrush(index: i32) -> *mut c_void;
+    fn DestroyWindow(window: *mut c_void) -> i32;
+    fn IsDialogMessageW(window: *mut c_void, message: *mut [usize; 8]) -> i32;
+    fn SetFocus(window: *mut c_void) -> *mut c_void;
+    fn SetForegroundWindow(window: *mut c_void) -> i32;
+    fn SendMessageW(window: *mut c_void, message: u32, w: usize, l: isize) -> isize;
+}
+#[link(name = "gdi32")]
+extern "system" {
+    fn GetStockObject(index: i32) -> *mut c_void;
 }
 #[link(name = "kernel32")]
 extern "system" {
@@ -350,10 +361,181 @@ fn unpack(zip: &Path, into: &Path) -> Result<(), String> {
     }
 }
 
-/// Starts Play.exe from the install, as a double-click would; the launcher ends.
-fn play(install: &Path) {
+/// The choice window's buttons and what it answered (0: closed without a choice).
+const ID_PLAY: usize = 101;
+const ID_MODS: usize = 102;
+const IDCANCEL: usize = 2;
+const WM_COMMAND: u32 = 0x111;
+const WM_SETFONT: u32 = 0x30;
+const DM_GETDEFID: u32 = 0x400;
+const DC_HASDEFID: isize = 0x534b;
+static CHOSEN: AtomicIsize = AtomicIsize::new(0);
+static DEFAULT_ID: AtomicIsize = AtomicIsize::new(ID_PLAY as isize);
+
+unsafe extern "system" fn choice_procedure(
+    window: *mut c_void,
+    message: u32,
+    w: usize,
+    l: isize,
+) -> isize {
+    match message {
+        WM_COMMAND => {
+            let id = w & 0xffff;
+            if id == ID_PLAY || id == ID_MODS {
+                CHOSEN.store(id as isize, Ordering::Relaxed);
+                DestroyWindow(window);
+            } else if id == IDCANCEL {
+                DestroyWindow(window);
+            }
+            0
+        }
+        // Enter presses the default button (the last choice).
+        DM_GETDEFID => (DC_HASDEFID << 16) | DEFAULT_ID.load(Ordering::Relaxed),
+        WM_CLOSE => {
+            DestroyWindow(window);
+            0
+        }
+        WM_DESTROY => {
+            PostQuitMessage(0);
+            0
+        }
+        _ => DefWindowProcW(window, message, w, l),
+    }
+}
+
+/// The window that asks what to start: `note` (what the update check found) above the two
+/// buttons, `default` the one Enter presses. `None` when it is closed without a choice.
+fn ask_choice(note: &str, default: Choice) -> Option<Choice> {
+    let class_name = wide("nv-rs-launcher-choice");
+    let (title, label, button) = (wide(TITLE), wide("STATIC"), wide("BUTTON"));
+    let text = wide(&format!("{note}\n\nWhat do you want to start?"));
+    let (play, mods) = (wide("Play"), wide("Play with mods"));
+    let default_id = match default {
+        Choice::Play => ID_PLAY,
+        Choice::Mods => ID_MODS,
+    };
+    CHOSEN.store(0, Ordering::Relaxed);
+    DEFAULT_ID.store(default_id as isize, Ordering::Relaxed);
+    // SAFETY: the strings live for this whole function, and the loop keeps the window alive
+    // until it is destroyed.
+    unsafe {
+        let instance = GetModuleHandleW(std::ptr::null());
+        let class = WndClassW {
+            style: 0,
+            procedure: choice_procedure,
+            class_extra: 0,
+            window_extra: 0,
+            instance,
+            icon: std::ptr::null_mut(),
+            cursor: std::ptr::null_mut(),
+            // COLOR_BTNFACE.
+            background: GetSysColorBrush(15),
+            menu_name: std::ptr::null(),
+            class_name: class_name.as_ptr(),
+        };
+        RegisterClassW(&class);
+        let (width, height) = (480, 190);
+        let (x, y) = (
+            (GetSystemMetrics(0) - width) / 2,
+            (GetSystemMetrics(1) - height) / 2,
+        );
+        // WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE; WS_EX_CONTROLPARENT for the keys.
+        let window = CreateWindowExW(
+            0x0001_0000,
+            class_name.as_ptr(),
+            title.as_ptr(),
+            0x10c8_0000,
+            x,
+            y,
+            width,
+            height,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            instance,
+            std::ptr::null_mut(),
+        );
+        if window.is_null() {
+            return Some(default);
+        }
+        let font = GetStockObject(17); // DEFAULT_GUI_FONT
+                                       // WS_CHILD | WS_VISIBLE.
+        let note = CreateWindowExW(
+            0,
+            label.as_ptr(),
+            text.as_ptr(),
+            0x5000_0000,
+            16,
+            14,
+            width - 48,
+            80,
+            window,
+            std::ptr::null_mut(),
+            instance,
+            std::ptr::null_mut(),
+        );
+        let mut buttons = Vec::new();
+        for (id, caption, left) in [(ID_PLAY, &play, 16), (ID_MODS, &mods, 196)] {
+            // WS_CHILD | WS_VISIBLE | WS_TABSTOP, BS_DEFPUSHBUTTON for the default.
+            let style = 0x5001_0000 | u32::from(id == default_id);
+            let handle = CreateWindowExW(
+                0,
+                button.as_ptr(),
+                caption.as_ptr(),
+                style,
+                left,
+                height - 84,
+                170,
+                32,
+                window,
+                id as *mut c_void,
+                instance,
+                std::ptr::null_mut(),
+            );
+            buttons.push((id, handle));
+        }
+        for handle in std::iter::once(note).chain(buttons.iter().map(|b| b.1)) {
+            if !handle.is_null() && !font.is_null() {
+                SendMessageW(handle, WM_SETFONT, font as usize, 1);
+            }
+        }
+        SetForegroundWindow(window);
+        if let Some(&(_, handle)) = buttons.iter().find(|b| b.0 == default_id) {
+            SetFocus(handle);
+        }
+        let mut message = [0usize; 8];
+        while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
+            if IsDialogMessageW(window, &mut message) == 0 {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+    }
+    match CHOSEN.load(Ordering::Relaxed) as usize {
+        ID_PLAY => Some(Choice::Play),
+        ID_MODS => Some(Choice::Mods),
+        _ => None,
+    }
+}
+
+/// Asks what to start ([`ask_choice`], the last choice the default), remembers it, and starts
+/// Play.exe for it; closing the window starts nothing.
+fn choose_and_play(install: &Path, note: &str) {
+    let Some(choice) = ask_choice(note, choice::remembered(install)) else {
+        return;
+    };
+    choice::remember(install, choice);
+    play(install, choice);
+}
+
+/// Starts Play.exe from the install, as a double-click would (with `--mods` for Play with mods,
+/// as `Play with mods.cmd` does); the launcher ends.
+fn play(install: &Path, choice: Choice) {
     let play = install.join("Play.exe");
-    if let Err(why) = Command::new(&play).current_dir(install).spawn() {
+    if let Err(why) = Command::new(&play)
+        .args(choice.args())
+        .current_dir(install)
+        .spawn()
+    {
         error(&format!(
             "Play.exe could not be started ({why}).\n\n{}",
             play.display()
@@ -393,31 +575,31 @@ pub fn run() {
         Ok(latest) => latest,
         Err(why) => {
             status.close();
-            warning(&format!(
-                "Could not look for a newer build ({why}).\n\nThe installed build starts."
-            ));
-            return play(&install);
+            return choose_and_play(
+                &install,
+                &format!(
+                    "Could not look for a newer build ({why}). You can play the installed build."
+                ),
+            );
         }
     };
     if installed.as_deref() == Some(latest.commit.as_str()) {
-        status.set(&format!(
-            "You have the newest build ({}). Starting the game...",
-            short(&latest.commit)
-        ));
-        std::thread::sleep(Duration::from_millis(600));
         status.close();
-        return play(&install);
+        return choose_and_play(
+            &install,
+            &format!("You have the newest build ({}).", short(&latest.commit)),
+        );
     }
     status.close();
     let have = installed.as_deref().map_or("unknown", short);
     let question = format!(
-        "A newer build is ready: {} ({}).\nInstalled: {}.\n\nUpdate now? Your saves and settings in the userdata folder stay as they are.\n\nNo starts the installed build.",
+        "A newer build is ready: {} ({}).\nInstalled: {}.\n\nUpdate now? Your saves and settings in the userdata folder stay as they are.\n\nNo keeps the installed build.",
         short(&latest.commit),
         latest.version,
         have
     );
     if !ask(&question) {
-        return play(&install);
+        return choose_and_play(&install, &format!("The installed build ({have}) is kept."));
     }
     if play_is_running() {
         warning("The game is running. Close it, then start Launcher.exe again to update.");
@@ -428,14 +610,11 @@ pub fn run() {
     status.close();
     let _ = std::fs::remove_dir_all(install.join(update::STAGING));
     match result {
-        Ok(()) => play(&install),
-        Err(why) => {
-            if ask(&format!(
-                "The update did not happen: {why}\n\nThe installed build is as it was. Start it?"
-            )) {
-                play(&install);
-            }
-        }
+        Ok(()) => choose_and_play(&install, &format!("Updated to {}.", short(&latest.commit))),
+        Err(why) => choose_and_play(
+            &install,
+            &format!("The update did not happen: {why}\nThe installed build is as it was."),
+        ),
     }
 }
 
@@ -477,10 +656,7 @@ fn update_to(
     update::apply(&root, install, &files).map_err(|e| {
         format!("{e}. If the game or a tool from this folder is open, close it and try again")
     })?;
-    status.set(&format!(
-        "Updated to {}. Starting the game...",
-        short(&latest.commit)
-    ));
+    status.set(&format!("Updated to {}.", short(&latest.commit)));
     std::thread::sleep(Duration::from_millis(800));
     Ok(())
 }

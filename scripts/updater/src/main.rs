@@ -5,8 +5,9 @@
 //! over HTTPS), and when that is another build offers to update: the zip is downloaded, checked
 //! against the published SHA-256 (`<zip>.sha256`), unpacked, and its programs put in place of the
 //! installed ones, all or nothing, never touching `userdata\` ([`update`]). Then, or when there is
-//! nothing newer, or when the release can't be reached, it starts Play.exe. A failed update leaves
-//! the installed build as it was and playable.
+//! nothing newer, or when the release can't be reached, it asks what to start: Play or Play with
+//! mods ([`choice`]; the last choice is the default button). A failed update leaves the installed
+//! build as it was and playable.
 //!
 //! The release is the Play package workflow's rolling prerelease of the branch the package was
 //! built from: `NV_RS_UPDATE_REPO` and `NV_RS_UPDATE_TAG` at build time, else this fork's
@@ -15,6 +16,7 @@
 // Off Windows only the tests use the update logic.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod choice;
 mod sha256;
 mod update;
 #[cfg(windows)]
