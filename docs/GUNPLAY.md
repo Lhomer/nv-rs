@@ -286,16 +286,27 @@ choice is the same with or without DLC. No cell name is taken from memory: the f
   corridor, sewer, vent or sleep cell by name (Patrick, 097ad477: `NorthernPassageINT` was a
   narrow passage and the targets stood in its walls).
 
+**Which files:** FalloutNV.esm and the official DLC and pack masters in the load order (Dead
+Money, Honest Hearts, Old World Blues, Lonesome Road, Gun Runners' Arsenal, the Caravan, Classic,
+Mercenary and Tribal packs); the Mojave's open ground from FalloutNV.esm.
+
+**The developers' test cells** (Patrick, 2026-11-14: a QASmoke-style test cell if there is a big
+enough one): every interior whose editor id has `test`, `debug` or starts with `qa` is reported in
+the game's log when the main menu shows, fit or not (`Test Range: developers' cell in <file>:
+<cell>: navmesh floor N m2, largest clear rectangle W x L m, references span S m, statics, actors,
+light: fit / not fit (why)`), and one that is fit is taken 1.5 times ahead of an ordinary place of
+the same floor.
+
 **Then its floor decides** (`crates/host/src/range_floor.rs`). The cell's navmesh is laid on a
 1 m grid, square to the cell and again turned 45 degrees:
 - a square is floor where a flat triangle (within about 8 degrees of level) covers it; where two
   floors overlap a metre or more apart (a walkway over a hall), or a steep triangle covers it, it
   is not;
 - the range wants the best clear rectangle of floor a metre in from the navmesh's edge (obstacles
-  are holes in the navmesh, so the rectangle has none): at least 8 m wide and 25 m long, width
-  counting as much as length (up to 30 m wide and 110 m long), less below 12 m wide, less again
-  for a floor that is not level;
-- the light nudges the score; a developers' test or QA cell goes a little ahead.
+  are holes in the navmesh, so the rectangle has none): at least 12 m wide and 40 m long
+  (hangar-sized: a small building never qualifies), width counting as much as length (up to 30 m
+  wide and 110 m long), less below 16 m wide, less again for a floor that is not level;
+- the light nudges the score; a fit developers' test cell goes well ahead (1.5 times).
 
 **The Mojave too.** `WastelandNV`'s navmesh is laid on one grid of 2 m squares with every placed
 actor's surroundings (200 m) left out, so the ground is away from towns, camps and creatures; its

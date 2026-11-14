@@ -27,7 +27,7 @@
 //! Each place comes with its lane ([`Spot`]): where the player stands, facing down the rectangle,
 //! and the floor around it, which the range checks each target's spot against.
 
-use crate::range_floor::{best_rect, Floor, Lane, Rect};
+use crate::range_floor::{best_rect, floor_area, largest_rect, Floor, Lane, Rect};
 use esm::{sig, FormId, FourCC, Plugin, RecordEntry};
 use std::collections::HashMap;
 
@@ -349,12 +349,12 @@ pub fn interior_spot(c: &CellStats, triangles: &[[[f32; 3]; 3]]) -> Option<Spot>
     let (floor, rect, score, angle) = best?;
     let rect = trim(&floor, rect);
     let lane = floor.lane(rect);
-    let name = c.editor_id.to_ascii_lowercase();
-    let test = name.contains("test") || name.starts_with("qa");
-    let score = score * (0.9 + 0.2 * c.light.min(1.0)) * if test { 1.1 } else { 1.0 }
+    let test = is_developer_cell(&c.editor_id);
+    let score = score * (0.9 + 0.2 * c.light.min(1.0)) * if test { DEVELOPER_BONUS } else { 1.0 }
         / (1.0 + lane.spread_m / 4.0);
     let why = format!(
-        "{:.0} m wide, {:.0} m long clear flat floor ({:.0} degrees to the cell), level within {:.1} m, light {:.2}, {} statics, no actors",
+        "{}{:.0} m wide, {:.0} m long clear flat floor ({:.0} degrees to the cell), level within {:.1} m, light {:.2}, {} statics, no actors",
+        if test { "a developers' test cell; " } else { "" },
         lane.width_m,
         lane.length_m,
         angle.to_degrees(),
@@ -369,6 +369,79 @@ pub fn interior_spot(c: &CellStats, triangles: &[[[f32; 3]; 3]]) -> Option<Spot>
         score,
         why,
     })
+}
+
+/// A developers' test or debug cell by its editor id (`QASmoke` was one in Fallout 3).
+pub fn is_developer_cell(editor_id: &str) -> bool {
+    let name = editor_id.to_ascii_lowercase();
+    name.contains("test") || name.starts_with("qa") || name.contains("debug")
+}
+
+/// A developers' test cell's score against another place of the same floor: strongly ahead
+/// (Patrick: a QASmoke-style test cell when there is a large, flat, open one).
+const DEVELOPER_BONUS: f32 = 1.5;
+
+/// The report line for each developers' test or debug interior of `plugin`: its navmesh floor,
+/// its largest clear rectangle, its references' span, statics, actors and light, and whether it
+/// is fit for the range and why not.
+pub fn developer_report(
+    plugin: &Plugin,
+    cells: &[CellStats],
+    navmeshes: &HashMap<String, Vec<RecordEntry>>,
+) -> Vec<String> {
+    cells
+        .iter()
+        .filter(|c| is_developer_cell(&c.editor_id))
+        .map(|c| {
+            let triangles: Vec<[[f32; 3]; 3]> = navmeshes
+                .get(&c.editor_id)
+                .map(|meshes| meshes.iter().flat_map(|m| navmesh_triangles(plugin, m)).collect())
+                .unwrap_or_default();
+            let floor = Floor::of(&triangles, 0.0, INTERIOR_RES);
+            let area = floor.as_ref().map_or(0.0, floor_area);
+            let rect = floor
+                .as_ref()
+                .and_then(|f| largest_rect(f, INTERIOR_CLEAR))
+                .map_or("none".to_string(), |(l, w)| format!("{w:.0} x {l:.0} m"));
+            let verdict = match score(c) {
+                None => format!("not fit ({})", unfit_reason(c)),
+                Some(_) if interior_spot(c, &triangles).is_none() => {
+                    format!(
+                        "not fit (no clear floor {:.0} m wide and {:.0} m long)",
+                        crate::range_floor::MIN_WIDTH,
+                        crate::range_floor::MIN_LENGTH
+                    )
+                }
+                Some(_) => "fit".to_string(),
+            };
+            format!(
+                "{}: navmesh floor {area:.0} m2, largest clear rectangle {rect}, references span {:.0} m, {} statics, {} actors, light {:.2}: {verdict}",
+                c.editor_id,
+                c.length / UNITS_PER_METRE,
+                c.statics,
+                c.actors,
+                c.light
+            )
+        })
+        .collect()
+}
+
+/// Why [`score`] turns a cell down.
+fn unfit_reason(c: &CellStats) -> &'static str {
+    let name = c.editor_id.to_ascii_lowercase();
+    if NOT_A_RANGE.iter().any(|w| name.contains(w)) {
+        "a holding, storage or narrow cell by name"
+    } else if !c.navmesh {
+        "no navmesh"
+    } else if c.actors > 0 {
+        "actors placed in it"
+    } else if c.statics < 20 {
+        "fewer than 20 statics"
+    } else if c.light < 0.1 {
+        "dark"
+    } else {
+        "under 20 m of references"
+    }
 }
 
 /// A rectangle cut to what the range uses: its long side to the lane's length (from its start),
@@ -506,7 +579,13 @@ pub fn exterior_spot(plugin: &Plugin, space: &str) -> Option<Spot> {
 /// The places for the range in `plugin`, best first: the fit interiors by their floor and the
 /// Mojave's open ground.
 pub fn spots(plugin: &Plugin) -> Vec<Spot> {
+    spots_in(plugin, true).0
+}
+
+/// [`spots`], the Mojave's ground only when `exterior`, with the developer cells' report.
+pub fn spots_in(plugin: &Plugin, exterior: bool) -> (Vec<Spot>, Vec<String>) {
     let (cells, navmeshes) = scan_with_navmeshes(plugin);
+    let report = developer_report(plugin, &cells, &navmeshes);
     let ranked = rank(&cells);
     let mut found: Vec<Spot> = ranked
         .iter()
@@ -519,34 +598,21 @@ pub fn spots(plugin: &Plugin) -> Vec<Spot> {
             interior_spot(c, &triangles)
         })
         .collect();
-    if found.is_empty() && !ranked.is_empty() {
-        // No floor read from any navmesh (a file the reader does not understand): the cells by
-        // their records, as before, without a lane.
-        eprintln!("Test Range: no navmesh floor could be measured: the cells are ranked by length");
-        found.extend(ranked.iter().take(4).map(|c| Spot {
-            place: Place::Interior(c.editor_id.clone()),
-            lane: Lane {
-                start: [0.0; 3],
-                heading: 0.0,
-                length_m: 0.0,
-                width_m: 0.0,
-                spread_m: 0.0,
-            },
-            floor: Floor::empty(0.0, INTERIOR_RES, 0.0, 0.0, 0.0, 0.0),
-            score: 0.0,
-            why: format!(
-                "{:.0} m long by its references (no floor measured)",
-                c.length / UNITS_PER_METRE
-            ),
-        }));
+    // A cell whose floor could not be measured is never taken by its references' length alone:
+    // that could be a small building (Patrick, 2026-11-14).
+    if exterior {
+        found.extend(exterior_spot(plugin, "WastelandNV"));
     }
-    found.extend(exterior_spot(plugin, "WastelandNV"));
+    sort_spots(&mut found);
+    (found, report)
+}
+
+fn sort_spots(found: &mut [Spot]) {
     found.sort_by(|a, b| {
         b.score
             .total_cmp(&a.score)
             .then_with(|| a.name().cmp(&b.name()))
     });
-    found
 }
 
 /// The base game's master in the load order: `FalloutNV.esm`'s path.
@@ -558,17 +624,62 @@ pub fn base_master(paths: &[std::path::PathBuf]) -> Option<&std::path::PathBuf> 
     })
 }
 
-/// The places for the range in the plugin at `path`, best first ([`spots`]), with a log line
-/// each for the first few; empty when it cannot be read.
-pub fn ranked_spots(path: &std::path::Path) -> Vec<Spot> {
-    let plugin = match Plugin::open(path) {
-        Ok(p) => p,
-        Err(why) => {
-            eprintln!("Test Range: {} not read ({why})", path.display());
-            return Vec::new();
+/// The official masters in the load order, the base game's first: `FalloutNV.esm`, the four
+/// story DLC and the five packs (their interiors are places for the range too).
+pub fn official_masters(paths: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    const NAMES: [&str; 10] = [
+        "FalloutNV.esm",
+        "DeadMoney.esm",
+        "HonestHearts.esm",
+        "OldWorldBlues.esm",
+        "LonesomeRoad.esm",
+        "GunRunnersArsenal.esm",
+        "CaravanPack.esm",
+        "ClassicPack.esm",
+        "MercenaryPack.esm",
+        "TribalPack.esm",
+    ];
+    NAMES
+        .iter()
+        .filter_map(|wanted| {
+            paths
+                .iter()
+                .find(|p| {
+                    let text = p.to_string_lossy();
+                    let name = text.rsplit(['\\', '/']).next().unwrap_or(&text);
+                    name.eq_ignore_ascii_case(wanted)
+                })
+                .cloned()
+        })
+        .collect()
+}
+
+/// The places for the range in the plugins at `paths` (the base game's first, whose Mojave is
+/// measured too), best first ([`spots_in`]), with a log line each for the first few and the
+/// developers' test cells' report; empty when none can be read.
+pub fn ranked_spots(paths: &[std::path::PathBuf]) -> Vec<Spot> {
+    let mut found = Vec::new();
+    for (i, path) in paths.iter().enumerate() {
+        let plugin = match Plugin::open(path) {
+            Ok(p) => p,
+            Err(why) => {
+                eprintln!("Test Range: {} not read ({why})", path.display());
+                continue;
+            }
+        };
+        let (spots, report) = spots_in(&plugin, i == 0);
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        if report.is_empty() {
+            eprintln!("Test Range: {name} has no developers' test or debug interior");
         }
-    };
-    let found = spots(&plugin);
+        for line in report {
+            eprintln!("Test Range: developers' cell in {name}: {line}");
+        }
+        found.extend(spots);
+    }
+    sort_spots(&mut found);
     for s in found.iter().take(6) {
         eprintln!(
             "Test Range: candidate {} (score {:.2}): {}",
@@ -864,6 +975,72 @@ mod tests {
         assert!(spot.why.contains("placed actors"), "{}", spot.why);
         assert_eq!(exterior_spot(&made(true), "WastelandNV"), None);
         assert_eq!(exterior_spot(&made(false), "NoSuchWorld"), None);
+    }
+
+    /// Interiors of the given widths and lengths (metres), each lit, with 40 statics along it and
+    /// a flat navmesh of that size.
+    fn halls(list: &[(&str, u32, f32, f32)]) -> Plugin {
+        let mut hedr = 1.34f32.to_le_bytes().to_vec();
+        hedr.extend([0u8; 8]);
+        let mut bytes = record(b"TES4", 0, &sub(b"HEDR", &hedr));
+        bytes.extend(group(
+            *b"STAT",
+            0,
+            &record(b"STAT", 0x100, &sub(b"EDID", b"Wall\0")),
+        ));
+        let mut block = Vec::new();
+        for &(name, id, width, length) in list {
+            let mut edid = name.as_bytes().to_vec();
+            edid.push(0);
+            let mut body = sub(b"EDID", &edid);
+            body.extend(sub(b"DATA", &[1]));
+            let mut light = vec![0u8; 40];
+            light[..3].copy_from_slice(&[200, 200, 200]);
+            body.extend(sub(b"XCLL", &light));
+            block.extend(record(b"CELL", id, &body));
+            let mut children = Vec::new();
+            for k in 0..40u32 {
+                let x = length * UNITS_PER_METRE * k as f32 / 39.0;
+                children.extend(reference(x, 0x100, id + 1 + k));
+            }
+            children.extend(navmesh(id + 0x900, 0.0, 0.0, width, length));
+            let label = id.to_le_bytes();
+            block.extend(group(label, 6, &group(label, 9, &children)));
+        }
+        bytes.extend(group(
+            *b"CELL",
+            0,
+            &group([0; 4], 2, &group([0; 4], 3, &block)),
+        ));
+        Plugin::from_bytes(bytes).expect("the made plugin")
+    }
+
+    /// The developers' test cells are reported with their size whether fit or not; a big one is
+    /// chosen ahead of an ordinary hall of the same floor; a small building is never a place.
+    #[test]
+    fn developer_cells_are_reported_and_preferred() {
+        let plugin = halls(&[
+            ("WarehouseBig", 0x1000, 24.0, 120.0),
+            ("QATestHall", 0x2000, 24.0, 120.0),
+            ("DebugRoom", 0x3000, 10.0, 30.0),
+            ("Shack", 0x4000, 9.0, 20.0),
+        ]);
+        let (found, report) = spots_in(&plugin, false);
+        let names: Vec<String> = found.iter().map(Spot::name).collect();
+        assert_eq!(names, ["QATestHall", "WarehouseBig"]);
+        assert!(
+            found[0].why.starts_with("a developers' test cell"),
+            "{}",
+            found[0].why
+        );
+        assert_eq!(report.len(), 2, "{report:?}");
+        let hall = report.iter().find(|l| l.starts_with("QATestHall")).unwrap();
+        assert!(hall.ends_with(": fit"), "{hall}");
+        assert!(hall.contains("largest clear rectangle"), "{hall}");
+        let room = report.iter().find(|l| l.starts_with("DebugRoom")).unwrap();
+        assert!(room.contains("not fit"), "{room}");
+        assert!(is_developer_cell("QASmoke") && is_developer_cell("zzTestCell"));
+        assert!(!is_developer_cell("NellisHangar1"));
     }
 
     #[test]

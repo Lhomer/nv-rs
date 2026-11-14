@@ -32,9 +32,9 @@ pub const FLAT: f32 = 0.99;
 const LAYER: f32 = 1.0 * UNITS_PER_METRE;
 /// The narrowest and shortest rectangle the range takes, the width it wants, and where width and
 /// length stop counting, in metres.
-pub const MIN_WIDTH: f32 = 8.0;
-pub const MIN_LENGTH: f32 = 25.0;
-pub const GOOD_WIDTH: f32 = 12.0;
+pub const MIN_WIDTH: f32 = 12.0;
+pub const MIN_LENGTH: f32 = 40.0;
+pub const GOOD_WIDTH: f32 = 16.0;
 pub const WIDE: f32 = 30.0;
 pub const LONG: f32 = 110.0;
 
@@ -390,6 +390,32 @@ pub fn rect_score(length: f32, width: f32) -> Option<f32> {
 /// The best rectangle of squares with at least `min_clear` clearance ([`rect_score`]; among
 /// equals the larger), with its score.
 pub fn best_rect(floor: &Floor, min_clear: u16) -> Option<(Rect, f32)> {
+    best_rect_by(floor, min_clear, rect_score)
+}
+
+/// The largest rectangle of squares with at least `min_clear` clearance, whatever its shape, with
+/// its longer and shorter side in metres (the developer cells' report).
+pub fn largest_rect(floor: &Floor, min_clear: u16) -> Option<(f32, f32)> {
+    let metres = floor.res / UNITS_PER_METRE;
+    best_rect_by(floor, min_clear, |l, w| Some(l * w)).map(|(r, _)| {
+        let (a, b) = ((r.i1 - r.i0) as f32 * metres, (r.j1 - r.j0) as f32 * metres);
+        (a.max(b), a.min(b))
+    })
+}
+
+/// The area of the floor in square metres (every square that is floor).
+pub fn floor_area(floor: &Floor) -> f32 {
+    let square = (floor.res / UNITS_PER_METRE).powi(2);
+    floor.z.iter().filter(|z| !z.is_nan()).count() as f32 * square
+}
+
+/// The rectangle of squares with at least `min_clear` clearance that `score` (length and width in
+/// metres, the longer first) rates best; among equals the larger.
+pub fn best_rect_by(
+    floor: &Floor,
+    min_clear: u16,
+    score: impl Fn(f32, f32) -> Option<f32>,
+) -> Option<(Rect, f32)> {
     let (w, h) = (floor.w, floor.h);
     let metres = floor.res / UNITS_PER_METRE;
     let mut heights = vec![0usize; w];
@@ -414,7 +440,7 @@ pub fn best_rect(floor: &Floor, min_clear: u16) -> Option<(Rect, f32)> {
                 stack.pop();
                 // The rectangle `top` squares tall over [left, i).
                 let (a, b) = ((i - left) as f32 * metres, top as f32 * metres);
-                if let Some(score) = rect_score(a.max(b), a.min(b)) {
+                if let Some(score) = score(a.max(b), a.min(b)) {
                     let area = (i - left) * top;
                     let better = best.as_ref().map_or(true, |&(_, s, ar)| {
                         score > s + 1e-6 || ((score - s).abs() <= 1e-6 && area > ar)
@@ -472,13 +498,33 @@ mod tests {
         assert_eq!(best_rect(&corridor, 2), None);
     }
 
-    /// Width counts as much as length: a 25 by 60 m hangar beats a 9 by 110 m gallery.
+    /// Width counts as much as length: a 25 by 60 m hangar beats a 13 by 110 m gallery; under
+    /// 12 m wide or 40 m long nothing counts (a small building is never the range).
     #[test]
     fn width_beats_a_little_more_length() {
-        assert!(rect_score(60.0, 25.0).unwrap() > rect_score(110.0, 9.0).unwrap());
-        assert!(rect_score(110.0, 12.0).unwrap() > rect_score(110.0, 10.0).unwrap());
-        assert_eq!(rect_score(200.0, 7.0), None);
+        assert!(rect_score(60.0, 25.0).unwrap() > rect_score(110.0, 13.0).unwrap());
+        assert!(rect_score(110.0, 14.0).unwrap() > rect_score(110.0, 12.0).unwrap());
+        assert_eq!(rect_score(200.0, 11.0), None);
+        assert_eq!(rect_score(35.0, 30.0), None);
         assert_eq!(rect_score(20.0, 20.0), None);
+    }
+
+    /// The report's measures: a 10 by 30 m room's floor and its largest clear rectangle, though
+    /// it is no range.
+    #[test]
+    fn a_small_room_is_measured_but_not_a_range() {
+        let floor = Floor::of(&slab(0.0, 0.0, 10.0, 30.0, 0.0), 0.0, M).unwrap();
+        assert!(
+            (floor_area(&floor) - 300.0).abs() <= 45.0,
+            "{}",
+            floor_area(&floor)
+        );
+        let (l, w) = largest_rect(&floor, 2).unwrap();
+        assert!(
+            (26.0..=30.0).contains(&l) && (6.0..=10.0).contains(&w),
+            "{l} x {w}"
+        );
+        assert_eq!(best_rect(&floor, 2), None);
     }
 
     /// A walkway over the hall leaves its squares out; a steep ramp is not floor.

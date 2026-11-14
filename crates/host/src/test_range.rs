@@ -653,16 +653,17 @@ fn start_scan(e: &Engine) {
         return;
     }
     let paths = crate::cell_offsets::loaded_plugin_paths(e);
-    let Some(path) = crate::range_cells::base_master(&paths).cloned() else {
+    let masters = crate::range_cells::official_masters(&paths);
+    if masters.is_empty() {
         return;
-    };
+    }
     if SCAN_STARTED.swap(true, Ordering::Relaxed) {
         return;
     }
     let spawned = std::thread::Builder::new()
         .name("test range cells".into())
         .spawn(move || {
-            let ranked = crate::range_cells::ranked_spots(&path)
+            let ranked = crate::range_cells::ranked_spots(&masters)
                 .into_iter()
                 .map(Arc::new)
                 .collect();
@@ -1243,6 +1244,39 @@ fn place_player(e: &mut Engine, spot: &Spot) {
     run_line(e, &format!("player.setpos y {y:.0}"));
     run_line(e, &format!("player.setpos z {:.0}", z + STAND_ABOVE));
     run_line(e, &format!("player.setangle z {degrees:.0}"));
+    // Checked: a player left where the `coc` put them (a small room) is put on the lane again.
+    for attempt in 0..2 {
+        let player = e.global::<u32>(PLAYER);
+        let position = if player == 0 {
+            0
+        } else {
+            e.vcall(player, POSITION_SLOT, &args![]).u32()
+        };
+        if position == 0 {
+            break;
+        }
+        let at = [
+            e.mem.f32(position),
+            e.mem.f32(position + 4),
+            e.mem.f32(position + 8),
+        ];
+        let off = ((at[0] - x).powi(2) + (at[1] - y).powi(2)).sqrt() / UNITS_PER_METRE;
+        if off < 3.0 {
+            break;
+        }
+        step(&format!(
+            "the player is {off:.0} m from the lane's start ({:.0}, {:.0}, {:.0}){}",
+            at[0],
+            at[1],
+            at[2],
+            if attempt == 0 { ": placed again" } else { "" }
+        ));
+        if attempt == 0 {
+            run_line(e, &format!("player.setpos x {x:.0}"));
+            run_line(e, &format!("player.setpos y {y:.0}"));
+            run_line(e, &format!("player.setpos z {:.0}", z + STAND_ABOVE));
+        }
+    }
     step(&format!(
         "the player stands at the lane's start ({x:.0}, {y:.0}, {z:.0}) facing {degrees:.0} degrees: {}",
         spot.why

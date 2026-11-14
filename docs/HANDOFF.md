@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (movement keys all going right; the range's place hangar-sized)
+
+- **Patrick (0881adee):** in Snappy mode W, A, S and D all moved him to the right (Classic fine). **Cause:** `movement::key_direction` took the mover's `SideVec` whenever it was not zero; with the keyboard the control handler (`0093e860`) sets `MoveMode` 0x40 and leaves in `SideVec` a scaled axis that `PlayerMover::Update` does not read then, so the replaced move vector pointed one way for every key. **Fix (1c9b585d):** `SideVec` only with 0x40 clear (a stick); else the bits (Forward 0x1, Back 0x2, Left 0x4, Right 0x8); test `wasd_move_forward_left_back_right`.
+- **Patrick:** the range spawned him in a tiny building; wanted a QASmoke-style developer cell if a large flat one exists, else a wide exterior or a hangar-sized interior. **No game files in this session**, so the cells could not be listed here; the build now lists them: it scans FalloutNV.esm and the official DLC and pack masters, logs every `test`/`debug`/`qa*` interior with its navmesh floor area, largest clear rectangle, span, statics, actors, light and fit/not fit (why), takes a fit one 1.5x ahead, needs at least 12 x 40 m of clear flat floor for any interior (the open Mojave ground competes as before), never takes a cell by its references' length alone, and checks the player is on the lane's start after `setpos` (placed again once, logged). **Next action:** Patrick: Test Range once and send the log's `Test Range: developers' cell` and `candidate` lines.
+
 ### Claude, 2026-11-14 (Test Range: no DLC and pack pop-ups)
 
 - **Patrick:** the DLC start quests' message boxes and the Caravan Pack / Gun Runners' Arsenal / pack item notifications show every time the range loads; hide them there only, never touch saves or normal games.
