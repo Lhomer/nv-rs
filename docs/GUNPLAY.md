@@ -186,7 +186,31 @@ with `bKnockdownCompanions=1`.
   attacker through the chest), so the part hit is pushed hardest and the body spins or flies from
   there; strength = momentum x 0.35 x `iHitForce` %, between 8 and 40. The game gets it up again
   through its get-up idle (`UpdateKnockState`).
-- **The strength is a speed** (2026-11-14 fix of bodies flying off and shaking):
+- **The launch and the get-up** (second 2026-11-14 fix: bodies dropped straight down, and flew up
+  and shook when getting up, upside down against a wall in a small interior):
+  - Cause of the drop: the previous build held every bone to 12 Havok units a second (about
+    1.2 m/s; a Havok unit is 7 game units, the game's float at `011b1864`) for 1.5 s, which took the
+    push and even the fall away; and the push itself ran inside `KnockExplosion`, before the
+    ragdoll was fully set up.
+  - Now `KnockExplosion` only puts the body into its ragdoll (strength 2), and the frame after it is
+    limp (knock state 2) every bone gets the same velocity added along the hit, lifted 0.3:
+    momentum x 6 game units/s x Hit Force %, 150 to 700 (about 2 to 10 m/s; a human's threshold 45
+    gives about 4 m/s, an anti-materiel round about 8.6). The next frame checks that at least 40 %
+    is left and gives it again (twice at most). Limits are in game units now: bones at most 1,400
+    units/s and spin 20 rad/s while flying (outliers only), settling below 12 units/s.
+  - Cause of the get-up: the game gets up on a timer (`UpdateKnockState`, `00920150`: state 1 a
+    moment after the ragdoll is limp, then the get-up idle), whether the body is still or lying, so
+    a body wedged upside down against a wall was stood up inside it. Now states 1 and 3 wait (the
+    hook skips the game's update) until every bone is slower than 30 units/s for 20 frames and the
+    bones lie within 70 units of height, at most 8 s; then the actor and its character controller
+    are set, with no velocity, at a clear spot by the body: the game's `PathingLocation` of the
+    body's centre (`006dce10`), moved onto the closest navmesh triangle (`006ddc00`), within
+    200 units and valid 25 units clear four ways (`IsValidLocation`, `006ded70`); else, and for a
+    body that never lay down, where it was knocked from (`SetLocationOnReference` `00575830`,
+    `bhkCharacterController::SetPosition` `005620e0`, `bhkCharacterProxy::SetLinearVelocity`
+    `00926980`). The log has `impulse applied`, `the launch holds`, `get-up held` and `get-up
+    allowed ... set at ...` lines.
+- **The strength is a speed** (first 2026-11-14 fix of bodies flying off and shaking):
   `AddExplosionImpulse` (`0062b660`) adds to each bone's velocity its own direction away from the
   push point times the strength times the bone's layer multiplier, with no falloff and no division
   by mass; the game's `PushActorAway` uses `GetKnockbackSpeed` (tens). The first build gave 135
@@ -218,11 +242,13 @@ with `bKnockdownCompanions=1`.
 | Creature types 0-7 | 30, 60, 50, 200, 150, 35, 120, 400 |
 | Size | x scale^2 (scale 0.25 to 4) |
 | Stagger share | 0.4 |
-| Launch force | momentum x 0.35 x Hit Force %, 8 to 40 |
+| Knock-down push (ragdoll only) | 2 |
+| Launch | momentum x 6 units/s x Hit Force %, 150 to 700, lift 0.3 |
 | Stagger force | momentum x 2, at most 200 |
 | Push origin behind the impact | 400 units |
-| Bone speed / spin while flying | 12 / 15, for 1.5 s |
-| Settling damping | 6 a second below speed 1.5 (sideways and spin) |
+| Bone speed / spin while flying | 1,400 units/s / 20 rad/s, for 1.5 s |
+| Settling damping | 6 a second below 12 units/s (sideways and spin) |
+| Get-up | bones under 30 units/s for 20 frames and within 70 units of height, at most 8 s; a clear navmesh spot within 200 units (25 clear), else where it stood |
 | Cooldowns | 2.5 s after a knock-down, 1.5 s after getting up |
 | Fall followed for | 12 s |
 

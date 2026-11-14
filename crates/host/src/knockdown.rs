@@ -16,27 +16,39 @@
 //! [`SUPER_MUTANT`], and by creature type (`0059f3a0`): animals, mutated animals and insects,
 //! abominations (deathclaws), super mutants, feral ghouls, robots and giants ([`CREATURE`]).
 //! - At or past the resistance: a **knockdown**. The game's own blast knock-down
-//!   (`MiddleHighProcess::KnockExplosion`, `0091fee0`) on the actor: it leaves its furniture, goes
-//!   into its ragdoll (knock state 2) and gets the game's push from a point [`ORIGIN_BACK`] units
-//!   behind the impact along the hit's direction (the hit data's impact point `+0x38` and
-//!   direction `+0x44`; for a swing without them, from the attacker through the chest; for a
-//!   blast, from its centre). The push (`TESHavokUtilities::AddExplosionImpulse`, `0062b660`) adds
-//!   to every bone's velocity its own direction away from that point times the strength times the
-//!   bone's layer multiplier, with no falloff and no division by mass: so the strength is a
-//!   speed, on the scale of the game's `PushActorAway` (`GetKnockbackSpeed`: tens), and the point
-//!   is far enough back that all bones go the same way (a near one pulls the limbs apart, which
-//!   the joints fight: the shaking). Strength: the momentum times [`FORCE_PER_POINT`] and
-//!   `iHitForce` percent, between [`MIN_FORCE`] and [`MAX_FORCE`]. The game gets it up again
-//!   (`UpdateKnockState`: the get-up idle) when it can.
+//!   (`MiddleHighProcess::KnockExplosion`, `0091fee0`) puts the actor into its ragdoll: it leaves
+//!   its furniture, knock state 2, its bones go limp. Its own push is kept tiny
+//!   ([`KNOCK_STRENGTH`]): `TESHavokUtilities::AddExplosionImpulse` (`0062b660`) adds to each bone's
+//!   velocity its own direction from the push point times the strength (a speed in Havok units, no
+//!   mass or falloff in it), and it runs before the ragdoll is fully set up.
+//! - **The launch** ([`frame`]'s launches; Patrick, 2026-11-14: bodies dropped straight down): the
+//!   frame after the ragdoll is limp (knock state 2), every bone gets the same velocity added along
+//!   the hit (the hit data's direction `+0x44`; for a swing without one, from the attacker; for a
+//!   blast, from its centre), lifted by [`LIFT`]: the momentum times [`LAUNCH_PER_POINT`] game units
+//!   a second and `iHitForce` percent, [`MIN_LAUNCH`] to [`MAX_LAUNCH`] (about 2 to 10 m/s),
+//!   turned into Havok's units by the game's own scale (`011b1864`, [`hk_scale`]). The next frame
+//!   checks the bones kept at least [`LAUNCH_KEPT`] of it, and gives it again (at most
+//!   [`LAUNCH_TRIES`]) if the ragdoll's set-up took it back. The 274ad9c build held every bone to
+//!   12 *Havok* units a second (about 1.2 m/s) for 1.5 s, which took the launch and even the fall
+//!   away: the limits are now in game units, for outliers only.
+//! - **The get-up** ([`hold_get_up`]; Patrick: knocked-down actors flew up and shook when getting
+//!   up, upside down against a wall): the game gets an actor up on a timer (`UpdateKnockState`,
+//!   `00920150`: state 1 a moment after the ragdoll is limp, then the get-up idle), whether the
+//!   body is still or lying. Its states 1 and 3 now wait until every bone is slower than
+//!   [`STILL_SPEED`] for [`STILL_FRAMES`] frames and the body lies (its bones within
+//!   [`LYING_HEIGHT`] in height), at most [`HOLD_MAX`]; then, on the main thread, the actor and
+//!   its character controller are set at a clear spot by the body with no velocity (the game's
+//!   `PathingLocation` moved onto the closest navmesh triangle and checked clear [`SPOT_RADIUS`]
+//!   around, within [`SPOT_DISTANCE`]; else, or for a body that never lay down, where it was
+//!   knocked from), and the game's get-up goes on from there.
 //! - **Once:** an actor knocked down in the last [`KNOCK_COOLDOWN`] or got up in the last
-//!   [`UP_COOLDOWN`] is not knocked again (no knock and get-up flipping), the game's own blast
-//!   knock-down ([`crate::hit_force::KNOCK_EXPLOSION`]) adds no second push to an actor knocked
-//!   here a moment ago ([`recently_knocked`]), and JIP's stagger push left on the character
-//!   controller is cleared before the ragdoll takes over. While it is down ([`frame`]), each bone's
-//!   speed is held to [`MAX_BONE_SPEED`] and its spin to [`MAX_BONE_SPIN`] for [`FLIGHT`], and
-//!   then, once a bone moves slower than [`SETTLE_SPEED`], its sideways motion and spin are damped
-//!   ([`SETTLE_DAMPING`] a second) so the settling body lies still instead of jittering. Every
-//!   clamp and guard is logged.
+//!   [`UP_COOLDOWN`] is not knocked again, the game's own blast knock-down
+//!   ([`crate::hit_force::KNOCK_EXPLOSION`]) adds no second push to an actor knocked here a moment
+//!   ago ([`recently_knocked`]), and JIP's stagger push left on the character controller is
+//!   cleared before the ragdoll takes over. While it is down, each bone's speed is held to
+//!   [`MAX_BONE_SPEED`] and its spin to [`MAX_BONE_SPIN`] for [`FLIGHT`], and then a bone slower
+//!   than [`SETTLE_SPEED`] has its sideways motion and spin damped ([`SETTLE_DAMPING`] a second).
+//!   Every launch, clamp, guard and get-up decision is a `Knockdown:` log line.
 //! - At or past [`STAGGER_SHARE`] of it: a **stagger**, JIP's push without a ragdoll (#565,
 //!   `jip::push_living_actor`): a shove of [`STAGGER_PER_POINT`] per point along the hit.
 //!
@@ -65,23 +77,44 @@ pub const SUPER_MUTANT: f32 = 150.0;
 /// ghoul, robot, giant.
 pub const CREATURE: [f32; 8] = [30.0, 60.0, 50.0, 200.0, 150.0, 35.0, 120.0, 400.0];
 pub const STAGGER_SHARE: f32 = 0.4;
-pub const FORCE_PER_POINT: f32 = 0.35;
-pub const MIN_FORCE: f32 = 8.0;
-pub const MAX_FORCE: f32 = 40.0;
+/// The game's own knock-down (`KnockExplosion`) only puts the body into its ragdoll: its push is
+/// this small. The launch is the knockdowns' own, given to the limp ragdoll ([`frame`]): game
+/// units a second per point of momentum, between [`MIN_LAUNCH`] and [`MAX_LAUNCH`] (about 2 to
+/// 10 m/s), lifted by [`LIFT`].
+pub const KNOCK_STRENGTH: f32 = 2.0;
+pub const LAUNCH_PER_POINT: f32 = 6.0;
+pub const MIN_LAUNCH: f32 = 150.0;
+pub const MAX_LAUNCH: f32 = 700.0;
+pub const LIFT: f32 = 0.3;
+/// The launch is given again (at most this many times) when the next frame shows less than this
+/// share of it left (the ragdoll's own start took it back).
+pub const LAUNCH_TRIES: u8 = 2;
+pub const LAUNCH_KEPT: f32 = 0.4;
 pub const STAGGER_PER_POINT: f32 = 2.0;
 pub const MAX_STAGGER: f32 = 200.0;
 pub const ORIGIN_BACK: f32 = 400.0;
 /// No second knock-down this soon after one, nor this soon after getting up.
 pub const KNOCK_COOLDOWN: Duration = Duration::from_millis(2500);
 pub const UP_COOLDOWN: Duration = Duration::from_millis(1500);
-/// A bone's speed (Havok units a second, about metres) and spin (radians a second) while it flies,
-/// how long that is held, and the settling: below this speed, sideways motion and spin lose this
-/// share a second.
-pub const MAX_BONE_SPEED: f32 = 12.0;
-pub const MAX_BONE_SPIN: f32 = 15.0;
+/// A bone's speed (game units a second, turned into Havok's by the game's scale, [`hk_scale`]) and
+/// spin (radians a second) at most while it flies (outliers only: the launch and a fall stay
+/// well below), how long that is held, and the settling: below this speed, sideways motion and
+/// spin lose this share a second.
+pub const MAX_BONE_SPEED: f32 = 1400.0;
+pub const MAX_BONE_SPIN: f32 = 20.0;
 pub const FLIGHT: Duration = Duration::from_millis(1500);
-pub const SETTLE_SPEED: f32 = 1.5;
+pub const SETTLE_SPEED: f32 = 12.0;
 pub const SETTLE_DAMPING: f32 = 6.0;
+/// The get-up waits ([`hold_get_up`]) until every bone is slower than [`STILL_SPEED`] for
+/// [`STILL_FRAMES`] frames in a row and the body lies (its bones within [`LYING_HEIGHT`] of each
+/// other in height), at most [`HOLD_MAX`]; then the actor stands at a clear navmesh spot within
+/// [`SPOT_DISTANCE`] of the body ([`SPOT_RADIUS`] clear around it), else where it was knocked from.
+pub const STILL_SPEED: f32 = 30.0;
+pub const STILL_FRAMES: u32 = 20;
+pub const LYING_HEIGHT: f32 = 70.0;
+pub const HOLD_MAX: Duration = Duration::from_secs(8);
+pub const SPOT_DISTANCE: f32 = 200.0;
+pub const SPOT_RADIUS: f32 = 25.0;
 pub const FOLLOW_FOR: Duration = Duration::from_secs(12);
 
 /// What kind of body takes the hit.
@@ -260,6 +293,19 @@ pub fn install(e: &mut Engine) {
         t.hit_force,
         u8::from(t.knockdown_companions)
     );
+    e.register(UPDATE_KNOCK_STATE, |e, a| {
+        if crate::gunplay::is_on() && a[0] != 0 && hold_get_up(e, a[0], a[1]) {
+            return Ret::default();
+        }
+        let (_, update) = engine::entry!(
+            0x00920150,
+            engine::units::fallout_ai::middlehighprocess::middle_high_process_update_knock_state(
+                Ptr<engine::units::fallout_ai::middlehighprocess::MiddleHighProcess>,
+                u32
+            )
+        );
+        update(e, a)
+    });
     e.register(HIT_ME, |e, a| {
         let queued = e.call(AI_THREAD, &[]).bool();
         actor_hit_me(e, Ptr::new(a[0]), Ptr::new(a[1]), a[2] as u8);
@@ -431,15 +477,31 @@ fn impact(e: &mut Engine, hit: u32, target: u32, aggressor: u32) -> ([f32; 3], [
     (chest, d)
 }
 
-/// The launch's strength for a momentum `m`: times [`FORCE_PER_POINT`] and `hit_force` percent,
-/// between [`MIN_FORCE`] (a small push, so the body falls) and [`MAX_FORCE`].
-pub fn launch_force(m: f32, hit_force: i32) -> f32 {
-    let f = m * FORCE_PER_POINT * hit_force.max(0) as f32 / 100.0;
+/// The launch's speed (game units a second) for a momentum `m`: times [`LAUNCH_PER_POINT`] and
+/// `hit_force` percent, between [`MIN_LAUNCH`] and [`MAX_LAUNCH`].
+pub fn launch_speed(m: f32, hit_force: i32) -> f32 {
+    let f = m * LAUNCH_PER_POINT * hit_force.max(0) as f32 / 100.0;
     if f.is_nan() {
-        MIN_FORCE
+        MIN_LAUNCH
     } else {
-        f.clamp(MIN_FORCE, MAX_FORCE)
+        f.clamp(MIN_LAUNCH, MAX_LAUNCH)
     }
+}
+
+/// The launch's direction: the hit's, lifted by [`LIFT`], of unit length.
+pub fn launch_direction(direction: [f32; 3]) -> [f32; 3] {
+    let d = [direction[0], direction[1], direction[2] + LIFT];
+    let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if l.is_nan() || l < 1e-3 {
+        [0.0, 0.0, 1.0]
+    } else {
+        d.map(|x| x / l)
+    }
+}
+
+/// Whether a knocked-down body may get up: still for long enough and lying, or held too long.
+pub fn may_get_up(still_frames: u32, height: f32, held: Duration) -> bool {
+    (still_frames >= STILL_FRAMES && height <= LYING_HEIGHT) || held >= HOLD_MAX
 }
 
 /// A velocity held to `most` (its length), and whether it was.
@@ -481,9 +543,11 @@ pub fn knock_down(
         return; // KnockExplosion is MiddleHighProcess's: a lower process has none
     }
     let t = crate::gunplay::tuning();
-    let strength = launch_force(m, t.hit_force);
+    let strength = KNOCK_STRENGTH;
+    let speed = launch_speed(m, t.hit_force);
     let origin = [0, 1, 2].map(|i| point[i] - direction[i] * ORIGIN_BACK);
-    let start = position(e, actor).map_or(origin[2], |p| p[2]);
+    let stood = position(e, actor);
+    let start = stood.map_or(origin[2], |p| p[2]);
     let who = describe(e, actor);
     if let Some(why) = cooling_down(actor) {
         note(format!("{who}: duplicate guard: {why}, not knocked again"));
@@ -508,10 +572,10 @@ pub fn knock_down(
         return;
     }
     let ragdoll = e.vcall(actor, 0x38c, &args![]).bool();
-    let wanted = m * FORCE_PER_POINT * t.hit_force.max(0) as f32 / 100.0;
-    if wanted > MAX_FORCE || wanted < MIN_FORCE {
+    let wanted = m * LAUNCH_PER_POINT * t.hit_force.max(0) as f32 / 100.0;
+    if wanted > MAX_LAUNCH || wanted < MIN_LAUNCH {
         note(format!(
-            "{who}: clamp: launch strength {wanted:.1} held to {strength:.1} ({MIN_FORCE}-{MAX_FORCE})"
+            "{who}: clamp: launch {wanted:.0} units/s held to {speed:.0} ({MIN_LAUNCH}-{MAX_LAUNCH})"
         ));
     }
     // JIP's stagger push left on the character controller would keep moving it under the ragdoll.
@@ -530,6 +594,35 @@ pub fn knock_down(
         strength,
     );
     let state = e.mem.u8(process + KNOCK_STATE) as i8;
+    let launch = launch_direction(direction);
+    LAUNCHES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(Launch {
+            actor,
+            direction: launch,
+            speed,
+            frames: 0,
+            tries: 0,
+            applied: false,
+        });
+    {
+        let mut ups = GET_UPS.lock().unwrap_or_else(|p| p.into_inner());
+        ups.retain(|g| g.actor != actor);
+        ups.push(GetUp {
+            actor,
+            start: stood.unwrap_or(point),
+            since: Instant::now(),
+            lying_since: None,
+            still_frames: 0,
+            held_said: false,
+            allowed: false,
+        });
+    }
+    note(format!(
+        "{who}: launch {speed:.0} units/s along ({:.2}, {:.2}, {:.2}) once the ragdoll is limp",
+        launch[0], launch[1], launch[2]
+    ));
     note(format!(
         "{who}: KnockExplosion strength {strength:.0} from ({:.0}, {:.0}, {:.0}): {} (knock state \
          now {state})",
@@ -558,6 +651,8 @@ pub fn frame(e: &mut Engine) {
         *last = Some(Instant::now());
         dt
     };
+    launches(e);
+    get_ups(e, dt);
     if followed.is_empty() {
         return;
     }
@@ -572,9 +667,6 @@ pub fn frame(e: &mut Engine) {
         }
         let top = top.max(at[2]);
         let state = e.mem.u8(process + KNOCK_STATE) as i8;
-        if state == 2 {
-            hold_bones(e, actor, since.elapsed() < FLIGHT, dt);
-        }
         let settled = matches!(state, 0 | 1 | 3 | 5 | 6) || since.elapsed() > FOLLOW_FOR;
         if settled && since.elapsed() > Duration::from_millis(400) {
             land(e, actor, aggressor, top - at[2]);
@@ -638,11 +730,28 @@ const ANGULAR_VELOCITY: u32 = 0x0056_0e50;
 const SET_LINEAR_VELOCITY: u32 = 0x0056_16d0;
 const SET_ANGULAR_VELOCITY: u32 = 0x0056_1800;
 const ACTOR_3D: u32 = 0x0043_fcd0;
+/// Game units per Havok unit (a float), a node's world translation.
+const HK_TO_GAME: u32 = 0x011b_1864;
+const WORLD_TRANSLATION: u32 = 0x8c;
+/// `PathingLocation(const NiPoint3&, TESObjectREFR*)`, its position, `ResolveToClosestNavmeshAndTriangle`,
+/// `IsValidLocation(radius)`.
+const PATHING_LOCATION_AT: u32 = 0x006d_ce10;
+const PATHING_POSITION: u32 = 0x04;
+const RESOLVE_TO_NAVMESH: u32 = 0x006d_dc00;
+const IS_VALID_LOCATION: u32 = 0x006d_ed70;
+/// `TESObjectREFR::SetLocationOnReference`, the actor's character controller,
+/// `bhkCharacterController::SetPosition`, `bhkCharacterProxy::SetLinearVelocity`.
+const SET_LOCATION: u32 = 0x0057_5830;
+const CHAR_CONTROLLER: u32 = 0x0093_06d0;
+const CONTROLLER_SET_POSITION: u32 = 0x0056_20e0;
+const CONTROLLER_SET_VELOCITY: u32 = 0x0092_6980;
+/// `MiddleHighProcess::UpdateKnockState`: the get-up waits there ([`hold_get_up`]).
+pub const UPDATE_KNOCK_STATE: u32 = 0x0092_0150;
 /// The most nodes walked for one body.
 const MAX_NODES: usize = 256;
 
-/// Every `hkpRigidBody` of the actor's 3D.
-fn bodies(e: &mut Engine, actor: u32) -> Vec<u32> {
+/// Every rigid body of the actor's 3D: its node and its `hkpRigidBody`.
+fn bodies(e: &mut Engine, actor: u32) -> Vec<(u32, u32)> {
     let root = e.call(ACTOR_3D, &args![actor]).u32();
     let mut found = Vec::new();
     let mut stack = vec![root];
@@ -658,7 +767,7 @@ fn bodies(e: &mut Engine, actor: u32) -> Vec<u32> {
             if body != 0 {
                 let havok = e.call(HAVOK_BODY, &args![body]).u32();
                 if havok != 0 {
-                    found.push(havok);
+                    found.push((node, havok));
                 }
             }
         }
@@ -671,6 +780,316 @@ fn bodies(e: &mut Engine, actor: u32) -> Vec<u32> {
         }
     }
     found
+}
+
+/// Game units per Havok unit (the game's float at `011b1864`; 7 when it can't be read).
+fn hk_scale(e: &Engine) -> f32 {
+    let s = e.mem.f32(HK_TO_GAME);
+    if s.is_finite() && (0.5..100.0).contains(&s) {
+        s
+    } else {
+        7.0
+    }
+}
+
+fn linear(e: &mut Engine, body: u32) -> Option<[f32; 3]> {
+    let at = e.call(LINEAR_VELOCITY, &args![body]).u32();
+    (at != 0).then(|| read3(e, at))
+}
+
+/// A knock-down's launch, given once its ragdoll is limp.
+#[derive(Clone, Copy, Debug)]
+struct Launch {
+    actor: u32,
+    direction: [f32; 3],
+    /// Game units a second.
+    speed: f32,
+    frames: u32,
+    tries: u8,
+    applied: bool,
+}
+
+static LAUNCHES: Mutex<Vec<Launch>> = Mutex::new(Vec::new());
+
+/// Once a frame: each pending launch given to its ragdoll the frame after it went limp (knock
+/// state 2: the game's own set-up of the ragdoll is done, so it is not wiped), every bone the same
+/// velocity added along the hit; checked the next frame and given again when the ragdoll took it
+/// back ([`LAUNCH_TRIES`]).
+fn launches(e: &mut Engine) {
+    let pending: Vec<Launch> =
+        std::mem::take(&mut *LAUNCHES.lock().unwrap_or_else(|p| p.into_inner()));
+    if pending.is_empty() {
+        return;
+    }
+    let scale = hk_scale(e);
+    let mut keep = Vec::new();
+    for mut l in pending {
+        let process = e.mem.u32(l.actor + PROCESS);
+        if process == 0 || matches!(e.mem.u32(l.actor + LIFE_STATE), 1 | 2) {
+            continue;
+        }
+        let state = e.mem.u8(process + KNOCK_STATE) as i8;
+        l.frames += 1;
+        if state != 2 {
+            if l.frames > 30 {
+                note(format!(
+                    "{}: launch dropped: the ragdoll never went limp (knock state {state})",
+                    describe(e, l.actor)
+                ));
+            } else {
+                keep.push(l);
+            }
+            continue;
+        }
+        if l.frames < 2 {
+            keep.push(l);
+            continue;
+        }
+        let add = l.direction.map(|x| x * l.speed / scale);
+        let bones = bodies(e, l.actor);
+        if !l.applied {
+            for &(_, body) in &bones {
+                if let Some(v) = linear(e, body) {
+                    let nv = [v[0] + add[0], v[1] + add[1], v[2] + add[2]];
+                    set_velocity(e, SET_LINEAR_VELOCITY, body, nv);
+                }
+            }
+            l.applied = true;
+            note(format!(
+                "{}: impulse applied: {} bones +{:.0} units/s ({:.1} m/s) along ({:.2}, {:.2}, \
+                 {:.2}), Havok scale {scale}",
+                describe(e, l.actor),
+                bones.len(),
+                l.speed,
+                l.speed / 70.0,
+                l.direction[0],
+                l.direction[1],
+                l.direction[2]
+            ));
+            keep.push(l);
+            continue;
+        }
+        // The frame after: how much of it the bones kept, along the launch.
+        let along: Vec<f32> = bones
+            .iter()
+            .filter_map(|&(_, b)| linear(e, b))
+            .map(|v| v[0] * l.direction[0] + v[1] * l.direction[1] + v[2] * l.direction[2])
+            .collect();
+        let kept = if along.is_empty() {
+            0.0
+        } else {
+            along.iter().sum::<f32>() / along.len() as f32 * scale
+        };
+        if kept < l.speed * LAUNCH_KEPT && l.tries < LAUNCH_TRIES && !bones.is_empty() {
+            l.tries += 1;
+            l.applied = false;
+            note(format!(
+                "{}: duplicate guard: the launch was taken back ({kept:.0} of {:.0} units/s left): \
+                 given again ({}/{LAUNCH_TRIES})",
+                describe(e, l.actor),
+                l.speed,
+                l.tries
+            ));
+            keep.push(l);
+        } else {
+            note(format!(
+                "{}: the launch holds: {kept:.0} units/s along it",
+                describe(e, l.actor)
+            ));
+        }
+    }
+    LAUNCHES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .extend(keep);
+}
+
+/// A knocked-down actor waiting to get up.
+#[derive(Clone, Copy, Debug)]
+struct GetUp {
+    actor: u32,
+    /// Where it stood when knocked down (a clear spot: the fallback).
+    start: [f32; 3],
+    since: Instant,
+    /// Since it lay down (knock state 1 or 3) and the get-up began to be held.
+    lying_since: Option<Instant>,
+    still_frames: u32,
+    held_said: bool,
+    /// Placed at its spot: the game's get-up may run.
+    allowed: bool,
+}
+
+static GET_UPS: Mutex<Vec<GetUp>> = Mutex::new(Vec::new());
+
+/// Whether the game's get-up of `actor` (its `UpdateKnockState`) waits this frame.
+pub fn hold_get_up(e: &Engine, process: u32, actor: u32) -> bool {
+    let state = e.mem.u8(process + KNOCK_STATE) as i8;
+    if !matches!(state, 1 | 3) {
+        return false;
+    }
+    GET_UPS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .any(|g| g.actor == actor && !g.allowed)
+}
+
+/// Once a frame (the main thread): each knocked-down body held still and damped while it lies,
+/// and its get-up let go once it is still and lying ([`may_get_up`]): the actor and its character
+/// controller set at a clear spot by the body with no velocity ([`clear_spot`], else where it was
+/// knocked from).
+fn get_ups(e: &mut Engine, dt: f32) {
+    let list: Vec<GetUp> = GET_UPS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    if list.is_empty() {
+        return;
+    }
+    let scale = hk_scale(e);
+    let mut keep = Vec::new();
+    for mut g in list {
+        let process = e.mem.u32(g.actor + PROCESS);
+        if process == 0
+            || matches!(e.mem.u32(g.actor + LIFE_STATE), 1 | 2)
+            || g.since.elapsed() > Duration::from_secs(30)
+        {
+            continue;
+        }
+        let state = e.mem.u8(process + KNOCK_STATE) as i8;
+        if state == 0 && g.since.elapsed() > Duration::from_millis(500) {
+            continue; // up again
+        }
+        if matches!(state, 1 | 2) {
+            hold_bones(e, g.actor, g.since.elapsed() < FLIGHT, dt, scale);
+        }
+        if g.allowed || !matches!(state, 1 | 3) {
+            keep.push(g);
+            continue;
+        }
+        let lying_since = *g.lying_since.get_or_insert_with(Instant::now);
+        // The body: its bones' positions (game units) and fastest speed.
+        let bones = bodies(e, g.actor);
+        let mut fastest = 0.0f32;
+        let (mut low, mut high) = (f32::INFINITY, f32::NEG_INFINITY);
+        let mut sum = [0.0f32; 3];
+        for &(node, body) in &bones {
+            let at = read3(e, node + WORLD_TRANSLATION);
+            low = low.min(at[2]);
+            high = high.max(at[2]);
+            for i in 0..3 {
+                sum[i] += at[i];
+            }
+            if let Some(v) = linear(e, body) {
+                let s = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() * scale;
+                fastest = fastest.max(if s.is_nan() { f32::INFINITY } else { s });
+            }
+        }
+        let height = if bones.is_empty() { 0.0 } else { high - low };
+        g.still_frames = if fastest < STILL_SPEED {
+            g.still_frames + 1
+        } else {
+            0
+        };
+        let held = lying_since.elapsed();
+        if !may_get_up(g.still_frames, height, held) {
+            if !g.held_said {
+                g.held_said = true;
+                note(format!(
+                    "{}: get-up held: {} (fastest bone {fastest:.0} units/s, body {height:.0} units \
+                     tall)",
+                    describe(e, g.actor),
+                    if fastest >= STILL_SPEED {
+                        "still moving"
+                    } else {
+                        "not lying on the ground"
+                    }
+                ));
+            }
+            keep.push(g);
+            continue;
+        }
+        let centre = if bones.is_empty() {
+            g.start
+        } else {
+            sum.map(|x| x / bones.len() as f32)
+        };
+        let lying = height <= LYING_HEIGHT && !bones.is_empty();
+        let spot = if lying {
+            clear_spot(e, g.actor, [centre[0], centre[1], low])
+        } else {
+            None
+        };
+        let (at, why) = match spot {
+            Some(at) => (at, "a clear navmesh spot by the body"),
+            None => (
+                g.start,
+                if lying {
+                    "where it was knocked from (no clear spot by the body)"
+                } else {
+                    "where it was knocked from (it never lay down)"
+                },
+            ),
+        };
+        place(e, g.actor, at);
+        g.allowed = true;
+        note(format!(
+            "{}: get-up allowed after {:.1} s ({}): set at ({:.0}, {:.0}, {:.0}), {why}, no velocity",
+            describe(e, g.actor),
+            held.as_secs_f32(),
+            if held >= HOLD_MAX { "held too long" } else { "still and lying" },
+            at[0],
+            at[1],
+            at[2]
+        ));
+        keep.push(g);
+    }
+    *GET_UPS.lock().unwrap_or_else(|p| p.into_inner()) = keep;
+}
+
+/// A clear navmesh spot by `near` (the body's centre at the floor's height): the game's
+/// `PathingLocation` of the point in the actor's cell, moved onto its closest navmesh triangle
+/// (`ResolveToClosestNavmeshAndTriangle`, `006ddc00`) and valid with [`SPOT_RADIUS`] clear around
+/// it (`IsValidLocation`, `006ded70`: line of sight four ways), within [`SPOT_DISTANCE`].
+fn clear_spot(e: &mut Engine, actor: u32, near: [f32; 3]) -> Option<[f32; 3]> {
+    e.with_stack(0x60, |e, frame| {
+        let location = (frame.addr() + 15) & !15;
+        let point = location + 0x40;
+        for (i, x) in near.into_iter().enumerate() {
+            e.mem.set_f32(point + 4 * i as u32, x);
+        }
+        e.call(PATHING_LOCATION_AT, &args![location, point, actor]);
+        if !e.call(RESOLVE_TO_NAVMESH, &args![location]).bool() {
+            return None;
+        }
+        let at = read3(e, location + PATHING_POSITION);
+        let away = ((at[0] - near[0]).powi(2) + (at[1] - near[1]).powi(2)).sqrt();
+        if !at.iter().all(|x| x.is_finite()) || away > SPOT_DISTANCE {
+            return None;
+        }
+        if !e
+            .call(IS_VALID_LOCATION, &args![location, SPOT_RADIUS])
+            .bool()
+        {
+            return None;
+        }
+        Some([at[0], at[1], near[2].max(at[2])])
+    })
+}
+
+/// The actor's reference and character controller set at `at`, the controller's velocity zero.
+fn place(e: &mut Engine, actor: u32, at: [f32; 3]) {
+    e.with_stack(32, |e, frame| {
+        let point = frame.addr();
+        let zero = frame.addr() + 16;
+        for (i, x) in at.into_iter().enumerate() {
+            e.mem.set_f32(point + 4 * i as u32, x);
+            e.mem.set_f32(zero + 4 * i as u32, 0.0);
+        }
+        e.call(SET_LOCATION, &args![actor, point]);
+        let controller = e.call(CHAR_CONTROLLER, &args![actor]).u32();
+        if controller != 0 {
+            e.call(CONTROLLER_SET_POSITION, &args![controller, point]);
+            e.call(CONTROLLER_SET_VELOCITY, &args![controller, zero]);
+        }
+    });
 }
 
 fn read3(e: &Engine, at: u32) -> [f32; 3] {
@@ -691,10 +1110,12 @@ fn set_velocity(e: &mut Engine, setter: u32, body: u32, v: [f32; 3]) {
 
 /// A knocked-down actor's bones: while it flies, held to [`MAX_BONE_SPEED`] and
 /// [`MAX_BONE_SPIN`]; afterwards, a slow bone's sideways motion and spin damped ([`settle`]).
-fn hold_bones(e: &mut Engine, actor: u32, flying: bool, dt: f32) {
+/// Speeds in game units (`scale` game units a Havok unit).
+fn hold_bones(e: &mut Engine, actor: u32, flying: bool, dt: f32, scale: f32) {
     let mut clamped = 0;
     let mut fastest = 0.0f32;
-    for body in bodies(e, actor) {
+    let (most, settle_below) = (MAX_BONE_SPEED / scale, SETTLE_SPEED / scale);
+    for (_, body) in bodies(e, actor) {
         let at = e.call(LINEAR_VELOCITY, &args![body]).u32();
         let spin_at = e.call(ANGULAR_VELOCITY, &args![body]).u32();
         if at == 0 || spin_at == 0 {
@@ -704,17 +1125,21 @@ fn hold_bones(e: &mut Engine, actor: u32, flying: bool, dt: f32) {
         let w = read3(e, spin_at);
         let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         if flying {
-            let (nv, a) = clamp_speed(v, MAX_BONE_SPEED);
+            let (nv, a) = clamp_speed(v, most);
             let (nw, b) = clamp_speed(w, MAX_BONE_SPIN);
             if a {
                 set_velocity(e, SET_LINEAR_VELOCITY, body, nv);
-                fastest = fastest.max(if speed.is_nan() { f32::INFINITY } else { speed });
+                fastest = fastest.max(if speed.is_nan() {
+                    f32::INFINITY
+                } else {
+                    speed * scale
+                });
             }
             if b {
                 set_velocity(e, SET_ANGULAR_VELOCITY, body, nw);
             }
             clamped += usize::from(a || b);
-        } else if speed < SETTLE_SPEED && dt > 0.0 {
+        } else if speed < settle_below && dt > 0.0 {
             set_velocity(e, SET_LINEAR_VELOCITY, body, settle(v, dt, true));
             set_velocity(e, SET_ANGULAR_VELOCITY, body, settle(w, dt, false));
         }
@@ -818,13 +1243,32 @@ mod tests {
     /// The launch grows with the momentum and Hit Force, within its bounds.
     #[test]
     fn the_launch_is_bounded() {
-        assert!((launch_force(50.0, 100) - 17.5).abs() < 1e-4);
-        assert!((launch_force(50.0, 200) - 35.0).abs() < 1e-4);
-        assert_eq!(launch_force(1000.0, 300), MAX_FORCE);
-        assert_eq!(launch_force(1.0, 100), MIN_FORCE);
-        assert_eq!(launch_force(f32::NAN, 100), MIN_FORCE);
-        // A human's threshold (45) knocks with a push on the scale of the game's PushActorAway.
-        assert!(launch_force(HUMAN, 100) < 20.0);
+        assert_eq!(launch_speed(50.0, 100), 300.0);
+        assert_eq!(launch_speed(50.0, 200), 600.0);
+        assert_eq!(launch_speed(1000.0, 300), MAX_LAUNCH);
+        assert_eq!(launch_speed(1.0, 100), MIN_LAUNCH);
+        assert_eq!(launch_speed(f32::NAN, 100), MIN_LAUNCH);
+        // A human's threshold (45): about 4 m/s; an anti-materiel rifle's (100): about 8.6 m/s.
+        assert!((200.0..350.0).contains(&launch_speed(HUMAN, 100)));
+        assert!(launch_speed(100.0, 100) > 500.0);
+        // Along the hit, a little up, of unit length.
+        let d = launch_direction([1.0, 0.0, 0.0]);
+        assert!(d[0] > 0.9 && d[2] > 0.2);
+        assert!(((d[0] * d[0] + d[2] * d[2]).sqrt() - 1.0).abs() < 1e-5);
+        assert_eq!(launch_direction([f32::NAN, 0.0, 0.0]), [0.0, 0.0, 1.0]);
+    }
+
+    /// The get-up waits for a still, lying body, never longer than its limit.
+    #[test]
+    fn the_get_up_waits_for_a_still_lying_body() {
+        let soon = Duration::from_millis(500);
+        assert!(!may_get_up(0, 20.0, soon), "moving");
+        assert!(
+            !may_get_up(STILL_FRAMES, 150.0, soon),
+            "upright against a wall"
+        );
+        assert!(may_get_up(STILL_FRAMES, 30.0, soon));
+        assert!(may_get_up(0, 150.0, HOLD_MAX), "held too long");
     }
 
     /// A bone's speed is held to its bound along its own direction; a NaN stops it.

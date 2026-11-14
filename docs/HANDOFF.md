@@ -7,6 +7,12 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (knockdown launch and get-up)
+
+- **Patrick (274ad9c in game):** knocked-down NPCs drop straight down with no momentum, and when getting up fly into the air and shake (screenshot: upside down against a wall in a small interior, "Torso Crippled").
+- **Causes:** (1) the per-bone hold was in Havok units (12 = about 1.2 m/s at the game's 7 units a Havok unit), held for 1.5 s, so the push and the fall were taken away; the push also ran inside `KnockExplosion` before the ragdoll was set up. (2) The game's get-up (`UpdateKnockState` `00920150`) runs on a timer whatever the body is doing, so a body wedged against a wall was stood up inside it.
+- **Now (`knockdown.rs`):** `KnockExplosion` strength 2 (ragdoll only); `launches`: the frame after knock state 2, the same velocity added to every bone along the hit (+0.3 lift), 150-700 units/s, checked the next frame and re-given (2 at most); limits in game units via `hk_scale` (`011b1864`). `get_ups` + the `UpdateKnockState` hook (`hold_get_up`): states 1 and 3 wait for still (30 units/s, 20 frames) and lying (70 units tall) bodies, at most 8 s; then `clear_spot` (`PathingLocation` `006dce10` -> `006ddc00` -> `IsValidLocation` `006ded70`) or the knock's start, `place` (ref, controller, zero controller velocity). Logged. Not run in game; the open question is whether the get-up idle accepts the reference moved under a limp ragdoll without a visible slide.
+
 ### Claude, 2026-11-14 (perks per level)
 
 - **Patrick:** two perks every level (vanilla: one every second level) as a Settings > Gameplay row, saved in the ini, default 2, from 0.5 (vanilla) to about 3; in normal and modded games; both picked in a row on the level-up menu; plugin/DLC perks and traits; say whether saves past level 2 get anything retroactively.
