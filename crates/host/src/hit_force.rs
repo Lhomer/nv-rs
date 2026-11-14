@@ -158,6 +158,10 @@ const HIT_SKILL: u32 = 0x0c;
 const HIT_HEALTH_DAMAGE: u32 = 0x14;
 const HIT_TOTAL_DAMAGE: u32 = 0x18;
 const HIT_WEAPON: u32 = 0x30;
+/// `TESObjectREFR::IsExplosion` (virtual `+0x220`: the process lists hand such a reference to
+/// `explosion.cpp`'s update, `009ae580`); `+0x224` is `IsProjectile` (`009bd780`), true for
+/// every bullet.
+const IS_EXPLOSION: u32 = 0x220;
 /// `TESObjectWEAP::reach` (the `DNAM` float after the animation multiplier).
 const WEAPON_REACH: u32 = 0xfc;
 /// Actor values: Strength, damage threshold.
@@ -205,7 +209,7 @@ fn was_power(aggressor: u32, target: u32) -> bool {
 /// What made the hit at `hit` (a `HitData`), read from it.
 pub fn shot_of(e: &mut Engine, hit: u32, stats: Option<&WeaponStats>) -> Shot {
     let source = e.mem.u32(hit + HIT_SOURCE);
-    if source != 0 && e.vcall(source, 0x224, &args![]).bool() {
+    if source != 0 && e.vcall(source, IS_EXPLOSION, &args![]).bool() {
         return Shot::Explosion {
             damage: e.mem.f32(hit + HIT_HEALTH_DAMAGE),
         };
@@ -300,6 +304,10 @@ pub fn install(e: &mut Engine) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A blast is told by `IsExplosion` (`+0x220`), never by `IsProjectile` (`+0x224`), which every
+    /// bullet answers: with it, every gunshot counted as a blast and no shot knocked anyone down.
+    const _: () = assert!(IS_EXPLOSION == 0x220);
 
     fn swing(damage: f32, weight: f32, power: bool) -> Shot {
         Shot::Melee {

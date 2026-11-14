@@ -125,6 +125,17 @@ const AI_THREAD: u32 = 0x008c_7aa0;
 /// 2 dead), `bPlayerTeammate` (`+0x18d`), its base form (`+0x20`) and position (virtual `+0x1f4`).
 const PROCESS: u32 = 0x68;
 const KNOCK_STATE: u32 = 0x13c;
+/// A process's level (`+0x28`: 0 high, 1 middle high; a lower one has no knock state) and the
+/// highest a knock-down takes; a reference's form id and position; `HitData`'s projectile or
+/// explosion.
+const PROCESS_LEVEL: u32 = 0x28;
+const MIDDLE_HIGH: u8 = 1;
+const FORM_ID: u32 = 0x0c;
+const REFR_POSITION: u32 = 0x30;
+const HIT_SOURCE: u32 = 0x08;
+/// `Actor::CanKnockDown`, and what it asks (module documentation).
+const CAN_KNOCK_DOWN: u32 = 0x0088_45a0;
+const BASE_FLAG_TEST: u32 = 0x0046_1580;
 const LIFE_STATE: u32 = 0x108;
 const TEAMMATE: u32 = 0x18d;
 const BASE_FORM: u32 = 0x20;
@@ -214,6 +225,15 @@ static DOWN: Mutex<Vec<(u32, u32, f32, Instant)>> = Mutex::new(Vec::new());
 /// Registers the hook (from `crate::gunplay::install`).
 pub fn install(e: &mut Engine) {
     use engine::units::fallout_ai::actor_p3::actor_hit_me;
+    let t = crate::gunplay::tuning();
+    eprintln!(
+        "Knockdown: bKnockdowns={} iKnockdownThreshold={} iHitForce={} bKnockdownCompanions={} \
+         (each decision on a living character is logged as Knockdown: lines)",
+        u8::from(t.knockdowns),
+        t.knockdown_threshold,
+        t.hit_force,
+        u8::from(t.knockdown_companions)
+    );
     e.register(HIT_ME, |e, a| {
         let queued = e.call(AI_THREAD, &[]).bool();
         actor_hit_me(e, Ptr::new(a[0]), Ptr::new(a[1]), a[2] as u8);
@@ -225,7 +245,7 @@ pub fn install(e: &mut Engine) {
 }
 
 /// After the game applied the hit `hit` to `target`: a knockdown or a stagger (module
-/// documentation).
+/// documentation). Each decision on a living character is logged ([`note`]).
 fn after_hit(e: &mut Engine, target: u32, hit: u32) {
     let t = crate::gunplay::tuning();
     if !crate::gunplay::is_on() || !t.knockdowns || hit == 0 || target == 0 {
@@ -238,30 +258,51 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
     if !e.vcall(target, 0x100, &args![]).bool() {
         return; // not a character
     }
+    let who = describe(e, target);
     if e.mem.u8(target + TEAMMATE) != 0 && !t.knockdown_companions {
+        note(format!(
+            "{who}: a companion (bKnockdownCompanions=0), left standing"
+        ));
         return;
     }
     let process = e.mem.u32(target + PROCESS);
-    if process == 0
-        || e.mem.u8(process + KNOCK_STATE) != 0
-        || matches!(e.mem.u32(target + LIFE_STATE), 1 | 2)
-        || actor_value(e, target, AV_HEALTH) <= 0.0
-    {
+    if process == 0 {
+        return;
+    }
+    let level = e.mem.u8(process + PROCESS_LEVEL);
+    let state = e.mem.u8(process + KNOCK_STATE) as i8;
+    let life = e.mem.u32(target + LIFE_STATE);
+    let health = actor_value(e, target, AV_HEALTH);
+    if level > MIDDLE_HIGH || state != 0 || matches!(life, 1 | 2) || health <= 0.0 {
+        note(format!(
+            "{who}: not knocked (process level {level}, knock state {state}, life state {life}, \
+             health {health:.0})"
+        ));
         return;
     }
     let aggressor = e.mem.u32(hit + HIT_AGGRESSOR);
     let stats = crate::gunplay::effective_stats(e, aggressor, e.mem.u32(hit + HIT_WEAPON));
     let shot = shot_of(e, hit, stats.as_ref());
-    if matches!(shot, Shot::Explosion { .. }) {
-        return; // the game knocks down from blasts itself
-    }
-    let threshold = actor_value(e, target, AV_DAMAGE_THRESHOLD);
+    // A blast's damage already has the threshold taken; it pushes away from its centre.
+    let (threshold, (point, direction)) = match shot {
+        Shot::Explosion { .. } => (0.0, blast(e, hit, target)),
+        _ => (
+            actor_value(e, target, AV_DAMAGE_THRESHOLD),
+            impact(e, hit, target, aggressor),
+        ),
+    };
     let m = momentum(shot, threshold);
     let scale = e.call(GET_SCALE, &args![target]).f64() as f32;
     let body = body_of(e, target);
     let resist = resistance(body, scale, t.knockdown_threshold);
-    let (point, direction) = impact(e, hit, target, aggressor);
-    match reaction(m, resist) {
+    let decision = reaction(m, resist);
+    note(format!(
+        "{who}: {} momentum {m:.1} (DT {threshold:.0}) vs resistance {resist:.1} ({body:?}, scale \
+         {scale:.2}, threshold {}%) -> {decision:?}",
+        kind_of(shot),
+        t.knockdown_threshold
+    ));
+    match decision {
         Reaction::Knockdown => knock_down(e, target, aggressor, point, direction, m),
         Reaction::Stagger => {
             let force = (m * STAGGER_PER_POINT).min(MAX_STAGGER);
@@ -269,6 +310,69 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
             jip::push_living_actor(e, target, force, angle, false);
         }
         Reaction::None => {}
+    }
+}
+
+fn kind_of(shot: Shot) -> &'static str {
+    match shot {
+        Shot::Gun { .. } => "gun",
+        Shot::Melee { .. } => "melee",
+        Shot::Explosion { .. } => "blast",
+        Shot::Bullet { .. } => "bullet",
+    }
+}
+
+/// An actor for the log: its form id and its base's name.
+fn describe(e: &Engine, actor: u32) -> String {
+    let base = e.mem.u32(actor + BASE_FORM);
+    let name = if base == 0 {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&jip::commands::the_name(e, base)).into_owned()
+    };
+    format!("Knockdown: {:08X} {name}", e.mem.u32(actor + FORM_ID))
+}
+
+/// The log lines of the decisions, at most [`NOTES_PER_SECOND`] a second (the rest counted).
+const NOTES_PER_SECOND: u32 = 20;
+static NOTES: Mutex<(Option<Instant>, u32, u32)> = Mutex::new((None, 0, 0));
+
+fn note(line: String) {
+    let mut n = NOTES.lock().unwrap_or_else(|p| p.into_inner());
+    if n.0.map_or(true, |t| t.elapsed().as_secs() >= 1) {
+        if n.2 > 0 {
+            eprintln!("Knockdown: {} more decisions not logged", n.2);
+        }
+        *n = (Some(Instant::now()), 0, 0);
+    }
+    if n.1 < NOTES_PER_SECOND {
+        n.1 += 1;
+        eprintln!("{line}");
+    } else {
+        n.2 += 1;
+    }
+}
+
+/// A blast's push: from its centre (the explosion reference's position) through the target's
+/// chest.
+fn blast(e: &mut Engine, hit: u32, target: u32) -> ([f32; 3], [f32; 3]) {
+    let at = position(e, target).unwrap_or([0.0; 3]);
+    let chest = [at[0], at[1], at[2] + 60.0];
+    let source = e.mem.u32(hit + HIT_SOURCE);
+    let centre = if source == 0 {
+        None
+    } else {
+        Some([0, 4, 8].map(|o| e.mem.f32(source + REFR_POSITION + o)))
+    };
+    let d = centre
+        .filter(|c| c.iter().all(|v| v.is_finite()))
+        .map(|c| [chest[0] - c[0], chest[1] - c[1], chest[2] - c[2]])
+        .unwrap_or([0.0, 0.0, 1.0]);
+    let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if l > 1e-3 {
+        (chest, d.map(|v| v / l))
+    } else {
+        (chest, [0.0, 0.0, 1.0])
     }
 }
 
@@ -323,10 +427,33 @@ pub fn knock_down(
     if process == 0 || actor == e.global::<u32>(PLAYER) {
         return;
     }
+    if e.mem.u8(process + PROCESS_LEVEL) > MIDDLE_HIGH {
+        return; // KnockExplosion is MiddleHighProcess's: a lower process has none
+    }
     let t = crate::gunplay::tuning();
     let strength = launch_force(m, t.hit_force);
     let origin = [0, 1, 2].map(|i| point[i] - direction[i] * ORIGIN_BACK);
     let start = position(e, actor).map_or(origin[2], |p| p[2]);
+    let who = describe(e, actor);
+    if !e.call(CAN_KNOCK_DOWN, &args![actor]).bool() {
+        // The game's own test refuses: say which of its questions did.
+        let dead = e.vcall(actor, 0x22c, &args![1u32]).bool();
+        let slot_4b4 = e.vcall(actor, 0x4b4, &args![]).bool();
+        let base = e.mem.u32(actor + BASE_FORM);
+        let no_knockdowns = base != 0
+            && e.call(BASE_FLAG_TEST, &args![base + 0x30, 0x0400_0000u32])
+                .bool();
+        let action = e.vcall(process, 0x3e4, &args![]).i32();
+        let other = e.vcall(actor, 0x1e4, &args![]).u32();
+        let other_says = other != 0 && e.mem.u16(other + 0x122) != 0xff;
+        note(format!(
+            "{who}: the game's CanKnockDown refuses (dead {dead}, slot 0x4b4 {slot_4b4}, base \
+             flag 0x4000000 {no_knockdowns}, process state {action} (9 or 17 refuse), slot 0x1e4 \
+             refuses {other_says})"
+        ));
+        return;
+    }
+    let ragdoll = e.vcall(actor, 0x38c, &args![]).bool();
     middle_high_process_knock_explosion(
         e,
         Ptr::new(process),
@@ -336,6 +463,19 @@ pub fn knock_down(
         origin[2].to_bits(),
         strength,
     );
+    let state = e.mem.u8(process + KNOCK_STATE) as i8;
+    note(format!(
+        "{who}: KnockExplosion strength {strength:.0} from ({:.0}, {:.0}, {:.0}): {} (knock state \
+         now {state})",
+        origin[0],
+        origin[1],
+        origin[2],
+        if ragdoll {
+            "ragdoll"
+        } else {
+            "no ragdoll for this actor (slot 0x38c): the game only pushes it"
+        }
+    ));
     let mut down = DOWN.lock().unwrap_or_else(|p| p.into_inner());
     down.retain(|d| d.0 != actor);
     down.push((actor, aggressor, start, Instant::now()));

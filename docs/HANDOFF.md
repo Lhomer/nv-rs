@@ -7,6 +7,12 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (knockdowns fixed: blasts and gunshots)
+
+- **Patrick:** with 48aa53f knockdowns never happened in game (grenades, anti-materiel rifle; normal save and Test Range).
+- **Cause:** `hit_force::shot_of` called a hit a blast when its source answered virtual `+0x224`, which is `IsProjectile` (`009bd780`): every gunshot was a "blast", and `knockdown::after_hit` skipped blasts (left to the game). A grenade's hit has an explosion as its source, which does not answer it, so it counted as a thrown weapon of the grenade weapon's own damage (about 1). `IsExplosion` is `+0x220`.
+- **Now:** `+0x220`; blasts knocked down by their health damage from their centre; the direct `KnockExplosion` call only for a process of level 0 or 1; `Knockdown:` log lines (settings at start, each decision, `CanKnockDown`'s questions when it refuses, ragdoll and knock state after). The kill impulse's bullets now push by the weapon's damage (they took the game's health damage as blasts before). Not run in game.
+
 ### Claude, 2026-11-14 (ballistic bullets, weapon mods)
 
 - **Patrick:** Battlefield-style bullets: every bullet and pellet a real projectile with travel time, mass and drop per calibre and load (HP, AP, JSP, surplus, hand load, match, incendiary, explosive, slugs), momentum into the hit force and knockdowns, penetration of bodies and thin objects, cheap for shotguns and automatics, NPCs leading and allowing for drop, Gameplay rows Ballistics (Classic / Projectile), Penetration, Bullet Speed. Then: with WMX, everything new on the weapon's effective stats with mods, read generically.

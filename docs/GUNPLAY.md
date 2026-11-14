@@ -161,7 +161,20 @@ with `bKnockdownCompanions=1`.
 - **When:** over `Actor::HitMe` (`0089a760`), after the game applied the hit, for a living
   character not already knocked down: the hit's momentum as the hit force works it out (damage
   less the target's damage threshold, projectiles, weight, reach, Strength, skill, power attack).
-  Blasts are left to the game, which knocks down from them itself (scaled by `iHitForce`).
+  Blasts too (2026-11-14 fix): the blast's health damage (the game took the threshold), pushed
+  from the blast's centre through the chest; a blast the game knocks down itself (its knock state
+  already set) is left to it. A process below middle-high (level `+0x28` above 1) has no knock
+  state and is skipped.
+- **The 2026-11-14 fix:** a hit was taken for a blast when its source answered virtual `+0x224`,
+  which is `IsProjectile`: every bullet answered it, so every gunshot counted as a blast and was
+  skipped, and a grenade's hit (an explosion, which does not) counted as a thrown weapon of the
+  grenade's own damage (about 1). `IsExplosion` is `+0x220` (the process lists hand such a
+  reference to `explosion.cpp`).
+- **Log:** the run's settings at start (`Knockdown: bKnockdowns=...`), then a `Knockdown:` line
+  per decision on a living character (form id and name, kind, momentum, DT, resistance, body,
+  scale, threshold, the decision; why one was left standing), the game's `CanKnockDown` answer
+  with each of its questions when it refuses, and after `KnockExplosion` whether the actor has a
+  ragdoll (slot `0x38c`) and its knock state; at most 20 lines a second.
 - **Resistance**, in the same damage points, x the actor's scale squared x
   `iKnockdownThreshold` %: human 45, super mutant or nightkin (by race name) 150; creatures by
   type: animal 30, mutated animal 60, mutated insect 50, abomination (deathclaws) 200, super
