@@ -521,6 +521,7 @@ mod tests {
                 "iHitStopMs",
                 "iMeleeReach",
                 "iImpulse",
+                "iHitForce",
                 "iDismemberForce",
                 "iExplodeForce",
                 "sTestRangeCell",

@@ -99,6 +99,8 @@ pub const FIX: Fix = Fix {
         crate::test_range::TUTORIAL_SHOW,
         crate::test_range::TUTORIAL_SEEN,
         crate::test_range::TUTORIAL_MENU,
+        crate::hit_force::MELEE_HIT,
+        crate::hit_force::KNOCK_EXPLOSION,
     ],
     summary: "guns kick the view and recover, the weapon lags fast turns and settles back, melee hits and heavy shots punch the viewmodel and camera (game time untouched), melee reaches a little further, kills push bodies by calibre and weapon weight, and a heavy enough hit severs the limb (Settings menu rows and [nv-rs Gunplay] tune it)",
     install,
@@ -126,6 +128,8 @@ pub struct Tuning {
     pub melee_reach: i32,
     /// `iImpulse`: the push a kill gives the body, 100 for the game's.
     pub impulse: i32,
+    /// `iHitForce`: the ragdoll hit force ([`crate::hit_force`]), percent; 0 = the game's own push.
+    pub hit_force: i32,
     /// `iDismemberForce`: the force ([`force`]) from which a killing hit severs the limb; 0 = only
     /// the game's own chance.
     pub dismember_force: i32,
@@ -144,6 +148,7 @@ impl Tuning {
         hit_stop_ms: 90,
         melee_reach: 115,
         impulse: 150,
+        hit_force: 100,
         dismember_force: 45,
         explode_force: 110,
     };
@@ -165,6 +170,7 @@ impl Tuning {
             "ihitstopms" => self.hit_stop_ms = value,
             "imeleereach" => self.melee_reach = value,
             "iimpulse" => self.impulse = value,
+            "ihitforce" => self.hit_force = value,
             "idismemberforce" => self.dismember_force = value,
             "iexplodeforce" => self.explode_force = value,
             _ => return false,
@@ -182,6 +188,7 @@ impl Tuning {
             "ihitstopms" => self.hit_stop_ms,
             "imeleereach" => self.melee_reach,
             "iimpulse" => self.impulse,
+            "ihitforce" => self.hit_force,
             "idismemberforce" => self.dismember_force,
             "iexplodeforce" => self.explode_force,
             _ => return None,
@@ -222,7 +229,7 @@ impl Default for Tuning {
 }
 
 /// The keys of [`SECTION`]: key, its environment variable, lowest and highest value.
-pub const KEYS: [(&str, &str, i32, i32); 9] = [
+pub const KEYS: [(&str, &str, i32, i32); 10] = [
     ("iRecoil", "NV_GUNPLAY_RECOIL", 0, 300),
     ("iRecoilRecovery", "NV_GUNPLAY_RECOVERY", 0, 100),
     ("iSway", "NV_GUNPLAY_SWAY", 0, 300),
@@ -230,6 +237,7 @@ pub const KEYS: [(&str, &str, i32, i32); 9] = [
     ("iHitStopMs", "NV_GUNPLAY_HIT_STOP_MS", 0, 250),
     ("iMeleeReach", "NV_GUNPLAY_MELEE_REACH", 50, 200),
     ("iImpulse", "NV_GUNPLAY_IMPULSE", 0, 500),
+    ("iHitForce", "NV_GUNPLAY_HIT_FORCE", 0, 300),
     ("iDismemberForce", "NV_GUNPLAY_DISMEMBER_FORCE", 0, 1000),
     ("iExplodeForce", "NV_GUNPLAY_EXPLODE_FORCE", 0, 1000),
 ];
@@ -679,6 +687,7 @@ pub fn install(e: &mut Engine) {
     install_change_fns(e);
     crate::test_range::install(e);
     crate::movement::install(e);
+    crate::hit_force::install(e);
 }
 
 /// The weapon form the actor holds (0 for its fists or none).
@@ -720,7 +729,8 @@ fn shot(e: &mut Engine, weapon: u32, player: u32) {
     });
 }
 
-/// The kill impulse with its strength scaled (module documentation).
+/// The kill impulse: with `iHitForce` the ragdoll hit force ([`crate::hit_force::push_body`]);
+/// without it (0) the game's push scaled as before (`iImpulse`, melee by weight).
 fn kill_impulse(e: &mut Engine, aggressor: u32, hit: u32) {
     if !on() || hit == 0 {
         fn_008ae000(e, Ptr::new(aggressor), Ptr::new(hit));
@@ -728,6 +738,10 @@ fn kill_impulse(e: &mut Engine, aggressor: u32, hit: u32) {
     }
     let tuning = tuning();
     let stats = weapon_stats(e, e.mem.u32(hit + HIT_WEAPON));
+    if tuning.hit_force > 0 {
+        crate::hit_force::push_body(e, aggressor, hit, stats.as_ref());
+        return;
+    }
     let scale = tuning.impulse as f32 / 100.0 * impulse_scale(stats.as_ref());
     let damage = e.mem.f32(hit + HIT_HEALTH_DAMAGE);
     e.mem.set_f32(hit + HIT_HEALTH_DAMAGE, damage * scale);
@@ -1240,12 +1254,14 @@ fn unplace_pose(e: &mut Engine, placed: &Placed) {
 
 /// The rows' change functions, after the graphics rows' (`0x7e06_0010` to `0x7e06_0050`), in the
 /// platform's area that no exe or platform code uses.
-pub const CHANGE_FNS: [u32; 5] = [
+pub const CHANGE_FNS: [u32; 6] = [
     0x7e06_0060,
     0x7e06_0070,
     0x7e06_0080,
     0x7e06_0090,
     0x7e06_00a0,
+    // Hit Force, on the Gameplay page (after the movement rows' `0x7e06_00d0`..`0x7e06_0160`).
+    0x7e06_0170,
 ];
 
 /// A row of the Settings menu's Display page.
@@ -1261,15 +1277,18 @@ pub enum Row {
     HitStop,
     /// A meter of `iDismemberForce` (0 Off).
     Dismember,
+    /// A meter of `iHitForce` (0 Off), on the Gameplay page.
+    HitForce,
 }
 
 /// The rows, in the order they are made.
-pub const ROWS: [Row; 5] = [
+pub const ROWS: [Row; 6] = [
     Row::Enabled,
     Row::Recoil,
     Row::Sway,
     Row::HitStop,
     Row::Dismember,
+    Row::HitForce,
 ];
 
 impl Row {
@@ -1281,6 +1300,15 @@ impl Row {
             Row::Sway => (SECTION, "iSway"),
             Row::HitStop => (SECTION, "bHitStop"),
             Row::Dismember => (SECTION, "iDismemberForce"),
+            Row::HitForce => (SECTION, "iHitForce"),
+        }
+    }
+
+    /// The Settings page the row is on: Display, or Gameplay for Hit Force.
+    pub fn page(self) -> u32 {
+        match self {
+            Row::HitForce => GAMEPLAY,
+            _ => DISPLAY,
         }
     }
 
@@ -1289,6 +1317,7 @@ impl Row {
         match self {
             Row::Recoil | Row::Sway => Some((10, 21)),
             Row::Dismember => Some((5, 31)),
+            Row::HitForce => Some((10, 31)),
             Row::Enabled | Row::HitStop => None,
         }
     }
@@ -1335,6 +1364,8 @@ impl Row {
             Row::HitStop => "Impact Punch".to_string(),
             Row::Dismember if value == 0 => "Dismember Force: Off".to_string(),
             Row::Dismember => format!("Dismember Force: {value}"),
+            Row::HitForce if value == 0 => "Hit Force: Off".to_string(),
+            Row::HitForce => format!("Hit Force: {value}%"),
         }
     }
 }
@@ -1363,6 +1394,8 @@ pub(crate) const VAL: u32 = 0x14;
 pub(crate) const DEFAULT_VAL: u32 = 0x18;
 /// The Display page, a list (values between arrows) and a meter, and the label's buffer.
 const DISPLAY: u32 = 0x10;
+/// The Gameplay page's mode bit (the original's own first rows have it).
+const GAMEPLAY: u32 = 8;
 pub(crate) const LIST: u32 = 0;
 pub(crate) const METER: u32 = 2;
 pub(crate) const LABEL_SIZE: u32 = 32;
@@ -1396,8 +1429,8 @@ pub fn add_rows(e: &mut Engine) {
             continue;
         }
         let mut call = match row.meter() {
-            Some((_, count)) => args![block, text, change_fn, DISPLAY, METER, count, 0u32],
-            None => args![block, text, change_fn, DISPLAY, LIST, 2u32, 0u32],
+            Some((_, count)) => args![block, text, change_fn, row.page(), METER, count, 0u32],
+            None => args![block, text, change_fn, row.page(), LIST, 2u32, 0u32],
         };
         if row.meter().is_none() {
             let off = heap_text(e, "Off", 8);
@@ -1423,12 +1456,13 @@ pub fn install_change_fns(e: &mut Engine) {
         change(e, ROWS[N], Ptr::new(a[0]));
         Ret::default()
     }
-    let fns: [AbiFn; 5] = [
+    let fns: [AbiFn; 6] = [
         row_fn::<0>,
         row_fn::<1>,
         row_fn::<2>,
         row_fn::<3>,
         row_fn::<4>,
+        row_fn::<5>,
     ];
     for (address, f) in CHANGE_FNS.into_iter().zip(fns) {
         e.register(address, f);
@@ -1575,6 +1609,7 @@ mod tests {
             hit_stop_ms: 0,
             melee_reach: 50,
             impulse: 0,
+            hit_force: 0,
             dismember_force: 0,
             explode_force: 0,
         };

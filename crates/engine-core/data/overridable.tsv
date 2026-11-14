@@ -118,11 +118,12 @@
 00899cb0	1	nv-rs weighty combat
 008a06c0	0	ITR
 008a8dd0	2	JIP
-008ae000	2	nv-rs weighty combat
+008ae000	4	nv-rs weighty combat
 008b39f0	0	ITR
 008bca90	0	JIP
 008d4e80	0	ITR
 00903180	0	kNVSE
+0091fee0	1	nv-rs weighty combat
 0092f260	1	nv-rs weighty combat
 00932a00	1	nv-rs half-loaded actor's level change
 00932b70	1	nv-rs half-loaded actor's level change
@@ -138,6 +139,7 @@
 00986c60	0	ITR
 009a60e0	1	nv-rs weighty combat
 009ac5a0	1	fixes preset guard
+009b5170	1	nv-rs weighty combat
 009b5a30	5	JIP
 009da7c0	0	ITR
 009f996e	0	JIP

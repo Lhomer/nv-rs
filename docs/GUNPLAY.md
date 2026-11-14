@@ -113,6 +113,46 @@ Afterwards ([`unplace_pose`]) the local rotation is put back, so nothing builds 
 translation too when the game did not update the root. Recoil, the impulse, the reach and the
 dismemberment are unchanged.
 
+### Ragdoll hit force (`crates/host/src/hit_force.rs`)
+
+Patrick, 2026-11-14: a body that dies, or is knocked down into its ragdoll, carries the
+momentum of what hit it. Independent of dismemberment; no new animations, no slow motion, the
+kill camera untouched.
+
+- **The game's own push does the work.** The kill impulse (`008ae000`) finds the body under the
+  hit and pushes every rigid body of the ragdoll from the impact point along the hit's direction
+  (the projectile's path; from the weapon to the hit for a swing), more for the parts near the
+  impact within the weapon's impulse radius, each part by its own multiplier
+  (`TESHavokUtilities::AddExplosionImpulse`, `0062b660`), radially with a falloff for a blast.
+  Its strength (the hit's health damage) is replaced for the call by the hit's momentum.
+- **The momentum, in damage points:**
+  - a gun: its damage per projectile less the target's damage threshold (actor value `0x4c`;
+    never below 20 % of it), times `projectiles^0.75` (a shotgun's pellets share their push);
+    thrown and placed weapons by their damage;
+  - a swing: the weapon's damage x `(1 + weight / 10)` x reach (0.5 to 2) x Strength
+    (`0.6 + 0.08 x STR`: 0.68 to 1.4) x skill (`0.8 + skill / 250`: 0.8 to 1.2) x 1.5 for a power
+    attack (recorded where the game makes the melee hit, `HitData::InitializeHitData_ov3`,
+    `009b5170`), less the threshold the same way; unarmed: the hit's total damage, reach 1;
+  - a blast: the game's own (its health damage, the threshold already taken) with its falloff;
+  - then x `iHitForce` % x `iImpulse` %, at most 160 (bodies are thrown, never launched).
+- **Knock-downs** by a blast (`MiddleHighProcess::KnockExplosion`, `0091fee0`): their push x
+  `iHitForce` %, raised no further than 160.
+- **For a later leg-loss fall:** `hit_force::push_body` takes any hit and pushes the body the
+  same way.
+- `iHitForce=0` (Hit Force: Off) gives the previous behaviour: the game's push scaled by
+  `iImpulse` and, for melee, by weight.
+
+| Constant | Value |
+| --- | --- |
+| `MIN_THROUGH` (share of damage through armour) | 0.2 |
+| `PELLET_EXPONENT` | 0.75 |
+| `WEIGHT_PER_DOUBLING` | 10 lb |
+| `POWER_ATTACK` | 1.5 |
+| `REACH_RANGE` | 0.5 to 2.0 |
+| Strength factor | 0.6 + 0.08 x STR |
+| Skill factor | 0.8 + skill / 250 |
+| `MAX_MOMENTUM` | 160 |
+
 ### Tuning
 
 `[nv-rs Gunplay]` in Fallout.ini is read in a launcher's play run. The `NV_GUNPLAY_*` variables
@@ -128,6 +168,7 @@ line; a bad variable stops the start.
 | `iHitStopMs` | `NV_GUNPLAY_HIT_STOP_MS` | 90 | 0-250 |
 | `iMeleeReach` | `NV_GUNPLAY_MELEE_REACH` | 115 | 50-200 |
 | `iImpulse` | `NV_GUNPLAY_IMPULSE` | 150 | 0-500 |
+| `iHitForce` | `NV_GUNPLAY_HIT_FORCE` | 100 | 0-300 (0 = the game's own push; Settings > Gameplay "Hit Force") |
 | `iDismemberForce` | `NV_GUNPLAY_DISMEMBER_FORCE` | 45 | 0-1000 (0 = only the game's chance) |
 | `iExplodeForce` | `NV_GUNPLAY_EXPLODE_FORCE` | 110 | 0-1000 (0 = only the game's chance) |
 

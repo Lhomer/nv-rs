@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (ragdoll hit force)
+
+- **Patrick:** dying or knocked-down bodies carry the hit's momentum (guns by damage per projectile and pellets along the path, blasts radial with falloff, melee by weight, reach, Strength, skill, power attacks along the swing), less the target's DT, clamped, a global Hit Force multiplier on Settings > Gameplay that persists; no slow motion, kill cams off; a hook for a later leg-loss fall.
+- **Now (`crates/host/src/hit_force.rs`, the weighty combat row):** the game's kill impulse (`008ae000`, per-bone via `AddExplosionImpulse` from the impact point along the hit, falloff in the weapon's radius, radial for blasts) gets the hit's momentum as its strength (model and constants in docs/GUNPLAY.md, "Ragdoll hit force"); power attacks recorded over `HitData::InitializeHitData_ov3` (`009b5170`; its two direct calls in `hitdata.rs` now by address); blast knock-downs (`0091fee0`) scaled by `iHitForce`; `iHitForce` (100, 0-300; 0 = the previous push) in `[nv-rs Gunplay]` and a Hit Force row on the Gameplay page (change function `7e060170`), saved in a play run; `push_body` is the path for a later leg-loss fall. Not run in game; the shotgun's pellets are approximated (the killing pellet's point gets `n^0.75` of one pellet's push).
+
 ### Claude, 2026-11-14 (Test Range: god mode, the whole inventory, no tutorials)
 
 - **Patrick:** in the range only: god mode with no limb damage, infinite carry weight, every weapon, ammo (a big stack), armour, aid item and misc equipment of all loaded plugins and DLC in the inventory, and no tutorials or help messages.

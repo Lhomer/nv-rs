@@ -32,6 +32,7 @@ pub mod game_ini;
 pub mod graphics_settings;
 pub mod gunplay;
 pub mod half_loaded_move;
+pub mod hit_force;
 pub mod menu_tiles;
 pub mod mod_fit_worn;
 pub mod movement;

@@ -1194,6 +1194,8 @@ const GET_CLAMPED_ACTOR_VALUE: u32 = 0x0066_ef20;
 /// `CombatFormulas::GetPowerAttackDamageMultiplier` (`00644520`, cdecl(value,
 /// animation type), ST0).
 const POWER_ATTACK_MULTIPLIER: u32 = 0x0064_4520;
+/// `HitData::InitializeHitData_ov3` (the melee and unarmed hit).
+const INITIALIZE_HIT_DATA_OV3: u32 = 0x009b_5170;
 /// `004997b0` (thiscall on the aggressor, byte; no Xbox PDB name).
 const AGGRESSOR_TEST_004997B0: u32 = 0x0049_97b0;
 /// `006450c0` (thiscall on the weapon, byte; no Xbox PDB name).
@@ -1271,7 +1273,11 @@ pub fn hit_data_initialize_hit_data(e: &mut Engine, hit: Ptr<HitData>, command: 
     let process = typed_call!(leaf::FAMILY, 0x008d_8520, leaf::word_at_68(e, player));
     let item = e.vcall(process, 0x148, &args![]).u32();
     let player = e.mem.u32(PLAYER_011DEA3C);
-    hit_data_initialize_hit_data_ov3(e, hit, player, character, item, u32::from(melee));
+    // By address: `InitializeHitData_ov3` is overridable (`crates/engine-core/data/overridable.tsv`).
+    e.call(
+        INITIALIZE_HIT_DATA_OV3,
+        &args![hit, player, character, item, u32::from(melee)],
+    );
 }
 
 // Translated from 009b5120 (decompiled, FalloutNV.exe 1.4.0.525)
@@ -1291,7 +1297,11 @@ pub fn hit_data_initialize_hit_data_ov2(
     if projectile != 0 {
         hit_data_initialize_hit_data_ov4(e, hit, aggressor, target, item, projectile);
     } else {
-        hit_data_initialize_hit_data_ov3(e, hit, aggressor, target, item, power_attack & 0xff);
+        // By address: `InitializeHitData_ov3` is overridable.
+        e.call(
+            INITIALIZE_HIT_DATA_OV3,
+            &args![hit, aggressor, target, item, power_attack & 0xff],
+        );
     }
 }
 
