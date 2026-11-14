@@ -726,6 +726,15 @@ fn penetrate(e: &mut Engine, projectile: u32, (collidee, at, material_id): (u32,
     QUEUE.lock().unwrap_or_else(|p| p.into_inner()).push(next);
 }
 
+/// The bullets in flight and the queued continuations dropped (a load, a new game, the main menu:
+/// their projectiles, shooters and weapons' references go with the game).
+pub fn clear() {
+    if let Some(map) = BULLETS.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+        map.clear();
+    }
+    QUEUE.lock().unwrap_or_else(|p| p.into_inner()).clear();
+}
+
 /// Once a frame: the queued continuations made (at most [`MAX_CONTINUATIONS`] a second).
 pub fn frame(e: &mut Engine) {
     let queued = std::mem::take(&mut *QUEUE.lock().unwrap_or_else(|p| p.into_inner()));

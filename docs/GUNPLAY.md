@@ -186,6 +186,28 @@ with `bKnockdownCompanions=1`.
   attacker through the chest), so the part hit is pushed hardest and the body spins or flies from
   there; strength = momentum x 0.35 x `iHitForce` %, between 8 and 40. The game gets it up again
   through its get-up idle (`UpdateKnockState`).
+- **Third 2026-11-14 fix (Patrick on 535c53a: a crash after leaving the range, still no
+  momentum, still thrown on getting up):**
+  - The crash (`read of unmapped memory at 3e2aabe7 in 009445b0`): `3e2aabe7` is `0x3e2aaaab`
+    (the float 1/6) plus `0x13c`, the knock state's offset: a knocked-down actor kept in the
+    get-up list across the return to the main menu was read after the game freed it (its process
+    word now held a float). Every knock-down list now keeps the actor's form id and checks each
+    frame that the game's form map (`LookupFormByID`, `004839c0`) still gives the same reference;
+    all of it (and the ballistics' bullets and continuations) is dropped at a load, a new game and
+    the main menu (the Test Range's end seams, which fire in every game).
+  - No momentum: the launch waited for the frame after knock state 2, but the game turns 2 into
+    1 (lying) within a frame (`UpdateKnockState`: once the blend value is 0), so the log said
+    "launch dropped: the ragdoll never went limp (knock state 1)" every time. It is now given
+    right after `KnockExplosion` returns, where the game gives its own blast's push (the bones were
+    just set moving under physics), and checked the next frames in knock state 2 or 1.
+  - Thrown on getting up: `Actor::HitMe` stores a knockback in the character controller
+    (`SetVelocityModifier`: `VelocityMod` `+0x500`, `fVelocityTime` `+0x524`, the larger one kept)
+    on every hit, also on a body that is already down, and the controller only spends it when it
+    moves again: at the get-up, which threw the actor. While it lies it is now cleared each frame
+    (logged), and at the get-up the bones' velocities are zeroed too. And 274ad9c/535c53a damped
+    every slow bone each frame, which woke the ragdoll every frame (`hkpRigidBody::setLinearVelocity`
+    activates the body), so it never slept and trembled: only outliers are touched now, during the
+    first 1.5 s.
 - **The launch and the get-up** (second 2026-11-14 fix: bodies dropped straight down, and flew up
   and shook when getting up, upside down against a wall in a small interior):
   - Cause of the drop: the previous build held every bone to 12 Havok units a second (about

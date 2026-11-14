@@ -45,9 +45,12 @@
 //!   [`UP_COOLDOWN`] is not knocked again, the game's own blast knock-down
 //!   ([`crate::hit_force::KNOCK_EXPLOSION`]) adds no second push to an actor knocked here a moment
 //!   ago ([`recently_knocked`]), and JIP's stagger push left on the character controller is
-//!   cleared before the ragdoll takes over. While it is down, each bone's speed is held to
-//!   [`MAX_BONE_SPEED`] and its spin to [`MAX_BONE_SPIN`] for [`FLIGHT`], and then a bone slower
-//!   than [`SETTLE_SPEED`] has its sideways motion and spin damped ([`SETTLE_DAMPING`] a second).
+//!   cleared before the ragdoll takes over. While it flies ([`FLIGHT`]) only a bone faster than
+//!   [`MAX_BONE_SPEED`] or spinning faster than [`MAX_BONE_SPIN`] is held to it; no bone is touched
+//!   otherwise, so the ragdoll can come to rest and sleep. While it lies, the knockback a hit on it
+//!   stores in its character controller is cleared ([`clear_stored_push`]); and every frame each
+//!   followed actor is checked to still be the same reference ([`live`]), all of it dropped on a
+//!   load, a new game or the main menu ([`clear`]).
 //!   Every launch, clamp, guard and get-up decision is a `Knockdown:` log line.
 //! - At or past [`STAGGER_SHARE`] of it: a **stagger**, JIP's push without a ragdoll (#565,
 //!   `jip::push_living_actor`): a shove of [`STAGGER_PER_POINT`] per point along the hit.
@@ -98,13 +101,10 @@ pub const KNOCK_COOLDOWN: Duration = Duration::from_millis(2500);
 pub const UP_COOLDOWN: Duration = Duration::from_millis(1500);
 /// A bone's speed (game units a second, turned into Havok's by the game's scale, [`hk_scale`]) and
 /// spin (radians a second) at most while it flies (outliers only: the launch and a fall stay
-/// well below), how long that is held, and the settling: below this speed, sideways motion and
-/// spin lose this share a second.
+/// well below), and how long that is held.
 pub const MAX_BONE_SPEED: f32 = 1400.0;
 pub const MAX_BONE_SPIN: f32 = 20.0;
 pub const FLIGHT: Duration = Duration::from_millis(1500);
-pub const SETTLE_SPEED: f32 = 12.0;
-pub const SETTLE_DAMPING: f32 = 6.0;
 /// The get-up waits ([`hold_get_up`]) until every bone is slower than [`STILL_SPEED`] for
 /// [`STILL_FRAMES`] frames in a row and the body lies (its bones within [`LYING_HEIGHT`] of each
 /// other in height), at most [`HOLD_MAX`]; then the actor stands at a clear navmesh spot within
@@ -279,7 +279,9 @@ fn body_of(e: &mut Engine, actor: u32) -> Body {
 }
 
 /// The actors knocked down and followed for their fall: (actor, attacker, highest z, since).
-static DOWN: Mutex<Vec<(u32, u32, f32, Instant)>> = Mutex::new(Vec::new());
+/// (actor, its form id, attacker, highest z, since).
+type Followed = (u32, u32, u32, f32, Instant);
+static DOWN: Mutex<Vec<Followed>> = Mutex::new(Vec::new());
 
 /// Registers the hook (from `crate::gunplay::install`).
 pub fn install(e: &mut Engine) {
@@ -516,13 +518,6 @@ pub fn clamp_speed(v: [f32; 3], most: f32) -> ([f32; 3], bool) {
     (v.map(|x| x * most / l), true)
 }
 
-/// A settling bone's velocity after `dt` seconds of damping: sideways (x, y) and spin lose
-/// [`SETTLE_DAMPING`] a second, its fall (z) is left to gravity.
-pub fn settle(v: [f32; 3], dt: f32, keep_z: bool) -> [f32; 3] {
-    let k = (-SETTLE_DAMPING * dt.clamp(0.0, 0.1)).exp();
-    [v[0] * k, v[1] * k, if keep_z { v[2] } else { v[2] * k }]
-}
-
 /// Knocks the living `actor` down into its ragdoll, pushed from `point` along `direction` with
 /// the momentum `m` (module documentation), and follows its fall; `aggressor` is credited with a
 /// fall's kill. The entry for any knock-down (a later leg-loss fall).
@@ -549,6 +544,7 @@ pub fn knock_down(
     let stood = position(e, actor);
     let start = stood.map_or(origin[2], |p| p[2]);
     let who = describe(e, actor);
+    let id = e.mem.u32(actor + FORM_ID);
     if let Some(why) = cooling_down(actor) {
         note(format!("{who}: duplicate guard: {why}, not knocked again"));
         return;
@@ -595,22 +591,38 @@ pub fn knock_down(
     );
     let state = e.mem.u8(process + KNOCK_STATE) as i8;
     let launch = launch_direction(direction);
+    // Given right away, where the game gives its own blast's push: KnockExplosion has just set the
+    // bones moving under physics (`bhkWorld::SetMotion`), knock state 2.
+    let given = if state == 2 {
+        give_launch(e, actor, launch, speed)
+    } else {
+        0
+    };
+    note(format!(
+        "{who}: impulse applied: {given} bones +{speed:.0} units/s ({:.1} m/s) along ({:.2}, {:.2}, \
+         {:.2}) right after KnockExplosion (knock state {state})",
+        speed / 70.0,
+        launch[0],
+        launch[1],
+        launch[2]
+    ));
     LAUNCHES
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .push(Launch {
             actor,
+            id,
             direction: launch,
             speed,
             frames: 0,
             tries: 0,
-            applied: false,
         });
     {
         let mut ups = GET_UPS.lock().unwrap_or_else(|p| p.into_inner());
         ups.retain(|g| g.actor != actor);
         ups.push(GetUp {
             actor,
+            id,
             start: stood.unwrap_or(point),
             since: Instant::now(),
             lying_since: None,
@@ -619,10 +631,6 @@ pub fn knock_down(
             allowed: false,
         });
     }
-    note(format!(
-        "{who}: launch {speed:.0} units/s along ({:.2}, {:.2}, {:.2}) once the ragdoll is limp",
-        launch[0], launch[1], launch[2]
-    ));
     note(format!(
         "{who}: KnockExplosion strength {strength:.0} from ({:.0}, {:.0}, {:.0}): {} (knock state \
          now {state})",
@@ -637,27 +645,23 @@ pub fn knock_down(
     ));
     let mut down = DOWN.lock().unwrap_or_else(|p| p.into_inner());
     down.retain(|d| d.0 != actor);
-    down.push((actor, aggressor, start, Instant::now()));
+    down.push((actor, id, aggressor, start, Instant::now()));
 }
 
 /// Once a frame (from the player's look hook): each followed actor's highest point, and when it
 /// is down, getting up or followed long enough, its fall's damage (module documentation).
 pub fn frame(e: &mut Engine) {
-    let followed: Vec<(u32, u32, f32, Instant)> =
-        DOWN.lock().unwrap_or_else(|p| p.into_inner()).clone();
-    let dt = {
-        let mut last = LAST_FRAME.lock().unwrap_or_else(|p| p.into_inner());
-        let dt = last.map_or(0.0, |t| t.elapsed().as_secs_f32());
-        *last = Some(Instant::now());
-        dt
-    };
+    let followed: Vec<Followed> = DOWN.lock().unwrap_or_else(|p| p.into_inner()).clone();
     launches(e);
-    get_ups(e, dt);
+    get_ups(e);
     if followed.is_empty() {
         return;
     }
     let mut keep = Vec::new();
-    for (actor, aggressor, top, since) in followed {
+    for (actor, id, aggressor, top, since) in followed {
+        if !live(e, actor, id) {
+            continue;
+        }
         let process = e.mem.u32(actor + PROCESS);
         let Some(at) = position(e, actor) else {
             continue;
@@ -674,7 +678,7 @@ pub fn frame(e: &mut Engine) {
                 .unwrap_or_else(|p| p.into_inner())
                 .push((actor, Instant::now()));
         } else {
-            keep.push((actor, aggressor, top, since));
+            keep.push((actor, id, aggressor, top, since));
         }
     }
     *DOWN.lock().unwrap_or_else(|p| p.into_inner()) = keep;
@@ -683,7 +687,6 @@ pub fn frame(e: &mut Engine) {
 /// The actors knocked down here and when, and those that got up again and when.
 static KNOCKED: Mutex<Vec<(u32, Instant)>> = Mutex::new(Vec::new());
 static UP: Mutex<Vec<(u32, Instant)>> = Mutex::new(Vec::new());
-static LAST_FRAME: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// Why `actor` is not knocked down again now, if it isn't.
 fn cooling_down(actor: u32) -> Option<String> {
@@ -745,6 +748,10 @@ const SET_LOCATION: u32 = 0x0057_5830;
 const CHAR_CONTROLLER: u32 = 0x0093_06d0;
 const CONTROLLER_SET_POSITION: u32 = 0x0056_20e0;
 const CONTROLLER_SET_VELOCITY: u32 = 0x0092_6980;
+/// `bhkCharacterController::VelocityMod` and `fVelocityTime`; `LookupFormByID`.
+const VELOCITY_MOD: u32 = 0x500;
+const VELOCITY_TIME: u32 = 0x524;
+const LOOKUP_FORM: u32 = 0x0048_39c0;
 /// `MiddleHighProcess::UpdateKnockState`: the get-up waits there ([`hold_get_up`]).
 pub const UPDATE_KNOCK_STATE: u32 = 0x0092_0150;
 /// The most nodes walked for one body.
@@ -797,24 +804,45 @@ fn linear(e: &mut Engine, body: u32) -> Option<[f32; 3]> {
     (at != 0).then(|| read3(e, at))
 }
 
-/// A knock-down's launch, given once its ragdoll is limp.
+/// A knock-down's launch: given right after `KnockExplosion`, checked the frames after.
 #[derive(Clone, Copy, Debug)]
 struct Launch {
     actor: u32,
+    id: u32,
     direction: [f32; 3],
     /// Game units a second.
     speed: f32,
     frames: u32,
     tries: u8,
-    applied: bool,
 }
 
 static LAUNCHES: Mutex<Vec<Launch>> = Mutex::new(Vec::new());
 
-/// Once a frame: each pending launch given to its ragdoll the frame after it went limp (knock
-/// state 2: the game's own set-up of the ragdoll is done, so it is not wiped), every bone the same
-/// velocity added along the hit; checked the next frame and given again when the ragdoll took it
-/// back ([`LAUNCH_TRIES`]).
+/// The launch added to every bone of `actor`'s ragdoll: the same velocity, `speed` game units a
+/// second along `direction`. Answers the bones given it.
+fn give_launch(e: &mut Engine, actor: u32, direction: [f32; 3], speed: f32) -> usize {
+    let scale = hk_scale(e);
+    let add = direction.map(|x| x * speed / scale);
+    let bones = bodies(e, actor);
+    let mut given = 0;
+    for &(_, body) in &bones {
+        if let Some(v) = linear(e, body) {
+            set_velocity(
+                e,
+                SET_LINEAR_VELOCITY,
+                body,
+                [v[0] + add[0], v[1] + add[1], v[2] + add[2]],
+            );
+            given += 1;
+        }
+    }
+    given
+}
+
+/// Once a frame: each launch checked while the body is down (knock state 2, or 1 once the game
+/// has it lying): when its bones kept less than [`LAUNCH_KEPT`] of it along the hit, it is given
+/// again (at most [`LAUNCH_TRIES`]). The 535c53a build waited for knock state 2 a frame later,
+/// which the game had already left for 1, and dropped every launch.
 fn launches(e: &mut Engine) {
     let pending: Vec<Launch> =
         std::mem::take(&mut *LAUNCHES.lock().unwrap_or_else(|p| p.into_inner()));
@@ -824,52 +852,23 @@ fn launches(e: &mut Engine) {
     let scale = hk_scale(e);
     let mut keep = Vec::new();
     for mut l in pending {
+        if !live(e, l.actor, l.id) {
+            continue;
+        }
         let process = e.mem.u32(l.actor + PROCESS);
         if process == 0 || matches!(e.mem.u32(l.actor + LIFE_STATE), 1 | 2) {
             continue;
         }
-        let state = e.mem.u8(process + KNOCK_STATE) as i8;
         l.frames += 1;
-        if state != 2 {
-            if l.frames > 30 {
-                note(format!(
-                    "{}: launch dropped: the ragdoll never went limp (knock state {state})",
-                    describe(e, l.actor)
-                ));
-            } else {
-                keep.push(l);
-            }
-            continue;
-        }
-        if l.frames < 2 {
-            keep.push(l);
-            continue;
-        }
-        let add = l.direction.map(|x| x * l.speed / scale);
-        let bones = bodies(e, l.actor);
-        if !l.applied {
-            for &(_, body) in &bones {
-                if let Some(v) = linear(e, body) {
-                    let nv = [v[0] + add[0], v[1] + add[1], v[2] + add[2]];
-                    set_velocity(e, SET_LINEAR_VELOCITY, body, nv);
-                }
-            }
-            l.applied = true;
+        let state = e.mem.u8(process + KNOCK_STATE) as i8;
+        if !matches!(state, 1 | 2) {
             note(format!(
-                "{}: impulse applied: {} bones +{:.0} units/s ({:.1} m/s) along ({:.2}, {:.2}, \
-                 {:.2}), Havok scale {scale}",
-                describe(e, l.actor),
-                bones.len(),
-                l.speed,
-                l.speed / 70.0,
-                l.direction[0],
-                l.direction[1],
-                l.direction[2]
+                "{}: launch check ended: knock state {state}",
+                describe(e, l.actor)
             ));
-            keep.push(l);
             continue;
         }
-        // The frame after: how much of it the bones kept, along the launch.
+        let bones = bodies(e, l.actor);
         let along: Vec<f32> = bones
             .iter()
             .filter_map(|&(_, b)| linear(e, b))
@@ -882,10 +881,10 @@ fn launches(e: &mut Engine) {
         };
         if kept < l.speed * LAUNCH_KEPT && l.tries < LAUNCH_TRIES && !bones.is_empty() {
             l.tries += 1;
-            l.applied = false;
+            let given = give_launch(e, l.actor, l.direction, l.speed);
             note(format!(
-                "{}: duplicate guard: the launch was taken back ({kept:.0} of {:.0} units/s left): \
-                 given again ({}/{LAUNCH_TRIES})",
+                "{}: duplicate guard: the launch was taken back ({kept:.0} of {:.0} units/s left, \
+                 knock state {state}): given again to {given} bones ({}/{LAUNCH_TRIES})",
                 describe(e, l.actor),
                 l.speed,
                 l.tries
@@ -893,7 +892,7 @@ fn launches(e: &mut Engine) {
             keep.push(l);
         } else {
             note(format!(
-                "{}: the launch holds: {kept:.0} units/s along it",
+                "{}: the launch holds: {kept:.0} units/s along it (knock state {state})",
                 describe(e, l.actor)
             ));
         }
@@ -908,6 +907,7 @@ fn launches(e: &mut Engine) {
 #[derive(Clone, Copy, Debug)]
 struct GetUp {
     actor: u32,
+    id: u32,
     /// Where it stood when knocked down (a clear spot: the fallback).
     start: [f32; 3],
     since: Instant,
@@ -938,7 +938,7 @@ pub fn hold_get_up(e: &Engine, process: u32, actor: u32) -> bool {
 /// and its get-up let go once it is still and lying ([`may_get_up`]): the actor and its character
 /// controller set at a clear spot by the body with no velocity ([`clear_spot`], else where it was
 /// knocked from).
-fn get_ups(e: &mut Engine, dt: f32) {
+fn get_ups(e: &mut Engine) {
     let list: Vec<GetUp> = GET_UPS.lock().unwrap_or_else(|p| p.into_inner()).clone();
     if list.is_empty() {
         return;
@@ -946,6 +946,9 @@ fn get_ups(e: &mut Engine, dt: f32) {
     let scale = hk_scale(e);
     let mut keep = Vec::new();
     for mut g in list {
+        if !live(e, g.actor, g.id) {
+            continue;
+        }
         let process = e.mem.u32(g.actor + PROCESS);
         if process == 0
             || matches!(e.mem.u32(g.actor + LIFE_STATE), 1 | 2)
@@ -958,7 +961,17 @@ fn get_ups(e: &mut Engine, dt: f32) {
             continue; // up again
         }
         if matches!(state, 1 | 2) {
-            hold_bones(e, g.actor, g.since.elapsed() < FLIGHT, dt, scale);
+            if g.since.elapsed() < FLIGHT {
+                hold_bones(e, g.actor, scale);
+            }
+            // A hit on the lying body stores a knockback in its character controller, which the
+            // controller only spends when it moves again: at the get-up, when it threw the actor.
+            if let Some(stored) = clear_stored_push(e, g.actor) {
+                note(format!(
+                    "{}: duplicate guard: a stored controller push of {stored:.0} cleared while it lies",
+                    describe(e, g.actor)
+                ));
+            }
         }
         if g.allowed || !matches!(state, 1 | 3) {
             keep.push(g);
@@ -1028,10 +1041,16 @@ fn get_ups(e: &mut Engine, dt: f32) {
                 },
             ),
         };
+        // Nothing carried into the get-up: the bones still, the controller's stored push gone.
+        for &(_, body) in &bones {
+            set_velocity(e, SET_LINEAR_VELOCITY, body, [0.0; 3]);
+            set_velocity(e, SET_ANGULAR_VELOCITY, body, [0.0; 3]);
+        }
+        let _ = clear_stored_push(e, g.actor);
         place(e, g.actor, at);
         g.allowed = true;
         note(format!(
-            "{}: get-up allowed after {:.1} s ({}): set at ({:.0}, {:.0}, {:.0}), {why}, no velocity",
+            "{}: get-up allowed after {:.1} s ({}): set at ({:.0}, {:.0}, {:.0}), {why}; bones, controller and its stored push zeroed",
             describe(e, g.actor),
             held.as_secs_f32(),
             if held >= HOLD_MAX { "held too long" } else { "still and lying" },
@@ -1108,13 +1127,15 @@ fn set_velocity(e: &mut Engine, setter: u32, body: u32, v: [f32; 3]) {
     });
 }
 
-/// A knocked-down actor's bones: while it flies, held to [`MAX_BONE_SPEED`] and
-/// [`MAX_BONE_SPIN`]; afterwards, a slow bone's sideways motion and spin damped ([`settle`]).
-/// Speeds in game units (`scale` game units a Havok unit).
-fn hold_bones(e: &mut Engine, actor: u32, flying: bool, dt: f32, scale: f32) {
+/// A knocked-down actor's bones while it flies: only a bone faster than [`MAX_BONE_SPEED`] or
+/// spinning faster than [`MAX_BONE_SPIN`] is touched (held to it); bones under the bounds are
+/// never set, so Havok can let the body come to rest and sleep. (274ad9c and 535c53a also damped
+/// every slow bone each frame, which woke the whole ragdoll every frame: it never slept and kept
+/// trembling.)
+fn hold_bones(e: &mut Engine, actor: u32, scale: f32) {
     let mut clamped = 0;
     let mut fastest = 0.0f32;
-    let (most, settle_below) = (MAX_BONE_SPEED / scale, SETTLE_SPEED / scale);
+    let most = MAX_BONE_SPEED / scale;
     for (_, body) in bodies(e, actor) {
         let at = e.call(LINEAR_VELOCITY, &args![body]).u32();
         let spin_at = e.call(ANGULAR_VELOCITY, &args![body]).u32();
@@ -1123,34 +1144,65 @@ fn hold_bones(e: &mut Engine, actor: u32, flying: bool, dt: f32, scale: f32) {
         }
         let v = read3(e, at);
         let w = read3(e, spin_at);
-        let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        if flying {
-            let (nv, a) = clamp_speed(v, most);
-            let (nw, b) = clamp_speed(w, MAX_BONE_SPIN);
-            if a {
-                set_velocity(e, SET_LINEAR_VELOCITY, body, nv);
-                fastest = fastest.max(if speed.is_nan() {
-                    f32::INFINITY
-                } else {
-                    speed * scale
-                });
-            }
-            if b {
-                set_velocity(e, SET_ANGULAR_VELOCITY, body, nw);
-            }
-            clamped += usize::from(a || b);
-        } else if speed < settle_below && dt > 0.0 {
-            set_velocity(e, SET_LINEAR_VELOCITY, body, settle(v, dt, true));
-            set_velocity(e, SET_ANGULAR_VELOCITY, body, settle(w, dt, false));
+        let (nv, a) = clamp_speed(v, most);
+        let (nw, b) = clamp_speed(w, MAX_BONE_SPIN);
+        if a {
+            set_velocity(e, SET_LINEAR_VELOCITY, body, nv);
+            let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            fastest = fastest.max(if speed.is_nan() {
+                f32::INFINITY
+            } else {
+                speed * scale
+            });
         }
+        if b {
+            set_velocity(e, SET_ANGULAR_VELOCITY, body, nw);
+        }
+        clamped += usize::from(a || b);
     }
     if clamped > 0 {
         note(format!(
-            "{}: clamp: {clamped} bones held (fastest {fastest:.1}, at most {MAX_BONE_SPEED} and \
-             spin {MAX_BONE_SPIN})",
+            "{}: clamp: {clamped} bones held (fastest {fastest:.0} units/s, at most {MAX_BONE_SPEED} \
+             and spin {MAX_BONE_SPIN})",
             describe(e, actor)
         ));
     }
+}
+
+/// The knockback the actor's character controller holds for its next move (`VelocityMod`,
+/// `+0x500`, and `fVelocityTime`, `+0x524`, as `SetVelocityModifier` stores them) cleared; its
+/// size (game units a second, roughly) when there was one.
+fn clear_stored_push(e: &mut Engine, actor: u32) -> Option<f32> {
+    let controller = e.call(CHAR_CONTROLLER, &args![actor]).u32();
+    if controller == 0 {
+        return None;
+    }
+    let v = read3(e, controller + VELOCITY_MOD);
+    let time = e.mem.f32(controller + VELOCITY_TIME);
+    let size = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let stored = time != 0.0 || size != 0.0;
+    for i in 0..4 {
+        e.mem.set_f32(controller + VELOCITY_MOD + 4 * i, 0.0);
+    }
+    e.mem.set_f32(controller + VELOCITY_TIME, 0.0);
+    (stored && size.is_finite() && size > 1e-3).then(|| size * hk_scale(e) * time.max(0.0))
+}
+
+/// Whether `actor` (read with its form id `id` when it was first seen) is still that actor: the
+/// game's form map gives the same pointer for the id. A load, a new game, the main menu or a
+/// cell's unload frees references; an entry kept across one is dropped, never read.
+fn live(e: &mut Engine, actor: u32, id: u32) -> bool {
+    actor != 0 && id != 0 && e.call(LOOKUP_FORM, &args![id]).u32() == actor
+}
+
+/// Every knock-down's bookkeeping dropped (a load, a new game, the main menu:
+/// `crate::test_range`'s end seams).
+pub fn clear() {
+    DOWN.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    LAUNCHES.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    GET_UPS.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    KNOCKED.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    UP.lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
 
 /// A knocked-down actor's landing after a drop of `drop` units (module documentation).
@@ -1279,17 +1331,5 @@ mod tests {
         assert!((v[0] - 6.0).abs() < 1e-4 && (v[1] - 8.0).abs() < 1e-4);
         assert_eq!(clamp_speed([1.0, 2.0, 2.0], 10.0), ([1.0, 2.0, 2.0], false));
         assert_eq!(clamp_speed([f32::NAN, 0.0, 0.0], 10.0), ([0.0; 3], true));
-    }
-
-    /// Settling damps sideways motion and spin, not the fall; it never adds speed.
-    #[test]
-    fn settling_damps_sideways_and_spin() {
-        let v = settle([1.0, -1.0, -3.0], 1.0 / 60.0, true);
-        assert!(v[0] < 1.0 && v[0] > 0.8 && v[1] > -1.0);
-        assert_eq!(v[2], -3.0);
-        let w = settle([2.0, 2.0, 2.0], 1.0 / 60.0, false);
-        assert!(w[2] < 2.0);
-        assert_eq!(settle([1.0, 1.0, 1.0], 0.0, false), [1.0, 1.0, 1.0]);
-        assert!(settle([1.0, 0.0, 0.0], 5.0, true)[0] > 0.0, "dt clamped");
     }
 }

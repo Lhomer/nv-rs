@@ -268,6 +268,10 @@ static START_ASKED: AtomicBool = AtomicBool::new(false);
 
 /// The range ends (a save loads, a new game, the main menu): nothing of it is kept.
 fn end(e: &mut Engine, _: &[u32]) -> Option<u32> {
+    // The world's references go with the game: nothing kept of them across it (Patrick's crash
+    // after 535c53a: a knocked-down actor's freed memory read on the next frame).
+    crate::knockdown::clear();
+    crate::ballistics::clear();
     if RESUMING.load(Ordering::Relaxed) {
         // The prepared save's own load: the range goes on.
         if phase() == Phase::Starting {

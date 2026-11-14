@@ -7,6 +7,12 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (knockdown crash, launch, get-up throw)
+
+- **Patrick (535c53a):** crash after leaving the range (`read of unmapped memory at 3e2aabe7 in 009445b0`); every launch "dropped: the ragdoll never went limp (knock state 1)"; still thrown on getting up.
+- **Causes:** `3e2aabe7` = 1/6 float + `0x13c`: the get-up list's actor read after the main menu freed it; the game turns knock state 2 into 1 within a frame, so the deferred launch never ran; `HitMe` stores a controller knockback (`+0x500`/`+0x524`) on every hit, also on the lying body, spent at the get-up; the per-frame damping woke the ragdoll every frame.
+- **Now:** form-id checked entries (`live`, `004839c0`) and `knockdown::clear` / `ballistics::clear` from the range's end seams; the launch given right after `KnockExplosion`, checked in states 2/1; `clear_stored_push` while lying and at the get-up; damping removed, outlier clamp only. Not run in game.
+
 ### Claude, 2026-11-14 (knockdown launch and get-up)
 
 - **Patrick (274ad9c in game):** knocked-down NPCs drop straight down with no momentum, and when getting up fly into the air and shake (screenshot: upside down against a wall in a small interior, "Torso Crippled").
