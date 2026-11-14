@@ -4,9 +4,10 @@
 //! weighty combat row ([`crate::gunplay::FIX`]); **not 1:1 with FalloutNV.exe**.
 //!
 //! **Only the game's own content and machinery.** The range's place is chosen from the player's
-//! own FalloutNV.esm ([`crate::range_cells`]: the longest quiet, lit, walkable interior, read with
-//! the plugin reader), unless `[nv-rs Gunplay] sTestRangeCell` names a cell; the next ranked
-//! cells, then the Mojave at Goodsprings ([`LAST_RESORT`]), are the fallbacks ([`candidates`]).
+//! own FalloutNV.esm ([`crate::range_cells`]: the widest, longest clear flat floor of a quiet, lit
+//! interior's navmesh, or of the Mojave's open ground away from every placed actor, read with the
+//! plugin reader), unless `[nv-rs Gunplay] sTestRangeCell` names a cell; the next ranked places,
+//! then the Mojave at Goodsprings ([`last_resort`]), are the fallbacks ([`candidates`]).
 //! Everything is done the way the console does it: the console's own compile-and-run of a line
 //! ([`run_line`], as `MenuConsole::Idle` runs a typed line) for `coc`, `MoveTo`, `AddItem`,
 //! `SetRestrained` and the rest, the game's `PlaceAtMe` worker (`005c4b30`) for the references
@@ -33,12 +34,13 @@
 //! or delete. The range ends with a save loaded (seam `00847fd9`), a new game from the menu
 //! (`007d33ce`) or the return to the main menu (`007d0b17`).
 
+use crate::range_cells::{Place, Spot};
 use crate::range_watch::{self, step};
 use engine::extend::{Owner, SiteSlot};
 use engine::prelude::*;
 use engine::units::fallout_shared::tes::fn_00453dc0;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// The weighty combat row as the owner of its seams (`crate::gunplay::FIX`'s name).
 pub const ROW: Owner = Owner::Row("weighty combat");
@@ -68,14 +70,16 @@ pub const MENU_CALLBACK: u32 = 0x7e06_00b0;
 /// The range's cell when the file names none: `auto`, the best interior of the player's own
 /// FalloutNV.esm ([`crate::range_cells`]).
 pub const DEFAULT_CELL: &str = "auto";
-/// The last resort when no interior can be had: the Mojave's worldspace (`WastelandNV`, whose
+/// The last resort when no place can be had: the Mojave's worldspace (`WastelandNV`, whose
 /// editor id the base game has) at the cell of Goodsprings' streets, a place every game reaches.
 /// Not quiet; only when nothing else starts.
-pub const LAST_RESORT: Target = Target::World {
-    space: "WastelandNV",
-    x: -18,
-    y: 0,
-};
+pub fn last_resort() -> Target {
+    Target::World {
+        space: "WastelandNV".to_string(),
+        x: -18,
+        y: 0,
+    }
+}
 
 static CELL: Mutex<String> = Mutex::new(String::new());
 
@@ -364,7 +368,7 @@ fn note(e: &mut Engine, text: &str) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Interior(String),
-    World { space: &'static str, x: i32, y: i32 },
+    World { space: String, x: i32, y: i32 },
 }
 
 impl Target {
@@ -384,20 +388,50 @@ impl Target {
     }
 }
 
-/// The places tried, in order: the configured cell (unless `auto`), the ranked interiors of the
-/// player's FalloutNV.esm (up to eight), then [`LAST_RESORT`].
-pub fn candidates(configured: &str, ranked: &[String]) -> Vec<Target> {
+/// The places tried, in order: the configured cell (unless `auto`), the ranked places of the
+/// player's FalloutNV.esm (up to eight), then [`last_resort`].
+pub fn candidates(configured: &str, ranked: &[Target]) -> Vec<Target> {
     let mut list = Vec::new();
     if !configured.eq_ignore_ascii_case(DEFAULT_CELL) && valid_cell(configured) {
         list.push(Target::Interior(configured.to_string()));
     }
-    for cell in ranked.iter().take(8) {
-        if !cell.eq_ignore_ascii_case(configured) && valid_cell(cell) {
-            list.push(Target::Interior(cell.clone()));
+    for target in ranked.iter().take(8) {
+        let fine = match target {
+            Target::Interior(cell) => !cell.eq_ignore_ascii_case(configured) && valid_cell(cell),
+            Target::World { space, .. } => valid_cell(space),
+        };
+        if fine && !list.contains(target) {
+            list.push(target.clone());
         }
     }
-    list.push(LAST_RESORT);
+    let last = last_resort();
+    if !list.contains(&last) {
+        list.push(last);
+    }
     list
+}
+
+/// Where a ranked place starts.
+pub fn target_of(spot: &Spot) -> Target {
+    match &spot.place {
+        Place::Interior(cell) => Target::Interior(cell.clone()),
+        Place::Exterior { space, x, y } => Target::World {
+            space: space.clone(),
+            x: *x,
+            y: *y,
+        },
+    }
+}
+
+/// The ranked place started as `name` ([`Target::name`]), with its lane and floor.
+fn spot_named(name: &str) -> Option<Arc<Spot>> {
+    RANKED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()?
+        .iter()
+        .find(|s| s.name() == name)
+        .cloned()
 }
 
 /// Why the range did not start.
@@ -466,7 +500,7 @@ pub fn first_start<C>(
 fn start(e: &mut Engine) {
     start_scan(e);
     let configured = cell();
-    let ranked = ranked_places();
+    let ranked: Vec<Target> = ranked_places().iter().map(|s| target_of(s)).collect();
     let list = candidates(&configured, &ranked);
     eprintln!(
         "Test Range: starting (sTestRangeCell {configured}; tries {})",
@@ -525,8 +559,10 @@ fn start(e: &mut Engine) {
             enter(
                 Phase::WaitingForPlay,
                 &format!(
-                    "started in {}: the player is in the cell {cell:08X} at {:.0}, {:.0}, {:.0}; waiting for play",
+                    "started in {} ({}): the player is in the cell {cell:08X} at {:.0}, {:.0}, {:.0}; waiting for play",
                     target.name(),
+                    spot_named(&target.name())
+                        .map_or_else(|| "the configured cell or the last resort".to_string(), |s| s.why.clone()),
                     at[0],
                     at[1],
                     at[2]
@@ -544,7 +580,7 @@ fn start(e: &mut Engine) {
 
 /// The ranked interiors of the player's FalloutNV.esm, read on a host thread from when the main
 /// menu is made ([`start_scan`]); waited for (up to a minute) when the range starts first.
-static RANKED: Mutex<Option<Vec<String>>> = Mutex::new(None);
+static RANKED: Mutex<Option<Vec<Arc<Spot>>>> = Mutex::new(None);
 static RANKED_READY: std::sync::Condvar = std::sync::Condvar::new();
 static SCAN_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -563,7 +599,10 @@ fn start_scan(e: &Engine) {
     let spawned = std::thread::Builder::new()
         .name("test range cells".into())
         .spawn(move || {
-            let ranked = crate::range_cells::ranked_cells(&path);
+            let ranked = crate::range_cells::ranked_spots(&path)
+                .into_iter()
+                .map(Arc::new)
+                .collect();
             *RANKED.lock().unwrap_or_else(|p| p.into_inner()) = Some(ranked);
             RANKED_READY.notify_all();
         });
@@ -573,7 +612,7 @@ fn start_scan(e: &Engine) {
 }
 
 /// The ranked places, once the reading is done; none when it never started.
-fn ranked_places() -> Vec<String> {
+fn ranked_places() -> Vec<Arc<Spot>> {
     if !SCAN_STARTED.load(Ordering::Relaxed) {
         return Vec::new();
     }
@@ -1030,6 +1069,11 @@ pub fn facing_back(heading: f32) -> f32 {
 
 /// The range's set-up: the weapons container, the ammo, the targets.
 fn setup(e: &mut Engine, player: u32) {
+    // The place's lane, when the range chose it from the plugin: the player at its start.
+    let spot = spot_named(&with_range(|r| r.place.clone())).filter(|s| s.has_lane());
+    if let Some(s) = &spot {
+        place_player(e, s);
+    }
     let forms = all_forms(e);
     let weapons = weapons(e, &forms);
     let mut ammo: Vec<u32> = weapons.iter().filter_map(|&w| ammo_of(e, w)).collect();
@@ -1052,7 +1096,10 @@ fn setup(e: &mut Engine, player: u32) {
             .take(1)
             .collect();
     }
-    let heading = e.vcall(player, HEADING_SLOT, &args![0u32]).f64() as f32;
+    let heading = match &spot {
+        Some(s) => s.lane.heading,
+        None => e.vcall(player, HEADING_SLOT, &args![0u32]).f64() as f32,
+    };
     let mut container = 0;
     if let Some(&base) = container_base.first() {
         let placed = e
@@ -1083,22 +1130,29 @@ fn setup(e: &mut Engine, player: u32) {
     });
     fill_ammo(e);
     step("set-up: the ammo is in the player's inventory");
-    // Down the longest clear line of the room: the player turned to face it.
-    let (best, clear) = best_heading(e, player, heading);
-    if best != heading {
-        run_line(
-            e,
-            &format!(
-                "player.setangle z {:.0}",
+    // Down the place's lane, or else the longest clear line of the room: the player turned to
+    // face it.
+    let best = match &spot {
+        Some(_) => heading,
+        None => {
+            let (best, clear) = best_heading(e, player, heading);
+            if best != heading {
+                run_line(
+                    e,
+                    &format!(
+                        "player.setangle z {:.0}",
+                        best.to_degrees().rem_euclid(360.0)
+                    ),
+                );
+            }
+            step(&format!(
+                "no lane from the plugin for this place: the longest line runs {clear:.0} m clear at {:.0} degrees",
                 best.to_degrees().rem_euclid(360.0)
-            ),
-        );
-    }
-    eprintln!(
-        "Test Range: the lane runs {clear:.0} m clear at {:.0} degrees",
-        best.to_degrees().rem_euclid(360.0)
-    );
-    place_targets(e, player, best);
+            ));
+            best
+        }
+    };
+    place_targets(e, player, best, spot.as_deref());
     eprintln!(
         "Test Range: {} weapons, a lane of targets; Home opens the range menu",
         weapons.len()
@@ -1117,9 +1171,119 @@ fn fill_ammo(e: &mut Engine) {
     }
 }
 
+/// The player at the start of the place's lane, facing down it ([`crate::range_floor::Lane`]).
+fn place_player(e: &mut Engine, spot: &Spot) {
+    let lane = spot.lane;
+    let [x, y, z] = lane.start;
+    let degrees = lane.heading.to_degrees().rem_euclid(360.0);
+    run_line(e, &format!("player.setpos x {x:.0}"));
+    run_line(e, &format!("player.setpos y {y:.0}"));
+    run_line(e, &format!("player.setpos z {:.0}", z + STAND_ABOVE));
+    run_line(e, &format!("player.setangle z {degrees:.0}"));
+    step(&format!(
+        "the player stands at the lane's start ({x:.0}, {y:.0}, {z:.0}) facing {degrees:.0} degrees: {}",
+        spot.why
+    ));
+}
+
+/// How far above the navmesh's floor an actor is set down, in units (it settles onto the floor).
+const STAND_ABOVE: f32 = 16.0;
+/// The least clearance a target's spot needs, in metres ([`crate::range_floor::Floor::at`]: a
+/// square at the navmesh's edge has its own size; inside, a metre more).
+const TARGET_ROOM: f32 = 1.5;
+/// The nudges tried for a target's spot, in order: metres ahead and to the right.
+const NUDGES: [(f32, f32); 11] = [
+    (0.0, 0.0),
+    (0.0, 1.0),
+    (0.0, -1.0),
+    (1.5, 0.0),
+    (-1.5, 0.0),
+    (0.0, 2.0),
+    (0.0, -2.0),
+    (1.5, 1.5),
+    (-1.5, -1.5),
+    (3.0, 0.0),
+    (-3.0, 0.0),
+];
+
+/// How many lanes side by side a floor `width_m` wide takes (5 m apart, 2 m from each side).
+pub fn lane_count(width_m: f32) -> usize {
+    if width_m >= 16.0 {
+        3
+    } else if width_m >= 10.0 {
+        2
+    } else {
+        1
+    }
+}
+
+/// The targets of `lanes` lanes side by side for `clear_m` metres of clear line: distance, a
+/// humanoid or a creature, metres to the side. One lane alternates the kinds a step to each side
+/// ([`lane`]); two are a humanoid lane and a creature lane; three add a second humanoid lane at
+/// every other distance.
+pub fn plan(clear_m: f32, lanes: usize) -> Vec<(f32, bool, f32)> {
+    if lanes <= 1 {
+        return lane(clear_m);
+    }
+    let distances = fit_lane(clear_m);
+    let mut out = Vec::new();
+    let sides: &[f32] = if lanes == 2 {
+        &[-2.5, 2.5]
+    } else {
+        &[-5.0, 0.0, 5.0]
+    };
+    for (i, &metres) in distances.iter().enumerate() {
+        out.push((metres, true, sides[0]));
+        out.push((metres, false, sides[1]));
+        if lanes >= 3 && i % 2 == 1 {
+            out.push((metres, true, sides[2]));
+        }
+    }
+    out
+}
+
+/// A target's spot near (x, y): the first of [`NUDGES`] (along `heading`) that is on the place's
+/// floor with [`TARGET_ROOM`] to spare (when the place has one; its height then) and that `room`
+/// finds free; with the nudge's index. `None`: no spot near.
+pub fn settle(
+    floor: Option<&crate::range_floor::Floor>,
+    at: [f32; 3],
+    heading: f32,
+    mut room: impl FnMut([f32; 3]) -> bool,
+) -> Option<([f32; 3], usize)> {
+    for (k, &(ahead, right)) in NUDGES.iter().enumerate() {
+        let (dx, dy) = offset(heading, ahead, right);
+        let (x, y) = (at[0] + dx, at[1] + dy);
+        let z = match floor {
+            Some(f) => match f.at(x, y) {
+                Some((z, clear)) if clear >= TARGET_ROOM => z,
+                _ => continue,
+            },
+            None => at[2],
+        };
+        if room([x, y, z]) {
+            return Some(([x, y, z], k));
+        }
+    }
+    None
+}
+
+/// Whether an actor fits at the floor point `at`: nothing solid from 2 m above down to its knees,
+/// nor across its chest each way (the game's pick, [`blocked`]).
+fn has_room(e: &mut Engine, at: [f32; 3]) -> bool {
+    let [x, y, z] = at;
+    let half = 40.0;
+    let chest = z + PICK_HEIGHT;
+    !blocked(e, [x, y, z + 150.0], [x, y, z + 20.0])
+        && !blocked(e, [x - half, y, chest], [x + half, y, chest])
+        && !blocked(e, [x, y - half, chest], [x, y + half, chest])
+}
+
 /// A fresh lane of targets in front of the player facing `heading`, fitted to the clear line
-/// there ([`clear_metres`], [`fit_lane`]), passive or hostile as the range is.
-fn place_targets(e: &mut Engine, player: u32, heading: f32) {
+/// there ([`clear_metres`], [`fit_lane`]) and, on a place the range chose, to its lane's length
+/// and width (lanes side by side, [`plan`]); each target set down only where it fits
+/// ([`settle`]); passive or hostile as the range is.
+fn place_targets(e: &mut Engine, player: u32, heading: f32, spot: Option<&Spot>) {
     let forms = all_forms(e);
     let mut humanoids = by_names(e, &forms, NPC, &HUMANOIDS, 4);
     if humanoids.is_empty() {
@@ -1131,17 +1295,40 @@ fn place_targets(e: &mut Engine, player: u32, heading: f32) {
         }
     }
     let creatures = by_names(e, &forms, CREA, &CREATURES, 4);
-    let clear = clear_metres(e, player, heading);
+    let seen = clear_metres(e, player, heading);
+    let (clear, lanes) = match spot {
+        Some(s) => (seen.min(s.lane.length_m), lane_count(s.lane.width_m)),
+        None => (seen, 1),
+    };
     step(&format!(
-        "targets: {} humanoid and {} creature kinds, {clear:.0} m clear",
+        "targets: {} humanoid and {} creature kinds, {clear:.0} m clear ({seen:.0} m by the game's pick), {lanes} lane(s)",
         humanoids.len(),
         creatures.len()
     ));
+    let position = e.vcall(player, POSITION_SLOT, &args![]).u32();
+    let here = if position == 0 {
+        [0.0; 3]
+    } else {
+        [
+            e.mem.f32(position),
+            e.mem.f32(position + 4),
+            e.mem.f32(position + 8),
+        ]
+    };
     let angle = facing_back(heading);
     let hostile = with_range(|r| r.hostile);
     let mut targets = Vec::new();
     let (mut h, mut c) = (0usize, 0usize);
-    for (metres, humanoid, side) in lane(clear) {
+    for (metres, humanoid, side) in plan(clear, lanes) {
+        let (dx, dy) = offset(heading, metres, side);
+        let wanted = [here[0] + dx, here[1] + dy, here[2]];
+        let floor = spot.map(|s| &s.floor);
+        let Some((at, nudge)) = settle(floor, wanted, heading, |p| has_room(e, p)) else {
+            step(&format!(
+                "targets: no room at {metres:.0} m, {side:+.1} m aside (off the floor or in geometry): skipped"
+            ));
+            continue;
+        };
         let base = if humanoid || creatures.is_empty() {
             h += 1;
             humanoids.get((h - 1) % humanoids.len().max(1)).copied()
@@ -1161,12 +1348,19 @@ fn place_targets(e: &mut Engine, player: u32, heading: f32) {
             continue;
         }
         let t = id(e.mem.u32(placed + FORM_ID));
+        let (x, y) = (at[0] - here[0], at[1] - here[1]);
         step(&format!(
-            "targets: {} ({base_id:08X}) placed as {t} at {metres:.0} m, {side:+.1} m aside",
-            name(e, base)
+            "targets: {} ({base_id:08X}) placed as {t} at {metres:.0} m, {side:+.1} m aside{} ({:.0}, {:.0}, {:.0})",
+            name(e, base),
+            if nudge == 0 { String::new() } else { format!(", nudged ({:?})", NUDGES[nudge]) },
+            at[0],
+            at[1],
+            at[2]
         ));
-        let (x, y) = offset(heading, metres, side);
         run_line(e, &format!("{t}.moveto player {x:.0} {y:.0} 0"));
+        if spot.is_some() {
+            run_line(e, &format!("{t}.setpos z {:.0}", at[2] + STAND_ABOVE));
+        }
         run_line(e, &format!("{t}.setangle z {angle:.0}"));
         for line in stance(&t, hostile) {
             run_line(e, &line);
@@ -1381,7 +1575,8 @@ fn act(e: &mut Engine, player: u32, answer: u8) {
                 run_line(e, &format!("{t}.markfordelete"));
             }
             let heading = e.vcall(player, HEADING_SLOT, &args![0u32]).f64() as f32;
-            place_targets(e, player, heading);
+            let spot = spot_named(&with_range(|r| r.place.clone())).filter(|s| s.has_lane());
+            place_targets(e, player, heading, spot.as_deref());
         }
         4 => {
             with_range(|r| *r = Range::default());
@@ -1459,21 +1654,33 @@ mod tests {
     /// for the next, a missing console stops; each failure has a line for the log and the screen.
     #[test]
     fn the_range_tries_its_places_in_order() {
-        let ranked = vec!["BigHall".to_string(), "Hangar".to_string()];
+        let ranked = vec![
+            Target::Interior("BigHall".into()),
+            Target::Interior("Hangar".into()),
+        ];
         let list = candidates("auto", &ranked);
         assert_eq!(
             list,
             [
                 Target::Interior("BigHall".into()),
                 Target::Interior("Hangar".into()),
-                LAST_RESORT
+                last_resort()
             ]
         );
+        // A ranked exterior is tried in its place; the last resort is not tried twice.
+        let desert = Target::World {
+            space: "WastelandNV".into(),
+            x: 20,
+            y: -5,
+        };
+        let with_desert = candidates("auto", &[desert.clone(), last_resort()]);
+        assert_eq!(with_desert, [desert.clone(), last_resort()]);
+        assert_eq!(desert.line(), "cow WastelandNV 20 -5");
         let list = candidates("MyCell", &ranked);
         assert_eq!(list[0], Target::Interior("MyCell".into()));
         assert_eq!(list.len(), 4);
         assert_eq!(candidates("hangar", &ranked).len(), 3, "no place twice");
-        assert_eq!(LAST_RESORT.line(), "cow WastelandNV -18 0");
+        assert_eq!(last_resort().line(), "cow WastelandNV -18 0");
         assert_eq!(list[0].line(), "coc MyCell");
 
         // MyCell is missing, BigHall does not start, Hangar does.
@@ -1513,7 +1720,7 @@ mod tests {
         };
         assert_eq!(
             first_start(&mut g, &list, there, run, started),
-            Ok(LAST_RESORT)
+            Ok(last_resort())
         );
         // No console: stops at once.
         let mut g = Game {
@@ -1632,6 +1839,68 @@ mod tests {
         );
         assert_eq!(at(Phase::Ready), None);
         with_range(|r| *r = Range::default());
+    }
+
+    /// A wide floor takes lanes side by side: a humanoid and a creature lane, then a second
+    /// humanoid lane at every other distance; a narrow one alternates as before.
+    #[test]
+    fn wide_floors_take_lanes_side_by_side() {
+        assert_eq!(lane_count(8.0), 1);
+        assert_eq!(lane_count(12.0), 2);
+        assert_eq!(lane_count(25.0), 3);
+        assert_eq!(plan(105.0, 1), lane(105.0));
+        let two = plan(105.0, 2);
+        assert_eq!(two.len(), 2 * DISTANCES.len());
+        assert!(two
+            .iter()
+            .all(|&(_, humanoid, side)| humanoid == (side < 0.0)));
+        let three = plan(105.0, 3);
+        assert_eq!(three.len(), 2 * DISTANCES.len() + DISTANCES.len() / 2);
+        assert!(three.iter().any(|&(_, _, side)| side == 5.0));
+    }
+
+    /// A target's spot: on the floor with a metre to spare and free by the game's pick, nudged
+    /// sideways or along when not, skipped when nothing near fits.
+    #[test]
+    fn targets_stand_only_where_they_fit() {
+        use crate::range_floor::{Floor, UNITS_PER_METRE as M};
+        // Floor 10 m wide (x 0..10 m), 100 m long, at height 5.
+        let slab = [
+            [
+                [0.0, 0.0, 5.0],
+                [10.0 * M, 0.0, 5.0],
+                [10.0 * M, 100.0 * M, 5.0],
+            ],
+            [
+                [0.0, 0.0, 5.0],
+                [10.0 * M, 100.0 * M, 5.0],
+                [0.0, 100.0 * M, 5.0],
+            ],
+        ];
+        let floor = Floor::of(&slab, 0.0, M).unwrap();
+        let north = 0.0;
+        // In the middle: as asked, the floor's height.
+        let (at, nudge) = settle(Some(&floor), [5.0 * M, 50.0 * M, 0.0], north, |_| true).unwrap();
+        assert_eq!((at, nudge), ([5.0 * M, 50.0 * M, 5.0], 0));
+        // Half a metre from the wall: nudged a metre in.
+        let (at, nudge) = settle(Some(&floor), [9.6 * M, 50.0 * M, 0.0], north, |_| true).unwrap();
+        assert_eq!(nudge, 2);
+        assert!((at[0] / M - 8.6).abs() < 1e-3, "{at:?}");
+        // Something solid where asked (the pick): the next nudge that is free.
+        let (_, nudge) = settle(Some(&floor), [5.0 * M, 50.0 * M, 0.0], north, |p| {
+            p[0] != 5.0 * M
+        })
+        .unwrap();
+        assert_eq!(nudge, 1);
+        // Off the floor: none.
+        assert_eq!(
+            settle(Some(&floor), [40.0 * M, 50.0 * M, 0.0], north, |_| true),
+            None
+        );
+        // No floor known: the pick alone, the height as given.
+        let (at, _) = settle(None, [1.0, 2.0, 3.0], north, |_| true).unwrap();
+        assert_eq!(at, [1.0, 2.0, 3.0]);
+        assert_eq!(settle(None, [1.0, 2.0, 3.0], north, |_| false), None);
     }
 
     /// The first builds' `QASmoke` counts as `auto`; other names stay as given.

@@ -42,6 +42,7 @@ pub mod pickpocket_chance;
 pub mod player_move;
 pub mod quick_loot;
 pub mod range_cells;
+mod range_floor;
 mod range_watch;
 pub mod save_out;
 pub mod test_range;
