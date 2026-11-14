@@ -47,7 +47,7 @@ use engine::units::fallout_shared::run_005b4550::fn_005b4630;
 use engine::units::fallout_shared::tes::fn_00453dc0;
 use engine::units::fallout_shared::tescontainer::fn_004821a0;
 use engine::units::fallout_shared::tesscriptfunctions::ScriptArgs;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The weighty combat row as the owner of its seams (`crate::gunplay::FIX`'s name).
@@ -67,6 +67,17 @@ pub const TO_MAIN_MENU: SiteSlot = SiteSlot::new(ROW, 0x007d_0b17);
 pub const SAVE_GAME: u32 = 0x0085_03b0;
 pub const QUICK_SAVE: u32 = 0x0085_09a0;
 pub const QUEUED_SAVES: u32 = 0x0085_1d90;
+/// `BGSSaveLoadManager::LoadGame` (`thiscall`: name, device, statistics, quiet; answers whether
+/// it loaded), the manager, the game's `sLocalSavePath` (its text at `+4`) and the folder the
+/// save paths start with (`ConstructSavegamePath`'s base, `01202fa0`).
+const LOAD_GAME: u32 = 0x0085_0760;
+const SAVE_MANAGER: u32 = 0x011d_e134;
+const SAVE_PATH_SETTING: u32 = 0x011c_3f74;
+const SAVE_BASE: u32 = 0x0120_2fa0;
+/// `CharacterProgression::RewardExperience` and `BeginLevelUp`: no XP and no level-up in a range
+/// game (Patrick: slow level-ups after the set-up).
+pub const REWARD_XP: u32 = 0x008d_5100;
+pub const BEGIN_LEVEL_UP: u32 = 0x008d_5210;
 /// The save manager's queue bytes: autosave, forced save, system save.
 const QUEUE_BYTES: [u32; 3] = [0x0f, 0x10, 0x11];
 
@@ -186,7 +197,23 @@ struct Range {
     hostile: bool,
     /// Every ammo the loaded weapons use (form ids).
     ammo: Vec<u32>,
+    /// Started from the prepared save ([`crate::range_save`]): no set-up.
+    resumed: bool,
 }
+
+/// The prepared save's cache for this load order: its root and its folder, when the run has one
+/// ([`crate::range_save::cache_root`]).
+static CACHE: Mutex<Option<(std::path::PathBuf, std::path::PathBuf)>> = Mutex::new(None);
+/// The prepared save is being loaded (a load's seams do not end the range then), or made (the
+/// range's own save is let through).
+static RESUMING: AtomicBool = AtomicBool::new(false);
+static SAVING: AtomicBool = AtomicBool::new(false);
+/// Frames of play after the set-up before the prepared save is made (0: none due), and the ask
+/// for it at the main loop's next pass.
+static SAVE_COUNTDOWN: AtomicU32 = AtomicU32::new(0);
+static SAVE_ASKED: AtomicBool = AtomicBool::new(false);
+/// Frames after the set-up before the save: the placed references settle.
+const SAVE_AFTER_FRAMES: u32 = 90;
 
 static RANGE: Mutex<Option<Range>> = Mutex::new(None);
 /// The range menu's answer, until the next frame of play acts on it (`0xff`: none).
@@ -241,7 +268,15 @@ static START_ASKED: AtomicBool = AtomicBool::new(false);
 
 /// The range ends (a save loads, a new game, the main menu): nothing of it is kept.
 fn end(e: &mut Engine, _: &[u32]) -> Option<u32> {
+    if RESUMING.load(Ordering::Relaxed) {
+        // The prepared save's own load: the range goes on.
+        if phase() == Phase::Starting {
+            enter(Phase::Loading, "the prepared save is loading");
+        }
+        return None;
+    }
     range_watch::end_trace(e);
+    SAVE_COUNTDOWN.store(0, Ordering::Relaxed);
     if phase() != Phase::Off {
         step("the range ends (a load, a new game or the main menu)");
     }
@@ -270,7 +305,34 @@ pub fn install(e: &mut Engine) {
             step("the main loop's pass: starting");
             start(e);
         }
+        if SAVE_ASKED.swap(false, Ordering::Relaxed) && phase() == Phase::Ready {
+            save_prepared(e);
+        }
         None
+    });
+    // No XP and no level-up in a range game (the set-up's items and the targets' deaths gave
+    // slow level-ups): nothing of the player's progression changes there.
+    e.register(REWARD_XP, |e, a| {
+        if active() {
+            note_hidden("XP");
+            return Ret::default();
+        }
+        let (_, reward) = engine::entry!(
+            0x008d5100,
+            engine::units::fallout_ai::falloutcharacterprogression::character_progression_reward_experience(Ptr, i32)
+        );
+        reward(e, a)
+    });
+    e.register(BEGIN_LEVEL_UP, |e, a| {
+        if active() {
+            note_hidden("a level-up");
+            return Ret::default();
+        }
+        let (_, begin) = engine::entry!(
+            0x008d5210,
+            engine::units::fallout_ai::falloutcharacterprogression::character_progression_begin_level_up(Ptr)
+        );
+        begin(e, a)
     });
     e.register(MENU_CALLBACK, |e, _| {
         let answer = e.call(GET_MESSAGE_MENU_RESULT, &[]).u8();
@@ -278,7 +340,7 @@ pub fn install(e: &mut Engine) {
         Ret::default()
     });
     e.register(SAVE_GAME, |e, a| {
-        if active() {
+        if active() && !SAVING.load(Ordering::Relaxed) {
             refused(e, a[1] != 0 && is_manual(e, a[1]));
             return Ret::default();
         }
@@ -611,6 +673,9 @@ pub fn first_start<C>(
 /// start is said in the log and on the screen, with the menu's list enabled again.
 fn start(e: &mut Engine) {
     start_scan(e);
+    if resume(e) {
+        return;
+    }
     let configured = cell();
     let ranked: Vec<Target> = ranked_places().iter().map(|s| target_of(s)).collect();
     let list = candidates(&configured, &ranked);
@@ -687,6 +752,170 @@ fn start(e: &mut Engine) {
             with_range(|r| *r = Range::default());
             fail_on_menu(e, &text);
         }
+    }
+}
+
+/// The prepared save's path in the run's files (`<Documents>\My Games\FalloutNV\nv-rs Test
+/// Range\TestRange.<extension>`, the game's save folder base and the range's folder).
+fn virtual_path(e: &Engine, extension: &str) -> Vec<u8> {
+    let mut path = e.mem.cstr(SAVE_BASE).to_vec();
+    path.extend_from_slice(crate::range_save::VIRTUAL_FOLDER.as_bytes());
+    path.extend_from_slice(format!("{}.{extension}", crate::range_save::SAVE_NAME).as_bytes());
+    engine_platform::files::full_path(e, &path)
+}
+
+/// `f` with the game's `sLocalSavePath` at the range's folder ([`crate::range_save`]), put back
+/// afterwards.
+fn with_save_path<R>(e: &mut Engine, f: impl FnOnce(&mut Engine) -> R) -> R {
+    static TEXT: AtomicU32 = AtomicU32::new(0);
+    let mut text = TEXT.load(Ordering::Relaxed);
+    if text == 0 {
+        text = crate::gunplay::heap_text(e, crate::range_save::VIRTUAL_FOLDER, 32);
+        TEXT.store(text, Ordering::Relaxed);
+    }
+    let slot = SAVE_PATH_SETTING + 4;
+    let was = e.mem.u32(slot);
+    if text != 0 {
+        e.mem.set_u32(slot, text);
+    }
+    let r = f(e);
+    e.mem.set_u32(slot, was);
+    r
+}
+
+/// The save's name on the game's heap (made once).
+fn save_name(e: &mut Engine) -> u32 {
+    static NAME: AtomicU32 = AtomicU32::new(0);
+    let mut name = NAME.load(Ordering::Relaxed);
+    if name == 0 {
+        name = crate::gunplay::heap_text(e, crate::range_save::SAVE_NAME, 16);
+        NAME.store(name, Ordering::Relaxed);
+    }
+    name
+}
+
+/// The start from the prepared save, when this load order has one ([`crate::range_save`]): its
+/// files put into the run's own, loaded as the main menu's Continue loads a save, and the range
+/// waiting for play with what it kept. False (and the set-up's start follows) when there is
+/// none, it was asked to be made again, or it does not load.
+fn resume(e: &mut Engine) -> bool {
+    use crate::range_save as cache;
+    let Some(root) = cache::cache_root() else {
+        *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        step("no prepared save outside a play run (no NV_SETTINGS): setting up");
+        return false;
+    };
+    let plugins = cache::plugin_facts(&crate::cell_offsets::loaded_plugin_paths(e));
+    let key = cache::fingerprint(&plugins, &cell());
+    let dir = root.join(&key);
+    *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = Some((root, dir.clone()));
+    if cache::rebuild_asked() {
+        let _ = std::fs::remove_dir_all(&dir);
+        step("NV_TEST_RANGE_REBUILD=1: the prepared save is made again");
+        return false;
+    }
+    let Some(prepared) = cache::read(&dir) else {
+        step(&format!(
+            "no prepared save for this load order ({} plugins, {key}): setting up, then saving it",
+            plugins.len()
+        ));
+        return false;
+    };
+    let fos = virtual_path(e, "fos");
+    engine_platform::files::write_whole(e, &fos, prepared.save.clone());
+    if let Some(bytes) = &prepared.cosave {
+        let nvse = virtual_path(e, "nvse");
+        engine_platform::files::write_whole(e, &nvse, bytes.clone());
+    }
+    let kept = prepared.kept.clone();
+    with_range(|r| {
+        *r = Range {
+            place: kept.place.clone(),
+            container: kept.container,
+            targets: kept.targets.clone(),
+            ammo: kept.ammo.clone(),
+            resumed: true,
+            ..Range::default()
+        }
+    });
+    range_watch::watch(watch_state);
+    enter(
+        Phase::Starting,
+        &format!(
+            "loading the prepared save ({key}, {} bytes, {})",
+            prepared.save.len(),
+            kept.place
+        ),
+    );
+    let manager = e.global::<u32>(SAVE_MANAGER);
+    let name = save_name(e);
+    RESUMING.store(true, Ordering::Relaxed);
+    let loaded = manager != 0
+        && name != 0
+        && with_save_path(e, |e| {
+            e.call(LOAD_GAME, &args![manager, name, 0xffff_ffffu32, 0u32, 1u32])
+                .bool()
+        });
+    RESUMING.store(false, Ordering::Relaxed);
+    if loaded && active() {
+        enter(
+            Phase::WaitingForPlay,
+            "the prepared save loaded: waiting for play",
+        );
+        return true;
+    }
+    step("the prepared save did not load: it is made again");
+    let _ = std::fs::remove_dir_all(&dir);
+    with_range(|r| *r = Range::default());
+    false
+}
+
+/// The prepared save made once the set-up has settled ([`SAVE_AFTER_FRAMES`]): saved under the
+/// range's folder of the run's files, then copied into this load order's cache.
+fn save_prepared(e: &mut Engine) {
+    use crate::range_save as cache;
+    let Some((root, dir)) = CACHE.lock().unwrap_or_else(|p| p.into_inner()).clone() else {
+        return;
+    };
+    if RUNNING.load(Ordering::Relaxed) {
+        SAVE_COUNTDOWN.store(30, Ordering::Relaxed);
+        return;
+    }
+    let manager = e.global::<u32>(SAVE_MANAGER);
+    let name = save_name(e);
+    if manager == 0 || name == 0 {
+        return;
+    }
+    step("saving the prepared range save");
+    SAVING.store(true, Ordering::Relaxed);
+    with_save_path(e, |e| {
+        e.call(SAVE_GAME, &args![manager, name, 0xffff_ffffu32, 0u32]);
+    });
+    SAVING.store(false, Ordering::Relaxed);
+    let fos = virtual_path(e, "fos");
+    let Some(save) = engine_platform::files::read_whole(e, &fos).filter(|b| !b.is_empty()) else {
+        step("the prepared save was not written: the next start sets up again");
+        return;
+    };
+    let nvse = virtual_path(e, "nvse");
+    let cosave = engine_platform::files::read_whole(e, &nvse);
+    let kept = with_range(|r| cache::Kept {
+        place: r.place.clone(),
+        container: r.container,
+        targets: r.targets.clone(),
+        ammo: r.ammo.clone(),
+    });
+    let prepared = cache::Prepared { save, cosave, kept };
+    match cache::write(&root, &dir, &prepared) {
+        Ok(()) => step(&format!(
+            "the prepared save is kept in {} ({} bytes): later starts load it",
+            dir.display(),
+            prepared.save.len()
+        )),
+        Err(err) => step(&format!(
+            "the prepared save could not be kept in {}: {err}",
+            dir.display()
+        )),
     }
 }
 
@@ -816,7 +1045,16 @@ pub fn frame(e: &mut Engine, player: u32) {
                         e.mem.u32(cell + FORM_ID)
                     ),
                 );
-                setup(e, player);
+                if with_range(|r| r.resumed) {
+                    step("the prepared save is in play: nothing to give again");
+                    eprintln!("Test Range: from the prepared save; Home opens the range menu");
+                    note(e, "Test Range: press Home for the range menu.");
+                } else {
+                    setup(e, player);
+                    if CACHE.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
+                        SAVE_COUNTDOWN.store(SAVE_AFTER_FRAMES, Ordering::Relaxed);
+                    }
+                }
             } else if next == Wait::TimeOut {
                 time_out(e);
             }
@@ -831,6 +1069,13 @@ pub fn frame(e: &mut Engine, player: u32) {
             return;
         }
         _ => return,
+    }
+    let due = SAVE_COUNTDOWN.load(Ordering::Relaxed);
+    if due > 0 {
+        SAVE_COUNTDOWN.store(due - 1, Ordering::Relaxed);
+        if due == 1 {
+            SAVE_ASKED.store(true, Ordering::Relaxed);
+        }
     }
     if LIMB_FRAMES.fetch_add(1, Ordering::Relaxed) % LIMB_EVERY == LIMB_EVERY - 1 {
         heal_limbs(e);
@@ -1720,7 +1965,7 @@ pub fn stance(target: &str, hostile: bool) -> Vec<String> {
 }
 
 /// The range menu's buttons, in order.
-pub fn buttons(hostile: bool) -> [&'static str; 6] {
+pub fn buttons(hostile: bool) -> [&'static str; 7] {
     [
         "Weapons",
         "Fill Ammo",
@@ -1730,6 +1975,7 @@ pub fn buttons(hostile: bool) -> [&'static str; 6] {
             "Make Targets Hostile"
         },
         "Respawn Targets",
+        "Rebuild Saved Range",
         "Exit to Main Menu",
         "Close",
     ]
@@ -1805,6 +2051,19 @@ fn act(e: &mut Engine, player: u32, answer: u8) {
             place_targets(e, player, heading, spot.as_deref());
         }
         4 => {
+            let dir = CACHE.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            let removed = dir.is_some_and(|(_, d)| std::fs::remove_dir_all(d).is_ok());
+            step(&format!(
+                "the range menu: rebuild the saved range ({})",
+                if removed { "removed" } else { "there was none" }
+            ));
+            SAVE_COUNTDOWN.store(0, Ordering::Relaxed);
+            note(
+                e,
+                "The saved range is made again at the next Test Range start.",
+            );
+        }
+        5 => {
             with_range(|r| *r = Range::default());
             e.call(CHOOSE_MAIN_MENU, &[]);
         }

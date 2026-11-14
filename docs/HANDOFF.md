@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (Test Range prepared save)
+
+- **Patrick:** giving every item at each Test Range start froze the game for about a minute, then slow level-ups. Wanted: a prepared save with god mode, carry weight, every item (all plugins, WMX mods included) at the range's spot, no tutorials or pop-ups; made once per load order, in a folder apart from the save profiles, loaded directly afterwards; never touching his save folders; out of git and the package.
+- **Now (`range_save.rs`, `test_range.rs`):** `start` first tries `resume`: fingerprint (plugins' names, order, sizes, times; `sTestRangeCell`; `GRANT_VERSION`) -> `userdata\testrange\<fp>\`; the cached `TestRange.fos`/`.nvse` are put into the virtual disk under `nv-rs Test Range\` (`write_whole`), `sLocalSavePath` (`011c3f74` +4) swapped for the `LoadGame` (`00850760`) call, the load's `PRE_LOAD` seam keeps the range (`RESUMING`), then `WaitingForPlay` -> `Ready` without set-up (container, targets, ammo from `range.txt`). Without a cache: the old set-up, then 90 frames later `save_prepared` at the `TICK` seam (`SaveGame` let through by `SAVING`) and the bytes copied out to the cache. `save_out::is_save` leaves `\nv-rs test range\` out. XP (`008d5100`) and level-ups (`008d5210`) off in range games. Range menu "Rebuild Saved Range"; `NV_TEST_RANGE_REBUILD=1`. Not run in game: whether `LoadGame` from the main menu's tick loads as Continue does, and whether the save made at that moment is whole, are the open questions (a failed load deletes the cache and sets up afresh).
+
 ### Claude, 2026-11-14 (knocked-down bodies flying off and shaking)
 
 - **Patrick:** knockdowns work (f19d62e) but some knocked-down enemies fly off or shake uncontrollably.

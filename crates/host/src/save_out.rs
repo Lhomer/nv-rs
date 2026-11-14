@@ -223,9 +223,13 @@ fn prefs_file() -> Option<&'static Path> {
     .as_deref()
 }
 
-/// A save or its script extender co-save (`.fos`, `.nvse`, ADR-0016 §10).
+/// A save or its script extender co-save (`.fos`, `.nvse`, ADR-0016 §10), never the Test Range's
+/// prepared save in its own folder ([`crate::range_save`]), which stays out of the player's saves.
 fn is_save(key: &[u8]) -> bool {
-    key.ends_with(b".fos") || key.ends_with(b".nvse")
+    (key.ends_with(b".fos") || key.ends_with(b".nvse"))
+        && !key
+            .windows(crate::range_save::VIRTUAL_KEY.len())
+            .any(|w| w == crate::range_save::VIRTUAL_KEY)
 }
 
 /// The game's `FalloutPrefs.ini` (what `NV_PREFS_OUT` copies).
@@ -899,6 +903,18 @@ mod tests {
         );
         assert_eq!(std::fs::read(dir.join("gone.fos")).unwrap(), b"kept");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Test Range's prepared save is never copied into the player's saves.
+    #[test]
+    fn the_test_range_save_is_left_out() {
+        assert!(is_save(br"c:\docs\my games\falloutnv\saves\a.fos"));
+        assert!(!is_save(
+            br"c:\docs\my games\falloutnv\nv-rs test range\testrange.fos"
+        ));
+        assert!(!is_save(
+            br"c:\docs\my games\falloutnv\nv-rs test range\testrange.nvse"
+        ));
     }
 
     /// A copy an earlier run's kill cut short leaves `<save>.part`: removed at the next start,

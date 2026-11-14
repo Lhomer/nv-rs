@@ -437,6 +437,7 @@ Code: `crates/host/src/test_range.rs`, part of the weighty combat row (on with
    | Fill Ammo | Tops every ammo type back up to 500. |
    | Make Targets Hostile / Passive | Passive targets stand still and take hits (`SetRestrained 1`, aggression 0). Hostile ones fight (`SetRestrained 0`, aggression 2, `StartCombat player`). |
    | Respawn Targets | Removes the old targets, dead or alive, and lays a fresh lane down the line you face now. Face the longest open line of the room first. |
+   | Rebuild Saved Range | Deletes this load order's prepared save (item 9); the next start sets the range up and saves it again. |
    | Exit to Main Menu | The game's own return to the title (`StartMenu::ChooseMainMenu`). |
    | Close | Closes the menu. |
 
@@ -462,7 +463,33 @@ Code: `crates/host/src/test_range.rs`, part of the weighty combat row (on with
      `ShowTutorialMenu` command's and the menus' own). The save's tutorial state is untouched
      (the routine that writes it reads the real bits).
 8. **Saving is off** in the range. A manual save or quick save shows "Saving is off in the Test
-   Range"; autosaves are dropped silently.
+   Range"; autosaves are dropped silently. No XP and no level-up either
+   (`CharacterProgression::RewardExperience`, `008d5100`, and `BeginLevelUp`, `008d5210`, do
+   nothing in a range game): the set-up and the targets' deaths gave slow level-ups.
+9. **The prepared save** (Patrick, 2026-11-14: giving everything at each start froze the game for
+   about a minute; `crates/host/src/range_save.rs`). The first start of a load order sets the
+   range up as above, then, 90 frames later, saves it once (the range's own save, let through)
+   and keeps it; every later start with the same load order loads it (the main menu's Continue
+   way, `BGSSaveLoadManager::LoadGame`, `00850760`) and gives nothing again: god mode, the
+   inventory, the targets and the container are in the save, and the range's hooks hold as
+   before.
+   - Kept in `userdata\testrange\<fingerprint>\` (`TestRange.fos`, `TestRange.nvse` when the
+     script extender wrote one, `range.txt`: the place, container, targets, ammo), beside the
+     launcher's `settings.ini`; `userdata\` is in `.gitignore`, and the play package copies a
+     fixed list and refuses a `.fos`. Not in a save profile: Play and Play with mods each get their
+     own entry (up to 4 load orders kept). Outside a play run (no `NV_SETTINGS`) nothing is cached.
+   - In the game it is written and read in the virtual `<Documents>\My Games\FalloutNV\nv-rs Test
+     Range\` (`sLocalSavePath`, `011c3f74`, points there only for that save and that load), which
+     stays in the run's memory: the save copy-out (`save_out`) leaves that folder out, and the
+     game's save list never looks in it. The player's save folders are neither read nor written.
+   - The fingerprint: the loaded plugins (names, order, sizes, modified times), `sTestRangeCell`
+     and the set-up's version (`range_save::GRANT_VERSION`).
+   - **Made again** when any of those change, after the range menu's "Rebuild Saved Range", with
+     `NV_TEST_RANGE_REBUILD=1` for a run, or when `userdata\testrange\` is deleted; and when the
+     kept save fails to load (it is deleted and the range is set up afresh).
+   - The log: `Test Range: no prepared save for this load order ...`, `saving the prepared range
+     save`, `the prepared save is kept in ...`, `loading the prepared save ...`, `the prepared
+     save is in play: nothing to give again`.
 
 If the range cannot start, the main menu shows why in a message box and the game's log
 (`userdata\logs\game-<date-time>.log`) has a line starting `Test Range:`:
