@@ -7,6 +7,10 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (merge #564, #566, #565)
+
+- **Merged** slaterain/main's 8183170 (#564), 3d25567 (#566), 2cdcaaf (#565) as d3fe1765: one conflict, `host/src/fixes.rs` `Choice` (the fork's gunplay/movement/Test Range fields and upstream's `draw_poison`, both kept); #566's drawing-thread files as upstream's; `DEPENDENCY-LOCK.sha256` refreshed (Cargo.lock identical to upstream's). Tests: host (3 known `cell_offsets`), engine-fallout-ai 6223, jip 498, nvse (its math bit-for-bit test, as before), engine-core seams, repo_hygiene. The hit force (6f0b5c01) builds on it unchanged: JIP's `PushActorNoRagdoll` (#565) pushes living actors without a ragdoll, so ragdolls stay on the game's kill impulse and knock-down; no JIP world hook overlaps a weighty combat address.
+
 ### Claude, 2026-11-14 (ragdoll hit force)
 
 - **Patrick:** dying or knocked-down bodies carry the hit's momentum (guns by damage per projectile and pellets along the path, blasts radial with falloff, melee by weight, reach, Strength, skill, power attacks along the swing), less the target's DT, clamped, a global Hit Force multiplier on Settings > Gameplay that persists; no slow motion, kill cams off; a hook for a later leg-loss fall.

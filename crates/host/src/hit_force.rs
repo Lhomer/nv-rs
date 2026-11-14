@@ -31,6 +31,13 @@
 //!
 //! **For a later leg-loss fall** ([`push_body`]): any event with a hit can push the body through
 //! the same path (the strength computed the same way, applied by the game's kill impulse).
+//!
+//! **Upstream's actor push** (#565, `crates/jip/src/world_push.rs`): JIP's `PushActorNoRagdoll`
+//! moves a *living* actor through its character controller (its velocity modifier, kept by the
+//! ApplyActorVelocity hook) without a ragdoll. A dead or knocked-down body is a ragdoll, which the
+//! game pushes through the kill impulse and the blast's knock-down used here; JIP's push is the
+//! one to reuse for a hit that only staggers a living actor, and none of its world hooks sits on an
+//! address this registers (they are seams inside the translations these wrappers call).
 
 use crate::gunplay::WeaponStats;
 use engine::prelude::*;
