@@ -44,7 +44,11 @@ Since 2026-11-14 every light list the world draw walks reads the frame's copy to
 their walks and counts, the tall grass's and lighting 3.0's light set-ups, the water's lights, the accumulators'
 shadow scene nodes), the pass lights' clip-plane caches are the draw's own state, and the render-state cache's last
 two slots the skinned and particle draws reached as translations are typed: groundwork for the drawing thread, no
-change a player sees.
+change a player sees. Then the drawing thread's hand-off itself (the frame's copy cut on main, handed to another
+thread, drawn there and joined back) is in, and on the recorded route (Doc's house and the Goodsprings street) the
+world draw's first half reads the frame only through its copy: the particle systems' arrays, the SpeedTree branches'
+set-up, the shadow light shader's fog and light rows and the toggles' colour were still reading it in place. Every frame
+still draws on main by default.
 The update half (what main runs besides drawing) began on 2026-11-10 with `scene`: the scene graph's
 downward update pass across geometries, fade nodes and particle systems, and the skinned bound, on once proven
 identical (differential tests, the recorded run byte-identical with it off); not a speed change by itself.
@@ -74,7 +78,11 @@ its run-time compiler for the old script syntax and its new script language (scr
 compiled to the same bytes as xNVSE writes them (byte tests from its source's rules, read back by its decompiler),
 `CompileScript` and the function files, the documentation dumps and the console's help listing; its
 compiled-script cache file is left out as a speed cache only. JIP LN NVSE's commands are in progress (README's
-system table has the counts).
+system table has the counts; batch 10 of 2026-11-14 adds the maths, utility, load screen, terminal, cell,
+radio, reference and game data commands); its engine hooks (step 3.5) are built in at their seams: the UI, actor
+and AI hooks, and since 2026-11-14 the world hooks (step 3.5c), switched on only by its commands and only once JIP
+answers "installed" (left for later: `CCCSetEquipped` with its `GetCannotWear` patch, `ToggleImmortalMode`
+with its hit patches in step 3.9).
 
 An interim Windows preview (maintainer, 2026-11-06) can be built with `scripts/package-playtest.ps1`:
 a ZIP a player can run with no build, labelled a preview, wgpu remaining the big release. It has only
