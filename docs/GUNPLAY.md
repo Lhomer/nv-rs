@@ -153,6 +153,50 @@ kill camera untouched.
 | Skill factor | 0.8 + skill / 250 |
 | `MAX_MOMENTUM` | 160 |
 
+### Knockdowns of living actors (`crates/host/src/knockdown.rs`)
+
+Patrick, 2026-11-14: Skyrim-style knockdowns, on the hit force. Never the player; companions only
+with `bKnockdownCompanions=1`.
+
+- **When:** over `Actor::HitMe` (`0089a760`), after the game applied the hit, for a living
+  character not already knocked down: the hit's momentum as the hit force works it out (damage
+  less the target's damage threshold, projectiles, weight, reach, Strength, skill, power attack).
+  Blasts are left to the game, which knocks down from them itself (scaled by `iHitForce`).
+- **Resistance**, in the same damage points, x the actor's scale squared x
+  `iKnockdownThreshold` %: human 45, super mutant or nightkin (by race name) 150; creatures by
+  type: animal 30, mutated animal 60, mutated insect 50, abomination (deathclaws) 200, super
+  mutant 150, feral ghoul 35, robot 120, giant 400.
+- **Knockdown** (momentum at or past the resistance): the game's own blast knock-down
+  (`MiddleHighProcess::KnockExplosion`, `0091fee0`): the actor leaves its furniture, goes into its
+  ragdoll and gets the game's push from a point 40 units behind the impact along the hit's
+  direction (the hit data's impact point and direction; for a swing without them, from the
+  attacker through the chest), so the part hit is pushed hardest and the body spins or flies from
+  there; strength = momentum x 3 x `iHitForce` %, between 30 and 600. The game gets it up again
+  through its get-up idle (`UpdateKnockState`).
+- **Stagger** (at or past 40 % of the resistance): JIP's push without a ragdoll (#565,
+  `jip::push_living_actor`, a new public entry beside `PushActorNoRagdoll`): momentum x 2, at
+  most 200, along the hit.
+- **Falls:** the game's fall damage runs from the character controller, which a ragdoll does not
+  use, so each knocked-down actor is followed (its highest point) until it is down, getting up or
+  12 s have passed; a drop past `fJumpFallHeightMin` takes the game's formula
+  (`(drop - min)^exponent x mult`) through `Actor` slot `0x338` with the attacker (a kill is the
+  attacker's: the player's), and each leg takes the game's landing roll
+  (`iJumpFallLimbDamageChance`, `fJumpFallLimbDamageMult`, slot `0x3ac`).
+- **For a later leg-loss fall:** `knockdown::knock_down(actor, attacker, point, direction,
+  momentum)`.
+- No slow motion; the kill camera is not involved.
+
+| Constant | Value |
+| --- | --- |
+| Human / super mutant | 45 / 150 |
+| Creature types 0-7 | 30, 60, 50, 200, 150, 35, 120, 400 |
+| Size | x scale^2 (scale 0.25 to 4) |
+| Stagger share | 0.4 |
+| Launch force | momentum x 3 x Hit Force %, 30 to 600 |
+| Stagger force | momentum x 2, at most 200 |
+| Push origin behind the impact | 40 units |
+| Fall followed for | 12 s |
+
 ### Tuning
 
 `[nv-rs Gunplay]` in Fallout.ini is read in a launcher's play run. The `NV_GUNPLAY_*` variables
@@ -169,6 +213,9 @@ line; a bad variable stops the start.
 | `iMeleeReach` | `NV_GUNPLAY_MELEE_REACH` | 115 | 50-200 |
 | `iImpulse` | `NV_GUNPLAY_IMPULSE` | 150 | 0-500 |
 | `iHitForce` | `NV_GUNPLAY_HIT_FORCE` | 100 | 0-300 (0 = the game's own push; Settings > Gameplay "Hit Force") |
+| `bKnockdowns` | `NV_GUNPLAY_KNOCKDOWNS` | 1 | 0/1 (Settings > Gameplay "Knockdowns") |
+| `iKnockdownThreshold` | `NV_GUNPLAY_KNOCKDOWN_THRESHOLD` | 100 | 25-400 (Settings > Gameplay "Knockdown Threshold") |
+| `bKnockdownCompanions` | `NV_GUNPLAY_KNOCKDOWN_COMPANIONS` | 0 | 0/1 |
 | `iDismemberForce` | `NV_GUNPLAY_DISMEMBER_FORCE` | 45 | 0-1000 (0 = only the game's chance) |
 | `iExplodeForce` | `NV_GUNPLAY_EXPLODE_FORCE` | 110 | 0-1000 (0 = only the game's chance) |
 

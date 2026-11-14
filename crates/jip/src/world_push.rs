@@ -215,6 +215,23 @@ pub(crate) fn push_actor_no_ragdoll(e: &mut Engine, w: &[u32]) -> Ret {
     handled(true)
 }
 
+/// `PushActorNoRagdoll`'s push for a caller outside the script command (nv-rs's own: the
+/// weighty combat row's stagger, `crates/host/src/knockdown.rs`): `actor` pushed by `force` at
+/// `angle` (degrees, the game's heading), the force adjusted as the command adjusts it unless
+/// `adjust` is false; the ApplyActorVelocity hook switched on as the command switches it.
+pub fn push_living_actor(e: &mut Engine, actor: u32, force: f32, angle: f32, adjust: bool) {
+    if actor == 0 {
+        return;
+    }
+    e.set_hook(Hook::ApplyActorVelocity, true);
+    let force = if adjust {
+        adjust_push_force(e, actor, force)
+    } else {
+        force
+    };
+    push_actor(e, actor, force, angle, 0);
+}
+
 #[cfg(test)]
 #[path = "world_push_tests.rs"]
 mod tests;

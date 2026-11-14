@@ -68,6 +68,7 @@ pub mod ui_hooks;
 pub mod utility;
 pub mod world_hooks;
 mod world_push;
+pub use world_push::push_living_actor;
 
 use engine_core::prelude::*;
 

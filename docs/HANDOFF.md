@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (knockdowns of living actors)
+
+- **Patrick:** Skyrim-style knockdowns on the hit force: past the target's resistance (mass/size/race: deathclaws, super mutants, robots) a living actor goes into ragdoll launched from the hit point along the hit; moderate hits stagger; real fall damage and leg crippling with the kill credited to the player; gets up normally; never the player; companions only by setting; Gameplay rows Knockdowns and Knockdown Threshold; a hook for the leg-loss fall.
+- **Now (`crates/host/src/knockdown.rs`):** over `Actor::HitMe` (`0089a760`, main-thread hits; queued ones on their return): `hit_force::momentum` vs `resistance` (body by creature type `0059f3a0` or NPC race name, x scale^2, x threshold%); knockdown through `KnockExplosion` (`0091fee0`, called directly, not through the hit-force wrapper) from 40 units behind the impact; stagger through `jip::push_living_actor` (new pub entry in `crates/jip/src/world_push.rs`); the fall followed per frame from the player's look hook and damaged via slot `0x338` with the attacker and the legs via `0x3ac` with the game's settings. Rows Knockdowns and Knockdown Threshold on the Gameplay page (`7e060180`, `7e060190`; meter 25-400); `bKnockdownCompanions` file-only. Constants in docs/GUNPLAY.md. Not run in game; whether the reference position follows the ragdoll during the fall (the drop's measure) is not known: if not, the drop is measured at the landing only (the start height to where it gets up).
+
 ### Claude, 2026-11-14 (merge #564, #566, #565)
 
 - **Merged** slaterain/main's 8183170 (#564), 3d25567 (#566), 2cdcaaf (#565) as d3fe1765: one conflict, `host/src/fixes.rs` `Choice` (the fork's gunplay/movement/Test Range fields and upstream's `draw_poison`, both kept); #566's drawing-thread files as upstream's; `DEPENDENCY-LOCK.sha256` refreshed (Cargo.lock identical to upstream's). Tests: host (3 known `cell_offsets`), engine-fallout-ai 6223, jip 498, nvse (its math bit-for-bit test, as before), engine-core seams, repo_hygiene. The hit force (6f0b5c01) builds on it unchanged: JIP's `PushActorNoRagdoll` (#565) pushes living actors without a ragdoll, so ragdolls stay on the game's kill impulse and knock-down; no JIP world hook overlaps a weighty combat address.

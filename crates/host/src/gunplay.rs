@@ -101,6 +101,7 @@ pub const FIX: Fix = Fix {
         crate::test_range::TUTORIAL_MENU,
         crate::hit_force::MELEE_HIT,
         crate::hit_force::KNOCK_EXPLOSION,
+        crate::knockdown::HIT_ME,
     ],
     summary: "guns kick the view and recover, the weapon lags fast turns and settles back, melee hits and heavy shots punch the viewmodel and camera (game time untouched), melee reaches a little further, kills push bodies by calibre and weapon weight, and a heavy enough hit severs the limb (Settings menu rows and [nv-rs Gunplay] tune it)",
     install,
@@ -130,6 +131,12 @@ pub struct Tuning {
     pub impulse: i32,
     /// `iHitForce`: the ragdoll hit force ([`crate::hit_force`]), percent; 0 = the game's own push.
     pub hit_force: i32,
+    /// `bKnockdowns`: hard enough hits knock living actors down ([`crate::knockdown`]).
+    pub knockdowns: bool,
+    /// `iKnockdownThreshold`: the momentum a knockdown takes, percent of each body's own.
+    pub knockdown_threshold: i32,
+    /// `bKnockdownCompanions`: companions are knocked down too.
+    pub knockdown_companions: bool,
     /// `iDismemberForce`: the force ([`force`]) from which a killing hit severs the limb; 0 = only
     /// the game's own chance.
     pub dismember_force: i32,
@@ -149,6 +156,9 @@ impl Tuning {
         melee_reach: 115,
         impulse: 150,
         hit_force: 100,
+        knockdowns: true,
+        knockdown_threshold: 100,
+        knockdown_companions: false,
         dismember_force: 45,
         explode_force: 110,
     };
@@ -171,6 +181,9 @@ impl Tuning {
             "imeleereach" => self.melee_reach = value,
             "iimpulse" => self.impulse = value,
             "ihitforce" => self.hit_force = value,
+            "bknockdowns" => self.knockdowns = value != 0,
+            "iknockdownthreshold" => self.knockdown_threshold = value,
+            "bknockdowncompanions" => self.knockdown_companions = value != 0,
             "idismemberforce" => self.dismember_force = value,
             "iexplodeforce" => self.explode_force = value,
             _ => return false,
@@ -189,6 +202,9 @@ impl Tuning {
             "imeleereach" => self.melee_reach,
             "iimpulse" => self.impulse,
             "ihitforce" => self.hit_force,
+            "bknockdowns" => i32::from(self.knockdowns),
+            "iknockdownthreshold" => self.knockdown_threshold,
+            "bknockdowncompanions" => i32::from(self.knockdown_companions),
             "idismemberforce" => self.dismember_force,
             "iexplodeforce" => self.explode_force,
             _ => return None,
@@ -229,7 +245,7 @@ impl Default for Tuning {
 }
 
 /// The keys of [`SECTION`]: key, its environment variable, lowest and highest value.
-pub const KEYS: [(&str, &str, i32, i32); 10] = [
+pub const KEYS: [(&str, &str, i32, i32); 13] = [
     ("iRecoil", "NV_GUNPLAY_RECOIL", 0, 300),
     ("iRecoilRecovery", "NV_GUNPLAY_RECOVERY", 0, 100),
     ("iSway", "NV_GUNPLAY_SWAY", 0, 300),
@@ -238,6 +254,19 @@ pub const KEYS: [(&str, &str, i32, i32); 10] = [
     ("iMeleeReach", "NV_GUNPLAY_MELEE_REACH", 50, 200),
     ("iImpulse", "NV_GUNPLAY_IMPULSE", 0, 500),
     ("iHitForce", "NV_GUNPLAY_HIT_FORCE", 0, 300),
+    ("bKnockdowns", "NV_GUNPLAY_KNOCKDOWNS", 0, 1),
+    (
+        "iKnockdownThreshold",
+        "NV_GUNPLAY_KNOCKDOWN_THRESHOLD",
+        25,
+        400,
+    ),
+    (
+        "bKnockdownCompanions",
+        "NV_GUNPLAY_KNOCKDOWN_COMPANIONS",
+        0,
+        1,
+    ),
     ("iDismemberForce", "NV_GUNPLAY_DISMEMBER_FORCE", 0, 1000),
     ("iExplodeForce", "NV_GUNPLAY_EXPLODE_FORCE", 0, 1000),
 ];
@@ -354,7 +383,7 @@ impl WeaponStats {
 }
 
 /// The stats of weapon form `weapon` (0: none).
-fn weapon_stats(e: &Engine, weapon: u32) -> Option<WeaponStats> {
+pub(crate) fn weapon_stats(e: &Engine, weapon: u32) -> Option<WeaponStats> {
     if weapon == 0 {
         return None;
     }
@@ -608,6 +637,7 @@ pub fn install(e: &mut Engine) {
         if a[0] != 0 {
             frame(e, a[0], f32::from_bits(a[1]));
             crate::test_range::frame(e, a[0]);
+            crate::knockdown::frame(e);
         }
         Ret {
             eax: u32::from(used),
@@ -688,6 +718,7 @@ pub fn install(e: &mut Engine) {
     crate::test_range::install(e);
     crate::movement::install(e);
     crate::hit_force::install(e);
+    crate::knockdown::install(e);
 }
 
 /// The weapon form the actor holds (0 for its fists or none).
@@ -1254,14 +1285,17 @@ fn unplace_pose(e: &mut Engine, placed: &Placed) {
 
 /// The rows' change functions, after the graphics rows' (`0x7e06_0010` to `0x7e06_0050`), in the
 /// platform's area that no exe or platform code uses.
-pub const CHANGE_FNS: [u32; 6] = [
+pub const CHANGE_FNS: [u32; 8] = [
     0x7e06_0060,
     0x7e06_0070,
     0x7e06_0080,
     0x7e06_0090,
     0x7e06_00a0,
-    // Hit Force, on the Gameplay page (after the movement rows' `0x7e06_00d0`..`0x7e06_0160`).
+    // Hit Force, Knockdowns and Knockdown Threshold, on the Gameplay page (after the movement
+    // rows' `0x7e06_00d0`..`0x7e06_0160`).
     0x7e06_0170,
+    0x7e06_0180,
+    0x7e06_0190,
 ];
 
 /// A row of the Settings menu's Display page.
@@ -1279,16 +1313,22 @@ pub enum Row {
     Dismember,
     /// A meter of `iHitForce` (0 Off), on the Gameplay page.
     HitForce,
+    /// Off / On: `bKnockdowns`, on the Gameplay page.
+    Knockdowns,
+    /// A meter of `iKnockdownThreshold` (25 to 400), on the Gameplay page.
+    KnockThreshold,
 }
 
 /// The rows, in the order they are made.
-pub const ROWS: [Row; 6] = [
+pub const ROWS: [Row; 8] = [
     Row::Enabled,
     Row::Recoil,
     Row::Sway,
     Row::HitStop,
     Row::Dismember,
     Row::HitForce,
+    Row::Knockdowns,
+    Row::KnockThreshold,
 ];
 
 impl Row {
@@ -1301,13 +1341,23 @@ impl Row {
             Row::HitStop => (SECTION, "bHitStop"),
             Row::Dismember => (SECTION, "iDismemberForce"),
             Row::HitForce => (SECTION, "iHitForce"),
+            Row::Knockdowns => (SECTION, "bKnockdowns"),
+            Row::KnockThreshold => (SECTION, "iKnockdownThreshold"),
+        }
+    }
+
+    /// A meter's lowest value (its first setting).
+    fn low(self) -> i32 {
+        match self {
+            Row::KnockThreshold => 25,
+            _ => 0,
         }
     }
 
     /// The Settings page the row is on: Display, or Gameplay for Hit Force.
     pub fn page(self) -> u32 {
         match self {
-            Row::HitForce => GAMEPLAY,
+            Row::HitForce | Row::Knockdowns | Row::KnockThreshold => GAMEPLAY,
             _ => DISPLAY,
         }
     }
@@ -1318,7 +1368,8 @@ impl Row {
             Row::Recoil | Row::Sway => Some((10, 21)),
             Row::Dismember => Some((5, 31)),
             Row::HitForce => Some((10, 31)),
-            Row::Enabled | Row::HitStop => None,
+            Row::KnockThreshold => Some((25, 16)),
+            Row::Enabled | Row::HitStop | Row::Knockdowns => None,
         }
     }
 
@@ -1342,7 +1393,7 @@ impl Row {
     pub fn setting_of(self, value: i32) -> u32 {
         match self.meter() {
             Some((step, count)) => {
-                ((value.max(0) + step / 2) / step).clamp(0, count as i32 - 1) as u32
+                (((value - self.low()).max(0) + step / 2) / step).clamp(0, count as i32 - 1) as u32
             }
             None => u32::from(value != 0),
         }
@@ -1350,7 +1401,7 @@ impl Row {
 
     pub fn value_of(self, setting: u32) -> i32 {
         match self.meter() {
-            Some((step, count)) => setting.min(count - 1) as i32 * step,
+            Some((step, count)) => self.low() + setting.min(count - 1) as i32 * step,
             None => i32::from(setting != 0),
         }
     }
@@ -1366,6 +1417,8 @@ impl Row {
             Row::Dismember => format!("Dismember Force: {value}"),
             Row::HitForce if value == 0 => "Hit Force: Off".to_string(),
             Row::HitForce => format!("Hit Force: {value}%"),
+            Row::Knockdowns => "Knockdowns".to_string(),
+            Row::KnockThreshold => format!("Knockdown Threshold: {value}%"),
         }
     }
 }
@@ -1456,13 +1509,15 @@ pub fn install_change_fns(e: &mut Engine) {
         change(e, ROWS[N], Ptr::new(a[0]));
         Ret::default()
     }
-    let fns: [AbiFn; 6] = [
+    let fns: [AbiFn; 8] = [
         row_fn::<0>,
         row_fn::<1>,
         row_fn::<2>,
         row_fn::<3>,
         row_fn::<4>,
         row_fn::<5>,
+        row_fn::<6>,
+        row_fn::<7>,
     ];
     for (address, f) in CHANGE_FNS.into_iter().zip(fns) {
         e.register(address, f);
@@ -1610,6 +1665,9 @@ mod tests {
             melee_reach: 50,
             impulse: 0,
             hit_force: 0,
+            knockdowns: false,
+            knockdown_threshold: 25,
+            knockdown_companions: false,
             dismember_force: 0,
             explode_force: 0,
         };

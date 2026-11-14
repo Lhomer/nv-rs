@@ -192,6 +192,9 @@ Read in a launcher's play run from Fallout.ini's `[nv-rs Gunplay]`; each variabl
 | `NV_GUNPLAY_HIT_STOP_MS` (`iHitStopMs`) | How long the impact punch lasts for a light weapon, ms (heavier: up to 1.3 times; 0: none) | 90 |
 | `NV_GUNPLAY_MELEE_REACH` (`iMeleeReach`) | The player's melee reach, percent of the game's | 115 |
 | `NV_GUNPLAY_IMPULSE` (`iImpulse`) | How hard a kill pushes the body, percent of the game's | 150 |
+| `NV_GUNPLAY_KNOCKDOWNS` (`bKnockdowns`) * | A hard enough hit knocks a living actor down (ragdoll, launched from the hit, gets up again; falls hurt and can kill, credited to you); a moderate one staggers; never you | 1 |
+| `NV_GUNPLAY_KNOCKDOWN_THRESHOLD` (`iKnockdownThreshold`) * | How hard a knockdown is, percent of each body's resistance (deathclaws, super mutants far more than people), 25-400 | 100 |
+| `NV_GUNPLAY_KNOCKDOWN_COMPANIONS` (`bKnockdownCompanions`) | Companions can be knocked down and staggered too | 0 |
 | `NV_GUNPLAY_HIT_FORCE` (`iHitForce`) * | Ragdoll hit force: a dying or knocked-down body carries the hit's momentum (damage less armour, pellets, weapon weight, reach, Strength, skill, power attacks), percent; 0 = the game's own push; Settings > Gameplay "Hit Force" | 100 |
 | `NV_GUNPLAY_DISMEMBER_FORCE` (`iDismemberForce`) * | A killing hit this strong severs the limb (0: the game's chance only) | 45 |
 | `NV_GUNPLAY_EXPLODE_FORCE` (`iExplodeForce`) | A gun's killing hit this strong explodes an explodable limb (0: the game's chance only) | 110 |
