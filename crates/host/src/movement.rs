@@ -369,6 +369,9 @@ const SLOT_RUN_SPEED: u32 = 0x45c;
 const HAVOK_TO_GAME: u32 = 0x011c_3d18;
 /// `MoveMode`'s direction keys and its walk and run bits.
 const KEYS_MASK: u32 = 0xf;
+/// `MoveMode`'s keyboard bit: the control handler's keyboard path (`0093e860`) sets it, and with
+/// it `PlayerMover::Update` leaves `SideVec` unread.
+const KEYBOARD: u32 = 0x40;
 const WALK: u32 = 0x100;
 const RUN: u32 = 0x200;
 
@@ -409,15 +412,19 @@ const STILL: f32 = 0.05;
 /// The nudge that keeps a sliding player from counting as still, units a frame.
 const NUDGE: f32 = 0.1;
 
-/// The keys' direction in the mover's frame (x to the right, y forward), unit length: the mover's
-/// `SideVec` when it has one (a stick), else the direction bits of `MoveMode` (0x1 forward, 0x2
-/// back, 0x4 left, 0x8 right; left is `-x` as in `PlayerMover::Update`). `None` without one.
+/// The keys' direction in the mover's frame (x to the right, y forward), unit length: the
+/// direction bits of `MoveMode` as the player's control handler sets them (`0093e860`: Forward
+/// 0x1, Back 0x2, Left 0x4, Right 0x8; left is `-x` as in `PlayerMover::Update`), or a stick's
+/// own direction, `SideVec`, when the mover itself uses it: only with the keyboard bit 0x40
+/// clear. With the keyboard the handler sets 0x40 and leaves in `SideVec` a scaled axis that
+/// is no direction of the keys (`PlayerMover::Update` does not read it then): taken as one, it
+/// sent every key the same way, to the right (Patrick, 0881adee). `None` without a key.
 pub fn key_direction(mode: u32, side: [f32; 2]) -> Option<[f32; 2]> {
     if mode & KEYS_MASK == 0 {
         return None;
     }
     let length = (side[0] * side[0] + side[1] * side[1]).sqrt();
-    if length > 1e-3 {
+    if mode & KEYBOARD == 0 && length > 1e-3 {
         return Some([side[0] / length, side[1] / length]);
     }
     let bit = |b: u32| if mode & b != 0 { 1.0f32 } else { 0.0 };
@@ -604,14 +611,10 @@ fn snap(e: &mut Engine, c: u32, input: u32, output: u32) {
         let dir = if game_speed > NO_WISH {
             [game_wish[0] / game_speed, game_wish[1] / game_speed]
         } else {
-            // The keys' direction (x sideways, y forward) in the util's order (forward, sideways).
+            // The keys' direction (x to the right, y forward) in the util's order (forward,
+            // sideways).
             let side = read4(e, mover + SIDE_VEC);
-            let length = (side[0] * side[0] + side[1] * side[1]).sqrt();
-            if length > 1e-6 {
-                [side[1] / length, side[0] / length]
-            } else {
-                [0.0, 0.0]
-            }
+            key_direction(mode, [side[0], side[1]]).map_or([0.0, 0.0], |d| [d[1], d[0]])
         };
         (
             dir,
@@ -1167,8 +1170,63 @@ mod tests {
         assert_eq!(Row::Accelerate.value_of(0), 2);
     }
 
-    /// The keys' direction: the stick's when it has one, else the bits; diagonals are unit length,
-    /// left is -x, and opposite keys cancel.
+    /// W, A, S and D with the keyboard (bit 0x40 set, as the control handler sets it) move
+    /// forward, left, back and right whatever the mover's `SideVec` holds: with the keyboard it is
+    /// a scaled axis, and taking it sent every key to the right (Patrick, 0881adee).
+    #[test]
+    fn wasd_move_forward_left_back_right() {
+        const W: u32 = 0x1;
+        const S: u32 = 0x2;
+        const A: u32 = 0x4;
+        const D: u32 = 0x8;
+        const KEYS: u32 = 0x40 | 0x200;
+        // The keyboard's SideVec: a scaled axis, the same for every key.
+        for side in [[0.0, 0.0], [312.0, 0.0], [0.0, 312.0], [-5.0, 7.0]] {
+            assert_eq!(
+                key_direction(KEYS | W, side),
+                Some([0.0, 1.0]),
+                "W {side:?}"
+            );
+            assert_eq!(
+                key_direction(KEYS | S, side),
+                Some([0.0, -1.0]),
+                "S {side:?}"
+            );
+            assert_eq!(
+                key_direction(KEYS | A, side),
+                Some([-1.0, 0.0]),
+                "A {side:?}"
+            );
+            assert_eq!(
+                key_direction(KEYS | D, side),
+                Some([1.0, 0.0]),
+                "D {side:?}"
+            );
+            let h = std::f32::consts::FRAC_1_SQRT_2;
+            let near = |d: Option<[f32; 2]>, want: [f32; 2]| {
+                d.is_some_and(|d| (d[0] - want[0]).abs() < 1e-6 && (d[1] - want[1]).abs() < 1e-6)
+            };
+            assert!(near(key_direction(KEYS | W | A, side), [-h, h]), "W+A");
+            assert!(near(key_direction(KEYS | W | D, side), [h, h]), "W+D");
+            assert!(near(key_direction(KEYS | S | A, side), [-h, -h]), "S+A");
+            assert!(near(key_direction(KEYS | S | D, side), [h, -h]), "S+D");
+            assert_eq!(key_direction(KEYS | W | S, side), None, "W+S cancel");
+            assert_eq!(key_direction(KEYS, side), None, "no key");
+        }
+        // The util's order for the wish (forward, then to the right): W ahead, D to the right.
+        let util = |d: [f32; 2]| [d[1], d[0]];
+        assert_eq!(
+            key_direction(KEYS | W, [312.0, 0.0]).map(util),
+            Some([1.0, 0.0])
+        );
+        assert_eq!(
+            key_direction(KEYS | D, [312.0, 0.0]).map(util),
+            Some([0.0, 1.0])
+        );
+    }
+
+    /// The keys' direction: a stick's (`SideVec`, the keyboard bit clear) when it has one, else
+    /// the bits; diagonals are unit length, left is -x, and opposite keys cancel.
     #[test]
     fn the_keys_give_the_direction() {
         assert_eq!(key_direction(0x200, [0.0, 0.0]), None);
