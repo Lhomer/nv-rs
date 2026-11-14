@@ -41,6 +41,14 @@
 //! `00cd4280`) the take-off speed is the square root of that times the game's, so a jump is as
 //! high as the original's and over sooner: less floaty, a quicker landing.
 //!
+//! **The Settings menu** (Patrick: every value editable in game, kept across launches): ten rows
+//! on the Gameplay page ([`ROWS`]): Movement (Classic / Snappy), Ground Acceleration, Ground
+//! Friction, Stop Speed, Air Control, Air Speed Cap, Run Speed (`iRunSpeed`, the wished speed's
+//! percent), Jump Strength (`iJumpStrength`, the height's percent), Jump Gravity and Reset Movement
+//! Settings. A change applies at the next physics step and is saved to Fallout.ini's
+//! `[nv-rs Movement]` in a launcher's play run, as the weighty combat rows do; the page's own
+//! Defaults puts each row back too.
+//!
 //! **The game moves the player itself** (a script, an AI package with the controls off): no key
 //! has been down for [`KEYS_IDLE`] s while the animation still asks for movement; then the
 //! original's movement runs as it is.
@@ -81,6 +89,11 @@ pub struct Tuning {
     pub air_speed_cap: i32,
     /// `iJumpGravity`: gravity in the air, in percent of the game's (130).
     pub jump_gravity: i32,
+    /// `iRunSpeed`: the wished speed on the ground (running and walking), in percent of the
+    /// game's formula speed (100).
+    pub run_speed: i32,
+    /// `iJumpStrength`: a jump's height, in percent of the game's (100).
+    pub jump_strength: i32,
 }
 
 impl Tuning {
@@ -93,6 +106,8 @@ impl Tuning {
         air_accelerate: 10,
         air_speed_cap: 30,
         jump_gravity: 130,
+        run_speed: 100,
+        jump_strength: 100,
     };
 
     /// Sets `key` (a [`KEYS`] key) to `value`; false for a key that isn't one or a value out of
@@ -112,6 +127,8 @@ impl Tuning {
             "iairaccelerate" => self.air_accelerate = value,
             "iairspeedcap" => self.air_speed_cap = value,
             "ijumpgravity" => self.jump_gravity = value,
+            "irunspeed" => self.run_speed = value,
+            "ijumpstrength" => self.jump_strength = value,
             _ => return false,
         }
         true
@@ -127,6 +144,8 @@ impl Tuning {
             "iairaccelerate" => self.air_accelerate,
             "iairspeedcap" => self.air_speed_cap,
             "ijumpgravity" => self.jump_gravity,
+            "irunspeed" => self.run_speed,
+            "ijumpstrength" => self.jump_strength,
             _ => return None,
         })
     }
@@ -165,7 +184,7 @@ impl Default for Tuning {
 }
 
 /// The keys of [`SECTION`]: key, its environment variable, lowest and highest value.
-pub const KEYS: [(&str, &str, i32, i32); 7] = [
+pub const KEYS: [(&str, &str, i32, i32); 9] = [
     ("bSnappyMovement", "NV_MOVEMENT_SNAPPY", 0, 1),
     ("iAccelerate", "NV_MOVEMENT_ACCELERATE", 1, 50),
     ("iFriction", "NV_MOVEMENT_FRICTION", 0, 20),
@@ -173,6 +192,8 @@ pub const KEYS: [(&str, &str, i32, i32); 7] = [
     ("iAirAccelerate", "NV_MOVEMENT_AIR_ACCELERATE", 0, 100),
     ("iAirSpeedCap", "NV_MOVEMENT_AIR_SPEED_CAP", 0, 300),
     ("iJumpGravity", "NV_MOVEMENT_JUMP_GRAVITY", 50, 300),
+    ("iRunSpeed", "NV_MOVEMENT_RUN_SPEED", 50, 200),
+    ("iJumpStrength", "NV_MOVEMENT_JUMP_STRENGTH", 50, 200),
 ];
 
 /// A value of `key` as the file or a variable holds it: `1`/`0` for a `b` key, a whole number for
@@ -330,6 +351,7 @@ static STATE: Mutex<State> = Mutex::new(State { idle: 0.0 });
 
 /// Registers the hooks (from `crate::gunplay::install`).
 pub fn install(e: &mut Engine) {
+    install_change_fns(e);
     e.register(CALCULATE_MOVEMENT, |e, a| {
         hkp_character_movement_util_calculate_movement(e, Ptr::new(a[0]), Ptr::new(a[1]));
         if let Some(controller) = player_output(e, a[1]) {
@@ -353,7 +375,7 @@ pub fn install(e: &mut Engine) {
         if jumped && is_player(e, c) {
             let t = tuning();
             if t.on && crate::gunplay::is_on() {
-                let k = jump_speed_factor(t.jump_gravity);
+                let k = jump_speed_factor(t.jump_gravity, t.jump_strength);
                 let z = e.mem.f32(c + OUT_VELOCITY + 8);
                 e.mem.set_f32(c + OUT_VELOCITY + 8, z * k);
             }
@@ -362,9 +384,10 @@ pub fn install(e: &mut Engine) {
     });
 }
 
-/// The take-off speed's factor for gravity at `percent` percent: a jump as high as the game's.
-pub fn jump_speed_factor(percent: i32) -> f32 {
-    (percent as f32 / 100.0).sqrt()
+/// The take-off speed's factor for gravity at `gravity` percent and a jump `strength` percent as
+/// high as the game's (a height is the speed squared over twice the gravity).
+pub fn jump_speed_factor(gravity: i32, strength: i32) -> f32 {
+    (gravity as f32 / 100.0 * strength as f32 / 100.0).sqrt()
 }
 
 /// Whether `controller` is the player's.
@@ -470,7 +493,8 @@ fn snap(e: &mut Engine, c: u32, input: u32, output: u32) {
         } else {
             SLOT_RUN_SPEED
         };
-        let speed = e.vcall(player, slot, &args![]).f32() / scale;
+        let speed =
+            e.vcall(player, slot, &args![]).f32() / scale * tuning().run_speed as f32 / 100.0;
         let dir = if game_speed > NO_WISH {
             [game_wish[0] / game_speed, game_wish[1] / game_speed]
         } else {
@@ -515,6 +539,265 @@ fn snap(e: &mut Engine, c: u32, input: u32, output: u32) {
     for (i, value) in out.into_iter().enumerate() {
         e.mem.set_f32(output + 4 * i as u32, value);
     }
+}
+
+// --- The Settings menu's rows (the Gameplay page). ---------------------------------------------
+
+/// The rows' change functions, after the Test Range's (`0x7e06_00b0`, `0x7e06_00c0`), in the
+/// platform's area that no exe or platform code uses.
+pub const CHANGE_FNS: [u32; 10] = [
+    0x7e06_00d0,
+    0x7e06_00e0,
+    0x7e06_00f0,
+    0x7e06_0100,
+    0x7e06_0110,
+    0x7e06_0120,
+    0x7e06_0130,
+    0x7e06_0140,
+    0x7e06_0150,
+    0x7e06_0160,
+];
+
+/// The Gameplay page's mode bit (the original's own first rows, difficulty and the others, have
+/// it: `USER_OPTION_ROWS` in `startmenu.rs`).
+const GAMEPLAY: u32 = 8;
+
+/// A row of the Settings menu's Gameplay page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Row {
+    /// Classic / Snappy: `bSnappyMovement`.
+    Mode,
+    Accelerate,
+    Friction,
+    StopSpeed,
+    AirAccelerate,
+    AirSpeedCap,
+    RunSpeed,
+    JumpStrength,
+    JumpGravity,
+    /// No / Yes: every movement value back to its default, at once.
+    Reset,
+}
+
+/// The rows, in the order they are made.
+pub const ROWS: [Row; 10] = [
+    Row::Mode,
+    Row::Accelerate,
+    Row::Friction,
+    Row::StopSpeed,
+    Row::AirAccelerate,
+    Row::AirSpeedCap,
+    Row::RunSpeed,
+    Row::JumpStrength,
+    Row::JumpGravity,
+    Row::Reset,
+];
+
+impl Row {
+    /// The Fallout.ini key the row saves to (`None` for Reset, which saves them all).
+    pub fn key(self) -> Option<&'static str> {
+        Some(match self {
+            Row::Mode => "bSnappyMovement",
+            Row::Accelerate => "iAccelerate",
+            Row::Friction => "iFriction",
+            Row::StopSpeed => "iStopSpeed",
+            Row::AirAccelerate => "iAirAccelerate",
+            Row::AirSpeedCap => "iAirSpeedCap",
+            Row::RunSpeed => "iRunSpeed",
+            Row::JumpStrength => "iJumpStrength",
+            Row::JumpGravity => "iJumpGravity",
+            Row::Reset => return None,
+        })
+    }
+
+    /// A meter's lowest value, step and number of settings; `None` for a two-value list.
+    pub fn meter(self) -> Option<(i32, i32, u32)> {
+        match self {
+            Row::Accelerate => Some((2, 2, 25)),
+            Row::Friction => Some((0, 1, 21)),
+            Row::StopSpeed => Some((0, 25, 21)),
+            Row::AirAccelerate => Some((0, 5, 21)),
+            Row::AirSpeedCap => Some((0, 10, 31)),
+            Row::RunSpeed | Row::JumpStrength => Some((50, 5, 31)),
+            Row::JumpGravity => Some((50, 10, 26)),
+            Row::Mode | Row::Reset => None,
+        }
+    }
+
+    /// The two values of a list row.
+    pub fn choices(self) -> [&'static str; 2] {
+        match self {
+            Row::Mode => ["Classic", "Snappy"],
+            _ => ["No", "Yes"],
+        }
+    }
+
+    /// The row's value in `tuning`.
+    pub fn value_in(self, tuning: &Tuning) -> i32 {
+        self.key().and_then(|k| tuning.get(k)).unwrap_or(0)
+    }
+
+    /// The setting (meter step or list index) of `value`, and the value of a setting.
+    pub fn setting_of(self, value: i32) -> u32 {
+        match self.meter() {
+            Some((low, step, count)) => {
+                ((value - low + step / 2).div_euclid(step)).clamp(0, count as i32 - 1) as u32
+            }
+            None => u32::from(value != 0),
+        }
+    }
+
+    pub fn value_of(self, setting: u32) -> i32 {
+        match self.meter() {
+            Some((low, step, count)) => low + setting.min(count - 1) as i32 * step,
+            None => i32::from(setting != 0),
+        }
+    }
+
+    /// The row's label for `value` (at most 31 characters).
+    pub fn label(self, value: i32) -> String {
+        match self {
+            Row::Mode => "Movement".to_string(),
+            Row::Accelerate => format!("Ground Acceleration: {value}"),
+            Row::Friction => format!("Ground Friction: {value}"),
+            Row::StopSpeed => format!("Stop Speed: {value}"),
+            Row::AirAccelerate => format!("Air Control: {value}"),
+            Row::AirSpeedCap => format!("Air Speed Cap: {value}"),
+            Row::RunSpeed => format!("Run Speed: {value}%"),
+            Row::JumpStrength => format!("Jump Strength: {value}%"),
+            Row::JumpGravity => format!("Jump Gravity: {value}%"),
+            Row::Reset => "Reset Movement Settings".to_string(),
+        }
+    }
+}
+
+/// The rows' options as the menu made them (for Reset, which shows the others' new values).
+static OPTIONS: Mutex<[u32; 10]> = Mutex::new([0; 10]);
+
+/// Makes the rows on the Gameplay page and appends them to `pUserOptionsA` (from
+/// `crate::gunplay::add_rows`, so they show when the weighty combat row is on).
+pub fn add_rows(e: &mut Engine) {
+    use crate::gunplay::{
+        heap_text, ARRAY_ADD, LABEL_SIZE, LIST, METER, OPERATOR_NEW, USER_OPTIONS, USER_OPTION_NEW,
+        USER_OPTION_SIZE,
+    };
+    let now = tuning();
+    for (i, (row, change_fn)) in ROWS.into_iter().zip(CHANGE_FNS).enumerate() {
+        let text = heap_text(e, &row.label(row.value_in(&now)), LABEL_SIZE);
+        let block = e.call(OPERATOR_NEW, &args![USER_OPTION_SIZE]).u32();
+        if text == 0 || block == 0 {
+            continue;
+        }
+        let call = match row.meter() {
+            Some((_, _, count)) => args![block, text, change_fn, GAMEPLAY, METER, count, 0u32],
+            None => {
+                let [a, b] = row.choices();
+                let (a, b) = (heap_text(e, a, 12), heap_text(e, b, 12));
+                if a == 0 || b == 0 {
+                    continue;
+                }
+                let mut call = args![block, text, change_fn, GAMEPLAY, LIST, 2u32, 0u32];
+                call.extend([a, b]);
+                call
+            }
+        };
+        let option = e.call(USER_OPTION_NEW, &call).u32();
+        OPTIONS.lock().unwrap_or_else(|p| p.into_inner())[i] = option;
+        e.with_stack(4, |e, cell| {
+            e.mem.set_u32(cell.addr(), option);
+            e.call(ARRAY_ADD, &args![USER_OPTIONS, cell]);
+        });
+    }
+}
+
+/// Registers the rows' change functions.
+fn install_change_fns(e: &mut Engine) {
+    fn row_fn<const N: usize>(e: &mut Engine, a: &[u32]) -> Ret {
+        change(e, N, Ptr::new(a[0]));
+        Ret::default()
+    }
+    let fns: [AbiFn; 10] = [
+        row_fn::<0>,
+        row_fn::<1>,
+        row_fn::<2>,
+        row_fn::<3>,
+        row_fn::<4>,
+        row_fn::<5>,
+        row_fn::<6>,
+        row_fn::<7>,
+        row_fn::<8>,
+        row_fn::<9>,
+    ];
+    for (address, f) in CHANGE_FNS.into_iter().zip(fns) {
+        e.register(address, f);
+    }
+}
+
+/// A row's change function: with the menu's save flag clear it reads the value; set, the player
+/// moved the row: applied at once (the next physics step uses it) and saved.
+fn change(e: &mut Engine, index: usize, option: Ptr) {
+    use crate::gunplay::{write_label, DEFAULT_VAL, VAL};
+    if option.is_null() {
+        return;
+    }
+    let row = ROWS[index];
+    OPTIONS.lock().unwrap_or_else(|p| p.into_inner())[index] = option.addr();
+    let now = tuning();
+    let Some(menu) = crate::gunplay::menu_saving(e) else {
+        e.mem
+            .set_u32(option.addr() + VAL, row.setting_of(row.value_in(&now)));
+        e.mem.set_u32(
+            option.addr() + DEFAULT_VAL,
+            row.setting_of(row.value_in(&Tuning::PLAY)),
+        );
+        write_label(e, 0, option, row.label(row.value_in(&now)));
+        return;
+    };
+    let value = row.value_of(e.mem.u32(option.addr() + VAL));
+    let Some(key) = row.key() else {
+        // Reset: chosen Yes.
+        if value != 0 {
+            reset(e, menu);
+            e.mem.set_u32(option.addr() + VAL, 0);
+        }
+        return;
+    };
+    if value == row.value_in(&now) {
+        return;
+    }
+    let mut changed = now;
+    changed.set(key, value);
+    set_tuning(changed);
+    write_label(e, menu, option, row.label(value));
+    let saved = crate::gunplay::save_key(SECTION, key, value);
+    eprintln!(
+        "Snappy movement: {key} {value}: applied now{}",
+        if saved { ", saved" } else { ", not saved" }
+    );
+}
+
+/// Every movement value back to its default: applied, saved, and the other rows shown with it.
+fn reset(e: &mut Engine, menu: u32) {
+    use crate::gunplay::{write_label, VAL};
+    set_tuning(Tuning::PLAY);
+    let mut saved = true;
+    for &(key, _, _, _) in &KEYS {
+        let value = Tuning::PLAY.get(key).unwrap_or(0);
+        saved &= crate::gunplay::save_key(SECTION, key, value);
+    }
+    let options = *OPTIONS.lock().unwrap_or_else(|p| p.into_inner());
+    for (row, option) in ROWS.into_iter().zip(options) {
+        if option == 0 || row == Row::Reset {
+            continue;
+        }
+        let value = row.value_in(&Tuning::PLAY);
+        e.mem.set_u32(option + VAL, row.setting_of(value));
+        write_label(e, menu, Ptr::new(option), row.label(value));
+    }
+    eprintln!(
+        "Snappy movement: every value back to its default{}",
+        if saved { ", saved" } else { ", not saved" }
+    );
 }
 
 #[cfg(test)]
@@ -605,12 +888,16 @@ mod tests {
     /// square root (height v^2 / 2g).
     #[test]
     fn the_jump_keeps_its_height() {
-        let k = jump_speed_factor(130);
+        let k = jump_speed_factor(130, 100);
         let (v, g) = (5.0f32, 9.8f32);
         let height = v * v / (2.0 * g);
         let heavier = (k * v) * (k * v) / (2.0 * g * 1.3);
         assert!((height - heavier).abs() < 1e-4);
-        assert_eq!(jump_speed_factor(100), 1.0);
+        assert_eq!(jump_speed_factor(100, 100), 1.0);
+        // Jump Strength 150 %: half as high again, whatever the gravity.
+        let k = jump_speed_factor(130, 150);
+        let higher = (k * v) * (k * v) / (2.0 * g * 1.3);
+        assert!((higher - 1.5 * height).abs() < 1e-4);
     }
 
     /// The util's frame: level ground, facing north, gives the forward and sideways axes level
@@ -623,6 +910,33 @@ mod tests {
         assert!((dot(b, c)).abs() < 1e-6);
         assert_eq!(n, up);
         assert!(frame(up, up, up).is_none(), "forward along up has no frame");
+    }
+
+    /// Each row's meter reaches its key's default exactly, stays inside the key's range, and its
+    /// label fits the menu's 31 characters.
+    #[test]
+    fn the_rows_show_every_value() {
+        for row in ROWS {
+            let value = row.value_in(&Tuning::PLAY);
+            assert_eq!(row.value_of(row.setting_of(value)), value, "{row:?}");
+            assert!(row.label(value).len() <= 31, "{}", row.label(value));
+            if let (Some(key), Some((_, _, count))) = (row.key(), row.meter()) {
+                let &(_, _, low, high) = KEYS.iter().find(|k| k.0 == key).unwrap();
+                for setting in [0, count - 1] {
+                    let v = row.value_of(setting);
+                    assert!((low..=high).contains(&v), "{row:?} {v}");
+                }
+            }
+        }
+        // Every key has a row (Reset aside).
+        let keyed: Vec<&str> = ROWS.iter().filter_map(|r| r.key()).collect();
+        assert_eq!(keyed.len(), KEYS.len());
+        for (key, ..) in KEYS {
+            assert!(keyed.contains(&key), "{key}");
+        }
+        assert_eq!(Row::Mode.choices(), ["Classic", "Snappy"]);
+        assert_eq!(Row::RunSpeed.setting_of(100), 10);
+        assert_eq!(Row::Accelerate.value_of(0), 2);
     }
 
     /// The table's values are the built-in tuning, each in its range; variables win and a bad one

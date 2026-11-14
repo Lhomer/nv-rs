@@ -151,7 +151,16 @@ controller (`MobileObject::GetCharController` of the player), after the util ran
 | Wish | The util's wanted direction (the animation's, rescaled by `PlayerMover::Update` to the keys' `SideVec`), or the keys' own when the animation gives none yet; at the formula speed (`Actor` vtable `+0x45c` run, `+0x458` walk by `MoveMode` 0x200/0x100, sneaking included), Havok units by `011c3d18`. No direction key (`MoveMode` & 0xF): no wish | |
 | Ground | `PM_Friction` (speed taken off from at least the stop speed), then `PM_Accelerate` toward the wish, across the surface | `iFriction` 6, `iStopSpeed` 100 units/s, `iAccelerate` 10 |
 | Air | The acceleration with the speed along the wish capped (a little air-strafe), no friction | `iAirAccelerate` 10, `iAirSpeedCap` 30 units/s |
-| Jump | Over the air state (`00cd3fb0`) gravity is a percentage of the game's; over the jump state (`00cd4280`) the take-off speed grows by its square root: as high, over sooner | `iJumpGravity` 130 |
+| Speed | The wish's speed, running and walking, a percentage of the formula speed | `iRunSpeed` 100 |
+| Jump | Over the air state (`00cd3fb0`) gravity is a percentage of the game's; over the jump state (`00cd4280`) the take-off speed is scaled by the square root of gravity times strength: as high as `iJumpStrength` says, over sooner | `iJumpGravity` 130, `iJumpStrength` 100 |
+
+**In the Settings menu** (Gameplay page, after the original's rows; shown while weighty combat is
+on): Movement (Classic / Snappy), Ground Acceleration (2-50), Ground Friction (0-20), Stop Speed
+(0-500), Air Control (0-100), Air Speed Cap (0-300), Run Speed (50-200 %), Jump Strength
+(50-200 %), Jump Gravity (50-300 %), and Reset Movement Settings (Yes puts every value back at
+once and saves them). Each row applies at the next physics step, without a restart, and saves
+its key to Fallout.ini's `[nv-rs Movement]` in a launcher's play run; the next start reads it
+back. The page's own Defaults resets the rows too. Change functions `7e0600d0` to `7e060160`.
 
 What the game keeps: the vertical speed, gravity, `ApplyVelocityMod` (pushes), the collision, the
 surface's own velocity. When no key has been down for 0.6 s and the animation still asks for

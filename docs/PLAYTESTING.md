@@ -200,7 +200,7 @@ Read in a launcher's play run from Fallout.ini's `[nv-rs Gunplay]`; each variabl
 
 ### Snappy movement (`[nv-rs Movement]`)
 
-Read like `[nv-rs Gunplay]`, used while weighty combat is on (docs/MOVEMENT.md, "Snappy movement"; the Quake movement model). Play.exe adds the section with these defaults to a Fallout.ini that lacks it and never changes a value already there.
+Read like `[nv-rs Gunplay]`, used while weighty combat is on (docs/MOVEMENT.md, "Snappy movement"; the Quake movement model). Play.exe adds the section with these defaults to a Fallout.ini that lacks it and never changes a value already there. Every key is also a row of the game's Settings menu, Gameplay page (Movement Classic/Snappy, the sliders, and Reset Movement Settings): a change applies at once and is saved here.
 
 | Variable (Fallout.ini key) | What it does | Default |
 | --- | --- | --- |
@@ -211,8 +211,10 @@ Read like `[nv-rs Gunplay]`, used while weighty combat is on (docs/MOVEMENT.md, 
 | `NV_MOVEMENT_AIR_ACCELERATE` (`iAirAccelerate`) | Steering in the air, 0-100 | 10 |
 | `NV_MOVEMENT_AIR_SPEED_CAP` (`iAirSpeedCap`) | The most the air steering adds toward where you press, game units/s, 0-300 | 30 |
 | `NV_MOVEMENT_JUMP_GRAVITY` (`iJumpGravity`) | Gravity in the air, percent of the game's (the jump stays as high), 50-300 | 130 |
+| `NV_MOVEMENT_RUN_SPEED` (`iRunSpeed`) | Top ground speed, running and walking, percent of the game's, 50-200 | 100 |
+| `NV_MOVEMENT_JUMP_STRENGTH` (`iJumpStrength`) | Jump height, percent of the game's, 50-200 | 100 |
 
-**To check in game (not yet run):** from standing, W reaches full run almost at once and letting go stops you in a step or two; A/D and reversals change direction immediately; running and jumping keeps the run-up and you can bend the jump a little with A/D and the mouse; a jump is as high as before and lands sooner; NPCs walk and run as before; sneaking and walking (Caps Lock / the walk key) keep their slower speeds; a scripted move of the player (a cutscene, a forced walk) still happens; bSnappyMovement=0 brings the original back. Say if the legs or the weapon bob look out of step with the speed.
+**To check in game (not yet run):** from standing, W reaches full run almost at once and letting go stops you in a step or two; A/D and reversals change direction immediately; running and jumping keeps the run-up and you can bend the jump a little with A/D and the mouse; a jump is as high as before and lands sooner; NPCs walk and run as before; sneaking and walking (Caps Lock / the walk key) keep their slower speeds; a scripted move of the player (a cutscene, a forced walk) still happens; bSnappyMovement=0 brings the original back. In Settings > Gameplay (from the main menu and the pause menu): the ten movement rows show; Movement Classic/Snappy switches at once; each slider changes the feel at once (Run Speed, Jump Strength are the easiest to see); Reset Movement Settings > Yes puts every row back to its default; after quitting and starting again the rows keep what you set (and Fallout.ini's `[nv-rs Movement]` has it). Say if the legs or the weapon bob look out of step with the speed.
 
 ### 3. Set by Play.exe
 

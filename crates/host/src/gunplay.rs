@@ -1332,33 +1332,45 @@ impl Row {
     }
 }
 
+/// Whether the Settings menu is saving its options now (the player moved a row): the change
+/// functions apply then; otherwise the menu reads the rows' values.
+pub(crate) fn menu_saving(e: &mut Engine) -> Option<u32> {
+    let menu = e.global::<u32>(START_MENU);
+    let saving = menu != 0
+        && e.call(MENU_FLAGS_TEST, &args![menu, FLAG_SAVE_OPTIONS])
+            .u32()
+            & 0xff
+            != 0;
+    saving.then_some(menu)
+}
+
 /// `pUserOptionsA`, its `Add`, `operator new`, `StartMenu::UserOption::UserOption` and a user
 /// option's words, as [`crate::fov_slider`] has them.
-const USER_OPTIONS: u32 = 0x011d_ab50;
-const ARRAY_ADD: u32 = 0x007c_b2e0;
-const OPERATOR_NEW: u32 = 0x0040_1000;
-const USER_OPTION_NEW: u32 = 0x007d_6350;
-const USER_OPTION_SIZE: u32 = 0x30;
+pub(crate) const USER_OPTIONS: u32 = 0x011d_ab50;
+pub(crate) const ARRAY_ADD: u32 = 0x007c_b2e0;
+pub(crate) const OPERATOR_NEW: u32 = 0x0040_1000;
+pub(crate) const USER_OPTION_NEW: u32 = 0x007d_6350;
+pub(crate) const USER_OPTION_SIZE: u32 = 0x30;
 const TEXT: u32 = 4;
-const VAL: u32 = 0x14;
-const DEFAULT_VAL: u32 = 0x18;
+pub(crate) const VAL: u32 = 0x14;
+pub(crate) const DEFAULT_VAL: u32 = 0x18;
 /// The Display page, a list (values between arrows) and a meter, and the label's buffer.
 const DISPLAY: u32 = 0x10;
-const LIST: u32 = 0;
-const METER: u32 = 2;
-const LABEL_SIZE: u32 = 32;
+pub(crate) const LIST: u32 = 0;
+pub(crate) const METER: u32 = 2;
+pub(crate) const LABEL_SIZE: u32 = 32;
 /// `StartMenu::pMe`, the `uiFlags` test, the save flag, the options list, `GetTileFor` and
 /// `Tile::SetString` with the string trait.
-const START_MENU: u32 = 0x011d_aac0;
-const MENU_FLAGS_TEST: u32 = 0x004a_4080;
-const FLAG_SAVE_OPTIONS: u32 = 0x20;
+pub(crate) const START_MENU: u32 = 0x011d_aac0;
+pub(crate) const MENU_FLAGS_TEST: u32 = 0x004a_4080;
+pub(crate) const FLAG_SAVE_OPTIONS: u32 = 0x20;
 const OPTIONS_LIST: u32 = 0x114;
 const GET_TILE_FOR: u32 = 0x007a_22d0;
 const TILE_SET_STRING: u32 = 0x00a0_1350;
 const TRAIT_STRING: u32 = 4036;
 
 /// A string of the game's heap holding `text`, 0 when none could be had.
-fn heap_text(e: &mut Engine, text: &str, size: u32) -> u32 {
+pub(crate) fn heap_text(e: &mut Engine, text: &str, size: u32) -> u32 {
     let buffer = e.call(OPERATOR_NEW, &args![size]).u32();
     if buffer != 0 {
         let bytes = &text.as_bytes()[..text.len().min(size as usize - 1)];
@@ -1394,6 +1406,7 @@ pub fn add_rows(e: &mut Engine) {
             e.call(ARRAY_ADD, &args![USER_OPTIONS, cell]);
         });
     }
+    crate::movement::add_rows(e);
     crate::test_range::add_option(e);
 }
 
@@ -1461,7 +1474,7 @@ fn change(e: &mut Engine, row: Row, option: Ptr) {
 }
 
 /// The label into the row's text and, with the menu, its tile.
-fn write_label(e: &mut Engine, menu: u32, option: Ptr, label: String) {
+pub(crate) fn write_label(e: &mut Engine, menu: u32, option: Ptr, label: String) {
     let text = e.mem.u32(option.addr() + TEXT);
     if text == 0 {
         return;
@@ -1487,10 +1500,16 @@ fn write_label(e: &mut Engine, menu: u32, option: Ptr, label: String) {
 /// The row's key into the run's Fallout.ini, in a launcher's play run only; false when not saved
 /// (a file that can't be written is said once in the log).
 fn save(row: Row, value: i32) -> bool {
+    let (section, key) = row.key();
+    save_key(section, key, value)
+}
+
+/// `key=value` into the run's Fallout.ini's `section`, in a launcher's play run only; false when
+/// not saved (a file that can't be written is said once in the log).
+pub(crate) fn save_key(section: &str, key: &str, value: i32) -> bool {
     if !crate::fixes::is_play_run(|name| std::env::var(name).ok()) {
         return false;
     }
-    let (section, key) = row.key();
     let text = value.to_string();
     let written = crate::game_ini::path()
         .ok_or_else(|| "no Fallout.ini for this run".to_string())

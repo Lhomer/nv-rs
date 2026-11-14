@@ -530,7 +530,9 @@ mod tests {
                 "iStopSpeed",
                 "iAirAccelerate",
                 "iAirSpeedCap",
-                "iJumpGravity"
+                "iJumpGravity",
+                "iRunSpeed",
+                "iJumpStrength"
             ]
         );
     }

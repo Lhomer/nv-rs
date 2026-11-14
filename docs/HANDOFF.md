@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (snappy movement in the Settings menu)
+
+- **Patrick:** every movement value editable in the game's Settings menu and kept across launches: Classic / Snappy, ground acceleration, friction / stop speed, air control, a run speed multiplier, jump strength, Reset to defaults; live if feasible.
+- **Now:** `movement.rs` adds ten rows on the Gameplay page (mode bit 8) after the original's, made as the weighty combat rows are (`gunplay::add_rows` calls `movement::add_rows`; change functions `7e0600d0`..`7e060160`): Movement (Classic/Snappy), Ground Acceleration, Ground Friction, Stop Speed, Air Control, Air Speed Cap, Run Speed % (new `iRunSpeed`), Jump Strength % (new `iJumpStrength`), Jump Gravity %, Reset Movement Settings (Yes: all to defaults, saved, the other rows' values and labels refreshed). A change applies at the next physics step and is saved to `[nv-rs Movement]` in a play run (`gunplay::save_key`). Not run in game; whether a reset meter's knob moves before the page is reopened is not known (its label and value do change).
+
 ### Claude, 2026-11-14 (snappy movement: the Quake model for the player)
 
 - **Patrick:** movement as snappy as Counter-Strike's: Quake's `PM_Accelerate`, `PM_Friction`, `PM_AirMove`, a less floaty jump, no camera smoothing, the player only, `[nv-rs Movement]` with `bSnappyMovement` and tunables written by the settings path without overwriting.
