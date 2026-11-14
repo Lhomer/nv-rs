@@ -7,6 +7,12 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (snappy movement made authoritative; the debug log)
+
+- **Patrick (ebf57acb):** jumping left slows him in the air; a slowdown step after landing; still no quick change of direction; he suspected the original movement was still in charge.
+- **Traced:** yes, through the frame's move vector (the animation's root motion via `PlayerMover::Update`): `MobileObject::Move` (`0092f260`) hands it to `bhkCharacterController::Move` (`00c73170`) as the controller's `Direction` (the util's wanted velocity: the animation's direction and per-direction speed) and as the stillness test: a move vector under 1/20 a lane makes the controller still and zeroes its velocity without integrating it when its contacts are unchanged (first frames of a press, the landing animation, the jump animation's strafe; the jump then takes off from that). `fJumpMoveMult`/`fJumpMoveBase` have no reader; no strafe setting exists.
+- **Now:** in Snappy mode a wrapper over `MobileObject::Move` replaces the player's move vector with the keys' direction (`SideVec` for a stick, else `MoveMode` bits) at the formula speed (`iRunSpeed`) for the frame, and nudges a sliding player without a key so friction stops it; swimming/flying keep the original. `bMovementLog` (`NV_MOVEMENT_LOG`) logs each step and which path set the final velocity. Classic keeps the original (nothing replaced). Not run in game.
+
 ### Claude, 2026-11-14 (snappy movement in the Settings menu)
 
 - **Patrick:** every movement value editable in the game's Settings menu and kept across launches: Classic / Snappy, ground acceleration, friction / stop speed, air control, a run speed multiplier, jump strength, Reset to defaults; live if feasible.

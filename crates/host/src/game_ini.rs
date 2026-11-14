@@ -532,7 +532,8 @@ mod tests {
                 "iAirSpeedCap",
                 "iJumpGravity",
                 "iRunSpeed",
-                "iJumpStrength"
+                "iJumpStrength",
+                "bMovementLog"
             ]
         );
     }

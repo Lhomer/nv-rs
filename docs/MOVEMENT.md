@@ -162,6 +162,28 @@ once and saves them). Each row applies at the next physics step, without a resta
 its key to Fallout.ini's `[nv-rs Movement]` in a launcher's play run; the next start reads it
 back. The page's own Defaults resets the rows too. Change functions `7e0600d0` to `7e060160`.
 
+**Traced after Patrick's test of ebf57acb** (jumping left slowed him in the air, a slowdown step
+after landing, no quick change of direction): the animation's root motion was still in charge
+through the frame's move vector. `PlayerMover::Update` builds it from the animation (rescaled to
+`SideVec`, turned for diagonals) and `MobileObject::Move` (`0092f260`) hands it to
+`bhkCharacterController::Move` (`00c73170`, parameters `+0x10`), where it becomes `Direction` (the
+util's wanted velocity: the animation's direction and each direction's own speed, a strafe's
+slower) and decides stillness: a move vector within 1/20 a lane with no velocity modifier is
+"still", and a still controller whose contacts are unchanged gets its velocity zeroed and is not
+integrated (every frame the animation gives no root motion: a press's first frames, the landing
+animation, a strafe in the jump animation; the jump state then takes off with that zeroed
+velocity). `fJumpMoveMult`/`fJumpMoveBase` have no reader and there is no strafe setting. Now,
+in Snappy mode, the move vector is the keys' (over `MobileObject::Move`, the player only): the
+`SideVec` direction for a stick or the `MoveMode` bits (0x1 forward, 0x2 back, 0x4 left, 0x8
+right) at the formula speed (`iRunSpeed`) for the frame; a sliding player without a key gets a
+0.1-unit nudge so friction stops it. Swimming and flying keep the original.
+
+**Debug log:** `bMovementLog=1` in `[nv-rs Movement]` (or `NV_MOVEMENT_LOG=1`) writes, for each
+of the player's steps, the move vector replaced, the Snappy step (state, keys, wish, velocity
+before and after, the util's own result), and the final velocity after `Move` with the path that
+set it: `snappy`, `original (no snappy step this frame)`, `zeroed after snappy (the controller
+still)`, `snappy, then changed by the game`, or `classic`.
+
 What the game keeps: the vertical speed, gravity, `ApplyVelocityMod` (pushes), the collision, the
 surface's own velocity. When no key has been down for 0.6 s and the animation still asks for
 movement (a script or an AI package moving the player), the original movement runs.

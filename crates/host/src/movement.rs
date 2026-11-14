@@ -20,6 +20,29 @@
 //! Havok's movement util (`hkpCharacterMovementUtil::calculateMovement`, `00d6aef0`, gain 1); the
 //! air state (`00cd3fb0`) steers toward it with `fAcrobatics`.
 //!
+//! **What else the original lets decide** (Patrick, ebf57acb: jumping left slowed him in the air,
+//! a slowdown step after landing, no quick change of direction). The frame's move vector, the
+//! animation's root motion as `PlayerMover::Update` rescales and turns it, goes through
+//! `MobileObject::Move` (`0092f260`) into `bhkCharacterController::Move`'s parameters (`+0x10`),
+//! and three things follow from it there: the controller's `Direction` (the movement util's
+//! wanted velocity: the animation's direction, and each direction's own animation speed, a
+//! strafe's slower), and the stillness rule: a move vector within 1/20 on each lane with no
+//! velocity modifier makes the controller "still", and a still controller whose contacts have not
+//! changed gets its velocity zeroed and is not integrated (`move_on_ground`), which is every frame
+//! the animation gives no root motion: the first frames of a press, a landing animation, a jump
+//! animation's strafe. The jump state takes off with the proxy's velocity, which that rule may
+//! have zeroed. So in Snappy mode the move vector is the keys' ([`keys_move`], over
+//! `MobileObject::Move`): their direction (`SideVec` for a stick, else the `MoveMode` bits) at the
+//! formula speed for the frame's seconds; a sliding player with no key gets a nudge so friction,
+//! not the rule, stops it. The settings `fJumpMoveMult` and `fJumpMoveBase` have no reader (the
+//! air state's gain is its own statics), and the game has no strafe speed setting: strafing was
+//! slower only by its animation.
+//!
+//! **The debug log** (`bMovementLog=1`): for each of the player's steps, the move vector replaced,
+//! the Snappy step (state, keys, wish, velocity before and after), and after `Move` the final
+//! velocity with the path that set it (snappy; original; zeroed after snappy; changed by the
+//! game); in Classic mode the util's own result.
+//!
 //! **What this does.** Over the movement util, for the player's controller only (its ground and
 //! air states, the util's two callers that move the player by keys), after the util ran:
 //! - the wish: the direction the game wants (the util's own frame, the animation's direction, or
@@ -61,6 +84,7 @@
 use engine::prelude::*;
 use engine::units::bshavok::bhkcharacterstateinair::bhk_character_state_in_air_update;
 use engine::units::bshavok::bhkcharacterstatejumping::bhk_character_state_jumping_update;
+use engine::units::fallout_ai::mobileobject::mobile_object_move;
 use engine::units::havok_sdk::hkpcharactermovementutil::hkp_character_movement_util_calculate_movement;
 use std::sync::Mutex;
 
@@ -94,6 +118,9 @@ pub struct Tuning {
     pub run_speed: i32,
     /// `iJumpStrength`: a jump's height, in percent of the game's (100).
     pub jump_strength: i32,
+    /// `bMovementLog`: a log line for each of the player's movement steps, saying which path set
+    /// the final velocity (off).
+    pub log: bool,
 }
 
 impl Tuning {
@@ -108,6 +135,7 @@ impl Tuning {
         jump_gravity: 130,
         run_speed: 100,
         jump_strength: 100,
+        log: false,
     };
 
     /// Sets `key` (a [`KEYS`] key) to `value`; false for a key that isn't one or a value out of
@@ -129,6 +157,7 @@ impl Tuning {
             "ijumpgravity" => self.jump_gravity = value,
             "irunspeed" => self.run_speed = value,
             "ijumpstrength" => self.jump_strength = value,
+            "bmovementlog" => self.log = value != 0,
             _ => return false,
         }
         true
@@ -146,6 +175,7 @@ impl Tuning {
             "ijumpgravity" => self.jump_gravity,
             "irunspeed" => self.run_speed,
             "ijumpstrength" => self.jump_strength,
+            "bmovementlog" => i32::from(self.log),
             _ => return None,
         })
     }
@@ -184,7 +214,7 @@ impl Default for Tuning {
 }
 
 /// The keys of [`SECTION`]: key, its environment variable, lowest and highest value.
-pub const KEYS: [(&str, &str, i32, i32); 9] = [
+pub const KEYS: [(&str, &str, i32, i32); 10] = [
     ("bSnappyMovement", "NV_MOVEMENT_SNAPPY", 0, 1),
     ("iAccelerate", "NV_MOVEMENT_ACCELERATE", 1, 50),
     ("iFriction", "NV_MOVEMENT_FRICTION", 0, 20),
@@ -194,6 +224,7 @@ pub const KEYS: [(&str, &str, i32, i32); 9] = [
     ("iJumpGravity", "NV_MOVEMENT_JUMP_GRAVITY", 50, 300),
     ("iRunSpeed", "NV_MOVEMENT_RUN_SPEED", 50, 200),
     ("iJumpStrength", "NV_MOVEMENT_JUMP_STRENGTH", 50, 200),
+    ("bMovementLog", "NV_MOVEMENT_LOG", 0, 1),
 ];
 
 /// A value of `key` as the file or a variable holds it: `1`/`0` for a `b` key, a whole number for
@@ -345,17 +376,89 @@ const RUN: u32 = 0x200;
 struct State {
     /// Seconds since a movement key was last down.
     idle: f32,
+    /// The frame's move vector as the animation gave it was not still ([`MOBILE_MOVE`]).
+    animation_moving: bool,
+    /// The move vector was the keys' this frame (or a nudge to let friction finish a slide).
+    injected: bool,
+    /// The velocity [`snap`] wrote this frame (for the log: who set the final velocity).
+    wrote: Option<[f32; 3]>,
+    /// The player's speed across the ground after the last step, Havok units a second.
+    speed: f32,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { idle: 0.0 });
+static STATE: Mutex<State> = Mutex::new(State {
+    idle: 0.0,
+    animation_moving: false,
+    injected: false,
+    wrote: None,
+    speed: 0.0,
+});
+
+fn kept() -> std::sync::MutexGuard<'static, State> {
+    STATE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// `MobileObject::Move` (`0092f260`): the move vector it hands the controller.
+pub const MOBILE_MOVE: u32 = 0x0092_f260;
+/// `MoveMode`'s swimming and flying bits: the original's movement then.
+const SWIMMING_OR_FLYING: u32 = 0x800 | 0x2000;
+/// A move vector shorter than this per frame is "still" to the controller (`Move`'s
+/// `POINTS_NEAR` with a tolerance of 1/20 on each lane): then it zeroes the velocity when the
+/// contacts have not changed.
+const STILL: f32 = 0.05;
+/// The nudge that keeps a sliding player from counting as still, units a frame.
+const NUDGE: f32 = 0.1;
+
+/// The keys' direction in the mover's frame (x to the right, y forward), unit length: the mover's
+/// `SideVec` when it has one (a stick), else the direction bits of `MoveMode` (0x1 forward, 0x2
+/// back, 0x4 left, 0x8 right; left is `-x` as in `PlayerMover::Update`). `None` without one.
+pub fn key_direction(mode: u32, side: [f32; 2]) -> Option<[f32; 2]> {
+    if mode & KEYS_MASK == 0 {
+        return None;
+    }
+    let length = (side[0] * side[0] + side[1] * side[1]).sqrt();
+    if length > 1e-3 {
+        return Some([side[0] / length, side[1] / length]);
+    }
+    let bit = |b: u32| if mode & b != 0 { 1.0f32 } else { 0.0 };
+    let (x, y) = (bit(8) - bit(4), bit(1) - bit(2));
+    let length = (x * x + y * y).sqrt();
+    (length > 0.0).then(|| [x / length, y / length])
+}
+
+/// Whether the debug log is on (`bMovementLog`).
+fn logging() -> bool {
+    tuning().log
+}
 
 /// Registers the hooks (from `crate::gunplay::install`).
 pub fn install(e: &mut Engine) {
     install_change_fns(e);
+    e.register(MOBILE_MOVE, |e, a| {
+        let this = a[0];
+        let player = e.global::<u32>(PLAYER);
+        let mine = player != 0 && this == player;
+        if mine {
+            keys_move(e, player, f32::from_bits(a[1]), a[2]);
+        }
+        let controller = mobile_object_move(
+            e,
+            Ptr::new(this),
+            f32::from_bits(a[1]),
+            Ptr::new(a[2]),
+            a[3],
+        );
+        if mine {
+            after_move(e, controller.addr());
+        }
+        controller.into_ret()
+    });
     e.register(CALCULATE_MOVEMENT, |e, a| {
         hkp_character_movement_util_calculate_movement(e, Ptr::new(a[0]), Ptr::new(a[1]));
         if let Some(controller) = player_output(e, a[1]) {
             snap(e, controller, a[0], a[1]);
+        } else if logging() {
+            classic_line(e, a[1]);
         }
         Ret::default()
     });
@@ -470,13 +573,16 @@ fn snap(e: &mut Engine, c: u32, input: u32, output: u32) {
     let keys = mode & KEYS_MASK != 0;
     let game_wish = [desired[0], desired[1]];
     let game_speed = (game_wish[0] * game_wish[0] + game_wish[1] * game_wish[1]).sqrt();
-    let idle = {
-        let mut s = STATE.lock().unwrap_or_else(|p| p.into_inner());
+    let (idle, animation_moving, injected) = {
+        let mut s = kept();
         s.idle = if keys { 0.0 } else { s.idle + dt };
-        s.idle
+        (s.idle, s.animation_moving, s.injected)
     };
-    if !keys && idle > KEYS_IDLE && game_speed > NO_WISH {
+    if !keys && idle > KEYS_IDLE && animation_moving && !injected {
         // The game moves the player itself: its own movement stands.
+        if logging() {
+            eprintln!("Movement: original (no key for {idle:.1} s, the game moves the player)");
+        }
         return;
     }
     let scale = {
@@ -536,9 +642,131 @@ fn snap(e: &mut Engine, c: u32, input: u32, output: u32) {
     // the current one in the air (the air state gives back its up part after).
     let normal = if ground { desired[2] } else { v_normal };
     let out = [0, 1, 2].map(|i| origin[i] + b[i] * moved[0] + cc[i] * moved[1] + n[i] * normal);
+    let before = [0, 1, 2].map(|i| e.mem.f32(output + 4 * i as u32));
     for (i, value) in out.into_iter().enumerate() {
         e.mem.set_f32(output + 4 * i as u32, value);
     }
+    {
+        let mut s = kept();
+        s.wrote = Some(out);
+        s.speed = (moved[0] * moved[0] + moved[1] * moved[1]).sqrt();
+    }
+    if logging() {
+        eprintln!(
+            "Movement: snappy {} dt {dt:.4} keys {mode:#x} wish ({:.2}, {:.2}) x {wish_speed:.2} v ({:.2}, {:.2}) -> ({:.2}, {:.2}); the util gave ({:.2}, {:.2}, {:.2}), now ({:.2}, {:.2}, {:.2})",
+            if ground { "ground" } else { "air" },
+            wish_dir[0],
+            wish_dir[1],
+            v[0],
+            v[1],
+            moved[0],
+            moved[1],
+            before[0],
+            before[1],
+            before[2],
+            out[0],
+            out[1],
+            out[2],
+        );
+    }
+}
+
+/// The frame's move vector, before `MobileObject::Move` hands it to the controller (Snappy only):
+/// with a direction key down, the keys' direction at the formula speed (run or walk, `iRunSpeed`)
+/// for the frame's seconds, so neither the animation's root motion nor its strafe speeds decide
+/// the direction or the speed, and the controller never counts the player as still while a key is
+/// down (`Move` zeroes a still controller's velocity: the step after landing, the first frames of
+/// a press). Without a key, a player still sliding gets a nudge so friction, not the stillness
+/// rule, stops it.
+fn keys_move(e: &mut Engine, player: u32, seconds: f32, input: u32) {
+    let original = read4(e, input);
+    let moving =
+        original[0].abs() > STILL || original[1].abs() > STILL || original[2].abs() > STILL;
+    {
+        let mut s = kept();
+        s.animation_moving = moving;
+        s.injected = false;
+        s.wrote = None;
+    }
+    let t = tuning();
+    if !t.on || !crate::gunplay::is_on() || input == 0 || !(seconds > 0.0 && seconds < 0.5) {
+        return;
+    }
+    let mover = e.mem.u32(player + ACTOR_MOVER);
+    if mover == 0 {
+        return;
+    }
+    let mode = e.mem.u32(mover + MOVE_MODE);
+    if mode & SWIMMING_OR_FLYING != 0 {
+        return;
+    }
+    let side = read4(e, mover + SIDE_VEC);
+    let replaced = match key_direction(mode, [side[0], side[1]]) {
+        Some(dir) => {
+            let slot = if mode & RUN == 0 && mode & WALK != 0 {
+                SLOT_WALK_SPEED
+            } else {
+                SLOT_RUN_SPEED
+            };
+            let speed = e.vcall(player, slot, &args![]).f32() * t.run_speed as f32 / 100.0;
+            if !speed.is_finite() || speed <= 0.0 {
+                return;
+            }
+            let step = speed * seconds;
+            [dir[0] * step, dir[1] * step, original[2]]
+        }
+        None if !moving && kept().speed > 0.2 => [0.0, NUDGE, original[2]],
+        None => return,
+    };
+    for (i, value) in replaced.into_iter().enumerate() {
+        e.mem.set_f32(input + 4 * i as u32, value);
+    }
+    kept().injected = true;
+    if logging() {
+        eprintln!(
+            "Movement: move vector ({:.2}, {:.2}, {:.2}) from the animation -> ({:.2}, {:.2}, {:.2}) from the keys {mode:#x}",
+            original[0], original[1], original[2], replaced[0], replaced[1], replaced[2]
+        );
+    }
+}
+
+/// After `MobileObject::Move`: the debug log's line on who set the final velocity.
+fn after_move(e: &mut Engine, controller: u32) {
+    if !logging() || controller == 0 {
+        return;
+    }
+    let out = [0, 1, 2].map(|i| e.mem.f32(controller + OUT_VELOCITY + 4 * i));
+    let current = e.mem.u32(controller + CURRENT_STATE);
+    let wrote = kept().wrote;
+    let path = match wrote {
+        None if tuning().on && crate::gunplay::is_on() => "original (no snappy step this frame)",
+        None => "classic",
+        Some(w) if (w[0] - out[0]).abs() < 1e-3 && (w[1] - out[1]).abs() < 1e-3 => "snappy",
+        Some(_) if out[0] == 0.0 && out[1] == 0.0 => "zeroed after snappy (the controller still)",
+        Some(_) => "snappy, then changed by the game (a push, the collision, the jump)",
+    };
+    eprintln!(
+        "Movement: final velocity ({:.2}, {:.2}, {:.2}) state {current}: {path}",
+        out[0], out[1], out[2]
+    );
+}
+
+/// The debug log's line for a step Snappy did not touch.
+fn classic_line(e: &mut Engine, output: u32) {
+    let Some(controller) = output.checked_sub(OUT_VELOCITY) else {
+        return;
+    };
+    if !is_player(e, controller) {
+        return;
+    }
+    let out = [0, 1, 2].map(|i| e.mem.f32(output + 4 * i));
+    eprintln!(
+        "Movement: classic step: the util gave ({:.2}, {:.2}, {:.2}) state {}",
+        out[0],
+        out[1],
+        out[2],
+        e.mem.u32(controller + CURRENT_STATE)
+    );
 }
 
 // --- The Settings menu's rows (the Gameplay page). ---------------------------------------------
@@ -928,15 +1156,41 @@ mod tests {
                 }
             }
         }
-        // Every key has a row (Reset aside).
+        // Every key has a row (Reset aside), but the debug log's.
         let keyed: Vec<&str> = ROWS.iter().filter_map(|r| r.key()).collect();
-        assert_eq!(keyed.len(), KEYS.len());
-        for (key, ..) in KEYS {
-            assert!(keyed.contains(&key), "{key}");
+        assert_eq!(keyed.len(), KEYS.len() - 1);
+        for (key, ..) in KEYS.iter().filter(|k| k.0 != "bMovementLog") {
+            assert!(keyed.contains(key), "{key}");
         }
         assert_eq!(Row::Mode.choices(), ["Classic", "Snappy"]);
         assert_eq!(Row::RunSpeed.setting_of(100), 10);
         assert_eq!(Row::Accelerate.value_of(0), 2);
+    }
+
+    /// The keys' direction: the stick's when it has one, else the bits; diagonals are unit length,
+    /// left is -x, and opposite keys cancel.
+    #[test]
+    fn the_keys_give_the_direction() {
+        assert_eq!(key_direction(0x200, [0.0, 0.0]), None);
+        assert_eq!(key_direction(0x1, [0.0, 0.0]), Some([0.0, 1.0]));
+        assert_eq!(key_direction(0x4, [0.0, 0.0]), Some([-1.0, 0.0]));
+        assert_eq!(
+            key_direction(0x8 | 0x2, [0.0, 0.0]).map(|d| d[1] < 0.0 && d[0] > 0.0),
+            Some(true)
+        );
+        let d = key_direction(0x1 | 0x4, [0.0, 0.0]).unwrap();
+        assert!((d[0] * d[0] + d[1] * d[1] - 1.0).abs() < 1e-6 && d[0] < 0.0 && d[1] > 0.0);
+        assert_eq!(
+            key_direction(0x4 | 0x8, [0.0, 0.0]),
+            None,
+            "left and right cancel"
+        );
+        assert_eq!(
+            key_direction(0x1, [0.0, 0.5]),
+            Some([0.0, 1.0]),
+            "a stick's own"
+        );
+        assert_eq!(key_direction(0x1, [0.3, 0.4]), Some([0.6, 0.8]));
     }
 
     /// The table's values are the built-in tuning, each in its range; variables win and a bad one

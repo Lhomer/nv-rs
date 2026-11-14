@@ -32,6 +32,7 @@ nv-rs Movement	iAirSpeedCap	NV_MOVEMENT_AIR_SPEED_CAP	30	The speed (game units a
 nv-rs Movement	iJumpGravity	NV_MOVEMENT_JUMP_GRAVITY	130	Gravity while you are in the air, in percent of the game's (50 to 300); a jump stays as high and is over sooner: higher is less floaty.
 nv-rs Movement	iRunSpeed	NV_MOVEMENT_RUN_SPEED	100	Your top speed on the ground, running and walking, in percent of the game's (50 to 200; the animations are made for 100).
 nv-rs Movement	iJumpStrength	NV_MOVEMENT_JUMP_STRENGTH	100	How high you jump, in percent of the game's (50 to 200).
+nv-rs Movement	bMovementLog	NV_MOVEMENT_LOG	0	1 = the game's log gets a line for each of your movement steps saying which path set the final velocity (snappy, original, the controller zeroing it): for checking the movement; 0 = no lines.
 nv-rs Fixes	bUncap	NV_UNCAP	1	Uncapped frame rate: the game's frame step without its sleep, so frames are not held to the original's pace (iFrameLimit paces it).
 nv-rs Fixes	bHighFrameRateLanding	NV_HF_LANDING	1	High-frame-rate landing: the player landing standing still falls as far as at 60 frames a second.
 nv-rs Fixes	bHighFrameRateSlowMotion	NV_HF_SLOWMO	1	High-frame-rate slow motion: the game's time multiplier moves to its target by the time passed, not by the frame.
