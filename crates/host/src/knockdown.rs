@@ -9,9 +9,12 @@
 //! already knocked down (its process's knock state `+0x13c`).
 //!
 //! **Physics** (Patrick, 2026-11-14: momentum transfer, not a score). The hit puts a momentum
-//! into the body ([`transferred`], N s); hits on the same actor within [`GATHER`] add up (a
-//! shotgun's pellets, a burst). The body's speed from it is that momentum over the body's mass
-//! ([`body_mass`]: the ragdoll's own Havok masses once measured, else by body and size), times
+//! into the body ([`transferred`], N s), added to the actor's stack ([`stack`]): every hit that
+//! lands (each landed pellet of a shotgun, each round of a burst, each swing) adds its momentum,
+//! and the stack fades by half every `iImpactStacking` milliseconds (Settings > Gameplay "Impact
+//! Stacking", 0.1 to 1 s); its direction is the momentum-weighted sum of the hits' directions.
+//! The decisions and the launch use the stack; a knockdown empties it. The body's speed from it
+//! is that momentum over the body's mass ([`body_mass`]: the ragdoll's own Havok masses once measured, else by body and size), times
 //! `iHitForce` percent, at most [`MAX_LAUNCH`]. What topples the body ([`topple_speed`]) is the
 //! speed that lifts its centre of mass over the edge of its stance, times a recovery factor (a
 //! standing body steps to catch itself), times `iKnockdownThreshold` percent. At or past it: a
@@ -112,8 +115,6 @@ pub const BLAST_PER_POINT: f32 = 3.5;
 pub const ARMOUR_DT: f32 = 40.0;
 pub const DAMAGE_MOMENTUM: f32 = 0.3;
 pub const POUND: f32 = 0.4536;
-/// Hits on one actor this close in time add up.
-pub const GATHER: Duration = Duration::from_millis(150);
 /// The launch at most (m/s; outliers), and game units a metre.
 pub const MAX_LAUNCH: f32 = 12.0;
 pub const UNITS_PER_METRE: f32 = 70.0;
@@ -488,6 +489,75 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
         return;
     }
     let aggressor = e.mem.u32(hit + HIT_AGGRESSOR);
+    let Measured {
+        push,
+        dt,
+        p,
+        point,
+        direction,
+    } = measure_hit(e, target, hit);
+    let half_life = t.impact_stacking.max(1) as f32 / 1000.0;
+    let stacked = stack(target, p, direction, half_life);
+    let (total, direction) = (stacked.total, stacked.direction);
+    let scale = e.call(GET_SCALE, &args![target]).f64() as f32;
+    let body = body_of(e, target);
+    let (mass, measured) = mass_of(e, target, body, scale);
+    let speed = total / mass * t.hit_force.max(0) as f32 / 100.0;
+    let topple = topple_speed(body, scale, t.knockdown_threshold);
+    let decision = reaction(speed, topple);
+    note(format!(
+        "{who}: {} {p:.1} N s (DT {dt:.0}); stack {:.1} N s left of earlier hits + this = {total:.1} \
+         N s over {} hits (half-life {half_life:.2} s), along ({:.2}, {:.2}, {:.2}) -> {speed:.2} \
+         m/s on {mass:.0} kg ({body:?}, scale {scale:.2}, {}) vs topple {topple:.2} m/s (threshold \
+         {}%, Hit Force {}%) -> {decision:?}",
+        describe_push(push),
+        stacked.before,
+        stacked.hits,
+        direction[0],
+        direction[1],
+        direction[2],
+        if measured {
+            "its ragdoll's mass"
+        } else {
+            "by body and size"
+        },
+        t.knockdown_threshold,
+        t.hit_force
+    ));
+    match decision {
+        Reaction::Knockdown => {
+            if speed > MAX_LAUNCH {
+                note(format!(
+                    "{who}: clamp: launch {speed:.1} m/s held to {MAX_LAUNCH} m/s"
+                ));
+            }
+            reset_stack(target);
+            note(format!("{who}: stack reset on the knockdown"));
+            knock_down(e, target, aggressor, point, direction, speed)
+        }
+        Reaction::Stagger => {
+            let force = (speed * STAGGER_PER_MPS).min(MAX_STAGGER);
+            let angle = direction[0].atan2(direction[1]).to_degrees();
+            jip::push_living_actor(e, target, force, angle, false);
+        }
+        Reaction::None => {}
+    }
+}
+
+/// One hit as the knockdowns read it: what pushed, the target's damage threshold that counted, the
+/// momentum it transferred (N s), its impact point and direction.
+#[derive(Clone, Copy, Debug)]
+pub struct Measured {
+    pub push: Push,
+    pub dt: f32,
+    pub p: f32,
+    pub point: [f32; 3],
+    pub direction: [f32; 3],
+}
+
+/// The hit `hit` on `target` measured ([`Measured`]; module documentation).
+pub fn measure_hit(e: &mut Engine, target: u32, hit: u32) -> Measured {
+    let aggressor = e.mem.u32(hit + HIT_AGGRESSOR);
     let weapon = e.mem.u32(hit + HIT_WEAPON);
     let stats = crate::gunplay::effective_stats(e, aggressor, weapon);
     let shot = shot_of(e, hit, stats.as_ref());
@@ -527,47 +597,12 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
             impact(e, hit, target, aggressor),
         ),
     };
-    let p = transferred(push, dt);
-    let total = gather(target, p);
-    let scale = e.call(GET_SCALE, &args![target]).f64() as f32;
-    let body = body_of(e, target);
-    let (mass, measured) = mass_of(e, target, body, scale);
-    let speed = total / mass * t.hit_force.max(0) as f32 / 100.0;
-    let topple = topple_speed(body, scale, t.knockdown_threshold);
-    let decision = reaction(speed, topple);
-    note(format!(
-        "{who}: {} {p:.1} N s (DT {dt:.0}){} -> {speed:.2} m/s on {mass:.0} kg ({body:?}, scale \
-         {scale:.2}, {}) vs topple {topple:.2} m/s (threshold {}%, Hit Force {}%) -> {decision:?}",
-        describe_push(push),
-        if total > p + 1e-3 {
-            format!(", {total:.1} N s with the hits just before")
-        } else {
-            String::new()
-        },
-        if measured {
-            "its ragdoll's mass"
-        } else {
-            "by body and size"
-        },
-        t.knockdown_threshold,
-        t.hit_force
-    ));
-    match decision {
-        Reaction::Knockdown => {
-            if speed > MAX_LAUNCH {
-                note(format!(
-                    "{who}: clamp: launch {speed:.1} m/s held to {MAX_LAUNCH} m/s"
-                ));
-            }
-            forget_gathered(target);
-            knock_down(e, target, aggressor, point, direction, speed)
-        }
-        Reaction::Stagger => {
-            let force = (speed * STAGGER_PER_MPS).min(MAX_STAGGER);
-            let angle = direction[0].atan2(direction[1]).to_degrees();
-            jip::push_living_actor(e, target, force, angle, false);
-        }
-        Reaction::None => {}
+    Measured {
+        push,
+        dt,
+        p: transferred(push, dt),
+        point,
+        direction,
     }
 }
 
@@ -595,31 +630,116 @@ fn describe_push(push: Push) -> String {
     }
 }
 
-/// The momentum gathered on each actor lately: (actor, N s, the last hit).
-static GATHERED: Mutex<Vec<(u32, f32, Instant)>> = Mutex::new(Vec::new());
-
-/// `p` added to what hit `actor` in the last [`GATHER`]; the sum.
-fn gather(actor: u32, p: f32) -> f32 {
-    let mut list = GATHERED.lock().unwrap_or_else(|p| p.into_inner());
-    list.retain(|g| g.2.elapsed() < GATHER);
-    match list.iter_mut().find(|g| g.0 == actor) {
-        Some(g) => {
-            g.1 += p;
-            g.2 = Instant::now();
-            g.1
-        }
-        None => {
-            list.push((actor, p, Instant::now()));
-            p
-        }
-    }
+/// A living actor's stacked impacts: the momentum left (N s), its momentum-weighted direction
+/// (the sum of each hit's momentum times its direction, decayed the same), the hits in it, the
+/// last hit.
+#[derive(Clone, Copy, Debug)]
+struct Stack {
+    actor: u32,
+    total: f32,
+    vector: [f32; 3],
+    hits: u32,
+    at: Instant,
 }
 
-fn forget_gathered(actor: u32) {
-    GATHERED
+static STACKS: Mutex<Vec<Stack>> = Mutex::new(Vec::new());
+
+/// What [`stack`] answers: the momentum left of the earlier hits, the total with this one, the
+/// direction of the total (unit), the hits in it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stacked {
+    pub before: f32,
+    pub total: f32,
+    pub direction: [f32; 3],
+    pub hits: u32,
+}
+
+/// Momentum `p` decayed over `seconds` with the half-life `half_life` (seconds).
+pub fn decayed(p: f32, seconds: f32, half_life: f32) -> f32 {
+    if half_life <= 0.0 || seconds.is_nan() {
+        return 0.0;
+    }
+    p * 0.5f32.powf(seconds.max(0.0) / half_life)
+}
+
+/// A stack's momentum and direction after a hit of `p` along `direction` (unit), the earlier
+/// `total` and `vector` decayed over `seconds`; the hits counted.
+pub fn add_hit(
+    total: f32,
+    vector: [f32; 3],
+    hits: u32,
+    seconds: f32,
+    half_life: f32,
+    p: f32,
+    direction: [f32; 3],
+) -> (Stacked, [f32; 3]) {
+    let k = decayed(1.0, seconds, half_life);
+    let before = total * k;
+    // A stack faded below a hundredth of its momentum counts no hits any more.
+    let hits = if k < 0.01 || before <= 0.0 {
+        1
+    } else {
+        hits + 1
+    };
+    let v = [0, 1, 2].map(|i| vector[i] * k + direction[i] * p);
+    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let dir = if l.is_finite() && l > 1e-6 {
+        v.map(|x| x / l)
+    } else {
+        direction
+    };
+    (
+        Stacked {
+            before,
+            total: before + p,
+            direction: dir,
+            hits,
+        },
+        v,
+    )
+}
+
+/// The hit of `p` along `direction` added to `actor`'s stack (module documentation).
+fn stack(actor: u32, p: f32, direction: [f32; 3], half_life: f32) -> Stacked {
+    let mut list = STACKS.lock().unwrap_or_else(|p| p.into_inner());
+    // Stacks faded out (ten half-lives) are dropped.
+    list.retain(|s| s.at.elapsed().as_secs_f32() < half_life * 10.0);
+    let old = list
+        .iter()
+        .position(|s| s.actor == actor)
+        .map(|i| list.remove(i));
+    let (total, vector, hits, seconds) = old.map_or((0.0, [0.0; 3], 0, 0.0), |s| {
+        (s.total, s.vector, s.hits, s.at.elapsed().as_secs_f32())
+    });
+    let (stacked, vector) = add_hit(total, vector, hits, seconds, half_life, p, direction);
+    list.push(Stack {
+        actor,
+        total: stacked.total,
+        vector,
+        hits: stacked.hits,
+        at: Instant::now(),
+    });
+    stacked
+}
+
+/// The momentum `actor`'s stack holds now (N s), decayed.
+pub fn stacked_now(actor: u32) -> f32 {
+    let half_life = crate::gunplay::tuning().impact_stacking.max(1) as f32 / 1000.0;
+    STACKS
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .retain(|g| g.0 != actor);
+        .iter()
+        .find(|s| s.actor == actor)
+        .map_or(0.0, |s| {
+            decayed(s.total, s.at.elapsed().as_secs_f32(), half_life)
+        })
+}
+
+fn reset_stack(actor: u32) {
+    STACKS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|s| s.actor != actor);
 }
 
 /// The ragdoll masses measured (base form -> kg at its scale then, and that scale).
@@ -1491,7 +1611,7 @@ pub fn clear() {
     LAUNCHES.lock().unwrap_or_else(|p| p.into_inner()).clear();
     GET_UPS.lock().unwrap_or_else(|p| p.into_inner()).clear();
     KNOCKED.lock().unwrap_or_else(|p| p.into_inner()).clear();
-    GATHERED.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    STACKS.lock().unwrap_or_else(|p| p.into_inner()).clear();
     UP.lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
 
@@ -1612,6 +1732,36 @@ mod tests {
         assert!(transferred(fifty, 20.0) < transferred(fifty, 0.0));
         assert_eq!(armour_left(0.0), 1.0);
         assert_eq!(reaction(f32::NAN, human), Reaction::None);
+    }
+
+    /// The stack: hits add up, fade by half each half-life, point the momentum-weighted way; a
+    /// stack faded to nothing counts the next hit alone.
+    #[test]
+    fn impacts_stack_and_fade() {
+        let east = [1.0, 0.0, 0.0];
+        let north = [0.0, 1.0, 0.0];
+        let (a, v) = add_hit(0.0, [0.0; 3], 0, 0.0, 0.3, 20.0, east);
+        assert_eq!((a.before, a.total, a.hits), (0.0, 20.0, 1));
+        // Eight landed pellets at once: eight times one.
+        let (mut s, mut v) = (a, v);
+        for _ in 1..8 {
+            let (n, nv) = add_hit(s.total, v, s.hits, 0.0, 0.3, 20.0, east);
+            s = n;
+            v = nv;
+        }
+        assert_eq!((s.total, s.hits), (160.0, 8));
+        // One half-life later half is left.
+        let (b, _) = add_hit(20.0, [20.0, 0.0, 0.0], 1, 0.3, 0.3, 10.0, north);
+        assert!((b.before - 10.0).abs() < 1e-3 && (b.total - 20.0).abs() < 1e-3);
+        assert_eq!(b.hits, 2);
+        // The direction is the momentum-weighted sum: equal parts east and north.
+        assert!((b.direction[0] - b.direction[1]).abs() < 1e-4 && b.direction[0] > 0.7);
+        // Faded out: the hit alone.
+        let (c, _) = add_hit(20.0, [20.0, 0.0, 0.0], 5, 10.0, 0.3, 10.0, north);
+        assert_eq!(c.hits, 1);
+        assert!(c.before < 0.01 && c.direction[1] > 0.99);
+        assert!((decayed(8.0, 0.6, 0.3) - 2.0).abs() < 1e-4);
+        assert_eq!(decayed(8.0, 0.0, 0.0), 0.0);
     }
 
     /// The game's fall formula: nothing within the minimum, more the further past it.

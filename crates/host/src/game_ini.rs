@@ -536,6 +536,7 @@ mod tests {
                 "bBallistics",
                 "bPenetration",
                 "iBulletSpeed",
+                "iImpactStacking",
                 "sTestRangeCell",
                 "bSnappyMovement",
                 "iAccelerate",

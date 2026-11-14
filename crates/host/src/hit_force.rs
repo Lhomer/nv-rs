@@ -17,8 +17,10 @@
 //! **The momentum** ([`momentum`], in the units of the game's strength: damage points), from
 //! [`Shot`]:
 //! - a gun (Classic hitscan): its damage per projectile, with its weapon mods, less the target's damage threshold (never below
-//!   [`MIN_THROUGH`] of it), over its projectiles: `n^`[`PELLET_EXPONENT`] (a shotgun's pellets
-//!   spread over the bones they hit; the one killing pellet's point gets their share);
+//!   [`MIN_THROUGH`] of it), one projectile's: each landed pellet is a hit of its own, and a
+//!   killing hit carries the momentum the hits just before left stacked in the body
+//!   ([`push_body`]: this hit's times the stack over this hit's, `crate::knockdown`'s stack; the
+//!   `n^0.75` share of all pellets is gone, 2026-11-14);
 //! - a melee or unarmed hit: the weapon's damage made heavier by its weight (`1 + weight /`
 //!   [`WEIGHT_PER_DOUBLING`]), longer by its reach, by the attacker's Strength
 //!   ([`strength_factor`]) and skill ([`skill_factor`]), [`POWER_ATTACK`] times for a power attack
@@ -49,7 +51,6 @@ use std::time::{Duration, Instant};
 
 /// The tuning constants (reported to Patrick; module documentation).
 pub const MIN_THROUGH: f32 = 0.2;
-pub const PELLET_EXPONENT: f32 = 0.75;
 pub const WEIGHT_PER_DOUBLING: f32 = 10.0;
 pub const POWER_ATTACK: f32 = 1.5;
 pub const MAX_MOMENTUM: f32 = 160.0;
@@ -103,10 +104,9 @@ fn through(damage: f32, threshold: f32) -> f32 {
 /// The hit's momentum before the multipliers (module documentation), in damage points.
 pub fn momentum(shot: Shot, threshold: f32) -> f32 {
     let m = match shot {
-        Shot::Gun {
-            damage,
-            projectiles,
-        } => through(damage, threshold) * (projectiles.clamp(1, 20) as f32).powf(PELLET_EXPONENT),
+        // One projectile's: each landed pellet is its own hit; the pellets that landed just before
+        // stack ([`push_body`], `crate::knockdown`'s stack).
+        Shot::Gun { damage, .. } => through(damage, threshold),
         Shot::Melee {
             damage,
             weight,
@@ -127,11 +127,8 @@ pub fn momentum(shot: Shot, threshold: f32) -> f32 {
         Shot::Bullet {
             momentum,
             threshold: factor,
-            projectiles,
-        } => {
-            through(momentum, threshold * factor)
-                * (projectiles.clamp(1, 20) as f32).powf(PELLET_EXPONENT)
-        }
+            ..
+        } => through(momentum, threshold * factor),
     };
     if m.is_finite() {
         m
@@ -268,7 +265,17 @@ pub fn push_body(e: &mut Engine, aggressor: u32, hit: u32, stats: Option<&Weapon
         Shot::Explosion { .. } => 0.0,
         _ => actor_value(e, target, AV_DAMAGE_THRESHOLD),
     };
-    let strength = push_strength(momentum(shot, threshold), t.hit_force, t.impulse);
+    let mut m = momentum(shot, threshold);
+    // A gun's killing hit carries the momentum the hits just before left stacked in the body (the
+    // landed pellets of the same shot, a burst): this hit's times the stack over this hit's.
+    if matches!(shot, Shot::Gun { .. } | Shot::Bullet { .. }) {
+        let own = crate::knockdown::measure_hit(e, target, hit).p;
+        if own > 0.0 {
+            let factor = (crate::knockdown::stacked_now(target) + own) / own;
+            m *= factor.clamp(1.0, 20.0);
+        }
+    }
+    let strength = push_strength(m, t.hit_force, t.impulse);
     let kept = e.mem.f32(hit + HIT_HEALTH_DAMAGE);
     e.mem.set_f32(hit + HIT_HEALTH_DAMAGE, strength);
     fn_008ae000(e, Ptr::new(aggressor), Ptr::new(hit));
@@ -337,24 +344,19 @@ mod tests {
         assert_eq!(momentum(rifle, 100.0), 10.0, "a fifth gets through");
     }
 
-    /// A shotgun's pellets push together, less than all of them at one point.
+    /// A gun pushes by one projectile's damage: a shotgun's pellets stack as separate hits.
     #[test]
-    fn pellets_share_their_push() {
-        let one = momentum(
-            Shot::Gun {
-                damage: 7.0,
-                projectiles: 1,
-            },
-            0.0,
-        );
-        let shotgun = momentum(
-            Shot::Gun {
-                damage: 7.0,
-                projectiles: 8,
-            },
-            0.0,
-        );
-        assert!(shotgun > 4.0 * one && shotgun < 8.0 * one, "{shotgun}");
+    fn a_gun_pushes_by_one_projectile() {
+        let one = |projectiles| {
+            momentum(
+                Shot::Gun {
+                    damage: 7.0,
+                    projectiles,
+                },
+                0.0,
+            )
+        };
+        assert_eq!(one(8), one(1));
     }
 
     /// A sledgehammer swings harder than a knife, a power attack harder again, Strength and skill

@@ -155,6 +155,9 @@ pub struct Tuning {
     pub penetration: bool,
     /// `iBulletSpeed`: the bullets' speed, percent of each calibre's.
     pub bullet_speed: i32,
+    /// `iImpactStacking`: the half-life of a living actor's stacked impacts, milliseconds
+    /// ([`crate::knockdown`]).
+    pub impact_stacking: i32,
 }
 
 impl Tuning {
@@ -176,6 +179,7 @@ impl Tuning {
         ballistics: true,
         penetration: true,
         bullet_speed: 100,
+        impact_stacking: 300,
     };
 
     /// Sets `key` (a [`KEYS`] key) to `value`; false for a key that isn't one or a value out of
@@ -204,6 +208,7 @@ impl Tuning {
             "bballistics" => self.ballistics = value != 0,
             "bpenetration" => self.penetration = value != 0,
             "ibulletspeed" => self.bullet_speed = value,
+            "iimpactstacking" => self.impact_stacking = value,
             _ => return false,
         }
         true
@@ -228,6 +233,7 @@ impl Tuning {
             "bballistics" => i32::from(self.ballistics),
             "bpenetration" => i32::from(self.penetration),
             "ibulletspeed" => self.bullet_speed,
+            "iimpactstacking" => self.impact_stacking,
             _ => return None,
         })
     }
@@ -266,7 +272,7 @@ impl Default for Tuning {
 }
 
 /// The keys of [`SECTION`]: key, its environment variable, lowest and highest value.
-pub const KEYS: [(&str, &str, i32, i32); 16] = [
+pub const KEYS: [(&str, &str, i32, i32); 17] = [
     ("iRecoil", "NV_GUNPLAY_RECOIL", 0, 300),
     ("iRecoilRecovery", "NV_GUNPLAY_RECOVERY", 0, 100),
     ("iSway", "NV_GUNPLAY_SWAY", 0, 300),
@@ -293,6 +299,7 @@ pub const KEYS: [(&str, &str, i32, i32); 16] = [
     ("bBallistics", "NV_GUNPLAY_BALLISTICS", 0, 1),
     ("bPenetration", "NV_GUNPLAY_PENETRATION", 0, 1),
     ("iBulletSpeed", "NV_GUNPLAY_BULLET_SPEED", 25, 200),
+    ("iImpactStacking", "NV_GUNPLAY_IMPACT_STACKING", 100, 1000),
 ];
 
 /// A value of `key` as the file or a variable holds it: `1`/`0` for a `b` key, a whole number for
@@ -1376,7 +1383,7 @@ fn unplace_pose(e: &mut Engine, placed: &Placed) {
 
 /// The rows' change functions, after the graphics rows' (`0x7e06_0010` to `0x7e06_0050`), in the
 /// platform's area that no exe or platform code uses.
-pub const CHANGE_FNS: [u32; 11] = [
+pub const CHANGE_FNS: [u32; 12] = [
     0x7e06_0060,
     0x7e06_0070,
     0x7e06_0080,
@@ -1391,6 +1398,8 @@ pub const CHANGE_FNS: [u32; 11] = [
     0x7e06_01a0,
     0x7e06_01b0,
     0x7e06_01c0,
+    // Impact Stacking (after the perk row's 0x7e06_01d0).
+    0x7e06_01e0,
 ];
 
 /// A row of the Settings menu's Display page.
@@ -1418,10 +1427,12 @@ pub enum Row {
     Penetration,
     /// A meter of `iBulletSpeed` (25 to 200), on the Gameplay page.
     BulletSpeed,
+    /// A meter of `iImpactStacking` (0.1 to 1.0 s), on the Gameplay page.
+    ImpactStacking,
 }
 
 /// The rows, in the order they are made.
-pub const ROWS: [Row; 11] = [
+pub const ROWS: [Row; 12] = [
     Row::Enabled,
     Row::Recoil,
     Row::Sway,
@@ -1433,6 +1444,7 @@ pub const ROWS: [Row; 11] = [
     Row::Ballistics,
     Row::Penetration,
     Row::BulletSpeed,
+    Row::ImpactStacking,
 ];
 
 impl Row {
@@ -1450,6 +1462,7 @@ impl Row {
             Row::Ballistics => (SECTION, "bBallistics"),
             Row::Penetration => (SECTION, "bPenetration"),
             Row::BulletSpeed => (SECTION, "iBulletSpeed"),
+            Row::ImpactStacking => (SECTION, "iImpactStacking"),
         }
     }
 
@@ -1457,6 +1470,7 @@ impl Row {
     fn low(self) -> i32 {
         match self {
             Row::KnockThreshold | Row::BulletSpeed => 25,
+            Row::ImpactStacking => 100,
             _ => 0,
         }
     }
@@ -1469,7 +1483,8 @@ impl Row {
             | Row::KnockThreshold
             | Row::Ballistics
             | Row::Penetration
-            | Row::BulletSpeed => GAMEPLAY,
+            | Row::BulletSpeed
+            | Row::ImpactStacking => GAMEPLAY,
             _ => DISPLAY,
         }
     }
@@ -1482,6 +1497,7 @@ impl Row {
             Row::HitForce => Some((10, 31)),
             Row::KnockThreshold => Some((25, 16)),
             Row::BulletSpeed => Some((5, 36)),
+            Row::ImpactStacking => Some((50, 19)),
             Row::Enabled | Row::HitStop | Row::Knockdowns | Row::Ballistics | Row::Penetration => {
                 None
             }
@@ -1545,6 +1561,7 @@ impl Row {
             Row::Ballistics => "Ballistics".to_string(),
             Row::Penetration => "Penetration".to_string(),
             Row::BulletSpeed => format!("Bullet Speed: {value}%"),
+            Row::ImpactStacking => format!("Impact Stacking: {:.2} s", value as f32 / 1000.0),
         }
     }
 }
@@ -1638,7 +1655,7 @@ pub fn install_change_fns(e: &mut Engine) {
         change(e, ROWS[N], Ptr::new(a[0]));
         Ret::default()
     }
-    let fns: [AbiFn; 11] = [
+    let fns: [AbiFn; 12] = [
         row_fn::<0>,
         row_fn::<1>,
         row_fn::<2>,
@@ -1650,6 +1667,7 @@ pub fn install_change_fns(e: &mut Engine) {
         row_fn::<8>,
         row_fn::<9>,
         row_fn::<10>,
+        row_fn::<11>,
     ];
     for (address, f) in CHANGE_FNS.into_iter().zip(fns) {
         e.register(address, f);
@@ -1810,6 +1828,7 @@ mod tests {
             ballistics: false,
             penetration: false,
             bullet_speed: 25,
+            impact_stacking: 100,
         };
         for (row, key) in rows.iter().zip(KEYS) {
             assert_eq!(row.switch, key.1, "{row:?}");

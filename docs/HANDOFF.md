@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (impact stacking)
+
+- **Patrick:** impacts stack: a running transferred momentum per living actor, decaying with a half-life (Settings > Gameplay "Impact Stacking", 0.1-1.0 s, default 0.3, `[nv-rs Gunplay]`); every landed hit (each landed pellet) adds its own; decisions and launch use the total, direction momentum-weighted; reset on knockdown; logged.
+- **Now:** `iImpactStacking` (ms, 100-1000, Gameplay row `7e0601e0`, meter of 19); `knockdown::stack`/`add_hit`/`decayed` replace the 150 ms gather; `measure_hit` shared with `hit_force::push_body`, whose gun kill push is this hit's x (stack + own) / own (1-20); `hit_force::momentum` drops `n^0.75` (one projectile's). Not run in game.
+
 ### Claude, 2026-11-14 (knockdowns by momentum transfer)
 
 - **Patrick:** the launch is the transferred momentum over the target's mass (rounds: mass x impact speed x share x armour; swings: weapon and arm mass x swing speed; blasts: from strength and distance); masses per body (ragdoll Havok masses when available); the knockdown decision physical too, `iKnockdownThreshold` scaling it, `iHitForce` the overall multiplier, a velocity cap.

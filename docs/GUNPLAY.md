@@ -176,8 +176,15 @@ with `bKnockdownCompanions=1`.
   with each of its questions when it refuses, and after `KnockExplosion` whether the actor has a
   ragdoll (slot `0x38c`) and its knock state; at most 20 lines a second.
 - **Physics (Patrick, 2026-11-14, replacing the per-body points):** the hit puts a momentum p
-  (N s) into the body; hits on the same actor within 150 ms add up (a shotgun's pellets, a burst).
-  Its speed is v = p / mass x `iHitForce` %, at most 12 m/s; it topples at the speed that lifts its
+  (N s) into the body, added to the actor's **stack**: every hit that lands (each landed pellet
+  of a shotgun, each round of a burst, each swing) adds its own p, and the stack decays
+  exponentially, by half every `iImpactStacking` ms (Settings > Gameplay "Impact Stacking",
+  0.10 to 1.00 s in 0.05 s steps, default 0.30 s): stack = stack x 0.5^(t / half-life) + p. Its
+  direction is the momentum-weighted sum of the hits' directions (each p x its direction, decayed
+  the same). The decisions use the stack, the launch is the stack over the mass along that
+  direction, and a knockdown empties it. Each decision's log line shows the hit's p, the stack
+  left of earlier hits, the total, the hits in it, the half-life and the direction.
+  The stack's speed is v = p_stack / mass x `iHitForce` %, at most 12 m/s; it topples at the speed that lifts its
   centre of mass (height h) over the edge of its stance (half-width b), times a recovery factor 3
   (a standing body steps to catch itself below that), times `iKnockdownThreshold` %:
   v_topple = 3 x sqrt(2 g (sqrt(h^2 + b^2) - h)), lengths x scale, mass x scale^3. Knockdown at
@@ -217,7 +224,7 @@ with `bKnockdownCompanions=1`.
   | .44 Magnum | 63 | 0.79 | 2.11 | 0.25 | 0.16 |
   | 5.56mm (HP) | 36 (48) | 0.45 (0.60) | 1.19 | 0.14 | 0.09 |
   | 9mm | 26 | 0.32 | 0.86 | 0.10 | 0.06 |
-  | 12 ga, 8 pellets / slug | 168 / 208 | 2.10 / 2.60 | 5.6 / 6.9 | 0.67 / 0.83 | 0.42 / 0.52 |
+  | 12 ga, 8 pellets landed at once / slug | 168 / 208 | 2.10 / 2.60 | 5.6 / 6.9 | 0.67 / 0.83 | 0.42 / 0.52 |
   | Sledgehammer / power | 77 / 116 | 0.97 / 1.45 | 2.6 / 3.9 | 0.31 / 0.46 | 0.19 / 0.29 |
   | Knife / fists | 22 / 19 | 0.28 / 0.24 | | | |
   | Frag blast, 100 damage | 350 | 4.38 | 11.7 | 1.40 | 0.88 |
@@ -440,6 +447,7 @@ line; a bad variable stops the start.
 | `bBallistics` | `NV_GUNPLAY_BALLISTICS` | 1 | 0/1 (Settings > Gameplay "Ballistics": Classic / Projectile) |
 | `bPenetration` | `NV_GUNPLAY_PENETRATION` | 1 | 0/1 (Settings > Gameplay "Penetration") |
 | `iBulletSpeed` | `NV_GUNPLAY_BULLET_SPEED` | 100 | 25-200 (Settings > Gameplay "Bullet Speed", in 5s) |
+| `iImpactStacking` | `NV_GUNPLAY_IMPACT_STACKING` | 300 | 100-1000 ms half-life (Settings > Gameplay "Impact Stacking", in 50s) |
 
 ### In-game Settings menu
 
