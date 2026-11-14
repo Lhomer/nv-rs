@@ -79,6 +79,8 @@
 007052f0	0	xNVSE
 00707e30	2	nv-rs equipment stats
 0070bc20	1	nv-rs quick loot
+00718630	0	nv-rs weighty combat
+00718840	2	nv-rs weighty combat
 00719790	2	nv-rs equipment stats
 0071d0a0	1	nv-rs thread races
 0075eac0	1	nv-rs pickpocket chance
@@ -91,6 +93,7 @@
 007adce0	0	nv-rs facial hair by race folder
 007b4b50	1	nv-rs facial hair by race folder
 007cc6e0	4	nv-rs field of view in the game's settings,nv-rs graphics in the game's settings,nv-rs weighty combat
+007e8890	1	nv-rs weighty combat
 007f3e00	0	nv-rs V.A.T.S. waits only for the camera
 008300c0	0	nv-rs radio song lengths
 00830b30	0	nv-rs radio song lengths
@@ -124,6 +127,7 @@
 00932a00	1	nv-rs half-loaded actor's level change
 00932b70	1	nv-rs half-loaded actor's level change
 009445b0	2	nv-rs weighty combat
+009526b0	1	nv-rs weighty combat
 0095de30	1	nv-rs field of view slider
 0095f6c0	1	nv-rs dragged bodies by time
 00960520	3	nv-rs dragged bodies by time

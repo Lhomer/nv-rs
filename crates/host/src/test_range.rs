@@ -38,6 +38,11 @@ use crate::range_cells::{Place, Spot};
 use crate::range_watch::{self, step};
 use engine::extend::{Owner, SiteSlot};
 use engine::prelude::*;
+use engine::units::fallout_ai::playercharacter_p2::player_character_is_god_mode;
+use engine::units::fallout_interface::interfacemanager_p2::{
+    fn_00718840, tutorial_manager_show_message, TutorialManager,
+};
+use engine::units::fallout_interface::tutorialmenu::tutorial_menu_create;
 use engine::units::fallout_shared::run_005b4550::fn_005b4630;
 use engine::units::fallout_shared::tes::fn_00453dc0;
 use engine::units::fallout_shared::tescontainer::fn_004821a0;
@@ -369,6 +374,44 @@ pub fn install(e: &mut Engine) {
         let (_, show) = engine::entry!(0x005b4630, fn_005b4630(ScriptArgs) -> bool);
         show(e, a)
     });
+    // God mode in a range game only (Patrick: infinite health and carry weight, no limb damage):
+    // `PlayerCharacter::IsGodMode` answers yes, as `tgm` makes it answer, without the byte `tgm`
+    // sets, so nothing of it outlives the range. The game asks it for damage, action points, the
+    // over-encumbered test and more.
+    e.register(IS_GOD_MODE, |e, _| {
+        if active() {
+            return 1u32.into_ret();
+        }
+        u32::from(player_character_is_god_mode(e)).into_ret()
+    });
+    // No tutorials or help in a range game: the tutorial manager queues none and counts every
+    // one as seen (the menus that wait for one go on), and no tutorial menu is made (the
+    // `ShowTutorialMenu` command's and the menus' own). Nothing is written: a save's tutorial
+    // state is as it was.
+    e.register(TUTORIAL_SHOW, |e, a| {
+        if active() {
+            note_hidden("a tutorial");
+            return 0u32.into_ret();
+        }
+        let (_, show) = engine::entry!(
+            0x00718630,
+            tutorial_manager_show_message(Ptr<TutorialManager>, i32, u32, u32) -> bool
+        );
+        show(e, a)
+    });
+    e.register(TUTORIAL_SEEN, |e, a| {
+        if active() {
+            return 1u32.into_ret();
+        }
+        u32::from(fn_00718840(e, Ptr::new(a[0]), a[1] as i32)).into_ret()
+    });
+    e.register(TUTORIAL_MENU, |e, a| {
+        if active() {
+            note_hidden("a tutorial or help menu");
+            return 1u32.into_ret();
+        }
+        u32::from(tutorial_menu_create(e, a[0], a[1] & 0xff != 0)).into_ret()
+    });
     e.register(GIVE_ITEMS, |e, a| {
         let player = e.global::<u32>(PLAYER);
         let quiet = if active() && a[1] == player && a[2] & 0xff == 0 {
@@ -387,6 +430,12 @@ pub fn install(e: &mut Engine) {
 /// "added" message).
 pub const SHOW_MESSAGE_COMMAND: u32 = 0x005b_4630;
 pub const GIVE_ITEMS: u32 = 0x0048_21a0;
+/// `PlayerCharacter::IsGodMode`, `TutorialManager::ShowMessage`, the tutorial manager's "seen"
+/// test and `TutorialMenu::Create`.
+pub const IS_GOD_MODE: u32 = 0x0095_26b0;
+pub const TUTORIAL_SHOW: u32 = 0x0071_8630;
+pub const TUTORIAL_SEEN: u32 = 0x0071_8840;
+pub const TUTORIAL_MENU: u32 = 0x007e_8890;
 /// `Script::ParseParameters` (`cdecl`: the parameter info, the script data, the offset, the three
 /// references, the event list, then the outputs).
 const PARSE_PARAMETERS: u32 = 0x005a_ccb0;
@@ -783,6 +832,9 @@ pub fn frame(e: &mut Engine, player: u32) {
         }
         _ => return,
     }
+    if LIMB_FRAMES.fetch_add(1, Ordering::Relaxed) % LIMB_EVERY == LIMB_EVERY - 1 {
+        heal_limbs(e);
+    }
     if home_pressed() {
         open_menu(e);
     }
@@ -1140,7 +1192,15 @@ fn setup(e: &mut Engine, player: u32) {
     }
     let forms = all_forms(e);
     let weapons = weapons(e, &forms);
+    // Every ammo of the loaded plugins (Patrick: every ammo type, a generous stack), the weapons'
+    // own first.
     let mut ammo: Vec<u32> = weapons.iter().filter_map(|&w| ammo_of(e, w)).collect();
+    ammo.extend(
+        forms
+            .iter()
+            .copied()
+            .filter(|&f| kind(e, f) == AMMO && !name(e, f).is_empty()),
+    );
     ammo.sort_unstable_by_key(|&a| e.mem.u32(a + FORM_ID));
     ammo.dedup();
     let ammo: Vec<u32> = ammo.iter().map(|&a| e.mem.u32(a + FORM_ID)).collect();
@@ -1194,6 +1254,7 @@ fn setup(e: &mut Engine, player: u32) {
     });
     fill_ammo(e);
     step("set-up: the ammo is in the player's inventory");
+    stock_inventory(e, &forms, &weapons);
     // Down the place's lane, or else the longest clear line of the room: the player turned to
     // face it.
     let best = match &spot {
@@ -1231,9 +1292,77 @@ fn fill_ammo(e: &mut Engine) {
     for a in ammo {
         let a = id(a);
         run_line(e, &format!("player.removeitem {a} 99999 1"));
-        run_line(e, &format!("player.additem {a} 500 1"));
+        run_line(e, &format!("player.additem {a} {AMMO_STACK} 1"));
     }
 }
+
+/// How many of each ammo the range gives (and Fill Ammo tops up to).
+const AMMO_STACK: u32 = 1000;
+/// How many of each aid item.
+const AID_STACK: u32 = 10;
+
+/// Every weapon, armour, aid item and weapon mod of the loaded plugins and DLC into the player's
+/// inventory, quietly (`AddItem`'s third word 1): one of each, `AID_STACK` of each aid item (the
+/// ammo comes from [`fill_ammo`]). Named forms only (the game's unnamed ones are its own); misc
+/// items are left out: some are quest items whose scripts start quests when added. The weapons are
+/// in the container too, as before.
+fn stock_inventory(e: &mut Engine, forms: &[u32], weapons: &[u32]) {
+    let armour = crate::form_types::form_type_number(esm::FourCC::new(b"ARMO")).unwrap_or(24);
+    let aid = crate::form_types::form_type_number(esm::FourCC::new(b"ALCH")).unwrap_or(47);
+    let mods = crate::form_types::form_type_number(esm::FourCC::new(b"IMOD")).unwrap_or(103);
+    let mut counts = [0usize; 4];
+    let give = |e: &mut Engine, form: u32, count: u32| {
+        let f = id(e.mem.u32(form + FORM_ID));
+        run_line(e, &format!("player.additem {f} {count} 1"));
+    };
+    for &weapon in weapons {
+        give(e, weapon, 1);
+        counts[0] += 1;
+    }
+    for &form in forms {
+        let k = kind(e, form);
+        let slot = if k == armour {
+            1
+        } else if k == aid {
+            2
+        } else if k == mods {
+            3
+        } else {
+            continue;
+        };
+        if name(e, form).is_empty() {
+            continue;
+        }
+        give(e, form, if slot == 2 { AID_STACK } else { 1 });
+        counts[slot] += 1;
+    }
+    step(&format!(
+        "set-up: the inventory has {} weapons, {} armour, {} aid items ({AID_STACK} each) and {} weapon mods, and {AMMO_STACK} of each ammo",
+        counts[0], counts[1], counts[2], counts[3]
+    ));
+}
+
+/// The limbs' condition values, put back to full every [`LIMB_EVERY`] frames of a range game
+/// (god mode keeps the health; the limbs are made sure of).
+const LIMBS: [&str; 7] = [
+    "PerceptionCondition",
+    "EnduranceCondition",
+    "LeftAttackCondition",
+    "RightAttackCondition",
+    "LeftMobilityCondition",
+    "RightMobilityCondition",
+    "BrainCondition",
+];
+const LIMB_EVERY: u32 = 120;
+
+/// Every limb back to its full condition (`RestoreActorValue`, a no-op on a whole limb).
+fn heal_limbs(e: &mut Engine) {
+    for limb in LIMBS {
+        run_line(e, &format!("player.restoreav {limb} 1000"));
+    }
+}
+
+static LIMB_FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// The player at the start of the place's lane, facing down it ([`crate::range_floor::Lane`]).
 fn place_player(e: &mut Engine, spot: &Spot) {

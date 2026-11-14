@@ -228,7 +228,19 @@ Code: `crates/host/src/test_range.rs`, part of the weighty combat row (on with
    container's gift, `004821a0`, with its quiet flag). Only from the Test Range button to the end
    of that game (a load, a new game, the main menu); the game's log names each one kept off. A
    save or new game of your own shows them as always, and nothing is written anywhere.
-7. **Saving is off** in the range. A manual save or quick save shows "Saving is off in the Test
+7. **God mode, everything in the bag, no tutorials** (Patrick, 2026-11-14), in a range game only:
+   - god mode: `PlayerCharacter::IsGodMode` (`009526b0`) answers yes, as `tgm` makes it answer,
+     without the byte `tgm` sets, so nothing of it outlives the range: no damage, no
+     over-encumbrance (infinite carry weight), action points and the rest of `tgm`'s; the limbs
+     are put back to full every 2 seconds (`RestoreActorValue` of the seven conditions);
+   - the inventory: every named weapon, armour, aid item (10 each) and weapon mod of the loaded
+     plugins and DLC, and 1,000 of every named ammo (Fill Ammo tops them up to 1,000); misc items
+     are left out, as some are quest items whose scripts start quests when added;
+   - no tutorials or help: the tutorial manager (`00718630`) queues none and counts every one as
+     seen (`00718840`), and no tutorial menu is made (`TutorialMenu::Create`, `007e8890`: the
+     `ShowTutorialMenu` command's and the menus' own). The save's tutorial state is untouched
+     (the routine that writes it reads the real bits).
+8. **Saving is off** in the range. A manual save or quick save shows "Saving is off in the Test
    Range"; autosaves are dropped silently.
 
 If the range cannot start, the main menu shows why in a message box and the game's log

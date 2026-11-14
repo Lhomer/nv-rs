@@ -2973,7 +2973,8 @@ pub fn fn_009508b0(
     amount: f32,
     flag: u8,
 ) -> bool {
-    if player_character_is_god_mode(e) != 0 {
+    // By address: `IsGodMode` is overridable (`crates/engine-core/data/overridable.tsv`).
+    if e.call(IS_GOD_MODE, &args![]).u8() != 0 {
         return false;
     }
     e.call(0x0089_1360, &args![this, first, amount, flag])
@@ -3904,7 +3905,8 @@ pub fn player_character_is_demigod_mode(e: &mut Engine) -> u8 {
 // Translated from 00952720 (decompiled, FalloutNV.exe 1.4.0.525)
 /// Returns `IsGodMode()` (`this` is not used).
 pub fn fn_00952720(e: &mut Engine, _this: Ptr) -> u8 {
-    player_character_is_god_mode(e)
+    // By address: `IsGodMode` is overridable (`crates/engine-core/data/overridable.tsv`).
+    e.call(IS_GOD_MODE, &args![]).u8()
 }
 
 // Translated from 00952730 (decompiled, FalloutNV.exe 1.4.0.525)

@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (Test Range: god mode, the whole inventory, no tutorials)
+
+- **Patrick:** in the range only: god mode with no limb damage, infinite carry weight, every weapon, ammo (a big stack), armour, aid item and misc equipment of all loaded plugins and DLC in the inventory, and no tutorials or help messages.
+- **Now (`test_range.rs`):** while `test_range::active()`: `IsGodMode` (`009526b0`) answers 1 (no byte written, so nothing leaks into a normal game; `fn_00952720` and `fn_009508b0` now call it by address so the override reaches them); limbs restored every 120 frames (`restoreav <limb>Condition`); `stock_inventory` adds every named WEAP, ARMO, ALCH (10) and IMOD quietly, and every named AMMO 1,000 (Fill Ammo too); MISC left out (quest scripts on add). Tutorials: `TutorialManager::ShowMessage` (`00718630`) queues none, `00718840` answers seen (the save's packer `fn_007187a0` still calls it directly, so saves keep the real bits), `TutorialMenu::Create` (`007e8890`) makes none. Not run in game; whether god mode already spares limbs is not known, hence the restore.
+
 ### Claude, 2026-11-14 (Launcher.exe asks Play or Play with mods)
 
 - **Patrick:** after the update check (unchanged), the launcher should not start the game by itself but ask: Play (as Play.cmd) or Play with mods (as Play with mods.cmd); the last choice may be the default, always ask; an offline or failed check still lets him pick.
