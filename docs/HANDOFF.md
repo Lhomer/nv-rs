@@ -7,6 +7,12 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-14 (knocked-down bodies flying off and shaking)
+
+- **Patrick:** knockdowns work (f19d62e) but some knocked-down enemies fly off or shake uncontrollably.
+- **Cause:** `AddExplosionImpulse` (`0062b660`, inside `KnockExplosion`) adds strength x layer multiplier straight to every bone's velocity, along each bone's own direction from the push point, with no mass or distance in it. The launch strength was momentum x 3, 135 to 600 (vanilla `PushActorAway` gives tens), from a point only 40 units behind the impact, so bones flew and were pulled apart radially and the joints fought it. Nothing held repeat pushes either: the game's own `KnockExplosion` could push an actor knocked here again, and a re-knock right after getting up was allowed.
+- **Now (`knockdown.rs`):** strength momentum x 0.35 x Hit Force %, 8-40, from 400 units back; per-bone speed 12 and spin 15 held for 1.5 s, then settling damping (sideways and spin); cooldowns 2.5 s after a knock, 1.5 s after getting up; the game's own knock skipped for an actor knocked here within 2.5 s (`hit_force` wrapper); JIP's stagger push cleared before the ragdoll; `Knockdown:` lines for each clamp and guard. Bodies walked like `AddExplosionImpulse` walks them; velocities through `00560dc0`/`00560e50` and `hkpRigidBody::setLinear/AngularVelocity` (`005616d0`, `00561800`). Not run in game.
+
 ### Claude, 2026-11-14 (knockdowns fixed: blasts and gunshots)
 
 - **Patrick:** with 48aa53f knockdowns never happened in game (grenades, anti-materiel rifle; normal save and Test Range).

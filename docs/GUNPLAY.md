@@ -184,8 +184,21 @@ with `bKnockdownCompanions=1`.
   ragdoll and gets the game's push from a point 40 units behind the impact along the hit's
   direction (the hit data's impact point and direction; for a swing without them, from the
   attacker through the chest), so the part hit is pushed hardest and the body spins or flies from
-  there; strength = momentum x 3 x `iHitForce` %, between 30 and 600. The game gets it up again
+  there; strength = momentum x 0.35 x `iHitForce` %, between 8 and 40. The game gets it up again
   through its get-up idle (`UpdateKnockState`).
+- **The strength is a speed** (2026-11-14 fix of bodies flying off and shaking):
+  `AddExplosionImpulse` (`0062b660`) adds to each bone's velocity its own direction away from the
+  push point times the strength times the bone's layer multiplier, with no falloff and no division
+  by mass; the game's `PushActorAway` uses `GetKnockbackSpeed` (tens). The first build gave 135
+  to 600 from a point 40 units behind the impact, so bones flew and were pulled apart radially
+  (the joints fighting it: the shaking). Now 8 to 40, from 400 units behind (all bones the same
+  way). While knocked down (knock state 2) every bone's speed is held to 12 Havok units/s and its
+  spin to 15 rad/s for 1.5 s; afterwards a bone slower than 1.5 has its sideways motion and spin
+  damped (6 a second; the fall is left to gravity). Guards: no second knock-down within 2.5 s of
+  one or 1.5 s after getting up; the game's own `KnockExplosion` (blasts, `PushActorAway`, a
+  knock-out) adds no second push to an actor knocked here within 2.5 s; JIP's stagger push on the
+  character controller is cleared before the ragdoll. Each clamp and guard is a `Knockdown:` log
+  line.
 - **Stagger** (at or past 40 % of the resistance): JIP's push without a ragdoll (#565,
   `jip::push_living_actor`, a new public entry beside `PushActorNoRagdoll`): momentum x 2, at
   most 200, along the hit.
@@ -205,9 +218,12 @@ with `bKnockdownCompanions=1`.
 | Creature types 0-7 | 30, 60, 50, 200, 150, 35, 120, 400 |
 | Size | x scale^2 (scale 0.25 to 4) |
 | Stagger share | 0.4 |
-| Launch force | momentum x 3 x Hit Force %, 30 to 600 |
+| Launch force | momentum x 0.35 x Hit Force %, 8 to 40 |
 | Stagger force | momentum x 2, at most 200 |
-| Push origin behind the impact | 40 units |
+| Push origin behind the impact | 400 units |
+| Bone speed / spin while flying | 12 / 15, for 1.5 s |
+| Settling damping | 6 a second below speed 1.5 (sideways and spin) |
+| Cooldowns | 2.5 s after a knock-down, 1.5 s after getting up |
 | Fall followed for | 12 s |
 
 ### Ballistic bullets (`crates/host/src/ballistics.rs`)

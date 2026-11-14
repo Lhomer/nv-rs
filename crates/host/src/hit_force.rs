@@ -295,6 +295,11 @@ pub fn install(e: &mut Engine) {
         Ret::default()
     });
     e.register(KNOCK_EXPLOSION, |e, a| {
+        // An actor knocked down by the knockdowns a moment ago gets no second push.
+        if crate::gunplay::is_on() && crate::knockdown::recently_knocked(a[1]) {
+            crate::knockdown::note_duplicate(e, a[1]);
+            return Ret::default();
+        }
         let strength = knock_strength(f32::from_bits(a[5]));
         middle_high_process_knock_explosion(e, Ptr::new(a[0]), a[1], a[2], a[3], a[4], strength);
         Ret::default()
