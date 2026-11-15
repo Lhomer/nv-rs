@@ -564,6 +564,7 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
         // and slid or launched it while it stood (Patrick, 2026-11-15).
         Reaction::Stagger => {
             crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction);
+            crate::active_ragdoll::push(e, target, p, mass, hit_direction, aggressor);
             note(format!(
             "{who}: stagger (the game's hit reaction only, no push): this hit {:.2} m/s ({p:.1} N s), \
              the stack {speed:.2} m/s ({total:.1} N s over {} hits) vs topple {topple:.2} m/s",
@@ -572,7 +573,10 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
         ));
         }
         // Below the stagger too: the physics flinch, per hit (`crate::active_ragdoll`).
-        Reaction::None => crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction),
+        Reaction::None => {
+            crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction);
+            crate::active_ragdoll::push(e, target, p, mass, hit_direction, aggressor);
+        }
     }
 }
 
@@ -1594,7 +1598,7 @@ fn navmesh_check(
     })
 }
 
-fn navmesh_point(e: &mut Engine, actor: u32, near: [f32; 3]) -> Option<[f32; 3]> {
+pub(crate) fn navmesh_point(e: &mut Engine, actor: u32, near: [f32; 3]) -> Option<[f32; 3]> {
     navmesh_check(e, actor, near, 0.0).map(|(at, _)| at)
 }
 
@@ -1800,7 +1804,7 @@ fn set_controller_velocity(e: &mut Engine, controller: u32, v: [f32; 3]) {
 }
 
 /// The actor's reference and character controller set at `at`, the controller's velocity zero.
-fn place(e: &mut Engine, actor: u32, at: [f32; 3]) {
+pub(crate) fn place(e: &mut Engine, actor: u32, at: [f32; 3]) {
     e.with_stack(32, |e, frame| {
         let point = frame.addr();
         let zero = frame.addr() + 16;

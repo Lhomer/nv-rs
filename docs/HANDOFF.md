@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (active ragdoll, stage 2: balance and stepping)
+
+- **Patrick:** stage 2 (catch steps by capture point, real leg and foot movement, never sliding; the actor follows the feet; walls, slopes, stairs, ledges with a fall); then stage 3 (bracing, windmilling, a smooth blend into the ragdoll, arms braced on the ground), each published separately; dismemberment later.
+- **Now (stage 2, `balance.rs` + `active_ragdoll.rs`):** pure planning/IK in `balance.rs` (`capture_offset`, `plan`, `classify`, `two_bone`, `between`, `Stepping`, `Limbs`); `active_ragdoll::push` from `knockdown::after_hit` (Stagger and None), `balance_frame` in `apply` (legs IK, arms out, pelvis shift; `knockdown::place` on each landing; ledge -> `knockdown::knock_down`). `iBalance` row `7e060210`. Feet `Bip01 L/R Foot` added to the rig. Not run in game: the IK's knee pole and the foot-level rotation are the parts most likely to need tuning; walls are judged from the navmesh only (no ray cast).
+
 ### Claude, 2026-11-15 (active ragdoll, stage 1: flinch)
 
 - **Patrick:** a GTA IV / RDR-style active ragdoll in stages; stage 1: below-topple hits make the body flinch (struck bone along the hit, spreading by distance and mass, spine twist, pelvis turn, head lag and snap, arms swing, knee buckle and pelvis drop for leg hits), springing back with overshoot; powered Havok blend preferred, a procedural spring-damper layer as the fallback; hits layer; never move the actor or its controller; per-hit momentum and ragdoll mass; Hit Reactions slider; logged; stages 2/3 later.

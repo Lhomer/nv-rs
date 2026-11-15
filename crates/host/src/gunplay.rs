@@ -162,6 +162,8 @@ pub struct Tuning {
     pub details_key: i32,
     /// `iHitReactions`: the physics flinch's strength, percent; 0 = off ([`crate::active_ragdoll`]).
     pub hit_reactions: i32,
+    /// `iBalance`: the catch steps' strength, percent; 0 = off ([`crate::balance`]).
+    pub balance: i32,
 }
 
 impl Tuning {
@@ -186,6 +188,7 @@ impl Tuning {
         impact_stacking: 300,
         details_key: 0x25,
         hit_reactions: 100,
+        balance: 100,
     };
 
     /// Sets `key` (a [`KEYS`] key) to `value`; false for a key that isn't one or a value out of
@@ -217,6 +220,7 @@ impl Tuning {
             "iimpactstacking" => self.impact_stacking = value,
             "idetailskey" => self.details_key = value,
             "ihitreactions" => self.hit_reactions = value,
+            "ibalance" => self.balance = value,
             _ => return false,
         }
         true
@@ -244,6 +248,7 @@ impl Tuning {
             "iimpactstacking" => self.impact_stacking,
             "idetailskey" => self.details_key,
             "ihitreactions" => self.hit_reactions,
+            "ibalance" => self.balance,
             _ => return None,
         })
     }
@@ -282,7 +287,7 @@ impl Default for Tuning {
 }
 
 /// The keys of [`SECTION`]: key, its environment variable, lowest and highest value.
-pub const KEYS: [(&str, &str, i32, i32); 19] = [
+pub const KEYS: [(&str, &str, i32, i32); 20] = [
     ("iRecoil", "NV_GUNPLAY_RECOIL", 0, 300),
     ("iRecoilRecovery", "NV_GUNPLAY_RECOVERY", 0, 100),
     ("iSway", "NV_GUNPLAY_SWAY", 0, 300),
@@ -312,6 +317,7 @@ pub const KEYS: [(&str, &str, i32, i32); 19] = [
     ("iImpactStacking", "NV_GUNPLAY_IMPACT_STACKING", 100, 1000),
     ("iDetailsKey", "NV_GUNPLAY_DETAILS_KEY", 1, 255),
     ("iHitReactions", "NV_GUNPLAY_HIT_REACTIONS", 0, 200),
+    ("iBalance", "NV_GUNPLAY_BALANCE", 0, 200),
 ];
 
 /// A value of `key` as the file or a variable holds it: `1`/`0` for a `b` key, a whole number for
@@ -1400,7 +1406,7 @@ fn unplace_pose(e: &mut Engine, placed: &Placed) {
 
 /// The rows' change functions, after the graphics rows' (`0x7e06_0010` to `0x7e06_0050`), in the
 /// platform's area that no exe or platform code uses.
-pub const CHANGE_FNS: [u32; 13] = [
+pub const CHANGE_FNS: [u32; 14] = [
     0x7e06_0060,
     0x7e06_0070,
     0x7e06_0080,
@@ -1419,6 +1425,8 @@ pub const CHANGE_FNS: [u32; 13] = [
     0x7e06_01e0,
     // Hit Reactions (after the detailed stats key's 0x7e06_01f0).
     0x7e06_0200,
+    // Balance.
+    0x7e06_0210,
 ];
 
 /// A row of the Settings menu's Display page.
@@ -1450,10 +1458,12 @@ pub enum Row {
     ImpactStacking,
     /// A meter of `iHitReactions` (0 Off to 200%), on the Gameplay page.
     HitReactions,
+    /// A meter of `iBalance` (0 Off to 200%), on the Gameplay page.
+    Balance,
 }
 
 /// The rows, in the order they are made.
-pub const ROWS: [Row; 13] = [
+pub const ROWS: [Row; 14] = [
     Row::Enabled,
     Row::Recoil,
     Row::Sway,
@@ -1467,6 +1477,7 @@ pub const ROWS: [Row; 13] = [
     Row::BulletSpeed,
     Row::ImpactStacking,
     Row::HitReactions,
+    Row::Balance,
 ];
 
 impl Row {
@@ -1486,6 +1497,7 @@ impl Row {
             Row::BulletSpeed => (SECTION, "iBulletSpeed"),
             Row::ImpactStacking => (SECTION, "iImpactStacking"),
             Row::HitReactions => (SECTION, "iHitReactions"),
+            Row::Balance => (SECTION, "iBalance"),
         }
     }
 
@@ -1508,7 +1520,8 @@ impl Row {
             | Row::Penetration
             | Row::BulletSpeed
             | Row::ImpactStacking
-            | Row::HitReactions => GAMEPLAY,
+            | Row::HitReactions
+            | Row::Balance => GAMEPLAY,
             _ => DISPLAY,
         }
     }
@@ -1522,7 +1535,7 @@ impl Row {
             Row::KnockThreshold => Some((25, 16)),
             Row::BulletSpeed => Some((5, 36)),
             Row::ImpactStacking => Some((50, 19)),
-            Row::HitReactions => Some((10, 21)),
+            Row::HitReactions | Row::Balance => Some((10, 21)),
             Row::Enabled | Row::HitStop | Row::Knockdowns | Row::Ballistics | Row::Penetration => {
                 None
             }
@@ -1589,6 +1602,8 @@ impl Row {
             Row::ImpactStacking => format!("Impact Stacking: {:.2} s", value as f32 / 1000.0),
             Row::HitReactions if value == 0 => "Hit Reactions: Off".to_string(),
             Row::HitReactions => format!("Hit Reactions: {value}%"),
+            Row::Balance if value == 0 => "Balance: Off".to_string(),
+            Row::Balance => format!("Balance: {value}%"),
         }
     }
 }
@@ -1684,7 +1699,7 @@ pub fn install_change_fns(e: &mut Engine) {
         change(e, ROWS[N], Ptr::new(a[0]));
         Ret::default()
     }
-    let fns: [AbiFn; 13] = [
+    let fns: [AbiFn; 14] = [
         row_fn::<0>,
         row_fn::<1>,
         row_fn::<2>,
@@ -1698,6 +1713,7 @@ pub fn install_change_fns(e: &mut Engine) {
         row_fn::<10>,
         row_fn::<11>,
         row_fn::<12>,
+        row_fn::<13>,
     ];
     for (address, f) in CHANGE_FNS.into_iter().zip(fns) {
         e.register(address, f);
@@ -1861,6 +1877,7 @@ mod tests {
             impact_stacking: 100,
             details_key: 1,
             hit_reactions: 0,
+            balance: 0,
         };
         for (row, key) in rows.iter().zip(KEYS) {
             assert_eq!(row.switch, key.1, "{row:?}");

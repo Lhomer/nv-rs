@@ -55,6 +55,7 @@ pub enum Role {
     Forearm,
     Thigh,
     Calf,
+    Foot,
 }
 
 impl Role {
@@ -70,6 +71,7 @@ impl Role {
             Role::Forearm => (1.8, 0.3),
             Role::Thigh => (3.0, 0.5),
             Role::Calf => (3.2, 0.5),
+            Role::Foot => (3.4, 0.6),
         }
     }
 
@@ -85,6 +87,7 @@ impl Role {
             Role::Forearm => 1.1,
             Role::Thigh => 0.6,
             Role::Calf => 0.7,
+            Role::Foot => 0.3,
         }
     }
 
@@ -100,12 +103,13 @@ impl Role {
             Role::Forearm => 0.7,
             Role::Thigh => 0.45,
             Role::Calf => 0.6,
+            Role::Foot => 0.4,
         }
     }
 }
 
 /// The rig's bones by name (the Gamebryo biped's), and their roles.
-pub const BONES: [(&str, Role); 16] = [
+pub const BONES: [(&str, Role); 18] = [
     ("Bip01 Pelvis", Role::Pelvis),
     ("Bip01 Spine", Role::Spine),
     ("Bip01 Spine1", Role::Spine),
@@ -122,6 +126,8 @@ pub const BONES: [(&str, Role); 16] = [
     ("Bip01 R Thigh", Role::Thigh),
     ("Bip01 L Calf", Role::Calf),
     ("Bip01 R Calf", Role::Calf),
+    ("Bip01 L Foot", Role::Foot),
+    ("Bip01 R Foot", Role::Foot),
 ];
 
 /// The tuning (module documentation): kick (rad/s per m/s of the body's speed), the spread's
@@ -292,12 +298,19 @@ pub struct Rig {
     pub drop: f32,
     pub drop_speed: f32,
     pub since: Instant,
+    /// Stage 2: the catch steps under way ([`crate::balance`]), the pelvis's offset they carry
+    /// (world, game units), and the limbs the body still has (dismemberment changes them).
+    pub balance: Option<crate::balance::Stepping>,
+    pub shift: V3,
+    pub limbs: crate::balance::Limbs,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Bone {
     pub node: u32,
     pub role: Role,
+    /// 0 left, 1 right, 2 the middle.
+    pub side: u8,
     pub spring: Spring,
     /// The animated pose (local rotation, local translation) and what was written over it.
     pub pose: Option<(M3, V3)>,
@@ -329,6 +342,11 @@ const PROCESS_LEVEL: u32 = 0x28;
 const KNOCK_STATE: u32 = 0x13c;
 const LIFE_STATE: u32 = 0x108;
 const MAX_NODES: usize = 400;
+/// `TESObjectREFR::GetScale`, a reference's position; how far its AI may move it before the steps
+/// give way (units).
+const GET_SCALE: u32 = 0x0056_7400;
+const REFR_POSITION: u32 = 0x30;
+const MOVED_AWAY: f32 = 30.0;
 
 fn read3(e: &Engine, at: u32) -> V3 {
     [0, 4, 8].map(|o| e.mem.f32(at + o))
@@ -368,9 +386,17 @@ fn find_bones(e: &mut Engine, root: u32) -> Vec<Bone> {
                 .iter()
                 .find(|(n, _)| text.eq_ignore_ascii_case(n.as_bytes()))
             {
+                let side = if text.windows(3).any(|w| w.eq_ignore_ascii_case(b" l ")) {
+                    0
+                } else if text.windows(3).any(|w| w.eq_ignore_ascii_case(b" r ")) {
+                    1
+                } else {
+                    2
+                };
                 found.push(Bone {
                     node,
                     role,
+                    side,
                     spring: Spring::REST,
                     pose: None,
                     written: None,
@@ -401,6 +427,43 @@ fn can_flinch(e: &mut Engine, actor: u32) -> bool {
         && e.call(ACTOR_3D, &args![actor]).u32() != 0
 }
 
+/// The actor's rig made (its bones found) when it has none for its 3D; false when it has no rig
+/// bones.
+fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
+    let root = e.call(ACTOR_3D, &args![actor]).u32();
+    if root == 0 {
+        return false;
+    }
+    if RIGS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .any(|r| r.actor == actor && r.root == root)
+    {
+        return true;
+    }
+    let bones = find_bones(e, root);
+    if bones.is_empty() {
+        return false;
+    }
+    let id = e.mem.u32(actor + FORM_ID);
+    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    rigs.retain(|r| r.actor != actor);
+    rigs.push(Rig {
+        actor,
+        id,
+        root,
+        bones,
+        drop: 0.0,
+        drop_speed: 0.0,
+        since: Instant::now(),
+        balance: None,
+        shift: [0.0; 3],
+        limbs: crate::balance::Limbs::WHOLE,
+    });
+    true
+}
+
 /// A hit below the topple speed (from `crate::knockdown`): `actor` takes the momentum `p` (N s,
 /// this hit's) on its `mass` (kg) at `point` along `direction` (unit) (module documentation).
 pub fn hit(e: &mut Engine, actor: u32, p: f32, mass: f32, point: V3, direction: V3) {
@@ -415,29 +478,13 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, mass: f32, point: V3, direction: 
         return;
     };
     let v = p / mass * strength as f32 / 100.0;
+    if !ensure_rig(e, actor) {
+        return;
+    }
     let root = e.call(ACTOR_3D, &args![actor]).u32();
     let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
-    let index = match rigs.iter().position(|r| r.actor == actor && r.root == root) {
-        Some(i) => i,
-        None => {
-            drop(rigs);
-            let bones = find_bones(e, root);
-            if bones.is_empty() {
-                return;
-            }
-            rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
-            rigs.retain(|r| r.actor != actor);
-            rigs.push(Rig {
-                actor,
-                id: e.mem.u32(actor + FORM_ID),
-                root,
-                bones,
-                drop: 0.0,
-                drop_speed: 0.0,
-                since: Instant::now(),
-            });
-            rigs.len() - 1
-        }
+    let Some(index) = rigs.iter().position(|r| r.actor == actor && r.root == root) else {
+        return;
     };
     let rig = &mut rigs[index];
     rig.since = Instant::now();
@@ -563,10 +610,12 @@ pub fn apply(e: &mut Engine) {
             };
             bone.pose = Some(base);
         }
+        let mut overrides: Vec<Option<M3>> = vec![None; rig.bones.len()];
         if flinching {
             for bone in &mut rig.bones {
                 bone.spring.step(bone.role, dt);
             }
+            overrides = balance_frame(e, &mut rig, dt);
             let (f, zeta) = Role::Pelvis.spring();
             let w0 = std::f32::consts::TAU * f;
             rig.drop_speed += (-w0 * w0 * rig.drop - 2.0 * zeta * w0 * rig.drop_speed) * dt;
@@ -577,9 +626,14 @@ pub fn apply(e: &mut Engine) {
             }
             rig.drop = 0.0;
             rig.drop_speed = 0.0;
+            rig.balance = None;
+            rig.shift = [0.0; 3];
         }
-        let resting = rig.bones.iter().all(|b| b.spring.at_rest()) && rig.drop.abs() < 1e-3;
-        for bone in &mut rig.bones {
+        let resting = rig.bones.iter().all(|b| b.spring.at_rest())
+            && rig.drop.abs() < 1e-3
+            && rig.balance.is_none();
+        let shift = rig.shift;
+        for (index, bone) in rig.bones.iter_mut().enumerate() {
             let (pose_rot, pose_t) = bone.pose.unwrap_or_default();
             let (rot, t) = if resting {
                 (pose_rot, pose_t)
@@ -591,12 +645,19 @@ pub fn apply(e: &mut Engine) {
                     read9(e, parent + WORLD_ROTATION)
                 };
                 // The world-space offset carried into the bone's frame: P^T R P L.
-                let r = rotation(bone.spring.angle);
+                let spring = rotation(bone.spring.angle);
+                let r = match overrides[index] {
+                    Some(o) => mul(&o, &spring),
+                    None => spring,
+                };
                 let rot = mul(&mul(&mul(&transpose(&p), &r), &p), &pose_rot);
                 let t = if bone.role == Role::Pelvis {
                     add(
                         pose_t,
-                        apply_m(&transpose(&p), [0.0, 0.0, rig.drop * UNITS_PER_METRE]),
+                        apply_m(
+                            &transpose(&p),
+                            add([0.0, 0.0, rig.drop * UNITS_PER_METRE], shift),
+                        ),
                     )
                 } else {
                     pose_t
@@ -623,6 +684,321 @@ pub fn apply(e: &mut Engine) {
         rigs.retain(|r| r.actor != f.actor);
         rigs.push(f);
     }
+}
+
+/// The rig's bone of `role` on `side`, its index.
+fn bone_of(rig: &Rig, role: Role, side: u8) -> Option<usize> {
+    rig.bones
+        .iter()
+        .position(|b| b.role == role && (side == 2 || b.side == side))
+}
+
+fn actor_scale(e: &mut Engine, actor: u32) -> f32 {
+    let s = e.call(GET_SCALE, &args![actor]).f64() as f32;
+    if s.is_finite() {
+        s.clamp(0.25, 4.0)
+    } else {
+        1.0
+    }
+}
+
+/// Stage 2's frame for a rig with catch steps under way ([`crate::balance`]): the steps advanced
+/// (a landed foot moves the reference with the feet), the pelvis carried over the feet, the legs
+/// placed by two-bone IK on their targets, the arms out. Answers each bone's world-space rotation
+/// on top of its spring's.
+fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
+    use crate::balance::{between, two_bone, Outcome};
+    let mut out: Vec<Option<M3>> = vec![None; rig.bones.len()];
+    let Some(mut s) = rig.balance.take() else {
+        rig.shift = [0.0; 3];
+        return out;
+    };
+    let actor = rig.actor;
+    let scale_ = actor_scale(e, actor);
+    let reference = read3(e, actor + REFR_POSITION);
+    if !s.recovering && length(sub(reference, s.reference)) > MOVED_AWAY {
+        s.recovering = true;
+        note(format!(
+            "{}: steps end: its AI moved it ({:.0} units)",
+            describe(e, actor),
+            length(sub(reference, s.reference))
+        ));
+    }
+    // A ledge: the foot goes over it, and the body falls into its ragdoll.
+    if s.outcome == Outcome::Ledge
+        && s.current + 1 >= s.steps.len()
+        && s.steps.last().is_some_and(|l| s.t > l.time * 0.5)
+    {
+        let pelvis = bone_of(rig, Role::Pelvis, 2)
+            .map(|i| read3(e, rig.bones[i].node + WORLD_TRANSLATION))
+            .unwrap_or(reference);
+        note(format!(
+            "{}: steps off a ledge: falls ({:.2} m/s)",
+            describe(e, actor),
+            s.v
+        ));
+        rig.shift = [0.0; 3];
+        crate::knockdown::knock_down(e, actor, s.aggressor, pelvis, s.dir, s.v);
+        return out;
+    }
+    if let Some((foot, at)) = s.advance(dt) {
+        // The reference follows the feet: to their middle, on the ground; the pelvis's offset
+        // takes the move back.
+        let to = s.follow_feet();
+        let to = [
+            to[0],
+            to[1],
+            to[2].clamp(reference[2] - 60.0, reference[2] + 60.0),
+        ];
+        let moved = sub(to, reference);
+        crate::knockdown::place(e, actor, to);
+        s.reference = to;
+        s.shift = sub(s.shift, moved);
+        note(format!(
+            "{}: {} foot lands at ({:.0}, {:.0}, {:.0}), step {} of {}; the actor follows the feet \
+             {:.0} units",
+            describe(e, actor),
+            if foot == 0 { "left" } else { "right" },
+            at[0],
+            at[1],
+            at[2],
+            s.current,
+            s.steps.len(),
+            length(moved)
+        ));
+    }
+    let pelvis =
+        bone_of(rig, Role::Pelvis, 2).map(|i| read3(e, rig.bones[i].node + WORLD_TRANSLATION));
+    if let Some(pelvis) = pelvis {
+        let target = s.shift_target(pelvis, scale_);
+        s.follow(target, dt);
+    }
+    let shift = s.shift;
+    let feet = s.feet(scale_);
+    for side in 0..2u8 {
+        let (Some(t), Some(c), Some(f)) = (
+            bone_of(rig, Role::Thigh, side),
+            bone_of(rig, Role::Calf, side),
+            bone_of(rig, Role::Foot, side),
+        ) else {
+            continue;
+        };
+        let hip0 = read3(e, rig.bones[t].node + WORLD_TRANSLATION);
+        let knee0 = read3(e, rig.bones[c].node + WORLD_TRANSLATION);
+        let ankle0 = read3(e, rig.bones[f].node + WORLD_TRANSLATION);
+        let (l1, l2) = (length(sub(knee0, hip0)), length(sub(ankle0, knee0)));
+        if l1 < 1.0 || l2 < 1.0 {
+            continue;
+        }
+        let (hip, knee_now, ankle) = (add(hip0, shift), add(knee0, shift), add(ankle0, shift));
+        let target = add(ankle, scale(sub(feet[side as usize], ankle), s.weight));
+        let bend = sub(knee_now, scale(add(hip, ankle), 0.5));
+        let pole = if length(bend) > 1.0 {
+            add(knee_now, scale(bend, 2.0))
+        } else {
+            add(knee_now, scale(s.dir, 20.0))
+        };
+        let Some((knee, reached)) = two_bone(hip, target, l1, l2, pole) else {
+            continue;
+        };
+        let r1 = rotation(between(sub(knee0, hip0), sub(knee, hip)));
+        let r2 = rotation(between(
+            apply_m(&r1, sub(ankle0, knee0)),
+            sub(reached, knee),
+        ));
+        let m = mul(&mul(&transpose(&r1), &r2), &r1);
+        // The foot kept level: its world rotation as the animation had it.
+        let level = mul(&transpose(&m), &transpose(&r1));
+        out[t] = Some(r1);
+        out[c] = Some(m);
+        out[f] = Some(level);
+    }
+    // The arms out, raised from the body.
+    let spine = bone_of(rig, Role::Spine, 2)
+        .map(|i| read3(e, rig.bones[i].node + WORLD_TRANSLATION))
+        .or(pelvis);
+    for side in 0..2u8 {
+        if !rig.limbs.arm(side as usize) || s.arms <= 0.0 {
+            continue;
+        }
+        let (Some(u), Some(f), Some(spine)) = (
+            bone_of(rig, Role::UpperArm, side),
+            bone_of(rig, Role::Forearm, side),
+            spine,
+        ) else {
+            continue;
+        };
+        let shoulder = read3(e, rig.bones[u].node + WORLD_TRANSLATION);
+        let elbow = read3(e, rig.bones[f].node + WORLD_TRANSLATION);
+        let outward = [shoulder[0] - spine[0], shoulder[1] - spine[1], 0.0];
+        if let Some(axis) = unit(cross(sub(elbow, shoulder), outward)) {
+            out[u] = Some(rotation(scale(axis, crate::balance::ARMS_OUT * s.arms)));
+        }
+    }
+    rig.shift = shift;
+    if s.done() {
+        note(format!(
+            "{}: steps done ({:?}): back to its animation",
+            describe(e, actor),
+            s.outcome
+        ));
+        rig.shift = [0.0; 3];
+    } else {
+        rig.balance = Some(s);
+    }
+    out
+}
+
+/// Stage 2's stimulus: a hit below the topple speed (from `crate::knockdown`) pushes the body's
+/// centre of mass with `v = p / mass x iBalance %`; past its feet, it takes catch steps
+/// ([`crate::balance`]).
+pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggressor: u32) {
+    use crate::balance::{classify, plan, Ground, Outcome, Stepping};
+    let strength = crate::gunplay::tuning().balance;
+    if strength <= 0 || !crate::gunplay::is_on() || !(p > 0.0 && mass > 0.0) {
+        return;
+    }
+    if !can_flinch(e, actor) || !ensure_rig(e, actor) {
+        return;
+    }
+    let Some(dir) = unit([direction[0], direction[1], 0.0]) else {
+        return;
+    };
+    let v = p / mass * strength as f32 / 100.0;
+    let scale_ = actor_scale(e, actor);
+    let root = e.call(ACTOR_3D, &args![actor]).u32();
+    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(rig) = rigs.iter_mut().find(|r| r.actor == actor && r.root == root) else {
+        return;
+    };
+    if !rig.limbs.legs() {
+        return; // one leg cannot step (stage 3 falls)
+    }
+    let (Some(pi), Some(lf), Some(rf)) = (
+        bone_of(rig, Role::Pelvis, 2),
+        bone_of(rig, Role::Foot, 0),
+        bone_of(rig, Role::Foot, 1),
+    ) else {
+        return;
+    };
+    let pelvis = add(read3(e, rig.bones[pi].node + WORLD_TRANSLATION), rig.shift);
+    let (mut feet, carried) = match &rig.balance {
+        Some(s) if !s.recovering => (s.planted, s.v * 0.5),
+        _ => (
+            [
+                read3(e, rig.bones[lf].node + WORLD_TRANSLATION),
+                read3(e, rig.bones[rf].node + WORLD_TRANSLATION),
+            ],
+            0.0,
+        ),
+    };
+    let v = v + carried;
+    let h = ((pelvis[2] - (feet[0][2] + feet[1][2]) / 2.0) / UNITS_PER_METRE).clamp(0.3, 2.5);
+    let planned = plan(pelvis, feet, dir, v, h, scale_);
+    let who = describe(e, actor);
+    if planned.steps.is_empty() {
+        return; // the feet hold it: the flinch alone
+    }
+    let mut outcome =
+        if planned.need > crate::balance::STEP_LENGTH * scale_ * crate::balance::MAX_STEPS as f32 {
+            Outcome::Overrun
+        } else {
+            Outcome::Caught
+        };
+    let start = feet;
+    let mut steps = Vec::new();
+    let mut said = Vec::new();
+    drop(rigs);
+    // Each foot's ankle over its ground (the navmesh's height is the ground's; the foot bone is
+    // the ankle): kept for its steps.
+    let ankle: [f32; 2] = [0, 1].map(|f| {
+        crate::knockdown::navmesh_point(e, actor, start[f])
+            .map(|g| start[f][2] - g[2])
+            .filter(|h| (0.0..=25.0).contains(h))
+            .unwrap_or(8.0 * scale_)
+    });
+    for (foot, to) in planned.steps {
+        let from = feet[foot];
+        let ground = classify(to, from[2], crate::knockdown::navmesh_point(e, actor, to));
+        match ground {
+            Ground::Floor(z) => {
+                let to = [to[0], to[1], z + ankle[foot]];
+                steps.push((foot, to));
+                feet[foot] = to;
+            }
+            Ground::Ledge => {
+                steps.push((foot, [to[0], to[1], from[2]]));
+                outcome = Outcome::Ledge;
+                said.push("a ledge");
+                break;
+            }
+            Ground::Blocked => {
+                // A wall or an obstacle: as far as there is room.
+                let mut placed = false;
+                for k in [0.66f32, 0.33] {
+                    let short = add(from, scale(sub(to, from), k));
+                    if let Ground::Floor(z) = classify(
+                        short,
+                        from[2],
+                        crate::knockdown::navmesh_point(e, actor, short),
+                    ) {
+                        let short = [short[0], short[1], z + ankle[foot]];
+                        steps.push((foot, short));
+                        placed = true;
+                        break;
+                    }
+                }
+                outcome = Outcome::Wall;
+                said.push(if placed {
+                    "a wall: the step shortened"
+                } else {
+                    "a wall: no room to step"
+                });
+                break;
+            }
+        }
+    }
+    if steps.is_empty() {
+        note(format!(
+            "{who}: pushed {v:.2} m/s past its feet ({:.2} m): against a wall, it catches itself",
+            planned.need
+        ));
+        return;
+    }
+    let reference = read3(e, actor + REFR_POSITION);
+    let count = steps.len();
+    let lengths: Vec<String> = steps
+        .iter()
+        .map(|(f, to)| {
+            format!(
+                "{:.2}",
+                length(sub([to[0], to[1], 0.0], [start[*f][0], start[*f][1], 0.0]))
+                    / UNITS_PER_METRE
+            )
+        })
+        .collect();
+    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(rig) = rigs.iter_mut().find(|r| r.actor == actor && r.root == root) else {
+        return;
+    };
+    let stepping = Stepping::new(dir, v, aggressor, start, steps, scale_, reference, outcome);
+    rig.balance = Some(stepping);
+    rig.since = Instant::now();
+    drop(rigs);
+    note(format!(
+        "{who}: balance: pushed {v:.2} m/s along ({:.2}, {:.2}), capture point {:.2} m past its feet: \
+         {count} step(s) ({} m){}; {:?}",
+        dir[0],
+        dir[1],
+        planned.need,
+        lengths.join(", "),
+        if said.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", said.join(", "))
+        },
+        outcome
+    ));
 }
 
 /// The actor's 3D's world transforms brought up to its bones' local ones (`NiAVObject::Update`

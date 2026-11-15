@@ -384,6 +384,36 @@ knockdown's topple speed makes the living body flinch. `[nv-rs Gunplay] iHitReac
 - **Log:** `Hit reaction: <id>: flinch at <bone>: <p> N s on <mass> kg -> <v> m/s (Hit Reactions
   <n>%), spread <m> m, <k> of <n> bones`.
 
+### Active ragdoll, stage 2: balance and stepping (`crates/host/src/balance.rs`)
+
+Patrick, 2026-11-15. `[nv-rs Gunplay] iBalance` (0-200 %, 0 off; Settings > Gameplay "Balance").
+- **When:** a hit below the topple speed gives the centre of mass (the pelvis) v = p / mass x
+  Balance % (this hit's momentum and the ragdoll's mass, as the flinch). Its capture point lies
+  v sqrt(h / g) along the push (h the pelvis's height over the feet). Within the feet and 0.15 m
+  around them: no step (the flinch alone). Past them: catch steps toward it, up to 4, each at most
+  0.6 m (x scale), the feet alternating from the one on the push's side and 0.12 m apart across it:
+  bigger hits take more and longer steps. A new hit while stepping re-plans from the planted feet,
+  half the old speed carried.
+- **How:** the legs by two-bone IK in the pose layer (thigh and calf turned so the ankle reaches
+  its target, the knee bending the way it bends, the foot kept level), the swinging foot on an arc
+  (0.12 m high) over 0.16-0.3 s, the pelvis carried over the feet and 8 cm past them along the
+  push (a 6 Hz spring), 5 cm lower; the arms raised out 0.9 rad (blend in 0.08 s); after the last
+  step the pose blends back over 0.35 s. The flinch's springs stay on top. When a foot lands the
+  reference and its character controller are set to the feet's middle (no velocity: the actor's
+  position follows the feet only), its height changed as the feet's ground changed; the pelvis's
+  offset takes the move back. If its AI moves it more than 30 units otherwise, the steps give way.
+- **The ground:** each target is put on the navmesh under it (the foot's ankle height kept):
+  slopes and stairs within 40 units up or down. No walkable ground within 30 units across: a wall
+  or obstacle; the step is shortened to two thirds, then a third, and with no room the body
+  catches itself where it is. Ground more than 60 units lower: a ledge; the foot goes over it and,
+  halfway through that step, the body falls into its ragdoll (`knock_down` with the push's speed;
+  its fall's damage as the knockdowns count it).
+- **Log:** `Hit reaction: <id>: balance: pushed <v> m/s ..., capture point <m> m past its feet:
+  <n> step(s) (<lengths> m) ...; <outcome>`, a line per landed foot (where, and how far the actor
+  followed), `steps off a ledge: falls`, `steps done`.
+- **For dismemberment:** `balance::Limbs` per rig (a body with one leg does not step; an arm lost
+  does not go out or, in stage 3, brace).
+
 ### Ballistic bullets (`crates/host/src/ballistics.rs`)
 
 Patrick, 2026-11-14: Battlefield-style bullets. `bBallistics` (Settings > Gameplay "Ballistics":
@@ -543,6 +573,7 @@ line; a bad variable stops the start.
 | `iImpactStacking` | `NV_GUNPLAY_IMPACT_STACKING` | 300 | 100-1000 ms half-life (Settings > Gameplay "Impact Stacking", in 50s) |
 | `iDetailsKey` | `NV_GUNPLAY_DETAILS_KEY` | 37 | a DirectInput key code (Settings > Controls "Detailed Stats Key") |
 | `iHitReactions` | `NV_GUNPLAY_HIT_REACTIONS` | 100 | 0-200 (0 off; Settings > Gameplay "Hit Reactions", in 10s) |
+| `iBalance` | `NV_GUNPLAY_BALANCE` | 100 | 0-200 (0 off; Settings > Gameplay "Balance", in 10s) |
 
 ### In-game Settings menu
 
