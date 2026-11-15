@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (active ragdoll, stage 1: flinch)
+
+- **Patrick:** a GTA IV / RDR-style active ragdoll in stages; stage 1: below-topple hits make the body flinch (struck bone along the hit, spreading by distance and mass, spine twist, pelvis turn, head lag and snap, arms swing, knee buckle and pelvis drop for leg hits), springing back with overshoot; powered Havok blend preferred, a procedural spring-damper layer as the fallback; hits layer; never move the actor or its controller; per-hit momentum and ragdoll mass; Hit Reactions slider; logged; stages 2/3 later.
+- **Now (`active_ragdoll.rs`):** the procedural layer (the Havok powered blend not tried on standing actors: that switch is what made the get-ups unstable). `hit` from `knockdown::after_hit` for Stagger and None (this hit's `p`, `mass`, point and direction); `apply` from gunplay's `FIRST_PERSON_SETUP` wrapper before the draw: springs stepped, bones' local rotations (and the pelvis's drop) written over the animated pose, `NiAVObject::Update` `00a59c60` on the actor's 3D; poses put back when the animation did not rewrite them and at rest. `knockdown::in_get_up`; `active_ragdoll::clear` at the range's end seams. `iHitReactions` row `7e060200`. Not run in game: whether the draw set-up runs after the NPCs' animation every frame (if the flinch never shows, that is the first thing to check) and how creature skeletons look.
+
 ### Claude, 2026-11-15 (no stagger shove)
 
 - **Patrick:** shot many times in a row, an actor sometimes slides or flies back while staying on its feet.

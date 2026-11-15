@@ -538,6 +538,7 @@ mod tests {
                 "iBulletSpeed",
                 "iImpactStacking",
                 "iDetailsKey",
+                "iHitReactions",
                 "sTestRangeCell",
                 "bSnappyMovement",
                 "iAccelerate",

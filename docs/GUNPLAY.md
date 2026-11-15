@@ -347,6 +347,43 @@ with `bKnockdownCompanions=1`.
 | Cooldowns | 2.5 s after a knock-down, 1.5 s after getting up |
 | Fall followed for | 12 s |
 
+### Active ragdoll, stage 1: the flinch (`crates/host/src/active_ragdoll.rs`)
+
+Patrick, 2026-11-15: a GTA IV / Red Dead style active ragdoll, in stages (2: balance and
+procedural stepping; 3: bracing and falling into the ragdoll, later). Stage 1: a hit below the
+knockdown's topple speed makes the living body flinch. `[nv-rs Gunplay] iHitReactions` (0-200 %,
+0 off; Settings > Gameplay "Hit Reactions").
+- **The kick:** per hit (never the stack), the knockdowns' momentum and mass: v = p / mass x
+  Hit Reactions %. The struck bone is the rig's bone nearest the impact. Each bone of the rig
+  (`Bip01` pelvis, spine 0-2, neck, head, clavicles, upper arms, forearms, thighs, calves; a
+  creature's that has them) gets an angular kick of 16 rad/s per m/s x its weight, about the axis
+  across its lever to the impact and the hit's direction; weight = the role's lightness (pelvis
+  0.35, spine 0.7, neck 0.8, head 0.9, clavicle 1.0, upper arm 1.2, forearm 1.1, thigh 0.6, calf 0.7)
+  x e^(-distance / spread), spread = 0.25 m + 0.4 m per m/s, at most 1.5 m (a pistol round stays at
+  the shoulder and upper torso, a .50 or a sledgehammer reaches the whole body; a low torso hit is
+  nearest the pelvis and turns the hips more). The head is also kicked 0.6 of the spine's kick
+  against it (it lags, then snaps). A leg hit buckles the knee (thigh and calf of that side bend,
+  6 rad/s per m/s) and drops the pelvis (0.6 m/s per m/s, at most 12 cm).
+- **The spring back:** each bone a spring-damper toward its animated pose, under-damped (an
+  overshoot): pelvis 3.2 Hz / 0.5, spine 3.0 / 0.45, neck 2.6 / 0.4, head 2.2 / 0.35, clavicle 2.4 /
+  0.4, upper arm 1.6 / 0.3, forearm 1.8 / 0.3, thigh 3.0 / 0.5, calf 3.2 / 0.5; its muscle (stiffness)
+  lowered by up to 60 % near the hit, back in a quarter second; held within each role's limit
+  (pelvis 0.2 rad ... upper arm 0.9). Hits layer (each adds to the bones' motion).
+- **How it shows:** not through the Havok joints: a living actor's ragdoll bodies are keyframed to
+  its animation, and switching a standing actor's ragdoll into a powered blend is what made the
+  knockdowns' get-ups unstable. A pose layer instead: at the draw's set-up
+  (`Main::DrawWorld_MTSetup1stPerson`, `00874c10`, after the animation posed the actors) each bone's
+  local rotation is turned by its spring's world-space offset carried into its frame (P^T R P L;
+  the pelvis also dropped), and the actor's 3D is updated by the game's `NiAVObject::Update`
+  (`00a59c60`, an update data of no time, as `KnockExplosion` updates a body). A bone the
+  animation did not write again (a pause, a menu) is put back to its pose first; at rest the pose
+  is put back. The actor's reference and character controller are never moved.
+- **Never:** the player, the dead, an actor knocked down or getting up (or in the get-up's watch),
+  a companion unless `bKnockdownCompanions`, an actor below the high process. Everything is
+  dropped at a load, a new game or the main menu.
+- **Log:** `Hit reaction: <id>: flinch at <bone>: <p> N s on <mass> kg -> <v> m/s (Hit Reactions
+  <n>%), spread <m> m, <k> of <n> bones`.
+
 ### Ballistic bullets (`crates/host/src/ballistics.rs`)
 
 Patrick, 2026-11-14: Battlefield-style bullets. `bBallistics` (Settings > Gameplay "Ballistics":
@@ -505,6 +542,7 @@ line; a bad variable stops the start.
 | `iBulletSpeed` | `NV_GUNPLAY_BULLET_SPEED` | 100 | 25-200 (Settings > Gameplay "Bullet Speed", in 5s) |
 | `iImpactStacking` | `NV_GUNPLAY_IMPACT_STACKING` | 300 | 100-1000 ms half-life (Settings > Gameplay "Impact Stacking", in 50s) |
 | `iDetailsKey` | `NV_GUNPLAY_DETAILS_KEY` | 37 | a DirectInput key code (Settings > Controls "Detailed Stats Key") |
+| `iHitReactions` | `NV_GUNPLAY_HIT_REACTIONS` | 100 | 0-200 (0 off; Settings > Gameplay "Hit Reactions", in 10s) |
 
 ### In-game Settings menu
 

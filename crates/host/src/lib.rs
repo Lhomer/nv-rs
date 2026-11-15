@@ -16,6 +16,7 @@
 //! thread). What it is connected to: docs/ENGINE_CRATE.md
 //! ("In the running game").
 
+pub mod active_ragdoll;
 pub mod ballistics;
 pub mod cell_entry_wait;
 pub mod cell_offsets;

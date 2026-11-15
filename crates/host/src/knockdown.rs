@@ -520,6 +520,7 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
     } = measure_hit(e, target, hit);
     let half_life = t.impact_stacking.max(1) as f32 / 1000.0;
     let stacked = stack(target, p, direction, half_life);
+    let hit_direction = direction;
     let (total, direction) = (stacked.total, stacked.direction);
     let scale = e.call(GET_SCALE, &args![target]).f64() as f32;
     let body = body_of(e, target);
@@ -561,13 +562,17 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
         // which `Actor::HitMe` has already played; pushing a standing actor's character controller
         // on every hit below topple (the stack's speed, so each rapid hit pushed harder) added up
         // and slid or launched it while it stood (Patrick, 2026-11-15).
-        Reaction::Stagger => note(format!(
+        Reaction::Stagger => {
+            crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction);
+            note(format!(
             "{who}: stagger (the game's hit reaction only, no push): this hit {:.2} m/s ({p:.1} N s), \
              the stack {speed:.2} m/s ({total:.1} N s over {} hits) vs topple {topple:.2} m/s",
             p / mass * t.hit_force.max(0) as f32 / 100.0,
             stacked.hits
-        )),
-        Reaction::None => {}
+        ));
+        }
+        // Below the stagger too: the physics flinch, per hit (`crate::active_ragdoll`).
+        Reaction::None => crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction),
     }
 }
 
@@ -1367,6 +1372,15 @@ struct GetUp {
 }
 
 static GET_UPS: Mutex<Vec<GetUp>> = Mutex::new(Vec::new());
+
+/// Whether `actor` is down or getting up (followed by the get-up, its watch included).
+pub fn in_get_up(actor: u32) -> bool {
+    GET_UPS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .any(|g| g.actor == actor)
+}
 
 /// Whether the game's get-up of `actor` (its `UpdateKnockState`) waits this frame.
 pub fn hold_get_up(e: &Engine, process: u32, actor: u32) -> bool {

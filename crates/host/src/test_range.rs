@@ -272,6 +272,7 @@ fn end(e: &mut Engine, _: &[u32]) -> Option<u32> {
     // after 535c53a: a knocked-down actor's freed memory read on the next frame).
     crate::knockdown::clear();
     crate::ballistics::clear();
+    crate::active_ragdoll::clear();
     if RESUMING.load(Ordering::Relaxed) {
         // The prepared save's own load: the range goes on.
         if phase() == Phase::Starting {
