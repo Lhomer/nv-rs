@@ -21,6 +21,7 @@ jip = { path = "../jip" }
 # The living-body physics' pure parts (flinch, balance, knockdown momentum, calibres), shared
 # with tools/ragdoll-lab.
 ragdoll-core = { path = "../ragdoll-core" }
+uio = { path = "../uio" }
 # The load order the game's forms are read from (`player_move`).
 esm = { path = "../esm" }
 # zlib's inflate on the host for the game's compressed archives and records (`native_inflate`).

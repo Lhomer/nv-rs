@@ -11,6 +11,9 @@
 pub mod arrays;
 pub mod extra;
 pub mod forms;
+pub(crate) mod havok_refs;
+pub mod jip_fn_actor;
+pub mod jip_fn_actor_p2;
 pub mod jip_fn_ammo;
 pub mod jip_fn_ammo_effect;
 pub mod jip_fn_armor;
@@ -30,17 +33,27 @@ pub mod jip_fn_grass;
 pub mod jip_fn_imagespace;
 pub mod jip_fn_impact_data;
 pub mod jip_fn_input;
+pub mod jip_fn_inventory;
 pub mod jip_fn_land_texture;
 pub mod jip_fn_light;
+pub mod jip_fn_linked_ref;
+pub mod jip_fn_marker_cmds;
 pub mod jip_fn_misc_ref;
+pub mod jip_fn_misc_ref_havok;
+pub mod jip_fn_misc_ref_havok_w;
+pub mod jip_fn_misc_ref_nodes;
+pub mod jip_fn_miscellaneous;
+pub mod jip_fn_move_cmds;
 pub mod jip_fn_package;
 pub mod jip_fn_perk;
 pub mod jip_fn_projectile;
 pub mod jip_fn_quest;
 pub mod jip_fn_ref_map;
 pub mod jip_fn_script;
+pub mod jip_fn_script_vars;
 pub mod jip_fn_sound;
 pub mod jip_fn_texture_set;
+pub mod jip_fn_ui;
 pub mod jip_fn_utility;
 pub mod jip_fn_water;
 pub mod jip_fn_weapon;
@@ -59,6 +72,7 @@ pub mod ln_fn_load_screen;
 pub mod ln_fn_map_marker;
 pub mod ln_fn_math;
 pub mod ln_fn_misc_ref;
+pub mod ln_fn_miscellaneous;
 pub mod ln_fn_perk;
 pub mod ln_fn_race;
 pub mod ln_fn_radio_ref;
@@ -66,6 +80,10 @@ pub mod ln_fn_recipe;
 pub mod ln_fn_terminal;
 pub mod ln_fn_utility;
 pub mod ln_fn_weapon;
+pub mod ni_matrix;
+pub mod nif_nodes;
+pub mod pos_marker;
+pub mod ref_move;
 
 use engine_core::prelude::*;
 use engine_core::ptr::Layout;
@@ -87,6 +105,7 @@ pub type Conditions = &'static [(u32, AbiFn, AbiFn)];
 
 /// Every module's conditions, one line per JIP source file that has any.
 pub const ALL_CONDITIONS: &[Conditions] = &[
+    jip_fn_actor_p2::CONDITIONS,
     jip_fn_effect::CONDITIONS,
     ln_fn_math::CONDITIONS,
     ln_fn_misc_ref::CONDITIONS,
@@ -94,6 +113,11 @@ pub const ALL_CONDITIONS: &[Conditions] = &[
     ln_fn_gamepad::CONDITIONS,
     jip_fn_ccc::CONDITIONS,
     jip_fn_weapon::CONDITIONS,
+    jip_fn_ui::CONDITIONS,
+    jip_fn_actor::CONDITIONS,
+    jip_fn_miscellaneous::CONDITIONS,
+    ln_fn_miscellaneous::CONDITIONS,
+    jip_fn_misc_ref_havok::CONDITIONS,
 ];
 
 /// A module's condition-only commands (`DEFINE_CMD_COND_ONLY` (JIP LN NVSE)): each opcode with its
@@ -101,10 +125,14 @@ pub const ALL_CONDITIONS: &[Conditions] = &[
 pub type ConditionsOnly = &'static [(u32, AbiFn)];
 
 /// Every module's condition-only commands.
-pub const ALL_CONDITIONS_ONLY: &[ConditionsOnly] = &[jip_fn_aux_variable::CONDITIONS_ONLY];
+pub const ALL_CONDITIONS_ONLY: &[ConditionsOnly] = &[
+    jip_fn_aux_variable::CONDITIONS_ONLY,
+    jip_fn_miscellaneous::CONDITIONS_ONLY,
+];
 
 /// Every module's list, one line per JIP source file.
 pub const ALL: &[Handlers] = &[
+    jip_fn_actor_p2::COMMANDS,
     jip_fn_ammo::COMMANDS,
     jip_fn_aux_variable::COMMANDS,
     jip_fn_ammo_effect::COMMANDS,
@@ -124,6 +152,7 @@ pub const ALL: &[Handlers] = &[
     jip_fn_impact_data::COMMANDS,
     jip_fn_land_texture::COMMANDS,
     jip_fn_light::COMMANDS,
+    jip_fn_miscellaneous::COMMANDS,
     jip_fn_package::COMMANDS,
     jip_fn_perk::COMMANDS,
     jip_fn_projectile::COMMANDS,
@@ -131,6 +160,7 @@ pub const ALL: &[Handlers] = &[
     jip_fn_ref_map::COMMANDS,
     jip_fn_sound::COMMANDS,
     jip_fn_texture_set::COMMANDS,
+    jip_fn_ui::COMMANDS,
     jip_fn_utility::COMMANDS,
     jip_fn_water::COMMANDS,
     jip_fn_weapon::COMMANDS,
@@ -160,6 +190,17 @@ pub const ALL: &[Handlers] = &[
     ln_fn_gamepad::COMMANDS,
     jip_fn_input::COMMANDS,
     jip_fn_ccc::COMMANDS,
+    jip_fn_actor::COMMANDS,
+    jip_fn_marker_cmds::COMMANDS,
+    jip_fn_script_vars::COMMANDS,
+    jip_fn_misc_ref_nodes::COMMANDS,
+    jip_fn_inventory::COMMANDS,
+    ln_fn_miscellaneous::COMMANDS,
+    jip_fn_misc_ref_havok::COMMANDS,
+    jip_fn_move_cmds::COMMANDS,
+    jip_fn_move_cmds::CCC_COMMANDS,
+    jip_fn_linked_ref::COMMANDS,
+    jip_fn_misc_ref_havok_w::COMMANDS,
 ];
 
 /// How many of JIP's commands have a handler.
@@ -186,6 +227,8 @@ pub fn is_built(opcode: u32) -> bool {
 
 /// Gives every built command its handler (a condition its eval too).
 pub fn install(e: &mut Engine) {
+    // Lock-free slots conditions read: made before the threads start.
+    jip_fn_miscellaneous::install(e);
     for list in ALL {
         for &(opcode, execute) in list.iter() {
             crate::table::set_handlers(e, opcode, Some(execute), None);
@@ -316,10 +359,15 @@ pub fn nth_item(e: &Engine, head: Ptr<ListNode>, index: i32) -> u32 {
     e.get(node, ListNode::data)
 }
 
-/// `tList::IsInList`: some node holds `item` (an empty first node holds 0).
+/// `tList::IsInList`: some node holds `item` (an empty first node holds 0). A list that runs
+/// back into itself ends as [`list_items`] does ([`list_step`]): not found.
 pub fn list_contains(e: &Engine, head: Ptr<ListNode>, item: u32) -> bool {
     let mut node = head;
+    let mut walked = 0usize;
     loop {
+        if !list_step(e, &mut walked) {
+            return false;
+        }
         if e.get(node, ListNode::data) == item {
             return true;
         }
@@ -390,10 +438,15 @@ pub fn list_remove_all(e: &mut Engine, head: Ptr<ListNode>) {
 }
 
 /// `tList::Remove`: the first node holding `item` taken out ([`list_unlink`]); whether there was
-/// one.
+/// one. A list that runs back into itself ends as [`list_items`] does ([`list_step`]): nothing
+/// removed.
 pub fn list_remove(e: &mut Engine, head: Ptr<ListNode>, item: u32) -> bool {
     let (mut node, mut prev) = (head, Ptr::<ListNode>::NULL);
+    let mut walked = 0usize;
     loop {
+        if !list_step(e, &mut walked) {
+            return false;
+        }
         if e.get(node, ListNode::data) == item {
             list_unlink(e, node, prev);
             return true;
@@ -673,6 +726,7 @@ mod tests {
     #[test]
     fn each_module_holds_its_own_file() {
         let files = [
+            "jip_fn_actor",
             "jip_fn_ammo",
             "jip_fn_aux_variable",
             "jip_fn_ammo_effect",
@@ -692,6 +746,7 @@ mod tests {
             "jip_fn_impact_data",
             "jip_fn_land_texture",
             "jip_fn_light",
+            "jip_fn_miscellaneous",
             "jip_fn_package",
             "jip_fn_perk",
             "jip_fn_projectile",
@@ -699,6 +754,7 @@ mod tests {
             "jip_fn_ref_map",
             "jip_fn_sound",
             "jip_fn_texture_set",
+            "jip_fn_ui",
             "jip_fn_utility",
             "jip_fn_water",
             "jip_fn_weapon",
@@ -728,7 +784,19 @@ mod tests {
             "ln_fn_gamepad",
             "jip_fn_input",
             "jip_fn_ccc",
+            "jip_fn_actor",
+            "jip_fn_misc_ref",
+            "jip_fn_script",
+            "jip_fn_misc_ref",
+            "jip_fn_inventory",
+            "ln_fn_miscellaneous",
+            "jip_fn_misc_ref",
+            "jip_fn_misc_ref",
+            "jip_fn_ccc",
+            "jip_fn_misc_ref",
+            "jip_fn_misc_ref",
         ];
+        assert_eq!(files.len(), ALL.len(), "one file per command list");
         let mut seen = std::collections::HashSet::new();
         for (list, file) in ALL.iter().zip(files) {
             for &(opcode, _) in list.iter() {
@@ -739,6 +807,7 @@ mod tests {
         }
         assert_eq!(ALL.len(), files.len());
         for (list, file) in ALL_CONDITIONS.iter().zip([
+            "jip_fn_actor",
             "jip_fn_effect",
             "ln_fn_math",
             "ln_fn_misc_ref",
@@ -746,6 +815,11 @@ mod tests {
             "ln_fn_gamepad",
             "jip_fn_ccc",
             "jip_fn_weapon",
+            "jip_fn_ui",
+            "jip_fn_actor",
+            "jip_fn_miscellaneous",
+            "ln_fn_miscellaneous",
+            "jip_fn_misc_ref",
         ]) {
             for &(opcode, _, _) in list.iter() {
                 let slot = crate::table::slot(opcode).expect("a JIP slot");
@@ -754,8 +828,11 @@ mod tests {
                 assert!(seen.insert(opcode), "{opcode:04x} listed twice");
             }
         }
-        assert_eq!(ALL_CONDITIONS.len(), 7);
-        for (list, file) in ALL_CONDITIONS_ONLY.iter().zip(["jip_fn_aux_variable"]) {
+        assert_eq!(ALL_CONDITIONS.len(), 13);
+        for (list, file) in ALL_CONDITIONS_ONLY
+            .iter()
+            .zip(["jip_fn_aux_variable", "jip_fn_miscellaneous"])
+        {
             for &(opcode, _) in list.iter() {
                 let slot = crate::table::slot(opcode).expect("a JIP slot");
                 assert!(slot.file.ends_with(file), "{opcode:04x} {}", slot.name);
@@ -766,7 +843,7 @@ mod tests {
                 assert!(seen.insert(opcode), "{opcode:04x} listed twice");
             }
         }
-        assert_eq!(ALL_CONDITIONS_ONLY.len(), 1);
+        assert_eq!(ALL_CONDITIONS_ONLY.len(), 2);
         // README's JIP LN count is checked in one place, against the table's every handled JIP
         // opcode: `ui_hooks::tests::the_readme_counts_the_built_commands`.
     }
