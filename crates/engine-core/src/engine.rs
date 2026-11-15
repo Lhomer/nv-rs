@@ -618,6 +618,18 @@ impl Engine {
             self.clock_ms = unsafe { GetTickCount() };
             self.clock_us = 0;
         }
+        // Elsewhere (the Android test build): the machine's uptime too (`/proc/uptime`), as
+        // `GetTickCount` answers; code that takes a zero start stamp as long ago needs a start
+        // past zero, so at least `REPEATABLE_START_MS`.
+        #[cfg(not(windows))]
+        {
+            let uptime_ms = std::fs::read_to_string("/proc/uptime")
+                .ok()
+                .and_then(|t| t.split_whitespace().next()?.parse::<f64>().ok())
+                .map(|s| (s * 1000.0) as u64 as u32);
+            self.clock_ms = uptime_ms.unwrap_or(0).max(REPEATABLE_START_MS);
+            self.clock_us = 0;
+        }
         self.real_clock = Some(std::time::Instant::now());
     }
 
