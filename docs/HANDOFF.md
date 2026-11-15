@@ -7,6 +7,12 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (no stagger shove)
+
+- **Patrick:** shot many times in a row, an actor sometimes slides or flies back while staying on its feet.
+- **Cause:** the stagger pushed the standing actor with JIP's push (`jip::push_living_actor`), its force from the *stacked* speed, so every rapid hit below topple fired a bigger shove, and the shoves added up in the character controller. (A knockdown blocked by the cooldown never fell back to a stagger: it just stops.)
+- **Now:** a stagger is the game's own hit reaction only (what `HitMe` plays), logged with this hit's speed and momentum and the stack's; no push of any kind; only a knockdown moves the body. `knock_down` clears the controller's stored push itself (`clear_stored_push`) instead of a zero JIP push. Not run in game.
+
 ### Claude, 2026-11-15 (merge #567, #568, #569)
 
 - **Merged** slaterain/main's 4a5c2d2 (#567), 7aa0b77 (#568), b94c269 (#569) (JIP LN commands, batches 11 and 12, CCCSetEquipped); not bea99758 (#570, not approved). No conflicts; Cargo.lock unchanged. Fork-only jip changes kept (`push_living_actor`, `high_actors` public). Tests: host (3 known `cell_offsets`), jip 635 of 637: upstream's new `jip_fn_ccc` `location_names` and `location_two_markers_in_one_ring` fail ("SE of" where "East of" is expected: `dx` just over 1.0) on b94c269 alone too, not from the merge; engine-core all; repo_hygiene. It lands after dcff4209 (per-gun velocity), which was pushed before the merge was asked for.

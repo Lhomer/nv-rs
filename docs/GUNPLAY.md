@@ -188,7 +188,8 @@ with `bKnockdownCompanions=1`.
   centre of mass (height h) over the edge of its stance (half-width b), times a recovery factor 3
   (a standing body steps to catch itself below that), times `iKnockdownThreshold` %:
   v_topple = 3 x sqrt(2 g (sqrt(h^2 + b^2) - h)), lengths x scale, mass x scale^3. Knockdown at
-  v_topple, stagger at 40 % of it (JIP's push, 100 per m/s, at most 200). The launch is v along
+  v_topple, stagger at 40 % of it (the game's own hit reaction only, logged, no push: 2026-11-15).
+  The launch is v along
   the hit (lifted 0.3).
   - A round: p = mass x speed at impact x the share it leaves in the body x 15 (game feel: a .50
     round's real 38 N s moves 80 kg only 0.5 m/s) x armour 1 / (1 + DT x load factor / 40). The
@@ -314,12 +315,14 @@ with `bKnockdownCompanions=1`.
   spin to 15 rad/s for 1.5 s; afterwards a bone slower than 1.5 has its sideways motion and spin
   damped (6 a second; the fall is left to gravity). Guards: no second knock-down within 2.5 s of
   one or 1.5 s after getting up; the game's own `KnockExplosion` (blasts, `PushActorAway`, a
-  knock-out) adds no second push to an actor knocked here within 2.5 s; JIP's stagger push on the
+  knock-out) adds no second push to an actor knocked here within 2.5 s; a push stored in the
   character controller is cleared before the ragdoll. Each clamp and guard is a `Knockdown:` log
   line.
-- **Stagger** (at or past 40 % of the resistance): JIP's push without a ragdoll (#565,
-  `jip::push_living_actor`, a new public entry beside `PushActorNoRagdoll`): momentum x 2, at
-  most 200, along the hit.
+- **Stagger** (at or past 40 % of the topple speed): the game's own hit reaction only, which
+  `Actor::HitMe` plays; nothing pushes the standing actor (2026-11-15: the stagger's JIP shove,
+  from the stacked speed, fired on every rapid hit below topple; the shoves added up in the
+  character controller and slid or launched the standing actor). A `Knockdown: ... stagger` line
+  gives this hit's speed and momentum and the stack's. Only a knockdown moves the body.
 - **Falls:** the game's fall damage runs from the character controller, which a ragdoll does not
   use, so each knocked-down actor is followed (its highest point) until it is down, getting up or
   12 s have passed; a drop past `fJumpFallHeightMin` takes the game's formula
@@ -336,7 +339,7 @@ with `bKnockdownCompanions=1`.
 | Stagger share | 0.4 |
 | Knock-down push (ragdoll only) | 2 |
 | Launch | v = p / mass x Hit Force %, at most 12 m/s, lift 0.3 |
-| Stagger force | 100 per m/s, at most 200 |
+| Stagger force | none (the game's hit reaction only) |
 | Push origin behind the impact | 400 units |
 | Bone speed / spin while flying | 1,400 units/s / 20 rad/s, for 1.5 s |
 | Settling damping | 6 a second below 12 units/s (sideways and spin) |

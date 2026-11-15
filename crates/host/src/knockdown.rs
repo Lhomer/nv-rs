@@ -55,7 +55,7 @@
 //! - **Once:** an actor knocked down in the last [`KNOCK_COOLDOWN`] or got up in the last
 //!   [`UP_COOLDOWN`] is not knocked again, the game's own blast knock-down
 //!   ([`crate::hit_force::KNOCK_EXPLOSION`]) adds no second push to an actor knocked here a moment
-//!   ago ([`recently_knocked`]), and JIP's stagger push left on the character controller is
+//!   ago ([`recently_knocked`]), and a push stored in the character controller is
 //!   cleared before the ragdoll takes over. While it flies ([`FLIGHT`]) only a bone faster than
 //!   [`MAX_BONE_SPEED`] or spinning faster than [`MAX_BONE_SPIN`] is held to it; no bone is touched
 //!   otherwise, so the ragdoll can come to rest and sleep. While it lies, the knockback a hit on it
@@ -63,8 +63,10 @@
 //!   followed actor is checked to still be the same reference ([`live`]), all of it dropped on a
 //!   load, a new game or the main menu ([`clear`]).
 //!   Every launch, clamp, guard and get-up decision is a `Knockdown:` log line.
-//! - At or past [`STAGGER_SHARE`] of it: a **stagger**, JIP's push without a ragdoll (#565,
-//!   `jip::push_living_actor`): a shove of [`STAGGER_PER_POINT`] per point along the hit.
+//! - At or past [`STAGGER_SHARE`] of it: a **stagger**: the game's own hit reaction only (which
+//!   `Actor::HitMe` plays), logged; no push of any kind. Only a knockdown moves the body (Patrick,
+//!   2026-11-15: rapid hits below topple each shoved the standing actor harder, by the stack, and
+//!   the shoves added up in its controller and slid or launched it).
 //!
 //! **Falls** ([`frame`]): the game's fall damage runs from the character controller, which a body
 //! in its ragdoll does not use. So each knocked-down actor is followed: its highest point and,
@@ -124,8 +126,6 @@ pub const POUND: f32 = 0.4536;
 /// The launch at most (m/s; outliers), and game units a metre.
 pub const MAX_LAUNCH: f32 = 12.0;
 pub const UNITS_PER_METRE: f32 = 70.0;
-/// The stagger's push (JIP's force) per m/s, at most [`MAX_STAGGER`].
-pub const STAGGER_PER_MPS: f32 = 100.0;
 pub const STAGGER_SHARE: f32 = 0.4;
 /// The game's own knock-down (`KnockExplosion`) only puts the body into its ragdoll: its push is
 /// this small. The launch is the knockdowns' own: the body's speed from the transferred momentum
@@ -136,7 +136,6 @@ pub const LIFT: f32 = 0.3;
 /// share of it left (the ragdoll's own start took it back).
 pub const LAUNCH_TRIES: u8 = 2;
 pub const LAUNCH_KEPT: f32 = 0.4;
-pub const MAX_STAGGER: f32 = 200.0;
 pub const ORIGIN_BACK: f32 = 400.0;
 /// No second knock-down this soon after one, nor this soon after getting up.
 pub const KNOCK_COOLDOWN: Duration = Duration::from_millis(2500);
@@ -558,11 +557,16 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
             note(format!("{who}: stack reset on the knockdown"));
             knock_down(e, target, aggressor, point, direction, speed)
         }
-        Reaction::Stagger => {
-            let force = (speed * STAGGER_PER_MPS).min(MAX_STAGGER);
-            let angle = direction[0].atan2(direction[1]).to_degrees();
-            jip::push_living_actor(e, target, force, angle, false);
-        }
+        // No shove: only a knockdown moves the body. A stagger is the game's own hit reaction,
+        // which `Actor::HitMe` has already played; pushing a standing actor's character controller
+        // on every hit below topple (the stack's speed, so each rapid hit pushed harder) added up
+        // and slid or launched it while it stood (Patrick, 2026-11-15).
+        Reaction::Stagger => note(format!(
+            "{who}: stagger (the game's hit reaction only, no push): this hit {:.2} m/s ({p:.1} N s), \
+             the stack {speed:.2} m/s ({total:.1} N s over {} hits) vs topple {topple:.2} m/s",
+            p / mass * t.hit_force.max(0) as f32 / 100.0,
+            stacked.hits
+        )),
         Reaction::None => {}
     }
 }
@@ -989,8 +993,9 @@ pub fn knock_down(
         return;
     }
     let ragdoll = e.vcall(actor, 0x38c, &args![]).bool();
-    // JIP's stagger push left on the character controller would keep moving it under the ragdoll.
-    jip::push_living_actor(e, actor, 0.0, 0.0, false);
+    // A push stored in the character controller (a script's, the game's knockback) would keep
+    // moving it under the ragdoll.
+    let _ = clear_stored_push(e, actor);
     KNOCKED
         .lock()
         .unwrap_or_else(|p| p.into_inner())
