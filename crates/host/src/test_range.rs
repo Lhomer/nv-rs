@@ -273,6 +273,7 @@ fn end(e: &mut Engine, _: &[u32]) -> Option<u32> {
     crate::knockdown::clear();
     crate::ballistics::clear();
     crate::active_ragdoll::clear();
+    crate::balance::clear();
     if RESUMING.load(Ordering::Relaxed) {
         // The prepared save's own load: the range goes on.
         if phase() == Phase::Starting {

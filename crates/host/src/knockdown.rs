@@ -511,6 +511,12 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
         return;
     }
     let aggressor = e.mem.u32(hit + HIT_AGGRESSOR);
+    if crate::active_ragdoll::falling(target) {
+        note(format!(
+            "{who}: going over into its ragdoll: this hit waits for it"
+        ));
+        return;
+    }
     let Measured {
         push,
         dt,
@@ -556,7 +562,12 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
             }
             reset_stack(target);
             note(format!("{who}: stack reset on the knockdown"));
-            knock_down(e, target, aggressor, point, direction, speed)
+            // Stage 3: the posed body goes over first (the flinch's kick on top), then falls into
+            // its ragdoll; without the layer, the hard switch as before.
+            crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction);
+            if !crate::active_ragdoll::fall(e, target, aggressor, point, direction, speed) {
+                knock_down(e, target, aggressor, point, direction, speed)
+            }
         }
         // No shove: only a knockdown moves the body. A stagger is the game's own hit reaction,
         // which `Actor::HitMe` has already played; pushing a standing actor's character controller
@@ -1072,6 +1083,8 @@ pub fn knock_down(
             allowed: false,
             placed: None,
             next_log: 0.0,
+            fall_dir: launch,
+            braced: false,
         });
     }
     note(format!(
@@ -1199,6 +1212,14 @@ const PUSH_COUNT: u32 = 0x590;
 /// The controller's linear velocity (a Havok vector, `00807080`), a node's name.
 const CONTROLLER_VELOCITY: u32 = 0x0080_7080;
 const NODE_NAME: u32 = 0x08;
+/// The ground brace (stage 3): for this long after the knock-down, while the pelvis is more than
+/// this over the lowest bone (units) and dropping faster than this (units/s), the arm bones are
+/// steered this share a frame toward (m/s forward along the fall, m/s down).
+const BRACE_GROUND_FOR: Duration = Duration::from_millis(1200);
+const BRACE_GROUND_HEIGHT: f32 = 25.0;
+const BRACE_GROUND_DROP: f32 = 35.0;
+const BRACE_GROUND_SHARE: f32 = 0.25;
+const BRACE_GROUND_SPEED: (f32, f32) = (1.5, 2.5);
 const LOOKUP_FORM: u32 = 0x0048_39c0;
 /// `hkpMotion::getMass` and a rigid body's motion.
 const GET_MASS: u32 = 0x00c8_6430;
@@ -1373,6 +1394,9 @@ struct GetUp {
     /// When and where it was set for the get-up, and the watch's next log time (seconds after).
     placed: Option<(Instant, [f32; 3])>,
     next_log: f32,
+    /// The fall's direction (the launch's), and whether its arms braced on the ground.
+    fall_dir: [f32; 3],
+    braced: bool,
 }
 
 static GET_UPS: Mutex<Vec<GetUp>> = Mutex::new(Vec::new());
@@ -1435,6 +1459,9 @@ fn get_ups(e: &mut Engine) {
         if matches!(state, 1 | 2) {
             if g.since.elapsed() < FLIGHT {
                 hold_bones(e, g.actor, scale);
+            }
+            if g.since.elapsed() < BRACE_GROUND_FOR {
+                brace_ground(e, &mut g, scale);
             }
             // A hit on the lying body stores a knockback in its character controller, which the
             // controller only spends when it moves again: at the get-up, when it threw the actor.
@@ -1875,6 +1902,73 @@ fn hold_bones(e: &mut Engine, actor: u32, scale: f32) {
             "{}: clamp: {clamped} bones held (fastest {fastest:.0} units/s, at most {MAX_BONE_SPEED} \
              and spin {MAX_BONE_SPIN})",
             describe(e, actor)
+        ));
+    }
+}
+
+/// Stage 3's brace on the ground: while the falling body is still well off the ground and
+/// dropping, its hands and forearms (the arms it has) are steered forward along the fall and down
+/// ([`BRACE_GROUND_SPEED`]), a share a frame, so the arms go out to take the landing.
+fn brace_ground(e: &mut Engine, g: &mut GetUp, scale: f32) {
+    let limbs = crate::balance::limbs_of(g.actor);
+    let bones = bodies(e, g.actor);
+    let named = |e: &Engine, node: u32, want: &[u8]| {
+        let name = e.mem.u32(node + NODE_NAME);
+        name != 0 && e.mem.cstr(name).eq_ignore_ascii_case(want)
+    };
+    let mut low = f32::INFINITY;
+    let mut pelvis = None;
+    for &(node, body) in &bones {
+        let at = read3(e, node + WORLD_TRANSLATION);
+        low = low.min(at[2]);
+        if named(e, node, b"Bip01 Pelvis") {
+            pelvis = Some((at, body));
+        }
+    }
+    let Some((at, body)) = pelvis else {
+        return;
+    };
+    let dropping = linear(e, body).is_some_and(|v| v[2] * scale < -BRACE_GROUND_DROP);
+    if at[2] - low < BRACE_GROUND_HEIGHT || !dropping {
+        return;
+    }
+    let dir = [g.fall_dir[0], g.fall_dir[1], 0.0];
+    let flat = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
+    let dir = if flat > 1e-3 {
+        [dir[0] / flat, dir[1] / flat, 0.0]
+    } else {
+        [0.0; 3]
+    };
+    let want = [
+        dir[0] * BRACE_GROUND_SPEED.0 * UNITS_PER_METRE / scale,
+        dir[1] * BRACE_GROUND_SPEED.0 * UNITS_PER_METRE / scale,
+        -BRACE_GROUND_SPEED.1 * UNITS_PER_METRE / scale,
+    ];
+    let mut moved = 0;
+    for &(node, body) in &bones {
+        let arm = [
+            (b"Bip01 L Hand".as_slice(), limbs.left_arm),
+            (b"Bip01 L Forearm".as_slice(), limbs.left_arm),
+            (b"Bip01 R Hand".as_slice(), limbs.right_arm),
+            (b"Bip01 R Forearm".as_slice(), limbs.right_arm),
+        ]
+        .iter()
+        .any(|(name, has)| *has && named(e, node, name));
+        if !arm {
+            continue;
+        }
+        if let Some(v) = linear(e, body) {
+            let nv = [0, 1, 2].map(|i| v[i] + (want[i] - v[i]) * BRACE_GROUND_SHARE);
+            let (nv, _) = clamp_speed(nv, MAX_BONE_SPEED / scale);
+            set_velocity(e, SET_LINEAR_VELOCITY, body, nv);
+            moved += 1;
+        }
+    }
+    if moved > 0 && !g.braced {
+        g.braced = true;
+        note(format!(
+            "{}: braces for the ground with its arms ({moved} arm bones)",
+            describe(e, g.actor)
         ));
     }
 }

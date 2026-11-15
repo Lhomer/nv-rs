@@ -7,6 +7,10 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (active ragdoll, stage 3: bracing and falling)
+
+- **Now (`active_ragdoll.rs` `Brace`, `Fall`, `brace_frame`, `fall_frame`, `fall`, `falling`, `reach_arm`; `knockdown::brace_ground`; `balance::limbs_of`/`set_limbs`/`clear`):** a knockdown goes through `active_ragdoll::fall` (0.12 s of the posed body going over, then `knock_down`); a rig whose actor is in its ragdoll or dead is dropped without writing (the ragdoll owns the bones); walls brace with the hands (or crumple past 2.5 m/s); ledges windmill 0.4 s then fall; overrun steps end in a fall; one leg falls; the ragdoll's arm bodies are steered to brace for the ground for 1.2 s. Hand bones added to the rig. Not run in game.
+
 ### Claude, 2026-11-15 (active ragdoll, stage 2: balance and stepping)
 
 - **Patrick:** stage 2 (catch steps by capture point, real leg and foot movement, never sliding; the actor follows the feet; walls, slopes, stairs, ledges with a fall); then stage 3 (bracing, windmilling, a smooth blend into the ragdoll, arms braced on the ground), each published separately; dismemberment later.

@@ -414,6 +414,35 @@ Patrick, 2026-11-15. `[nv-rs Gunplay] iBalance` (0-200 %, 0 off; Settings > Game
 - **For dismemberment:** `balance::Limbs` per rig (a body with one leg does not step; an arm lost
   does not go out or, in stage 3, brace).
 
+### Active ragdoll, stage 3: bracing and falling (`crates/host/src/active_ragdoll.rs`)
+
+Patrick, 2026-11-15. Rides on Hit Reactions and Balance (either on).
+- **Into the ragdoll, smoothly** (replacing the hard switch): a knockdown first kicks the posed
+  body (the flinch, full strength) and lets it go over for 0.12 s (the torso leaning 0.4 rad into
+  the fall, the knees giving 0.3 rad, the pelvis following the fall), then the ragdoll takes it
+  with the fall's speed (`knock_down`). From then the ragdoll owns the bones: the pose layer
+  writes nothing back (it would fight it; the rig just goes, also for the dead). Hits arriving
+  while it goes over wait for the ragdoll.
+- **Walls:** a step with no room (no walkable ground ahead) braces: both hands (the arms it has)
+  reach to the wall ahead at the shoulders (two-bone IK of upper arm and forearm), in 0.12 s, held
+  0.5 s, released over 0.4 s, the steps that fit still taken. A push of more than 2.5 m/s (x Balance
+  %), or no arm to brace with, crumples it against the wall into its ragdoll at half the speed.
+- **Ledges:** the foot goes over, then 0.4 s of windmilling (the arms swinging 1.6 rad at 2.2 Hz,
+  the torso leaning back), then the ragdoll at the push's speed; the fall's damage as before.
+- **Too much to catch:** more distance than 4 steps can cover: the steps are taken, then it goes
+  over at 0.6 of the speed. On one leg (dismemberment later) it cannot step: it goes over at once.
+- **Bracing on the ground:** for 1.2 s after the ragdoll takes it, while the pelvis is more than
+  25 units over its lowest bone and dropping, the hands and forearms (the arms it has) are steered a
+  quarter a frame toward 1.5 m/s along the fall and 2.5 m/s down: the arms go out for the landing.
+- **The get-up fixes stay** (the get-up waits for a still, lying body; stands where it lies; the
+  watch).
+- **For dismemberment:** `balance::set_limbs(actor, Limbs)` (a lost leg: no steps, it falls; a
+  lost arm: no brace on that side), `balance::limbs_of`; the rig keeps per-role spring, gain and
+  limit tables for masses and muscles.
+- **Log:** `braces against a wall`, `lets go of the wall`, `steps off a ledge: windmills, then
+  falls`, `the steps could not catch it: falls`, `into its ragdoll after <t> s of going over`,
+  `braces for the ground with its arms`.
+
 ### Ballistic bullets (`crates/host/src/ballistics.rs`)
 
 Patrick, 2026-11-14: Battlefield-style bullets. `bBallistics` (Settings > Gameplay "Ballistics":

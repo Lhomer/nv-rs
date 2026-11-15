@@ -56,6 +56,7 @@ pub enum Role {
     Thigh,
     Calf,
     Foot,
+    Hand,
 }
 
 impl Role {
@@ -72,6 +73,7 @@ impl Role {
             Role::Thigh => (3.0, 0.5),
             Role::Calf => (3.2, 0.5),
             Role::Foot => (3.4, 0.6),
+            Role::Hand => (2.0, 0.35),
         }
     }
 
@@ -88,6 +90,7 @@ impl Role {
             Role::Thigh => 0.6,
             Role::Calf => 0.7,
             Role::Foot => 0.3,
+            Role::Hand => 1.0,
         }
     }
 
@@ -104,12 +107,13 @@ impl Role {
             Role::Thigh => 0.45,
             Role::Calf => 0.6,
             Role::Foot => 0.4,
+            Role::Hand => 0.6,
         }
     }
 }
 
 /// The rig's bones by name (the Gamebryo biped's), and their roles.
-pub const BONES: [(&str, Role); 18] = [
+pub const BONES: [(&str, Role); 20] = [
     ("Bip01 Pelvis", Role::Pelvis),
     ("Bip01 Spine", Role::Spine),
     ("Bip01 Spine1", Role::Spine),
@@ -128,6 +132,8 @@ pub const BONES: [(&str, Role); 18] = [
     ("Bip01 R Calf", Role::Calf),
     ("Bip01 L Foot", Role::Foot),
     ("Bip01 R Foot", Role::Foot),
+    ("Bip01 L Hand", Role::Hand),
+    ("Bip01 R Hand", Role::Hand),
 ];
 
 /// The tuning (module documentation): kick (rad/s per m/s of the body's speed), the spread's
@@ -303,6 +309,64 @@ pub struct Rig {
     pub balance: Option<crate::balance::Stepping>,
     pub shift: V3,
     pub limbs: crate::balance::Limbs,
+    /// Stage 3: hands braced on a wall, and the fall into the ragdoll under way.
+    pub brace: Option<Brace>,
+    pub fall: Option<Fall>,
+}
+
+/// Hands reaching to a wall along `dir` (stage 3), `t` seconds in.
+#[derive(Clone, Copy, Debug)]
+pub struct Brace {
+    pub dir: V3,
+    pub t: f32,
+}
+
+/// The fall into the ragdoll under way (stage 3): along `dir` at `speed` (m/s), for the attacker,
+/// from `point`; `lead` seconds of the posed body going over (with the arms windmilling at a
+/// ledge) before the ragdoll takes it.
+#[derive(Clone, Copy, Debug)]
+pub struct Fall {
+    pub dir: V3,
+    pub speed: f32,
+    pub aggressor: u32,
+    pub point: V3,
+    pub t: f32,
+    pub lead: f32,
+    pub windmill: bool,
+}
+
+/// Stage 3's timings: the brace's reach, hold and release (s); the fall's lead for a knockdown, a
+/// ledge (windmilling) and a fall at the end of the steps (s); the windmill's turns a second and
+/// swing (rad); how much the torso and the knees go over in a fall (rad), how far the pelvis goes
+/// (units); the push a wall brace holds (m/s), past it the body crumples against the wall.
+pub const BRACE_REACH: f32 = 0.12;
+pub const BRACE_HOLD: f32 = 0.5;
+pub const BRACE_RELEASE: f32 = 0.4;
+pub const FALL_LEAD: f32 = 0.12;
+pub const LEDGE_LEAD: f32 = 0.4;
+pub const OVERRUN_LEAD: f32 = 0.1;
+pub const WINDMILL_HZ: f32 = 2.2;
+pub const WINDMILL_SWING: f32 = 1.6;
+pub const FALL_LEAN: f32 = 0.4;
+pub const FALL_KNEES: f32 = 0.3;
+pub const FALL_SHIFT: f32 = 25.0;
+pub const BRACE_HOLDS: f32 = 2.5;
+
+/// The brace's weight `t` seconds in: up over the reach, held, down over the release; `None` when
+/// it is over.
+pub fn brace_weight(t: f32) -> Option<f32> {
+    if t < 0.0 {
+        return Some(0.0);
+    }
+    if t < BRACE_REACH {
+        let s = t / BRACE_REACH;
+        return Some(s * s * (3.0 - 2.0 * s));
+    }
+    if t < BRACE_REACH + BRACE_HOLD {
+        return Some(1.0);
+    }
+    let r = (t - BRACE_REACH - BRACE_HOLD) / BRACE_RELEASE;
+    (r < 1.0).then_some(1.0 - r)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -459,7 +523,9 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         since: Instant::now(),
         balance: None,
         shift: [0.0; 3],
-        limbs: crate::balance::Limbs::WHOLE,
+        limbs: crate::balance::limbs_of(actor),
+        brace: None,
+        fall: None,
     });
     true
 }
@@ -596,6 +662,15 @@ pub fn apply(e: &mut Engine) {
         if root != rig.root {
             continue; // its 3D was made again: the old nodes are not ours
         }
+        // In its ragdoll (knocked down) or dead: the ragdoll owns the bones now; nothing is
+        // written back (that would fight it), the rig just goes.
+        let process = e.mem.u32(rig.actor + PROCESS);
+        if process == 0
+            || e.mem.u8(process + KNOCK_STATE) != 0
+            || matches!(e.mem.u32(rig.actor + LIFE_STATE), 1 | 2)
+        {
+            continue;
+        }
         let flinching = can_flinch(e, rig.actor);
         // The pose under the offset: what the animation wrote, or (when it did not write the bone
         // again) the pose the last offset was written over.
@@ -616,6 +691,10 @@ pub fn apply(e: &mut Engine) {
                 bone.spring.step(bone.role, dt);
             }
             overrides = balance_frame(e, &mut rig, dt);
+            brace_frame(e, &mut rig, &mut overrides, dt);
+            if fall_frame(e, &mut rig, &mut overrides, dt) {
+                continue; // in the ragdoll now: it owns the bones
+            }
             let (f, zeta) = Role::Pelvis.spring();
             let w0 = std::f32::consts::TAU * f;
             rig.drop_speed += (-w0 * w0 * rig.drop - 2.0 * zeta * w0 * rig.drop_speed) * dt;
@@ -628,10 +707,14 @@ pub fn apply(e: &mut Engine) {
             rig.drop_speed = 0.0;
             rig.balance = None;
             rig.shift = [0.0; 3];
+            rig.brace = None;
+            rig.fall = None;
         }
         let resting = rig.bones.iter().all(|b| b.spring.at_rest())
             && rig.drop.abs() < 1e-3
-            && rig.balance.is_none();
+            && rig.balance.is_none()
+            && rig.brace.is_none()
+            && rig.fall.is_none();
         let shift = rig.shift;
         for (index, bone) in rig.bones.iter_mut().enumerate() {
             let (pose_rot, pose_t) = bone.pose.unwrap_or_default();
@@ -733,12 +816,20 @@ fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
             .map(|i| read3(e, rig.bones[i].node + WORLD_TRANSLATION))
             .unwrap_or(reference);
         note(format!(
-            "{}: steps off a ledge: falls ({:.2} m/s)",
+            "{}: steps off a ledge: windmills, then falls ({:.2} m/s)",
             describe(e, actor),
             s.v
         ));
-        rig.shift = [0.0; 3];
-        crate::knockdown::knock_down(e, actor, s.aggressor, pelvis, s.dir, s.v);
+        rig.fall = Some(Fall {
+            dir: s.dir,
+            speed: s.v,
+            aggressor: s.aggressor,
+            point: pelvis,
+            t: 0.0,
+            lead: LEDGE_LEAD,
+            windmill: true,
+        });
+        rig.shift = s.shift;
         return out;
     }
     if let Some((foot, at)) = s.advance(dt) {
@@ -836,6 +927,26 @@ fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
         }
     }
     rig.shift = shift;
+    if s.recovering && s.outcome == Outcome::Overrun && rig.fall.is_none() {
+        // More than its steps could catch: it goes over at the end of them.
+        let at = pelvis.unwrap_or(reference);
+        note(format!(
+            "{}: the steps could not catch it: falls ({:.2} m/s)",
+            describe(e, actor),
+            s.v * 0.6
+        ));
+        rig.fall = Some(Fall {
+            dir: s.dir,
+            speed: s.v * 0.6,
+            aggressor: s.aggressor,
+            point: at,
+            t: 0.0,
+            lead: OVERRUN_LEAD,
+            windmill: false,
+        });
+        rig.shift = shift;
+        return out;
+    }
     if s.done() {
         note(format!(
             "{}: steps done ({:?}): back to its animation",
@@ -871,9 +982,7 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
     let Some(rig) = rigs.iter_mut().find(|r| r.actor == actor && r.root == root) else {
         return;
     };
-    if !rig.limbs.legs() {
-        return; // one leg cannot step (stage 3 falls)
-    }
+    let one_leg = !rig.limbs.legs();
     let (Some(pi), Some(lf), Some(rf)) = (
         bone_of(rig, Role::Pelvis, 2),
         bone_of(rig, Role::Foot, 0),
@@ -898,6 +1007,24 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
     let who = describe(e, actor);
     if planned.steps.is_empty() {
         return; // the feet hold it: the flinch alone
+    }
+    if one_leg {
+        // One leg cannot step: past its foot it goes over.
+        rig.fall = Some(Fall {
+            dir,
+            speed: v,
+            aggressor,
+            point: pelvis,
+            t: 0.0,
+            lead: FALL_LEAD,
+            windmill: false,
+        });
+        rig.balance = None;
+        drop(rigs);
+        note(format!(
+            "{who}: on one leg it cannot step: falls ({v:.2} m/s)"
+        ));
+        return;
     }
     let mut outcome =
         if planned.need > crate::balance::STEP_LENGTH * scale_ * crate::balance::MAX_STEPS as f32 {
@@ -958,9 +1085,14 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
             }
         }
     }
+    let against_wall = outcome == Outcome::Wall;
+    if against_wall {
+        start_brace(e, actor, root, dir, v, aggressor);
+    }
     if steps.is_empty() {
         note(format!(
-            "{who}: pushed {v:.2} m/s past its feet ({:.2} m): against a wall, it catches itself",
+            "{who}: pushed {v:.2} m/s past its feet ({:.2} m): against a wall, it catches itself \
+             with its hands",
             planned.need
         ));
         return;
@@ -983,6 +1115,9 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
     };
     let stepping = Stepping::new(dir, v, aggressor, start, steps, scale_, reference, outcome);
     rig.balance = Some(stepping);
+    if against_wall && rig.brace.is_none() {
+        rig.brace = Some(Brace { dir, t: 0.0 });
+    }
     rig.since = Instant::now();
     drop(rigs);
     note(format!(
@@ -999,6 +1134,216 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
         },
         outcome
     ));
+}
+
+/// A wall's brace begun (stage 3): the hands reach to it; past what a brace holds the body
+/// crumples against it into its ragdoll.
+fn start_brace(e: &mut Engine, actor: u32, root: u32, dir: V3, v: f32, aggressor: u32) {
+    let limit = BRACE_HOLDS * crate::gunplay::tuning().balance.max(1) as f32 / 100.0;
+    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(rig) = rigs.iter_mut().find(|r| r.actor == actor && r.root == root) else {
+        return;
+    };
+    let arms = rig.limbs.arm(0) || rig.limbs.arm(1);
+    if arms {
+        rig.brace = Some(Brace { dir, t: 0.0 });
+    }
+    if v > limit || !arms {
+        let point = bone_of(rig, Role::Pelvis, 2)
+            .map(|i| read3(e, rig.bones[i].node + WORLD_TRANSLATION))
+            .unwrap_or([0.0; 3]);
+        rig.fall = Some(Fall {
+            dir,
+            speed: v * 0.5,
+            aggressor,
+            point,
+            t: 0.0,
+            lead: BRACE_REACH + 0.1,
+            windmill: false,
+        });
+    }
+    drop(rigs);
+    note(format!(
+        "{}: braces against a wall with {}{}",
+        describe(e, actor),
+        if arms {
+            "its hands"
+        } else {
+            "no arm to brace with"
+        },
+        if v > limit || !arms {
+            format!(": the push ({v:.2} m/s) is too much, it crumples into its ragdoll")
+        } else {
+            String::new()
+        }
+    ));
+}
+
+/// The arm of `side` reaching its hand to `target` (two-bone IK of the upper arm and the forearm),
+/// blended by `weight`: the upper arm's and the forearm's rotations.
+fn reach_arm(
+    e: &Engine,
+    rig: &Rig,
+    side: u8,
+    target: V3,
+    weight: f32,
+) -> Option<(usize, M3, usize, M3)> {
+    use crate::balance::{between, two_bone};
+    let u = bone_of(rig, Role::UpperArm, side)?;
+    let f = bone_of(rig, Role::Forearm, side)?;
+    let h = bone_of(rig, Role::Hand, side)?;
+    let shoulder = read3(e, rig.bones[u].node + WORLD_TRANSLATION);
+    let elbow0 = read3(e, rig.bones[f].node + WORLD_TRANSLATION);
+    let hand0 = read3(e, rig.bones[h].node + WORLD_TRANSLATION);
+    let (l1, l2) = (length(sub(elbow0, shoulder)), length(sub(hand0, elbow0)));
+    if l1 < 1.0 || l2 < 1.0 {
+        return None;
+    }
+    let goal = add(hand0, scale(sub(target, hand0), weight.clamp(0.0, 1.0)));
+    let pole = add(elbow0, [0.0, 0.0, -20.0]);
+    let (elbow, reached) = two_bone(shoulder, goal, l1, l2, pole)?;
+    let r1 = rotation(between(sub(elbow0, shoulder), sub(elbow, shoulder)));
+    let r2 = rotation(between(
+        apply_m(&r1, sub(hand0, elbow0)),
+        sub(reached, elbow),
+    ));
+    Some((u, r1, f, mul(&mul(&transpose(&r1), &r2), &r1)))
+}
+
+/// Stage 3's wall brace for a frame: both hands (the arms it has) reach to the wall ahead along
+/// the push, at the shoulders' height.
+fn brace_frame(e: &mut Engine, rig: &mut Rig, out: &mut [Option<M3>], dt: f32) {
+    let Some(mut b) = rig.brace.take() else {
+        return;
+    };
+    b.t += dt;
+    let Some(w) = brace_weight(b.t) else {
+        note(format!("{}: lets go of the wall", describe(e, rig.actor)));
+        return;
+    };
+    for side in 0..2u8 {
+        if !rig.limbs.arm(side as usize) {
+            continue;
+        }
+        let Some(u) = bone_of(rig, Role::UpperArm, side) else {
+            continue;
+        };
+        let shoulder = read3(e, rig.bones[u].node + WORLD_TRANSLATION);
+        let target = add(
+            shoulder,
+            add(scale(b.dir, 0.55 * UNITS_PER_METRE), [0.0, 0.0, -8.0]),
+        );
+        if let Some((ui, ur, fi, fr)) = reach_arm(e, rig, side, target, w) {
+            out[ui] = Some(ur);
+            out[fi] = Some(fr);
+        }
+    }
+    rig.brace = Some(b);
+}
+
+/// Stage 3's fall for a frame: the posed body goes over along the fall (torso and knees, the
+/// pelvis following; the arms windmilling at a ledge) for its lead, then the ragdoll takes it with
+/// the fall's speed (`crate::knockdown::knock_down`). True when the ragdoll has it.
+fn fall_frame(e: &mut Engine, rig: &mut Rig, out: &mut [Option<M3>], dt: f32) -> bool {
+    let Some(mut f) = rig.fall.take() else {
+        return false;
+    };
+    rig.balance = None;
+    f.t += dt;
+    let k = (f.t / f.lead.max(1e-3)).clamp(0.0, 1.0);
+    let across = unit(cross([0.0, 0.0, 1.0], f.dir)).unwrap_or([1.0, 0.0, 0.0]);
+    // The torso goes over (a windmilling body leans back against it), the knees give.
+    let lean = if f.windmill { -0.3 } else { FALL_LEAN * k };
+    if let Some(i) = bone_of(rig, Role::Spine, 2) {
+        out[i] = Some(rotation(scale(across, lean)));
+    }
+    for side in 0..2u8 {
+        if let Some(t) = bone_of(rig, Role::Thigh, side) {
+            out[t] = Some(rotation(scale(across, FALL_KNEES * k)));
+        }
+        if let Some(c) = bone_of(rig, Role::Calf, side) {
+            out[c] = Some(rotation(scale(across, -FALL_KNEES * k)));
+        }
+        if f.windmill && rig.limbs.arm(side as usize) {
+            if let Some(u) = bone_of(rig, Role::UpperArm, side) {
+                let phase = if side == 0 { 0.0 } else { std::f32::consts::PI };
+                let a = WINDMILL_SWING * (std::f32::consts::TAU * WINDMILL_HZ * f.t + phase).sin();
+                out[u] = Some(rotation(scale(across, a)));
+            }
+        }
+    }
+    let go = add(
+        rig.shift,
+        scale(f.dir, (f.speed * dt * UNITS_PER_METRE).min(FALL_SHIFT)),
+    );
+    rig.shift = if length(go) <= FALL_SHIFT * 2.0 {
+        go
+    } else {
+        rig.shift
+    };
+    if f.t < f.lead {
+        rig.fall = Some(f);
+        return false;
+    }
+    note(format!(
+        "{}: into its ragdoll after {:.2} s of going over{} ({:.2} m/s along ({:.2}, {:.2}))",
+        describe(e, rig.actor),
+        f.t,
+        if f.windmill { ", windmilling" } else { "" },
+        f.speed,
+        f.dir[0],
+        f.dir[1]
+    ));
+    crate::knockdown::knock_down(e, rig.actor, f.aggressor, f.point, f.dir, f.speed);
+    true
+}
+
+/// Stage 3's entry for a knockdown (from `crate::knockdown`): instead of the hard switch, the
+/// posed body goes over for [`FALL_LEAD`] and then falls into its ragdoll. False when it cannot
+/// (no rig, the layer off): the caller knocks it down at once.
+pub fn fall(
+    e: &mut Engine,
+    actor: u32,
+    aggressor: u32,
+    point: V3,
+    direction: V3,
+    speed: f32,
+) -> bool {
+    let t = crate::gunplay::tuning();
+    if !crate::gunplay::is_on() || (t.hit_reactions <= 0 && t.balance <= 0) {
+        return false;
+    }
+    if !can_flinch(e, actor) || !ensure_rig(e, actor) {
+        return false;
+    }
+    let root = e.call(ACTOR_3D, &args![actor]).u32();
+    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(rig) = rigs.iter_mut().find(|r| r.actor == actor && r.root == root) else {
+        return false;
+    };
+    if rig.fall.is_some() {
+        return true;
+    }
+    let dir = unit([direction[0], direction[1], 0.0]).unwrap_or([0.0, 1.0, 0.0]);
+    rig.fall = Some(Fall {
+        dir,
+        speed,
+        aggressor,
+        point,
+        t: 0.0,
+        lead: FALL_LEAD,
+        windmill: false,
+    });
+    rig.since = Instant::now();
+    true
+}
+
+/// Whether `actor` is going over into its ragdoll now (its hits wait for the ragdoll).
+pub fn falling(actor: u32) -> bool {
+    RIGS.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .any(|r| r.actor == actor && r.fall.is_some())
 }
 
 /// The actor's 3D's world transforms brought up to its bones' local ones (`NiAVObject::Update`
@@ -1093,6 +1438,18 @@ mod tests {
     }
 
     /// The rotation of a rotation vector: a quarter turn about z takes x to y; none is the identity.
+    #[test]
+    fn the_brace_reaches_holds_and_lets_go() {
+        assert_eq!(brace_weight(0.0), Some(0.0));
+        assert_eq!(brace_weight(BRACE_REACH + 0.1), Some(1.0));
+        let w = brace_weight(BRACE_REACH + BRACE_HOLD + BRACE_RELEASE / 2.0).unwrap();
+        assert!((w - 0.5).abs() < 1e-4);
+        assert_eq!(
+            brace_weight(BRACE_REACH + BRACE_HOLD + BRACE_RELEASE + 0.01),
+            None
+        );
+    }
+
     #[test]
     fn rotations() {
         let r = rotation([0.0, 0.0, std::f32::consts::FRAC_PI_2]);

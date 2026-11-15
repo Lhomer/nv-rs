@@ -128,6 +128,33 @@ impl Limbs {
     }
 }
 
+/// The limbs each body has lost (dismemberment will set them; none until then): by actor.
+static LIMBS: std::sync::Mutex<Vec<(u32, Limbs)>> = std::sync::Mutex::new(Vec::new());
+
+/// The limbs `actor` has.
+pub fn limbs_of(actor: u32) -> Limbs {
+    LIMBS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|l| l.0 == actor)
+        .map_or(Limbs::WHOLE, |l| l.1)
+}
+
+/// `actor`'s limbs set (dismemberment's entry: a lost leg cannot step, a lost arm cannot brace).
+pub fn set_limbs(actor: u32, limbs: Limbs) {
+    let mut list = LIMBS.lock().unwrap_or_else(|p| p.into_inner());
+    list.retain(|l| l.0 != actor);
+    if limbs != Limbs::WHOLE {
+        list.push((actor, limbs));
+    }
+}
+
+/// Every body's limbs forgotten (a load, a new game, the main menu).
+pub fn clear() {
+    LIMBS.lock().unwrap_or_else(|p| p.into_inner()).clear();
+}
+
 /// How far (m) the capture point lies from the centre of mass for a speed `v` (m/s) at a height
 /// `h` (m): `v sqrt(h / g)`.
 pub fn capture_offset(v: f32, h: f32) -> f32 {
