@@ -455,9 +455,11 @@ Patrick, 2026-11-15. Rides on Hit Reactions and Balance (either on).
 - **The wall brace** is slower, lower and deliberate: the hands reach 0.45 m ahead of the
   shoulders and 0.28 m below them (chest high; was 0.55 m ahead, 8 units below) over 0.7 s with
   a quintic ease in and out (release 0.6 s); the bracing arms' motors twice as firm and tracking
-  half their world rotation (they no longer ride up with a torso pitched toward the wall). In
-  the lab the hand stays at least 15 units below the shoulder (it rose 1.7 above it), swings
-  behind it by 8.7 at most (was 16) and drifts 1.5 units a frame while holding (was 3.4).
+  half their world rotation (they no longer ride up with a torso pitched toward the wall).
+  Measured in the lab against f36ddda's brace: the hand stays at least 15 units below the
+  shoulder (it rose 21 above it), drifts 1.5 units a frame while holding (was 5.7) and its arm
+  turns at most 5.7 rad/s (was 8.1); it swings back behind the shoulder a little more as the
+  push takes the body (8.7 units at most, was 4.4).
 
 ### Active ragdoll: a physical body (Patrick, 2026-11-15: toward Euphoria)
 
