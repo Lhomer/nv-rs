@@ -975,7 +975,9 @@ save) should get.
 The row `NV_JIP_GAME_PATCHES` (Fallout.ini `bJIPGamePatches`) holds every change JIP LN NVSE 57.30
 (jazzisparis) makes to the game's own code for every player, as step 3.9 builds them; each is put in
 only while JIP answers "installed" (step 3.10) and the row is on. Patches that only answer JIP's own
-commands are part of JIP in every preset and are not listed here. The switches are read as JIP reads
+commands are part of JIP in every preset and are not listed here. A few of JIP's own always-on
+patches do change what a player sees; those are in whenever JIP is installed, whatever the row says
+(as JIP itself does), and their entries below say so and what a player with JIP gets. The switches are read as JIP reads
 them: `GetPrivateProfileSectionA("GamePatches", ..., "Data\NVSE\plugins\jip_nvse.ini")` (a path in
 the game's folder), a switch on unless its value starts with `0`, and with no such section (or one
 with only notes) JIP's defaults: `bIgnoreDTDRFix`, `bProjImpactDmgFix`, `bGameDaysPassedFix`,
@@ -997,7 +999,9 @@ Nothing built yet.
 
 #### GB: UI: item lists, repair, pad dead zones
 
-Nothing built yet.
+| JIP's comment | Exe places | What a player with JIP gets | Built |
+|---|---|---|---|
+| (`DeferredInit`, when its XInput hook is in: `SafeWrite32` of `&s_deadZoneLSg` / `&s_deadZoneRSg` over the operand of eleven `FCOMP double ptr [0x010718F0]`) | left stick, nine: `00741500` (`0x7416D6`, `0x741705`), `007908f0` (`0x790966`), `00799790` (`0x799861`, the map's zoom), `007bd2a0` (`0x7BD47D`, `0x7BD4A0`, `0x7BD4DD`), `0094a8c0` (`0x94AB59`, `0x94AB88`, the free camera's move axes); right stick, two: `0094a8c0` (`0x94A93C`, `0x94A95F`, the free camera's look axes) | JIP's own: in whenever JIP is installed, whatever this row says (as JIP). The caravan, lockpick, map-zoom and roulette menus and the free camera's movement test the left stick against JIP's left dead zone, a double that starts at the game's own 7849 (no change until `SetDeadZoneLS` is built). The free camera's look axes use JIP's right dead zone, 8689 where the game uses 7849, so a slightly larger right-stick movement is needed before the free camera turns, once group GP's four free-camera seams are in (until then the free camera keeps the game's 7849) | 3.9 GB-1 |
 
 #### GC: Hit damage, detection, combat formulas
 
@@ -1009,17 +1013,43 @@ player's teammate when others detect it, and with the detection fix its level wo
 
 #### GD: Projectiles, explosions, combat AI, packages
 
-Nothing built yet.
+| JIP's comment | Exe places | What a player with JIP gets | Built |
+|---|---|---|---|
+| (none; `InitProjectileSetAmmoHook` in `InitGamePatches`) | `009bbef0` (`0x9BC241`: the projectile's launch constructor, its projectile count, damage division and split-beam scale) | With the fixes row on, a weapon's damage is split by JIP's own projectile count: the loaded ammo's projectiles per shot times the weapon's ammo use when the ammo sets one, else the weapon's count, plus the split-beam mod's value when that mod is on (the original counts through `GetNumProjectiles`), and split-beam damage is scaled by 1.3 before the division instead of after. The ammo, the split-beam flag and the count are kept in the projectile (in its own unused bytes, as JIP keeps them) for JIP's hit-damage formula and ammo impact scripts (group GC's O1, G119). With JIP installed and the row off, the original's count and damage, nothing recorded. Differences from JIP: a projectile loaded from a save reads "no ammo" (the port's memory starts zeroed; on the original's heap JIP reads leftover bytes there); JIP's Rock-It Launcher check (`InitRockItLauncher`, not built) never matches | 3.9-GD |
 
 #### GE: Actors: movement, life, NPC perks
 
 | JIP's comment | Exe places | What a player with JIP gets | Built |
 |---|---|---|---|
-| (none; 26 bytes in `InitGamePatches`) | `008ab3a0` (`0x8AB6D9`: the actor's save-game load, its two calls that clear bits of the flag word `+0x140`) | An NPC (not a creature) a script made essential (the reference's own essential bit, set by the exe's `SetActorRefEssential`, `005dfdab`) stays essential across a save and load (the original clears that bit on every load), with the fixes row on. A creature still loses it: the creature's load (`008d4ff0`) clears the whole flag word right after this routine, with JIP and without, until G04 (`0x8D5003`) is built. JIP's own per-actor flags (combat disabled, forced detection values and the others its commands set) start clear on every load whenever JIP is installed. With JIP installed and the row off a player gets both: JIP's two flag bytes cleared AND the original's two calls run, so a script's essential flag is still lost on load; real JIP never produces this mix (its 26 bytes always replace the calls) | 3.9-GE |
+| (none; 26 bytes in `InitGamePatches`) | `008ab3a0` (`0x8AB6D9`: the actor's save-game load, its two calls that clear bits of the flag word `+0x140`) | An NPC (not a creature) a script made essential (the reference's own essential bit, set by the exe's `SetActorRefEssential`, `005dfdab`) stays essential across a save and load (the original clears that bit on every load), with the fixes row on. For a creature this needs G04 (next row): the creature's load (`008d4ff0`) clears the whole flag word right after this routine, and G04 skips that clear with the fixes row on. JIP's own per-actor flags (combat disabled, forced detection values and the others its commands set) start clear on every load whenever JIP is installed. With JIP installed and the row off a player gets both: JIP's two flag bytes cleared AND the original's two calls run, so a script's essential flag is still lost on load; real JIP never produces this mix (its 26 bytes always replace the calls) | 3.9-GE |
+| "Don't reset Actor::actorFlags for creatures, upon LoadGame" | `008d4ff0` (`0x8D5003`) | A creature keeps its loaded flag word after a save is loaded (the original clears it all after the actor's load), so a script's essential bit and the other flags survive on creatures too | 3.9-GE |
+| "AI Z fix" (credits Stewie) | `006b0f40` (`0x6B10A3`), `00881860` (`0x881A9C`), `009e6900` (`0x9E6A82`) | Three places where the AI flattened a direction to the ground plane before measuring it keep its height: path smoothing from inside a target circle, the move toward a navmesh point, and the "actor in the way" test of path avoidance, so actors keep their height while pathing | 3.9-GE |
+| "Fix SetLevel XP" | `008d5300` (`0x8D535F`) | `SetLevel` sets the player's experience from the experience table entry of the level given, where the original reads the entry of the level below it | 3.9-GE |
+| "Cap Agility for calculating reload & equip speeds" | `008c17c0` (`0x8C17D9`), `008c1940` (`0x8C1959`) | Reload and weapon-equip speeds use Agility as the game's actor value clamp caps it (`ClampActorValue`), so Agility raised past its limit by effects no longer speeds them up further | 3.9-GE |
+| (InitRagdollControllerHook) | `00930c70` (`0x931384`) | The player's ragdoll is not built again when Havok is set up again on the same body (the original builds it each time) | 3.9-GE |
+| (IsActorEssentialHook; JIP's own) | `0087f3d0` (`0x87F427`) | A teammate JIP's `ToggleTeammateKillable` marked can be killed outside hardcore mode (whenever JIP is installed; nothing changes until the command is used) | 3.9-GE |
+| `bVoiceModulationFix` (on by default) | `009344d0` (`0x934AC8`); `0x578E16` and `0x7974CC` (seams in groups GH2 and GB) | Helmeted characters' voice modulation follows the character: the dialogue sound is made with the sound flag 0x80000 unless the speaker's base form has its flag 0x2000 (the original never sets 0x80000), and the two other voice sound places always add it, as JIP's switch does. Not asked yet: the Pip-Boy's recorded-note playback (`0x7974CC`, group GB's seam in the map menu is still to be built), so those voices keep the original's flags until it is | 3.9-GE |
 
 #### GP: Player character
 
-No fix rows yet. Built as part of JIP (every preset, while JIP answers "installed"; not fix rows):
+| JIP's comment | Exe places | What a player with JIP gets | Built |
+|---|---|---|---|
+| "Ignore disabled MusicMarkers" | `00969930` (`0x9699C5`) | A disabled music marker no longer chooses the music played near it; a marker's position is read from the reference itself (`+0x30`) instead of through its position call | 3.9 GP |
+| (G72, `BuildMusicMarkerListHook`) | `00947d80` (`0x947DD2`) | The player's music markers in a world space come from one list built when he enters that world space (JIP's cache, rebuilt only for another world space), sorted by their media location controller, instead of the world space's markers walked every time | 3.9 GP |
+| (G105, `DamagePCFatigueMinFixHook`) | `0093b7a0` (`0x93B87F`) | Fatigue damage to the player stops at `fMinFatigue` (the change is cut so the value lands on it) | 3.9 GP |
+
+Built as part of JIP (every preset, while JIP answers "installed"; not fix rows): G114 with O6
+and the `ToggleHardcoreTracking` command (`00969c30` at `0x969C41`): with `bHardcoreNeedsFix` (on
+by JIP's defaults, read only with the row on) the hardcore needs take their pending changes each
+update and never go below 0; `ToggleHardcoreTracking 0` (kept in JIP's co-save) makes the hardcore
+timers start again every update, so no needs build up. With JIP installed and the row off, the
+update's state test is JIP's (the same answer) and only the co-save flag acts. G122 with the
+`ToggleImmortalMode` command (the player's `MagicTarget` slot `0x108A9B4`): mode 2 makes the player
+unhittable as god mode does (mode 1 keeps him at 1 health through JIP's PlayerMinHealth hook); with
+JIP installed and no mode set, the god mode test reads the setting's byte itself (the exe answers 1
+for any non-zero byte). The hit effects JIP also turns off in mode 2 are the hit effect patches'
+(G123 to G125, not built yet).
+
 G38 and H09, JIP's "update 3D" on the player and on queued references. The player's first-person
 model is copied from the model loader's cached load (`0094e1d0` at `0x94E4A1`; the eye height is no
 longer read there, `0x94E5F6`), and JIP's own attach goes into the `Attach` slot of four queued
@@ -1048,7 +1078,20 @@ Three steps of JIP's attach are not built yet, because nothing can set what they
 
 #### GH1: Extra data and inventory stacks
 
-No fix built yet. Part of JIP in every preset (not a fix, so not in the row): the ExtraJIP framework
+Fixes (in with the row `NV_JIP_GAME_PATCHES` while JIP is installed; PLAN-3.9 G46, G79, G50, G61, G75, G76):
+
+| Fix | What a player gets | Where |
+|---|---|---|
+| G46 invisible stacks | Items no stack showed appear in the inventory: an owner extra no longer splits a stack off at once, and JIP's one iterator hands out, after the game's passes, the count left of each form | `CompareListForContainer` (`0x41271E`), the fast iteration's start (`0x4CA200`), next (`0x4CAFA3`) and destructor (`0x4BF630`) |
+| G79 weapon mods | A weapon's mods are read null-safely, from the list of the reference that dropped it when there is one | `GetModSlots` (`0x4BD820`), `HasModEffectActive_ov2` (`0x4BDA70`) |
+| G50 items' health | A container's items get the health JIP's way: clamped below 1, only armour and weapons below type 10 keep one | `00482090` (rewritten) |
+| G61 temporary forms | A temporary reference (mod index 0xFF) is never taken as persistent when picked up or pointed at | the three calls of `GetRefPersists` (`0x41C833`, `0x4C232C`, `0x4C273A`) |
+| G75, G76 hotkeys | A hotkeyed item given to the player, or picked up, loses its hotkey when the player already uses that key; a hotkey moves with its stack | `004c37d0` (`0x4C3976`), `00953ff0` (`0x95400F`, group GP's translation), `CopyListForReference` (`0x412675`) |
+
+Deliberate differences: the iterator's destructor answers `this` (JIP leaves EAX as it was); an owner whose
+base form has no container gives the iterator no container copy (JIP would copy from a null container).
+
+Part of JIP in every preset (not a fix, so not in the row): the ExtraJIP framework
 (PLAN-3.9 G44, "For ExtraJIP framework"), the place JIP keeps `SetRefExtraData`'s data. JIP takes the extra
 data type `0x27` (`ExtraTimeLeft`, which the game never makes) for a key into its own data (the co-save's
 `JPED` record): such an extra goes to the head of its list (`0040f980`), keeps its item out of the
@@ -1065,10 +1108,27 @@ list in records of its own.
 
 #### GH2: References, models, cells, ash piles
 
-No fix row built yet. Part of JIP in every preset (not this row): `DestroyRefrHook` (`0055a430`,
-`0x55A488`): a destroyed reference lets go of its `SetRefName` name and `SetRefrModelPath` model
-(with their hooks' users) and, when it was made in the game and the save holds nothing of it, its
-aux variables.
+| JIP's comment | Exe places | What a player with JIP gets | Built |
+|---|---|---|---|
+| (none; `SafeWrite16(0x54E421, 0x1EEB)` and `WriteRelJump(0x54E4E1, ClearAshPilesHook)` in `InitGamePatches`, no INI setting) | the cell's reset walk `0054df30` (run when a cell is attached; it is the game's respawn of a cell whose reset time has passed): `0x54E421` (a deleted actor's ash pile) and `0x54E4E1` (the type branches for references that are neither actors nor containers) | GAINS: an ash pile (the two vanilla piles and any activator `MarkActivatorAshPile` marked) is deleted when the reset walk reaches it, unless the actor it came from has flag `0x400` on its base; the actor loses its link to the pile. A dead actor deleted by the reset no longer takes its ash pile with it there (the pile goes when the walk reaches it, if it is in the walked cell). JIP's jump also passes over the exe's two other branches there: a reference whose base is a `FLOR` record (form type 0x26) made harvestable again, and a picked-up placed `INGR` reference (type 0x1D, not persistent) brought back. The game's own data has none: `FalloutNV.esm`, the four story add-ons, Gun Runners' Arsenal and the four packs hold 0 `FLOR` records and 0 placed references to an `INGR` (New Vegas's plants are activators with scripts), so nothing in the game changes; only a mod that adds `FLOR` records or places `INGR` references sees those stop respawning, the same as with real JIP. Containers still refill and actors still respawn. With JIP installed and the row off, the exe's walk runs unchanged | 3.9 GH2-2 |
+
+Part of JIP in every preset (not the row above), while JIP answers "installed":
+- `DestroyRefrHook` (`0055a430`, `0x55A488`): a destroyed reference lets go of its `SetRefName`
+  name and `SetRefrModelPath` model (with their hooks' users) and, when it was made in the game and
+  the save holds nothing of it, its aux variables.
+- "Recognize custom ashpile activators" (G06, eight places: `0x56A30A`, `0x573194`, `0x573FE8`,
+  `0x57445B`, `0x576AF0`, `0x624958`, and groups GA's `0x77765A` and GP's `0x95F7FE`): where the
+  exe compares a reference's base with the ash and goo pile forms it tests JIP's ash pile bit on the
+  base instead; the two vanilla piles get the bit when the game starts (`DeferredInit`), so with no
+  script marking anything nothing changes for a player. A reference with no base answers "not a
+  pile" (JIP would read a bad address). Built so far in seven of the eight places: the HUD's
+  (`0x77765A`, group GA builds that seam) is not asked yet and still compares with the two vanilla
+  forms, so until that seam lands an activator marked as an ash pile (for example its bit restored
+  from a co-save) is an ash pile in seven places only.
+- `AttachAshPileHook` (G73, the death ash pile command `005db870`, its seam at `0x5DBCFD`): the
+  pile a death leaves is `AttachAshPileEx`'s form once when a script set one, else the exe's
+  choice. It changes nothing yet: the command `AttachAshPileEx` is not built, so no script can set
+  a form.
 
 #### GF: Forms and records
 
@@ -1079,6 +1139,7 @@ Nothing built yet.
 | JIP's comment | Exe places | What a player with JIP gets | Built |
 |---|---|---|---|
 | (`DeferredInit`: `eventCmdInfos[1].execute = Hook_MenuMode_Execute; eventCmdInfos[0xE].execute = 0x5D4A40`) | the block-type records `0x0118E2F0` [1] (`MenuMode`, the exe's `MenuModeFunction` `005c4240`) and [0xE] ("Unused2", no handler), read by `005e1550` | `Begin MenuMode N` takes JIP's modes 0 to 4 (menu mode, the Pip-Boy, a menu open, the console, the loading screens) and any menu's id, as JIP's `MenuMode` command; a block of type 0xE no longer fails its line (its handler answers true and its body is skipped). Under `NV_JIP_VANILLA_CMDS` (the same switch and handler as the `MenuMode` command), not the game-patch row. Deliberate difference: both block handlers clear the block's result first. JIP's `MenuMode` handler sets the result only when the mode is up and JIP's 0xE handler (the exe's `005d4a40`, `mov al, 1`) never sets it; in JIP the "result = 0" patch above always clears it first, but here the game-patch row can be off, where the exe leaves whatever the stack held and the block would run or not by chance. With that row on nothing differs from JIP | 3.9 GS-1 |
+| `bNoFailedScriptLocks` (`SetOptionalPatch(7)`: three `SafeWrite16` jumps) | `005e0d20` (`0x5E0FBE`, a line that fails), `005e1550` (`0x5E1A23`, a set with an expression error; `0x5E1F0B`, a condition with an expression error) | A script whose line fails (the error is still reported) keeps running on later frames; the game sets its data length to 0 there, so it never runs again until the game is restarted. On with the row and JIP's default switch | 3.9 GS-2 |
 
 #### GW: World, sky, sound, saves, start-up
 
