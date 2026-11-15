@@ -62,6 +62,22 @@ pub const MAX_SPEED: f32 = 12.0;
 pub const MAX_SPIN: f32 = 30.0;
 pub const MAX_SPREAD: f32 = 2.5;
 pub const SPIN_KNEE: f32 = 0.6;
+/// The elbows and the knees are one-way hinges ([`hinge_limit`]): how far each flexes (rad: an
+/// elbow about 145 degrees, a knee about 140), how far past straight it may go (a hair: none), how
+/// far its child may lean out of the hinge's plane (rad: an elbow's carrying angle, a knee's
+/// play), and how bent the animation must be for its bend to say the hinge's axis (rad).
+pub const ELBOW_FLEX: f32 = 2.5;
+pub const KNEE_FLEX: f32 = 2.4;
+pub const HYPEREXTEND: f32 = 0.03;
+pub const ELBOW_LEAN: f32 = 0.3;
+pub const KNEE_LEAN: f32 = 0.15;
+pub const AXIS_BEND: f32 = 0.2;
+/// How much firmer a hinge's motor is near and past its stop (as a negative dip).
+pub const HINGE_FIRM: f32 = 4.0;
+/// How near its stop (rad) a hinge's motor is made firmer.
+pub const HINGE_NEAR: f32 = 0.08;
+/// The share of the way back into its range a hinge past it is turned each small step.
+pub const HINGE_SHARE: f32 = 0.05;
 
 /// Each Bip01 bone's share of the body's mass (`crate::flinch::BONES`' order; segment fractions).
 pub const SHARES: [f32; 20] = [
@@ -254,6 +270,12 @@ pub struct Targets {
     /// its rotation relative to its parent (0 to 1): an armed body's arms keep their aim while the
     /// torso under them flinches.
     pub world: Vec<f32>,
+    /// Per bone (empty: `rot`): the plain animation's world rotations, before any reach or step
+    /// (an elbow's or a knee's hinge axis is taken from them, never from a reach that might be
+    /// wrong).
+    pub anim: Vec<Q>,
+    /// The way the actor faces (world, flat; zero: not known): a straight limb's hinge axis.
+    pub forward: V3,
 }
 
 /// The physical body (module documentation).
@@ -267,6 +289,9 @@ pub struct Body {
     pub dip: Vec<f32>,
     /// The hits going in: bone, momentum (N s, world), the point (bone-local, m), time in (s).
     pub pushes: Vec<(usize, V3, V3, f32)>,
+    /// Per bone: an elbow's or a knee's hinge axis, in its parent's frame (the way it flexes: a
+    /// turn about it by a positive angle bends it), once known ([`Body::hinge_bend`]).
+    pub hinge: Vec<Option<V3>>,
 }
 
 /// A joint as given to [`Body::from_pose`]: its bone's parent, role, world rotation, joint and
@@ -360,6 +385,205 @@ impl Body {
             mass,
             dip: vec![0.0; n],
             pushes: Vec::new(),
+            hinge: vec![None; n],
+        }
+    }
+
+    /// An elbow's or a knee's flex range and lean, or `None` for any other joint.
+    fn hinge_range(&self, i: usize) -> Option<(f32, f32)> {
+        match self.segments[i].role {
+            Role::Forearm => Some((ELBOW_FLEX, ELBOW_LEAN)),
+            Role::Calf => Some((KNEE_FLEX, KNEE_LEAN)),
+            _ => None,
+        }
+    }
+
+    /// Each hinge's axis from this frame's animation: its bend's axis when it is bent enough to
+    /// say it, else (a straight limb) the one that flexes it the way a person's does from the way
+    /// the actor faces (an elbow brings the forearm forward, a knee the calf back), else as it
+    /// was.
+    fn update_hinges(&mut self, targets: &Targets) {
+        let anim = if targets.anim.len() == self.state.len() {
+            &targets.anim
+        } else {
+            &targets.rot
+        };
+        let forward = unit([targets.forward[0], targets.forward[1], 0.0]);
+        for i in 0..self.state.len() {
+            let (Some(p), Some(_)) = (self.segments[i].parent, self.hinge_range(i)) else {
+                continue;
+            };
+            let (Some(u), Some(f)) = (
+                unit(qrot(anim[p], self.segments[p].seg)),
+                unit(qrot(anim[i], self.segments[i].seg)),
+            ) else {
+                continue;
+            };
+            let bent = cross(u, f);
+            let axis = if length(bent) > AXIS_BEND.sin() {
+                unit(bent)
+            } else {
+                forward.and_then(|fw| {
+                    let toward = if self.segments[i].role == Role::Calf {
+                        scale(fw, -1.0)
+                    } else {
+                        fw
+                    };
+                    let a = cross(u, toward);
+                    if length(a) > 0.3 {
+                        unit(a)
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(a) = axis {
+                self.hinge[i] = Some(qrot(qconj(anim[p]), a));
+            }
+        }
+    }
+
+    /// An elbow's or a knee's bend now: its flex (rad, negative: bent backwards) and its lean out
+    /// of the hinge's plane (rad), once its axis is known.
+    pub fn hinge_bend(&self, i: usize) -> Option<(f32, f32)> {
+        let p = self.segments[i].parent?;
+        let axis = self.hinge[i]?;
+        let rel = qmul(qconj(self.state[p].q), self.state[i].q);
+        let u = unit(self.segments[p].seg)?;
+        let f = unit(qrot(rel, self.segments[i].seg))?;
+        Some(hinge_angles(u, f, axis))
+    }
+
+    /// World rotations `rot` (one per bone, parents first) with each elbow and knee held to its
+    /// human range ([`hinge_limit`]), or `None` when all already are: what is shown and what the
+    /// motors track never asks a joint to bend backwards or past its range.
+    pub fn hinged(&self, rot: &[Q]) -> Option<Vec<Q>> {
+        if rot.len() != self.state.len() {
+            return None;
+        }
+        let mut out: Option<Vec<Q>> = None;
+        for i in 0..self.state.len() {
+            let (Some(p), Some((flex, lean)), Some(axis)) =
+                (self.segments[i].parent, self.hinge_range(i), self.hinge[i])
+            else {
+                continue;
+            };
+            let now = out.as_deref().unwrap_or(rot);
+            let rel = qmul(qconj(now[p]), now[i]);
+            let (Some(u), Some(f)) = (
+                unit(self.segments[p].seg),
+                unit(qrot(rel, self.segments[i].seg)),
+            ) else {
+                continue;
+            };
+            if let Some(turn) = hinge_limit(u, f, axis, flex, lean) {
+                let fixed = qnorm(qmul(now[p], qmul(turn, rel)));
+                out.get_or_insert_with(|| rot.to_vec())[i] = fixed;
+            }
+        }
+        out
+    }
+
+    /// The pose to show: the targets' world rotations `target` (held to the hinges' ranges,
+    /// [`Body::hinged`]) and the body's own, blended by `w` (0 the targets, 1 the body). Each
+    /// elbow and knee is blended against its parent, not in the world: two poses within range
+    /// blended bone by bone in the world can take the joint between them past straight.
+    pub fn shown(&self, target: &[Q], w: f32) -> Vec<Q> {
+        let wanted = self.hinged(target).unwrap_or_else(|| target.to_vec());
+        if wanted.len() != self.state.len() {
+            return wanted;
+        }
+        let w = w.clamp(0.0, 1.0);
+        let mut out: Vec<Q> = Vec::with_capacity(wanted.len());
+        for i in 0..wanted.len() {
+            let body = self.state[i].q;
+            let q = match (self.segments[i].parent, self.hinge_range(i)) {
+                (Some(p), Some(_)) if p < i => {
+                    let local_target = qmul(qconj(wanted[p]), wanted[i]);
+                    let local_body = qmul(qconj(self.state[p].q), body);
+                    qnorm(qmul(out[p], qslerp(local_target, local_body, w)))
+                }
+                _ => qslerp(wanted[i], body, w),
+            };
+            out.push(q);
+        }
+        out
+    }
+
+    fn hinged_targets(&self, targets: &Targets) -> Option<Targets> {
+        let rot = self.hinged(&targets.rot)?;
+        let mut t = targets.clone();
+        t.rot = rot;
+        Some(t)
+    }
+
+    /// Each elbow and knee turned back toward its human range when past it (flex only, never
+    /// backwards; a little lean), a share of the way each small step ([`HINGE_SHARE`]; the whole
+    /// way at once snapped the bone, a jump in its speed), about its joint.
+    fn limit_hinges(&mut self) {
+        for i in 0..self.state.len() {
+            let (Some(p), Some((flex, lean)), Some(axis)) =
+                (self.segments[i].parent, self.hinge_range(i), self.hinge[i])
+            else {
+                continue;
+            };
+            let qp = self.state[p].q;
+            let rel = qmul(qconj(qp), self.state[i].q);
+            let (Some(u), Some(f)) = (
+                unit(self.segments[p].seg),
+                unit(qrot(rel, self.segments[i].seg)),
+            ) else {
+                continue;
+            };
+            if let Some(turn) = hinge_limit(u, f, axis, flex, lean) {
+                let turn = qexp(scale(qlog(turn), HINGE_SHARE));
+                let joint = self.joint(i);
+                let q = qnorm(qmul(qp, qmul(turn, rel)));
+                self.state[i].q = q;
+                let seg = self.segments[i].seg;
+                self.state[i].com = add(joint, qrot(q, scale(seg, 0.5)));
+            }
+        }
+    }
+
+    /// Each elbow and knee stopped at its human range: past it (backwards, or flexed past its
+    /// stop), the spin of the child against its parent that would take it further is taken out,
+    /// shared between the two by their inertia about the hinge (an inelastic stop: no turn is
+    /// forced on the positions, which made a spin of its own). The motors' targets (held to the
+    /// range) bring it back; what is written is held to it.
+    fn stop_hinges(&mut self) {
+        for i in 0..self.state.len() {
+            let (Some(p), Some((flex, _))) = (self.segments[i].parent, self.hinge_range(i)) else {
+                continue;
+            };
+            let (Some(axis), Some((now, _))) = (self.hinge[i], self.hinge_bend(i)) else {
+                continue;
+            };
+            // Its motor firmer near its stops and past them (back toward its target, held to the
+            // range), so it seldom gets there.
+            if now < HINGE_NEAR - HYPEREXTEND || now > flex - HINGE_NEAR {
+                self.dip[i] = self.dip[i].min(-HINGE_FIRM);
+            }
+            let past_low = now < -HYPEREXTEND;
+            let past_high = now > flex;
+            if !(past_low || past_high) {
+                continue;
+            }
+            let Some(n) = unit(qrot(self.state[p].q, axis)) else {
+                continue;
+            };
+            let c = dot(sub(self.state[i].w, self.state[p].w), n);
+            if (past_low && c >= 0.0) || (past_high && c <= 0.0) {
+                continue;
+            }
+            let ic = dot(mv(&self.inv_inertia_world(i), n), n).max(0.0);
+            let ip = dot(mv(&self.inv_inertia_world(p), n), n).max(0.0);
+            let total = ic + ip;
+            if total <= 1e-9 {
+                continue;
+            }
+            self.state[i].w = sub(self.state[i].w, scale(n, c * ic / total));
+            self.state[p].w = add(self.state[p].w, scale(n, c * ip / total));
         }
     }
 
@@ -475,6 +699,9 @@ impl Body {
         let n = ((dt * 60.0 * t.substeps).ceil()).clamp(1.0, 64.0) as usize;
         let h = dt / n as f32;
         let fade = (-dt / t.muscle_back.max(0.02)).exp();
+        self.update_hinges(targets);
+        let hinged = self.hinged_targets(targets);
+        let targets = hinged.as_ref().unwrap_or(targets);
         let gains = self.gains(targets, strength);
         for _ in 0..n {
             // Gravity, and the support's carrying of the body's weight (its share).
@@ -501,6 +728,7 @@ impl Body {
             self.pins(targets, &gains, h);
             self.hold_joints();
             self.limit_bends(targets);
+            self.limit_hinges();
             self.limit_turns(&before, h);
             for (s, b) in self.state.iter_mut().zip(&before) {
                 let v = scale(sub(s.com, b.com), 1.0 / h);
@@ -514,6 +742,7 @@ impl Body {
                     s.w = [0.0; 3];
                 }
             }
+            self.stop_hinges();
             self.damp(targets, &gains, h);
         }
         for d in &mut self.dip {
@@ -1005,6 +1234,55 @@ fn scale4(a: Q, k: f32) -> Q {
     [a[0] * k, a[1] * k, a[2] * k, a[3] * k]
 }
 
+/// A hinge's bend: the child's direction `f` against the parent's `u` (both in the parent's
+/// frame, unit), about the hinge's `axis` (a positive turn flexes it): the flex (rad, negative
+/// bent backwards) and the lean out of the hinge's plane (rad).
+pub fn hinge_angles(u: V3, f: V3, axis: V3) -> (f32, f32) {
+    let n = unit(axis).unwrap_or([1.0, 0.0, 0.0]);
+    let lean = dot(f, n).clamp(-1.0, 1.0).asin();
+    let inplane = sub(f, scale(n, dot(f, n)));
+    let flex = dot(cross(u, inplane), n).atan2(dot(u, inplane));
+    (flex, lean)
+}
+
+/// The turn (in the parent's frame) that brings a hinge's child direction `f` back within its
+/// human range, flex from `-HYPEREXTEND` to `flex`, lean within `lean` (see [`hinge_angles`]),
+/// or `None` when it is within it. A child folded far backwards goes to whichever end of the
+/// range is nearer round the circle.
+pub fn hinge_limit(u: V3, f: V3, axis: V3, flex: f32, lean: f32) -> Option<Q> {
+    let n = unit(axis)?;
+    let (a, l) = hinge_angles(u, f, n);
+    let tau = std::f32::consts::TAU;
+    let a2 = if a < -HYPEREXTEND {
+        let to_low = -HYPEREXTEND - a;
+        let to_high = (a + tau) - flex;
+        if to_high < to_low {
+            flex
+        } else {
+            -HYPEREXTEND
+        }
+    } else {
+        a.min(flex)
+    };
+    let l2 = l.clamp(-lean, lean);
+    if (a2 - a).abs() < 1e-5 && (l2 - l).abs() < 1e-5 {
+        return None;
+    }
+    // The wanted direction: `u` turned about `n` by the flex, leaned toward `n`.
+    let inplane = qrot(qexp(scale(n, a2)), u);
+    let want = add(scale(inplane, l2.cos()), scale(n, l2.sin()));
+    let axis = cross(f, want);
+    let s = length(axis);
+    let c = dot(f, want).clamp(-1.0, 1.0);
+    if s < 1e-6 {
+        if c > 0.0 {
+            return None;
+        }
+        return Some(qexp(scale(n, std::f32::consts::PI)));
+    }
+    Some(qexp(scale(axis, s.atan2(c) / s)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1065,6 +1343,8 @@ mod tests {
             hands: vec![],
             support: 1.0,
             world: vec![],
+            anim: vec![],
+            forward: [0.0; 3],
         }
     }
 
@@ -1155,5 +1435,26 @@ mod tests {
         assert_eq!(weight(ACTIVE_FOR + BLEND_BACK), 0.0);
         assert!((strength(0.0) - DRIVE_SOFT).abs() < 1e-6);
         assert_eq!(strength(DRIVE_RAMP), 1.0);
+    }
+
+    /// A hinge past straight or past its most flex is turned back to the nearer stop; within its
+    /// range it is left alone.
+    #[test]
+    fn hinges_stop_both_ways() {
+        let u = [0.0, 0.0, -1.0];
+        let axis = [1.0, 0.0, 0.0];
+        let bend = |a: f32| qrot(qexp(scale(axis, a)), u);
+        assert!(hinge_limit(u, bend(1.0), axis, ELBOW_FLEX, ELBOW_LEAN).is_none());
+        for (a, want) in [(-0.4, -HYPEREXTEND), (2.9, ELBOW_FLEX), (-2.7, ELBOW_FLEX)] {
+            let f = bend(a);
+            let t = hinge_limit(u, f, axis, ELBOW_FLEX, ELBOW_LEAN).expect("past a stop");
+            let (flex, _) = hinge_angles(u, qrot(t, f), axis);
+            assert!((flex - want).abs() < 1e-3, "{a}: {flex} vs {want}");
+        }
+        // A lean out of the plane is held to its bound.
+        let leaned = add(scale(bend(0.5), 0.6f32.cos()), scale(axis, 0.6f32.sin()));
+        let t = hinge_limit(u, leaned, axis, ELBOW_FLEX, ELBOW_LEAN).expect("leaned too far");
+        let (_, lean) = hinge_angles(u, qrot(t, leaned), axis);
+        assert!((lean - ELBOW_LEAN).abs() < 1e-3);
     }
 }

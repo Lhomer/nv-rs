@@ -21,9 +21,7 @@ use crate::mannequin::{self as mq, COUNT};
 use crate::weapons::{self, Weapon};
 use crate::world::{self, Ground, GroundKind};
 use ragdoll_core::active;
-use ragdoll_core::balance::{
-    between, classify, plan, two_bone, Ground as Step, Limbs, Outcome, Stepping,
-};
+use ragdoll_core::balance::{classify, plan, Ground as Step, Limbs, Outcome, Stepping};
 use ragdoll_core::flinch::*;
 use ragdoll_core::knock::{
     add_hit, body_mass, launch_direction, launch_speed, reaction, topple_speed, transferred, Body,
@@ -53,6 +51,11 @@ pub const GET_UP: f32 = 1.6;
 pub const PELLET_SPREAD: f32 = 2.4;
 /// How far ahead of the shoulders a brace looks for its wall (units; the host's `BRACE_PROBE`).
 pub const BRACE_PROBE: f32 = 90.0;
+/// The way the mannequin faces (+Y; the host reads its actor's 3D root).
+pub const FORWARD: V3 = [0.0, 1.0, 0.0];
+/// The share of the way back to straight a ragdoll elbow or knee bent backwards is turned each
+/// step ([`Sim::stop_ragdoll_hinges`]).
+pub const RAGDOLL_HINGE_SHARE: f32 = 0.5;
 
 /// Hands reaching to a wall along `dir` (stage 3), `t` seconds in.
 #[derive(Clone, Copy, Debug)]
@@ -187,6 +190,80 @@ pub struct Stats {
     pub jerk: f32,
     /// How often the body was dropped back to the animation as not believable.
     pub dropped: u32,
+    /// The most any elbow or knee was bent backwards, standing, in the ragdoll or getting up
+    /// (degrees; [`back_bend`]).
+    pub back_bend: f32,
+}
+
+/// An elbow's or a knee's bend in the pose `posed` (rad, negative: backwards past straight), from
+/// the mannequin's own anatomy: about its parent's X axis, `sign` 1 for an elbow (the forearm
+/// comes forward), -1 for a knee (the calf goes back); straight is the two bones in line (each
+/// bone's own line at rest: joint to the child's joint).
+pub fn hinge_bend(posed: &[Xf; COUNT], parent: usize, child: usize, sign: f32) -> f32 {
+    let (Some(u), Some(c)) = (
+        unit(sub(mq::end(parent), mq::JOINT[parent])),
+        unit(sub(mq::end(child), mq::JOINT[child])),
+    ) else {
+        return 0.0;
+    };
+    let rel = mul(&transpose(&posed[parent].0), &posed[child].0);
+    let f = apply_m(&rel, c);
+    // In the hinge's plane (square to X): the turn from the parent's line to the child's.
+    let (u2, f2) = ([0.0, u[1], u[2]], [0.0, f[1], f[2]]);
+    sign * (u2[1] * f2[2] - u2[2] * f2[1]).atan2(dot(u2, f2))
+}
+
+/// How far the pose `posed` bends an elbow or a knee backwards past straight and the hinges'
+/// allowance (`active::HYPEREXTEND`; degrees, 0 when none does), measured from the mannequin's
+/// own anatomy ([`hinge_bend`]), not from the body's hinges; a joint folded round past its most
+/// flex counts as flexed past its stop ([`past_stop`]), not as bent backwards.
+pub fn back_bend(posed: &[Xf; COUNT]) -> f32 {
+    let mut most: f32 = 0.0;
+    for (parent, child, sign) in [
+        (mq::L_UPPERARM, mq::L_FOREARM, 1.0f32),
+        (mq::R_UPPERARM, mq::R_FOREARM, 1.0),
+        (mq::L_THIGH, mq::L_CALF, -1.0),
+        (mq::R_THIGH, mq::R_CALF, -1.0),
+    ] {
+        let flex = hinge_bend(posed, parent, child, sign);
+        let over = past_stop(flex, hinge_flex(child));
+        if over < 0.0 {
+            most = most.max((-over).to_degrees());
+        }
+    }
+    most
+}
+
+/// How far a hinge's bend `flex` (rad) is past its stops (straight, less `active::HYPEREXTEND`,
+/// and `most` flexed), taking whichever end is nearer round the circle: negative backwards past
+/// straight, positive flexed past its stop, 0 within.
+pub fn past_stop(flex: f32, most: f32) -> f32 {
+    if !flex.is_finite() {
+        return 0.0;
+    }
+    let low = -active::HYPEREXTEND;
+    if (low..=most).contains(&flex) {
+        return 0.0;
+    }
+    let tau = std::f32::consts::TAU;
+    let to_low = (low - flex).rem_euclid(tau);
+    let to_high = (flex - most).rem_euclid(tau);
+    if to_low <= to_high {
+        -to_low
+    } else {
+        to_high
+    }
+}
+
+/// The most an elbow (a forearm) or a knee (a calf) flexes: the lab ragdoll's stop.
+fn hinge_flex(child: usize) -> f32 {
+    let lim = mq::ragdoll_limits(child)[0];
+    lim[1].max(-lim[0])
+}
+
+/// A Rapier vector as the lab's.
+fn v3(v: Vec3) -> V3 {
+    [v.x, v.y, v.z]
 }
 
 /// What a ray from a point along a direction hits on the body: the bone and the point.
@@ -384,7 +461,7 @@ impl Sim {
         scale(sub(mq::JOINT[b], parent), self.scale)
     }
 
-    fn state_is_standing(&self) -> bool {
+    pub fn state_is_standing(&self) -> bool {
         matches!(self.state, State::Standing)
     }
 
@@ -785,6 +862,58 @@ impl Sim {
         ));
     }
 
+    /// The ragdoll's elbows and knees held to their stops, as the standing body's are
+    /// (`active::Body::stop_hinges`): past one (Rapier's limits give under a hard fall, a sledge's
+    /// spin), the spin of the child against its parent about the hinge (its parent's X axis) that
+    /// would take it further is taken out, shared by the two bodies, and it is turned back a share
+    /// of the way each step ([`past_stop`]: whichever stop is nearer round the circle).
+    fn stop_ragdoll_hinges(&mut self, bodies: &[Option<RigidBodyHandle>]) {
+        for (parent, child, sign) in [
+            (mq::L_UPPERARM, mq::L_FOREARM, 1.0f32),
+            (mq::R_UPPERARM, mq::R_FOREARM, 1.0),
+            (mq::L_THIGH, mq::L_CALF, -1.0),
+            (mq::R_THIGH, mq::R_CALF, -1.0),
+        ] {
+            let (Some(hp), Some(hc)) = (bodies[parent], bodies[child]) else {
+                continue;
+            };
+            let over = past_stop(
+                hinge_bend(&self.posed, parent, child, sign),
+                hinge_flex(child),
+            );
+            if over == 0.0 {
+                continue;
+            }
+            let rp = self.posed[parent].0;
+            // The hinge's axis in the world (a turn about it by +sign flexes the joint).
+            let n = scale(apply_m(&rp, [1.0, 0.0, 0.0]), sign);
+            let (Some(bp), Some(bc)) = (self.world.bodies.get(hp), self.world.bodies.get(hc))
+            else {
+                continue;
+            };
+            let (wp, wc) = (v3(bp.angvel()), v3(bc.angvel()));
+            let (mp, mc) = (bp.mass().max(1e-3), bc.mass().max(1e-3));
+            // Its spin about the hinge, toward flexing: positive.
+            let c = dot(sub(wc, wp), n);
+            // Turned back a share of the way each step, and no spin further past the stop: past
+            // straight it is flexed back, past its most flex unflexed.
+            let back = -over * RAGDOLL_HINGE_SHARE / STEP;
+            let fix = if over < 0.0 {
+                (back - c).max(0.0)
+            } else {
+                (back - c).min(0.0)
+            };
+            let (kc, kp) = (mp / (mp + mc), mc / (mp + mc));
+            if let Some(b) = self.world.bodies.get_mut(hc) {
+                b.set_angvel(vec(add(wc, scale(n, fix * kc))), true);
+            }
+            if let Some(b) = self.world.bodies.get_mut(hp) {
+                b.set_angvel(vec(sub(wp, scale(n, fix * kp))), true);
+            }
+        }
+    }
+
+    /// The host's `reach_arm`: the arm reaching as a person's does (`reach_arm_ik`).
     fn reach_arm(
         &self,
         anim: &[Xf; COUNT],
@@ -795,22 +924,10 @@ impl Sim {
         let u = mq::bone_of(Role::UpperArm, side)?;
         let f = mq::bone_of(Role::Forearm, side)?;
         let h = mq::bone_of(Role::Hand, side)?;
-        let shoulder = anim[u].1;
-        let elbow0 = anim[f].1;
         let hand0 = anim[h].1;
-        let (l1, l2) = (length(sub(elbow0, shoulder)), length(sub(hand0, elbow0)));
-        if l1 < 1.0 || l2 < 1.0 {
-            return None;
-        }
         let goal = add(hand0, scale(sub(target, hand0), w.clamp(0.0, 1.0)));
-        let pole = add(elbow0, [0.0, 0.0, -20.0]);
-        let (elbow, reached) = two_bone(shoulder, goal, l1, l2, pole)?;
-        let r1 = rotation(between(sub(elbow0, shoulder), sub(elbow, shoulder)));
-        let r2 = rotation(between(
-            apply_m(&r1, sub(hand0, elbow0)),
-            sub(reached, elbow),
-        ));
-        Some((u, r1, f, mul(&mul(&transpose(&r1), &r2), &r1)))
+        let (r1, r2) = reach_arm_ik(anim[u].1, anim[f].1, hand0, goal, FORWARD, side)?;
+        Some((u, r1, f, r2))
     }
 
     fn brace_frame(&mut self, anim: &[Xf; COUNT], out: &mut [Option<M3>], dt: f32) {
@@ -982,24 +1099,12 @@ impl Sim {
             if l1 < 1.0 || l2 < 1.0 {
                 continue;
             }
-            let (hip, knee_now, ankle) = (add(hip0, shift), add(knee0, shift), add(ankle0, shift));
+            let (hip, ankle) = (add(hip0, shift), add(ankle0, shift));
             let target = add(ankle, scale(sub(feet[side as usize], ankle), s.weight));
-            let bend = sub(knee_now, scale(add(hip, ankle), 0.5));
-            let pole = if length(bend) > 1.0 {
-                add(knee_now, scale(bend, 2.0))
-            } else {
-                add(knee_now, scale(s.dir, 20.0))
-            };
-            let Some((knee, reached)) = two_bone(hip, target, l1, l2, pole) else {
+            // The knee forward whichever way the push goes (`leg_ik`: never bent backwards).
+            let Some((r1, m, level)) = leg_ik(hip0, knee0, ankle0, hip, target, FORWARD) else {
                 continue;
             };
-            let r1 = rotation(between(sub(knee0, hip0), sub(knee, hip)));
-            let r2 = rotation(between(
-                apply_m(&r1, sub(ankle0, knee0)),
-                sub(reached, knee),
-            ));
-            let m = mul(&mul(&transpose(&r1), &r2), &r1);
-            let level = mul(&transpose(&m), &transpose(&r1));
             out[t] = Some(r1);
             out[c] = Some(m);
             out[f] = Some(level);
@@ -1052,6 +1157,10 @@ impl Sim {
             State::Standing => self.pose_frame(dt),
             State::Ragdoll { .. } => self.ragdoll_frame(),
             State::GettingUp { .. } => self.get_up_frame(dt),
+        }
+        let bent = back_bend(&self.posed);
+        if bent > self.stats.back_bend {
+            self.stats.back_bend = bent;
         }
         if self.stats.recovered_at.is_none() && self.stats.last_hit.is_some() && self.recovered() {
             self.stats.recovered_at = Some(self.t);
@@ -1160,6 +1269,8 @@ impl Sim {
                             }
                         })
                         .collect(),
+                    anim: anim.iter().map(|a| active::qfrom_m(&a.0)).collect(),
+                    forward: FORWARD,
                 };
                 let since_hit = (self.t - self.rig.hit_at) as f32;
                 // A deliberate brace: the bracing arms' motors firmer while they reach and hold.
@@ -1195,8 +1306,10 @@ impl Sim {
         let mut pelvis = pelvis_target;
         if let Some(body) = &self.rig.body {
             let pose = body.pose();
-            for b in 0..COUNT {
-                let q = active::qslerp(active::qfrom_m(&target[b]), pose[b].0, shown_w);
+            // The targets as the body tracks them (no elbow or knee past its human range) and the
+            // body, blended (`Body::shown`).
+            let wanted: Vec<active::Q> = target.iter().map(active::qfrom_m).collect();
+            for (b, q) in body.shown(&wanted, shown_w).into_iter().enumerate() {
                 rots[b] = active::m_from_q(q);
             }
             let sim = scale(pose[mq::PELVIS].1, UNITS_PER_METRE);
@@ -1381,6 +1494,19 @@ impl Sim {
                 continue;
             };
             let lim = mq::ragdoll_limits(b);
+            // An elbow and a knee are one-way hinges: one axis (X, across the body), its limits
+            // (Rapier's three-axis limits let a hard fall fold them past their stops).
+            if matches!(mq::role_side(b).0, Role::Forearm | Role::Calf) {
+                let hinge = RevoluteJointBuilder::new(Vec3::X)
+                    .local_anchor1(to_m(self.rest_local(b)))
+                    .local_anchor2(Vec3::ZERO)
+                    .contacts_enabled(false)
+                    .limits(lim[0])
+                    .motor_velocity(0.0, 0.05)
+                    .motor_max_force(2.0);
+                self.world.insert_impulse_joint(hp, hb, hinge.build());
+                continue;
+            }
             let frame1 = Pose::from_translation(to_m(self.rest_local(b)));
             let mut joint = GenericJointBuilder::new(JointAxesMask::LOCKED_SPHERICAL_AXES)
                 .local_frame1(frame1)
@@ -1433,6 +1559,11 @@ impl Sim {
     }
 
     fn ragdoll_frame(&mut self) {
+        // Before the step: the elbows and knees the last step left past straight are stopped.
+        if let State::Ragdoll { bodies, .. } = &self.state {
+            let handles = bodies.clone();
+            self.stop_ragdoll_hinges(&handles);
+        }
         self.brace_ground();
         self.world.step();
         let State::Ragdoll {
@@ -1608,12 +1739,23 @@ impl Sim {
         let k = (*t / GET_UP).clamp(0.0, 1.0);
         let k = active::ease(k);
         let anim = self.anim();
+        // Each bone's turn against its parent blended (not its world rotation: two bones blended
+        // apart could take the joint between them the long way round, through a backward bend).
+        let local = |pose: &[Xf; COUNT], b: usize| match mq::PARENT[b] {
+            Some(p) => mul(&transpose(&pose[p].0), &pose[b].0),
+            None => pose[b].0,
+        };
+        let mut world = [IDENTITY; COUNT];
         for b in 0..COUNT {
-            let qa = quat_of(&from[b].0);
-            let qb = quat_of(&anim[b].0);
-            let q = qa.slerp(qb, k);
+            let qa = quat_of(&local(&from, b));
+            let qb = quat_of(&local(&anim, b));
+            let l = m3_of(qa.slerp(qb, k));
+            world[b] = match mq::PARENT[b] {
+                Some(p) => mul(&world[p], &l),
+                None => l,
+            };
             let p = add(from[b].1, scale(sub(anim[b].1, from[b].1), k));
-            self.posed[b] = (m3_of(q), p);
+            self.posed[b] = (world[b], p);
         }
         if k >= 1.0 {
             self.state = State::Standing;

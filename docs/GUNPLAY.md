@@ -471,6 +471,45 @@ stretched and grew, and the game froze. Two causes, both fixed:
   poses (the pass writing back three times a frame, a hair off, the animation skipping frames)
   makes exactly the shown pose and never adds up.
 
+### Active ragdoll: elbows and knees are one-way hinges (Patrick, 2026-11-15, c87282a reel)
+
+Patrick saw the wall brace's arms bend backwards in the c87282a lab reel (.45-70, wall behind).
+Two causes, both in the IK, and the body had no idea which way a joint bends:
+- **The brace's elbow pole pointed down.** Reaching back toward a wall behind, an elbow below
+  the shoulder-hand line *is* a backward bend. And the upper arm was turned by the smallest
+  rotation, with no care for its twist, so the forearm bent about the wrong axis.
+- **The catch steps' knee pole followed the push.** With a straight leg, a push backwards bent
+  the knee backwards: with the hinges switched off, the lab's new measure saw knees up to 68°
+  past straight during catch steps (magnum, leg shot, slopes, stairs, the wall brace's step).
+
+Now, all in `ragdoll_core` (the lab and the game share it):
+- **One-way hinges** (`active::Body`): the elbows flex 0 to 2.5 rad and the knees 0 to 2.4 rad,
+  never more than 0.03 rad past straight, with a little lean out of the plane. Each hinge's axis
+  comes from the plain animation's bend, or, for a straight limb, from the way the actor faces
+  (`Targets::anim`, `Targets::forward`; the host reads the actor's 3D root). The limits act on:
+  - what the motors track (`Body::hinged`): no target asks a joint past its range;
+  - the body: near a stop the joint's motor is firmer, past it the spin that would take it
+    further is taken out, shared by inertia, and it is turned back a small share each step;
+  - what is shown (`Body::shown`): elbows and knees are blended against their parents, not in
+    the world, which could take a joint between two good poses past straight.
+- **Human reach** (`flinch::reach_arm_ik`, `human_reach`, `hinge_ik`):
+  - A reach behind the body is turned down, keeping its length, to at most 45° back from
+    straight down, and goes a little out to the side. The upper arm stays within about 55°
+    back, so hands bracing on a wall behind go back, down and out, never up behind the shoulder.
+  - The elbow points away from the upper arm's front, and the upper arm is twisted so that its
+    hinge is the bend's.
+  - The slower, lower brace and the arm speed cap are unchanged.
+- **Knees forward** (`flinch::leg_ik`): the catch steps' knees point the way the actor faces,
+  whichever way the push goes.
+- **Lab:**
+  - Every built-in scenario now fails if any elbow or knee shows bent backwards (`back_bend`,
+    measured from the mannequin's own anatomy, not from the body's hinges), standing, in the
+    ragdoll or getting up. The most now is 2.7° past the allowance, at the ledge.
+  - The lab ragdoll's elbows and knees are Rapier hinge joints (its three-axis limits let a
+    sledgehammer's spin fold an elbow past its stop and round), held to their stops the same way.
+  - The get-up blends each bone against its parent.
+  - The arm speed, smoothness and all other expectations still hold.
+
 ### Active ragdoll: our own controller, one write for every actor (Patrick, 2026-11-15)
 
 - **No more writes through the game's ragdoll-controller pass.** The flinch, catch steps, brace

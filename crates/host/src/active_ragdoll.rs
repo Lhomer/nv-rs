@@ -750,6 +750,7 @@ pub fn apply(e: &mut Engine) {
         let mut shown: Vec<M3> = target.clone();
         let mut pelvis_offset = rig.shift;
         let mut failed: Option<String> = None;
+        let forward = facing(e, &rig);
         if let Some(body) = rig.body.as_mut() {
             let targets = active::Targets {
                 rot: target.iter().map(active::qfrom_m).collect(),
@@ -758,6 +759,8 @@ pub fn apply(e: &mut Engine) {
                 hands: Vec::new(),
                 support,
                 world,
+                anim: anim.iter().map(|a| active::qfrom_m(&a.0)).collect(),
+                forward,
             };
             // A deliberate brace: the bracing arms' motors firmer while they reach and hold.
             if let Some(w) = rig.brace.and_then(|br| brace_weight(br.t)) {
@@ -777,8 +780,10 @@ pub fn apply(e: &mut Engine) {
             }
             let w = active::weight(since);
             let pose = body.pose();
-            for b in 0..n {
-                let q = active::qslerp(active::qfrom_m(&target[b]), pose[b].0, w);
+            // The targets as the body tracks them (no elbow or knee past its human range) and the
+            // body, blended (`Body::shown`: the elbows and knees against their parents).
+            let wanted: Vec<active::Q> = target.iter().map(active::qfrom_m).collect();
+            for (b, q) in body.shown(&wanted, w).into_iter().enumerate() {
                 shown[b] = active::m_from_q(q);
             }
             let sim = scale(pose[pi].1, UNITS_PER_METRE);
@@ -1032,7 +1037,7 @@ fn actor_scale(e: &mut Engine, actor: u32) -> f32 {
 /// placed by two-bone IK on their targets, the arms out. Answers each bone's world-space rotation
 /// on top of its spring's.
 fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
-    use crate::balance::{between, two_bone, Outcome};
+    use crate::balance::Outcome;
     let mut out: Vec<Option<M3>> = vec![None; rig.bones.len()];
     let Some(mut s) = rig.balance.take() else {
         rig.shift = [0.0; 3];
@@ -1123,25 +1128,12 @@ fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
         if l1 < 1.0 || l2 < 1.0 {
             continue;
         }
-        let (hip, knee_now, ankle) = (add(hip0, shift), add(knee0, shift), add(ankle0, shift));
+        let (hip, ankle) = (add(hip0, shift), add(ankle0, shift));
         let target = add(ankle, scale(sub(feet[side as usize], ankle), s.weight));
-        let bend = sub(knee_now, scale(add(hip, ankle), 0.5));
-        let pole = if length(bend) > 1.0 {
-            add(knee_now, scale(bend, 2.0))
-        } else {
-            add(knee_now, scale(s.dir, 20.0))
-        };
-        let Some((knee, reached)) = two_bone(hip, target, l1, l2, pole) else {
+        // The knee forward whichever way the push goes (`leg_ik`: never bent backwards).
+        let Some((r1, m, level)) = leg_ik(hip0, knee0, ankle0, hip, target, facing(e, rig)) else {
             continue;
         };
-        let r1 = rotation(between(sub(knee0, hip0), sub(knee, hip)));
-        let r2 = rotation(between(
-            apply_m(&r1, sub(ankle0, knee0)),
-            sub(reached, knee),
-        ));
-        let m = mul(&mul(&transpose(&r1), &r2), &r1);
-        // The foot kept level: its world rotation as the animation had it.
-        let level = mul(&transpose(&m), &transpose(&r1));
         out[t] = Some(r1);
         out[c] = Some(m);
         out[f] = Some(level);
@@ -1518,8 +1510,9 @@ fn start_brace(e: &mut Engine, actor: u32, root: u32, dir: V3, v: f32, aggressor
     ));
 }
 
-/// The arm of `side` reaching its hand to `target` (two-bone IK of the upper arm and the forearm),
-/// blended by `weight`: the upper arm's and the forearm's rotations.
+/// The arm of `side` reaching its hand to `target`, blended by `weight`, as a person's arm reaches
+/// (`ragdoll_core::flinch::reach_arm_ik`: the shoulder's range, the elbow's pole and hinge): the
+/// upper arm's and the forearm's rotations.
 fn reach_arm(
     e: &Engine,
     rig: &Rig,
@@ -1527,26 +1520,29 @@ fn reach_arm(
     target: V3,
     weight: f32,
 ) -> Option<(usize, M3, usize, M3)> {
-    use crate::balance::{between, two_bone};
     let u = bone_of(rig, Role::UpperArm, side)?;
     let f = bone_of(rig, Role::Forearm, side)?;
     let h = bone_of(rig, Role::Hand, side)?;
     let shoulder = read3(e, rig.bones[u].node + WORLD_TRANSLATION);
     let elbow0 = read3(e, rig.bones[f].node + WORLD_TRANSLATION);
     let hand0 = read3(e, rig.bones[h].node + WORLD_TRANSLATION);
-    let (l1, l2) = (length(sub(elbow0, shoulder)), length(sub(hand0, elbow0)));
-    if l1 < 1.0 || l2 < 1.0 {
-        return None;
-    }
     let goal = add(hand0, scale(sub(target, hand0), weight.clamp(0.0, 1.0)));
-    let pole = add(elbow0, [0.0, 0.0, -20.0]);
-    let (elbow, reached) = two_bone(shoulder, goal, l1, l2, pole)?;
-    let r1 = rotation(between(sub(elbow0, shoulder), sub(elbow, shoulder)));
-    let r2 = rotation(between(
-        apply_m(&r1, sub(hand0, elbow0)),
-        sub(reached, elbow),
-    ));
-    Some((u, r1, f, mul(&mul(&transpose(&r1), &r2), &r1)))
+    let (r1, r2) = reach_arm_ik(shoulder, elbow0, hand0, goal, facing(e, rig), side)?;
+    Some((u, r1, f, r2))
+}
+
+/// The way the actor faces (world, flat): its 3D root's forward (+Y) axis.
+fn facing(e: &Engine, rig: &Rig) -> V3 {
+    if rig.root == 0 {
+        return [0.0; 3];
+    }
+    let r = read9(e, rig.root + WORLD_ROTATION);
+    let f = [r[1], r[4], 0.0];
+    if f.iter().all(|x| x.is_finite()) {
+        unit(f).unwrap_or([0.0; 3])
+    } else {
+        [0.0; 3]
+    }
 }
 
 /// Stage 3's wall brace for a frame: both hands (the arms it has) reach to the wall ahead along

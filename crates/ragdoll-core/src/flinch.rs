@@ -362,6 +362,190 @@ pub fn brace_target(shoulder: V3, dir: V3, wall: Option<f32>) -> V3 {
 
 /// A hand's thickness short of the wall (game units).
 pub const BRACE_HAND: f32 = 5.0;
+
+/// How far behind the body an arm may reach from the shoulder (rad back from straight down: a
+/// person's shoulder extension, about 45 degrees), and how far out to the side a reach behind goes
+/// (a fraction of its length).
+pub const SHOULDER_BACK: f32 = 0.8;
+pub const BACK_OUT: f32 = 0.25;
+
+/// A hand's goal `goal` held to where a person's arm can reach from its shoulder `shoulder`, for
+/// an actor facing `forward` (flat) and an arm on `side` (0 left, 1 right): a reach behind the body
+/// is turned down (its length kept) until it is no further back than [`SHOULDER_BACK`] from
+/// straight down, and goes a little out to the side; a hand reaching back to a wall goes back,
+/// down and out, palms low, as a person's does, never up behind the shoulder.
+pub fn human_reach(shoulder: V3, goal: V3, forward: V3, side: u8) -> V3 {
+    let Some(fwd) = unit([forward[0], forward[1], 0.0]) else {
+        return goal;
+    };
+    let out = side_out(fwd, side);
+    let d = sub(goal, shoulder);
+    let back = -dot(d, fwd);
+    if back <= 0.0 {
+        return goal;
+    }
+    // In the plane of the back and down: its angle back from straight down.
+    let lateral = dot(d, out);
+    let sideways = scale(out, lateral);
+    let rest = sub(d, sideways);
+    let len = length(rest);
+    let down = -rest[2];
+    let angle = back.atan2(down);
+    if angle <= SHOULDER_BACK || len < 1e-3 {
+        return goal;
+    }
+    let (sin, cos) = SHOULDER_BACK.sin_cos();
+    let turned = add(scale(fwd, -len * sin), [0.0, 0.0, -len * cos]);
+    let wide = lateral.max(len * BACK_OUT);
+    add(shoulder, add(turned, scale(out, wide)))
+}
+
+/// The way out to the side for an arm on `side` (0 left, 1 right) of an actor facing `fwd`.
+fn side_out(fwd: V3, side: u8) -> V3 {
+    let right = cross(fwd, [0.0, 0.0, 1.0]);
+    if side == 0 {
+        scale(right, -1.0)
+    } else {
+        right
+    }
+}
+
+/// The rotation taking the frame of `a` and `b` (directions, `b` made square to `a`) onto that of
+/// `c` and `d`; `None` when either pair is degenerate.
+fn align(a: V3, b: V3, c: V3, d: V3) -> Option<M3> {
+    let frame = |x: V3, y: V3| -> Option<M3> {
+        let x = unit(x)?;
+        let y = unit(sub(y, scale(x, dot(x, y))))?;
+        let z = cross(x, y);
+        // Columns x, y, z (row-major).
+        Some([x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]])
+    };
+    Some(mul(&frame(c, d)?, &transpose(&frame(a, b)?)))
+}
+
+/// Two-bone IK through a one-way hinge (an elbow, a knee): from the animated root, middle and end
+/// joints (`root0`, `mid0`, `end0`) to the end at `goal` with the root at `root`; `hinge0` the
+/// animation's hinge axis (a turn about it flexes the joint), `out` a nudge for the middle (an
+/// elbow a little out to the side). The middle points away from where the flex takes the end (an
+/// elbow away from the upper arm's front, a knee forward), and the first bone is turned so that
+/// its hinge is the bend's: the joint flexes, never bends backwards. The world turn of the first
+/// bone and the second's turn after it (carried down the chain: `r1ᵀ r2 r1`).
+pub fn hinge_ik(
+    root0: V3,
+    mid0: V3,
+    end0: V3,
+    root: V3,
+    goal: V3,
+    hinge0: Option<V3>,
+    out: V3,
+) -> Option<(M3, M3)> {
+    use crate::balance::{between, two_bone};
+    let (u0, f0) = (sub(mid0, root0), sub(end0, mid0));
+    let (l1, l2) = (length(u0), length(f0));
+    if l1 < 1.0 || l2 < 1.0 {
+        return None;
+    }
+    let g = unit(sub(goal, root))?;
+    let pole = match hinge0 {
+        Some(h) => {
+            let front = unit(cross(h, g)).unwrap_or([0.0, 0.0, 1.0]);
+            let mid = add(root, scale(g, l1 * 0.5));
+            add(mid, scale(add(scale(front, -1.0), scale(out, 0.4)), 20.0))
+        }
+        None => add(add(mid0, sub(root, root0)), [0.0, 0.0, -20.0]),
+    };
+    let (m, reached) = two_bone(root, goal, l1, l2, pole)?;
+    let (u1, f1) = (sub(m, root), sub(reached, m));
+    let bent1 = cross(u1, f1);
+    let r1 = match hinge0 {
+        Some(h0) if length(bent1) > 0.1f32.sin() * l1 * l2 => {
+            align(u0, h0, u1, bent1).unwrap_or_else(|| rotation(between(u0, u1)))
+        }
+        _ => rotation(between(u0, u1)),
+    };
+    let r2 = rotation(between(apply_m(&r1, f0), f1));
+    Some((r1, mul(&mul(&transpose(&r1), &r2), &r1)))
+}
+
+/// A hinge's axis from the animated joints (a turn about it flexes the joint): the animation's
+/// bend when it is bent enough to say it, else from the way the actor faces (`toward`: where a
+/// flex takes the end; forward for an elbow, back for a knee), else the body's right.
+fn hinge_axis(root0: V3, mid0: V3, end0: V3, toward: Option<V3>) -> Option<V3> {
+    let (u0, f0) = (sub(mid0, root0), sub(end0, mid0));
+    let bent = cross(u0, f0);
+    if length(bent) > 0.2f32.sin() * length(u0) * length(f0) {
+        return unit(bent);
+    }
+    let t = toward?;
+    let a = cross(u0, t);
+    if length(a) > 0.3 * length(u0) {
+        unit(a)
+    } else {
+        unit(cross(t, [0.0, 0.0, 1.0]))
+    }
+}
+
+/// Two-bone IK for an arm reaching its hand to `goal` from the animated shoulder, elbow and hand
+/// (game units), as a person's arm does: the goal held to the shoulder's reach
+/// ([`human_reach`]), then [`hinge_ik`] with the elbow's hinge (the animation's bend, or a
+/// straight arm's that brings the forearm forward) and the elbow a little out.
+pub fn reach_arm_ik(
+    shoulder: V3,
+    elbow0: V3,
+    hand0: V3,
+    goal: V3,
+    forward: V3,
+    side: u8,
+) -> Option<(M3, M3)> {
+    let fwd = unit([forward[0], forward[1], 0.0]);
+    let mut goal = human_reach(shoulder, goal, forward, side);
+    let hinge = hinge_axis(shoulder, elbow0, hand0, fwd);
+    let out = fwd.map_or([0.0; 3], |f| side_out(f, side));
+    let mut reach = hinge_ik(shoulder, elbow0, hand0, shoulder, goal, hinge, out)?;
+    // The elbow's bend can lift the upper arm further back than the hand: while it is past the
+    // shoulder's reach back, the goal is turned down about the shoulder by what is over.
+    if let Some(f) = fwd {
+        for _ in 0..3 {
+            let upper = apply_m(&reach.0, sub(elbow0, shoulder));
+            let back = -dot(upper, f);
+            let over = back.atan2(-upper[2]) - (SHOULDER_BACK + UPPER_ARM_BACK);
+            if back <= 0.0 || over <= 0.0 {
+                break;
+            }
+            // Down about the body's right (a turn about it takes a reach behind toward straight
+            // down).
+            let axis = cross(f, [0.0, 0.0, 1.0]);
+            let turned = apply_m(&rotation(scale(axis, over)), sub(goal, shoulder));
+            goal = add(shoulder, turned);
+            reach = hinge_ik(shoulder, elbow0, hand0, shoulder, goal, hinge, out)?;
+        }
+    }
+    Some(reach)
+}
+
+/// How much further back than the hand (rad past [`SHOULDER_BACK`]) the upper arm may go as the
+/// elbow bends (a person's shoulder extends to about 55 degrees).
+pub const UPPER_ARM_BACK: f32 = 0.15;
+
+/// Two-bone IK for a leg putting its ankle at `goal` with the hip moved to `hip` (game units),
+/// from the animated hip, knee and ankle: [`hinge_ik`] with the knee's hinge (the animation's
+/// bend, or a straight leg's that takes the calf back), so the knee points forward and never
+/// bends backwards, whichever way the body is pushed. The thigh's world turn, the calf's turn
+/// after it and the foot's (kept level: its world rotation as the animation had it).
+pub fn leg_ik(
+    hip0: V3,
+    knee0: V3,
+    ankle0: V3,
+    hip: V3,
+    goal: V3,
+    forward: V3,
+) -> Option<(M3, M3, M3)> {
+    let back = unit([-forward[0], -forward[1], 0.0]);
+    let hinge = hinge_axis(hip0, knee0, ankle0, back);
+    let (r1, m) = hinge_ik(hip0, knee0, ankle0, hip, goal, hinge, [0.0; 3])?;
+    let level = mul(&transpose(&m), &transpose(&r1));
+    Some((r1, m, level))
+}
 /// Bracing on the ground (the host's `crate::knockdown`, the ragdoll's first moments): for this
 /// long (s) after the ragdoll takes the body, while the pelvis is more than this high over its
 /// lowest bone (units) and dropping faster than this (units a second), the hands and forearms are
@@ -734,5 +918,70 @@ mod tests {
         let mut none = vec![IDENTITY, spine, IDENTITY, arm];
         hold_aim(&mut none, &parent, &roles, 0.0);
         assert_eq!(none[3], arm);
+    }
+
+    /// The arm reaching to a wall behind, ahead, or not at all: the elbow always flexes the way a
+    /// person's does (never past straight), and a reach behind never takes the arm further back
+    /// than a person's shoulder goes.
+    #[test]
+    fn arms_reach_as_a_persons() {
+        use crate::active::{hinge_angles, HYPEREXTEND};
+        let fwd = [0.0, 1.0, 0.0];
+        let (s, e0, h0) = ([-13.0, 0.0, 100.0], [-14.0, 0.5, 79.0], [-15.0, 1.0, 59.0]);
+        for goal in [
+            [-13.0, -31.0, 80.0],
+            [-13.0, -40.0, 100.0],
+            [-13.0, 31.0, 80.0],
+            [-30.0, 0.0, 85.0],
+            h0,
+        ] {
+            let (r1, r2) = reach_arm_ik(s, e0, h0, goal, fwd, 0).expect("reaches");
+            let upper = apply_m(&r1, sub(e0, s));
+            let fore = apply_m(&mul(&r1, &r2), sub(h0, e0));
+            // The elbow's hinge after the reach: the animation's (the body's right, +X) turned
+            // with the upper arm.
+            let axis = apply_m(&r1, [1.0, 0.0, 0.0]);
+            let (flex, _) = hinge_angles(unit(upper).unwrap(), unit(fore).unwrap(), axis);
+            assert!(
+                flex >= -HYPEREXTEND - 1e-3,
+                "{goal:?}: the elbow bent backwards {flex}"
+            );
+            // Behind: within the shoulder's reach back from straight down (and a hair).
+            let back = -dot(upper, fwd);
+            if back > 0.0 {
+                let down = -upper[2];
+                assert!(
+                    back.atan2(down) <= SHOULDER_BACK + UPPER_ARM_BACK + 0.02,
+                    "{goal:?}: the upper arm went {} back",
+                    back.atan2(down)
+                );
+            }
+        }
+    }
+
+    /// Pushed backwards or forwards, a stepping leg's knee points forward: it never bends
+    /// backwards.
+    #[test]
+    fn knees_point_forward_whichever_way_the_push() {
+        use crate::active::{hinge_angles, HYPEREXTEND};
+        let fwd = [0.0, 1.0, 0.0];
+        let (h0, k0, a0) = ([-7.0, 0.0, 64.0], [-7.0, 1.0, 35.0], [-7.0, 0.0, 6.0]);
+        for (shift, goal) in [
+            ([0.0, -12.0, -4.0], [-7.0, -25.0, 6.0]),
+            ([0.0, 12.0, -4.0], [-7.0, 25.0, 6.0]),
+            ([0.0, -6.0, -10.0], [-7.0, 0.0, 6.0]),
+        ] {
+            let hip = add(h0, shift);
+            let (r1, m, _) = leg_ik(h0, k0, a0, hip, goal, fwd).expect("reaches");
+            let thigh = apply_m(&r1, sub(k0, h0));
+            let calf = apply_m(&mul(&r1, &m), sub(a0, k0));
+            // The knee's hinge: the body's left (-X: a positive turn takes the calf back).
+            let axis = apply_m(&r1, [-1.0, 0.0, 0.0]);
+            let (flex, _) = hinge_angles(unit(thigh).unwrap(), unit(calf).unwrap(), axis);
+            assert!(
+                flex >= -HYPEREXTEND - 1e-3,
+                "{goal:?}: the knee bent backwards {flex}"
+            );
+        }
     }
 }

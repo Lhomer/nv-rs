@@ -7,6 +7,12 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (elbows and knees: one-way hinges)
+
+- **Now (`ragdoll_core::active` `hinge_limit`, `hinge_angles`, `Body::hinge`, `hinged`, `shown`, `stop_hinges`, `limit_hinges`, `Targets::anim`/`forward`; `flinch::hinge_ik`, `reach_arm_ik`, `leg_ik`, `human_reach`; host `reach_arm`, `facing`, the steps' legs, the shown blend; the lab's `back_bend`, `hinge_bend`, `past_stop`, `stop_ragdoll_hinges`, revolute ragdoll elbows and knees, the local get-up blend):** no elbow or knee bends backwards in any lab scenario. Not run in game.
+- **Patrick:** the wall brace's arms bent backwards in the c87282a reel; one-way hinge limits on elbows and knees, a brace reach that never asks a joint past its range, a lab test that fails on any backward bend; keep the slower, lower brace and the arm speed cap.
+- **Queued (Patrick approved):** world interaction (multi-height obstacle probes, braces at the obstacle's height, fold-over, tripping on low obstacles) and Kickback-style fatigue, pain, regional injury and counter-side bracing, with lab scenes and tests.
+
 ### Claude, 2026-11-15 (quick start)
 
 - **Now (`crates/host/src/quick_start.rs`, the fixes row `bQuickStart`/`NV_QUICK_START`, on in the `fixes` preset; `overridable.tsv` rows `007cf9a0`, `00ec16d0`; docs/FIXES.md):** `MoviePlayer::StartSequence` with the text of `sIntroSequence` during the first load starts nothing; while `StartMenu` holds its buttons back for the first screens (flag `0x80000`), the loading menu's own key skip (`0078aa90`) is pressed for the player once per scheduled swap. The loading menu's own music/movie sequence and the main menu's background are left alone. Not run in game: which screens Patrick's start shows, and how long the last slide takes, is still to be seen.

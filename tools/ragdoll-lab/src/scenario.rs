@@ -371,6 +371,7 @@ pub struct Report {
     pub interrupted: bool,
     pub velocity_jump: f32,
     pub jerk: f32,
+    pub back_bend: f32,
     pub expect: Vec<(String, bool)>,
     pub log: Vec<String>,
 }
@@ -394,6 +395,7 @@ impl Report {
              \"time_s\":{:.2},\"peak_speed_mps\":{:.3},\"topple_mps\":{:.3},\"decisions\":[{}],\
              \"arm_spin\":{:.2},\"ragdoll_arm_spin\":{:.2},\"flinch_deg\":{:.2},\"armed\":{},\
              \"aim_drift_deg\":{:.2},\"interrupted\":{},\"velocity_jump_mps\":{:.3},\"jerk\":{:.1},\
+             \"back_bend_deg\":{:.2},\
              \"expectations\":[{}],\"passed\":{},\"log\":[{}]}}",
             s(&self.name),
             s(self.ground),
@@ -418,6 +420,7 @@ impl Report {
             self.interrupted,
             self.velocity_jump,
             self.jerk,
+            self.back_bend,
             expect.join(","),
             self.passed(),
             list(&self.log)
@@ -551,6 +554,7 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
         interrupted: st.interrupted,
         velocity_jump: st.velocity_jump,
         jerk: st.jerk,
+        back_bend: st.back_bend,
         expect: Vec::new(),
         log: sim.log.iter().rev().take(60).rev().cloned().collect(),
     };
@@ -578,6 +582,9 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
                 }
                 e if e.starts_with("armspin<=") => {
                     e[9..].parse::<f32>().is_ok_and(|w| report.arm_spin <= w)
+                }
+                e if e.starts_with("backbend<=") => {
+                    e[10..].parse::<f32>().is_ok_and(|d| report.back_bend <= d)
                 }
                 e if e.starts_with("ragdollarmspin<=") => e[16..]
                     .parse::<f32>()
@@ -649,8 +656,65 @@ mod tests {
                     r.expect, r.steps, r.fall, r.decisions
                 ));
             }
+            // No elbow or knee ever bends backwards, standing, in the ragdoll or getting up
+            // (Patrick, 2026-11-15: the wall brace's arms bent backwards in c87282a).
+            if r.back_bend > MOST_BACK_BEND {
+                failed.push(format!(
+                    "{name}: an elbow or a knee bent {:.1} degrees backwards",
+                    r.back_bend
+                ));
+            }
         }
         assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    /// The most an elbow or a knee may show bent backwards past the hinges' allowance
+    /// (`active::HYPEREXTEND`, 1.7 degrees past straight) in degrees: a soft stop's give.
+    const MOST_BACK_BEND: f32 = 3.0;
+
+    /// The measure itself: a forearm turned forward is a bend, turned back past straight is a
+    /// backward one; a calf the other way round (straight: the two bones' rest lines in line, so
+    /// the rest pose's slight bends count).
+    #[test]
+    fn a_backward_bend_is_seen() {
+        use crate::mannequin as mq;
+        use crate::sim::{back_bend, hinge_bend};
+        use ragdoll_core::active;
+        use ragdoll_core::flinch::{rotation, IDENTITY};
+        let mut posed = [(IDENTITY, [0.0; 3]); mq::COUNT];
+        assert!(
+            back_bend(&posed) < 0.5,
+            "the rest pose: {}",
+            back_bend(&posed)
+        );
+        posed[mq::L_FOREARM].0 = rotation([0.8, 0.0, 0.0]);
+        posed[mq::R_CALF].0 = rotation([-0.8, 0.0, 0.0]);
+        assert!(back_bend(&posed) < 0.5, "flexed is no backward bend");
+        let rest = hinge_bend(
+            &[(IDENTITY, [0.0; 3]); mq::COUNT],
+            mq::R_UPPERARM,
+            mq::R_FOREARM,
+            1.0,
+        );
+        posed[mq::R_FOREARM].0 = rotation([-0.3, 0.0, 0.0]);
+        let b = back_bend(&posed);
+        let want = (0.3 - rest - active::HYPEREXTEND).to_degrees();
+        assert!((b - want).abs() < 0.5, "{b} vs {want}");
+        posed[mq::R_FOREARM].0 = IDENTITY;
+        let rest = hinge_bend(
+            &[(IDENTITY, [0.0; 3]); mq::COUNT],
+            mq::L_THIGH,
+            mq::L_CALF,
+            -1.0,
+        );
+        posed[mq::L_CALF].0 = rotation([0.5, 0.0, 0.0]);
+        let b = back_bend(&posed);
+        let want = (0.5 - rest - active::HYPEREXTEND).to_degrees();
+        assert!((b - want).abs() < 0.5, "{b} vs {want}");
+        // Folded round past its most flex, an elbow reads as flexed past its stop, not backwards.
+        posed[mq::L_CALF].0 = IDENTITY;
+        posed[mq::L_FOREARM].0 = rotation([3.3, 0.0, 0.0]);
+        assert!(back_bend(&posed) < 0.5);
     }
 }
 
