@@ -24,6 +24,12 @@ of the shoulders a brace stops at) by Rapier's. As in the game, the pose is writ
 the animated pose, the same for unarmed, armed and attacking bodies; the test
 `one_write_path_for_every_actor` checks that write for all three.
 
+The world around the body is the game's logic too (`ragdoll_core::obstacle`): the lab answers its
+floor and ray questions from Rapier, the game from its ray casts and navmesh. The grounds
+`railing`, `gaprailing`, `halfwall`, `table` and `curb` put obstacles behind the mannequin (a
+push from its front meets them), for braces on a waist-high top, folding over, and tripping. What
+hits leave (fatigue, pain, hurt limbs; `ragdoll_core::condition`) is kept across a run's hits.
+
 The standing body is the game's active ragdoll body (`ragdoll_core::active`): capsules with
 PD motors on every joint tracking the animation, soft right after a hit and ramping back, the
 hit's push travelling through the chain, balance from the motors, the pelvis's support and the
