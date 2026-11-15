@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (merge #570-#596; arm speed and the wall brace)
+
+- **Now:** slaterain main through e32ec7f merged (cefcabeb; unions only; the drawing-thread files are upstream's). Then `ragdoll_core::active` `limit_spin`/`limit_turns` (arms held to 1.1x their role's speed, smoothly), the brace's `brace_target`, `BRACE_OUT`/`BRACE_LOW`/`BRACE_FIRM`/`BRACE_WORLD`, quintic brace weight, slower reach (0.7 s); lab scenarios all assert `armspin<=6.5`. Not run in game.
+- **Patrick:** merge #570-#596 with the usual rules; then cap standing arm spin smoothly (4-6 rad/s) with lab assertions, and make the brace slower, lower and more deliberate with less overshoot; keep knockdowns working.
+
 ### Claude, 2026-11-15 (active ragdoll: a physical body)
 
 - **Now (`ragdoll_core::active` Body, Targets, ease/weight/strength; `active_ragdoll::apply` rewritten around it, `make_body`, `body_velocities`; `knockdown::give_launch` starts from them; the lab's `sim.rs` the same, with `velocity_jump` and `jerk`):** after a hit the rig is a physical articulated body (capsules, XPBD joints, PD motors tracking the animation, soft and ramping, gravity carried, impulse shared and travelling, support plus foot pins following the capture-point steps), blended back eased; written as offsets over the animation. All 20 lab scenarios pass natively and in Chromium with smoothness bounds. Not run in game.

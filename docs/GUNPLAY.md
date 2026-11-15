@@ -443,6 +443,22 @@ Patrick, 2026-11-15. Rides on Hit Reactions and Balance (either on).
   falls`, `the steps could not catch it: falls`, `into its ragdoll after <t> s of going over`,
   `braces for the ground with its arms`.
 
+### Active ragdoll: arm speed and the wall brace (f36ddda lab review, 2026-11-15)
+
+- **Standing arm speed is limited too** (it was only in the ragdoll: a .50 reached 13.7 rad/s,
+  a sledgehammer 9.3, the brace 8.5). Each arm joint's turn against its parent is held to its
+  role's speed times 1.1 (about 4.4 to 6.6 rad/s), smoothly: below 60% of the bound nothing
+  changes, above it the speed saturates (`tanh`), on the velocities before and after each small
+  step and on what the step's constraints moved (`ragdoll_core::active` `limit_spin`,
+  `limit_turns`; the legs only on their velocities, as they follow the steps' pins). In the lab:
+  every scenario now asserts `armspin<=6.5`; the most is 6.1 (.50 5.9, sledge 5.3, brace 5.7).
+- **The wall brace** is slower, lower and deliberate: the hands reach 0.45 m ahead of the
+  shoulders and 0.28 m below them (chest high; was 0.55 m ahead, 8 units below) over 0.7 s with
+  a quintic ease in and out (release 0.6 s); the bracing arms' motors twice as firm and tracking
+  half their world rotation (they no longer ride up with a torso pitched toward the wall). In
+  the lab the hand stays at least 15 units below the shoulder (it rose 1.7 above it), swings
+  behind it by 8.7 at most (was 16) and drifts 1.5 units a frame while holding (was 3.4).
+
 ### Active ragdoll: a physical body (Patrick, 2026-11-15: toward Euphoria)
 
 The reactions were far off Euphoria's: the spring offsets per bone did not look smooth or fluid.

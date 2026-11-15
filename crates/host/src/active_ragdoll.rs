@@ -705,7 +705,12 @@ pub fn apply(e: &mut Engine) {
             .iter()
             .map(|b| {
                 if b.role.is_arm() {
-                    (rig.aim_hold * 1.25).min(1.0)
+                    // The aim kept, or the brace's reach to the wall point (not riding up with a
+                    // torso pitched toward the wall).
+                    let brace = rig.brace.and_then(|br| brace_weight(br.t)).unwrap_or(0.0);
+                    (rig.aim_hold * 1.25)
+                        .max(brace * ragdoll_core::tuning::get().brace_world)
+                        .min(1.0)
                 } else {
                     0.0
                 }
@@ -723,6 +728,14 @@ pub fn apply(e: &mut Engine) {
                 support,
                 world,
             };
+            // A deliberate brace: the bracing arms' motors firmer while they reach and hold.
+            if let Some(w) = rig.brace.and_then(|br| brace_weight(br.t)) {
+                for (b, d) in body.dip.iter_mut().enumerate() {
+                    if rig.bones[b].role.is_arm() {
+                        *d = d.min(-ragdoll_core::tuning::get().brace_firm * w);
+                    }
+                }
+            }
             body.step(
                 &targets,
                 dt,
@@ -1513,10 +1526,7 @@ fn brace_frame(e: &mut Engine, rig: &mut Rig, out: &mut [Option<M3>], dt: f32) {
             continue;
         };
         let shoulder = read3(e, rig.bones[u].node + WORLD_TRANSLATION);
-        let target = add(
-            shoulder,
-            add(scale(b.dir, 0.55 * UNITS_PER_METRE), [0.0, 0.0, -8.0]),
-        );
+        let target = brace_target(shoulder, b.dir);
         if let Some((ui, ur, fi, fr)) = reach_arm(e, rig, side, target, w) {
             out[ui] = Some(ur);
             out[fi] = Some(fr);

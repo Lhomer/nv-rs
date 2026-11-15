@@ -139,6 +139,7 @@ tuning! {
         hit_time = a::HIT_TIME, 0.005, 0.3, 0.005, None, "A hit's momentum goes in over this long, eased (s).";
         hit_wave = a::HIT_WAVE, 0.5, 30, 0.1, None, "A hit's push reaches each bone after its distance at this speed (m/s).";
         spin_room = a::SPIN_ROOM, 0.5, 5, 0.05, None, "A joint turns against its parent at most this many times its role's spin.";
+        arm_spin_room = a::ARM_SPIN_ROOM, 0.3, 3, 0.05, None, "An arm's joint at most this many times its role's spin (smoothly).";
     }
     "Flinch" {
         kick = f::KICK, 0, 60, 0.5, None, "Kick: rad/s of a bone's spin per m/s of the body's speed.";
@@ -175,6 +176,10 @@ tuning! {
         brace_hold = f::BRACE_HOLD, 0, 3, 0.05, None, "The wall brace's hold (s).";
         brace_release = f::BRACE_RELEASE, 0.02, 2, 0.01, None, "The wall brace's release (s).";
         brace_holds = f::BRACE_HOLDS, 0, 10, 0.1, None, "The push a wall brace holds (m/s); past it the body crumples.";
+        brace_reach_out = f::BRACE_OUT, 0.2, 0.8, 0.01, None, "How far ahead of the shoulders the hands reach to the wall (m).";
+        brace_reach_low = f::BRACE_LOW, 0, 0.6, 0.01, None, "How far below the shoulders the hands meet the wall (m).";
+        brace_firm = f::BRACE_FIRM, 0, 5, 0.1, None, "The bracing arms' motors this many times firmer.";
+        brace_world = f::BRACE_WORLD, 0, 1, 0.05, None, "How much the bracing arms track their world rotation (not riding the torso).";
         fall_lead = f::FALL_LEAD, 0, 1, 0.01, None, "A knockdown's lead: the posed body goes over this long before the ragdoll (s).";
         ledge_lead = f::LEDGE_LEAD, 0, 2, 0.01, None, "A ledge fall's lead, windmilling (s).";
         overrun_lead = f::OVERRUN_LEAD, 0, 1, 0.01, None, "The lead of a fall at the end of the steps (s).";

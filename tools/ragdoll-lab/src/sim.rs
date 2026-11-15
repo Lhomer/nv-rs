@@ -798,10 +798,7 @@ impl Sim {
                 continue;
             };
             let shoulder = anim[u].1;
-            let target = add(
-                shoulder,
-                add(scale(b.dir, 0.55 * UNITS_PER_METRE), [0.0, 0.0, -8.0]),
-            );
+            let target = brace_target(shoulder, b.dir);
             if let Some((ui, ur, fi, fr)) = self.reach_arm(anim, side, target, w) {
                 out[ui] = Some(ur);
                 out[fi] = Some(fr);
@@ -1110,7 +1107,16 @@ impl Sim {
                     world: (0..COUNT)
                         .map(|b| {
                             if mq::role_side(b).0.is_arm() {
-                                (self.rig.aim_hold * 1.25).min(1.0)
+                                // The aim kept, or the brace's reach to the wall point (not
+                                // riding up with a torso pitched toward the wall).
+                                let brace = self
+                                    .rig
+                                    .brace
+                                    .and_then(|br| brace_weight(br.t))
+                                    .unwrap_or(0.0);
+                                (self.rig.aim_hold * 1.25)
+                                    .max(brace * ragdoll_core::tuning::get().brace_world)
+                                    .min(1.0)
                             } else {
                                 0.0
                             }
@@ -1118,6 +1124,14 @@ impl Sim {
                         .collect(),
                 };
                 let since_hit = (self.t - self.rig.hit_at) as f32;
+                // A deliberate brace: the bracing arms' motors firmer while they reach and hold.
+                if let Some(w) = self.rig.brace.and_then(|br| brace_weight(br.t)) {
+                    for (b, d) in body.dip.iter_mut().enumerate() {
+                        if mq::role_side(b).0.is_arm() {
+                            *d = d.min(-ragdoll_core::tuning::get().brace_firm * w);
+                        }
+                    }
+                }
                 body.step(&targets, dt, active::strength(since_hit));
                 active::weight((self.t - self.rig.since) as f32)
             }

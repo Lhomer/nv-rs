@@ -321,9 +321,9 @@ impl Spring {
 /// ledge (windmilling) and a fall at the end of the steps (s); the windmill's turns a second and
 /// swing (rad); how much the torso and the knees go over in a fall (rad), how far the pelvis goes
 /// (units); the push a wall brace holds (m/s), past it the body crumples against the wall.
-pub const BRACE_REACH: f32 = 0.3;
+pub const BRACE_REACH: f32 = 0.7;
 pub const BRACE_HOLD: f32 = 0.5;
-pub const BRACE_RELEASE: f32 = 0.5;
+pub const BRACE_RELEASE: f32 = 0.6;
 pub const FALL_LEAD: f32 = 0.12;
 pub const LEDGE_LEAD: f32 = 0.4;
 pub const OVERRUN_LEAD: f32 = 0.1;
@@ -333,6 +333,27 @@ pub const FALL_LEAN: f32 = 0.4;
 pub const FALL_KNEES: f32 = 0.3;
 pub const FALL_SHIFT: f32 = 25.0;
 pub const BRACE_HOLDS: f32 = 2.5;
+/// Where the hands meet the wall: this far ahead of the shoulders along the push and this far
+/// below them (m): chest high, a deliberate reach (Patrick, 2026-11-15: it was rubbery and high).
+pub const BRACE_OUT: f32 = 0.45;
+pub const BRACE_LOW: f32 = 0.28;
+/// The bracing arms' motors this many times firmer (the active body's dip below 0): a deliberate
+/// reach and a steady hold, not a rubbery one.
+pub const BRACE_FIRM: f32 = 1.0;
+/// How much the bracing arms track their world rotation (1: the wall point, whatever the torso).
+pub const BRACE_WORLD: f32 = 0.5;
+
+/// Where a brace's hand goes from its shoulder `shoulder` along the push `dir` (game units).
+pub fn brace_target(shoulder: V3, dir: V3) -> V3 {
+    let t = tuning::get();
+    add(
+        shoulder,
+        add(
+            scale(dir, t.brace_reach_out * UNITS_PER_METRE),
+            [0.0, 0.0, -t.brace_reach_low * UNITS_PER_METRE],
+        ),
+    )
+}
 /// Bracing on the ground (the host's `crate::knockdown`, the ragdoll's first moments): for this
 /// long (s) after the ragdoll takes the body, while the pelvis is more than this high over its
 /// lowest bone (units) and dropping faster than this (units a second), the hands and forearms are
@@ -474,15 +495,16 @@ pub fn brace_weight(t: f32) -> Option<f32> {
     if t < 0.0 {
         return Some(0.0);
     }
+    // Eased in and out (`6t^5 - 15t^4 + 10t^3`): the hands set off and arrive at rest, no
+    // overshoot asked of the motors.
     if t < k.brace_reach {
-        let s = t / k.brace_reach;
-        return Some(s * s * (3.0 - 2.0 * s));
+        return Some(crate::active::ease(t / k.brace_reach));
     }
     if t < k.brace_reach + k.brace_hold {
         return Some(1.0);
     }
     let r = (t - k.brace_reach - k.brace_hold) / k.brace_release;
-    (r < 1.0).then_some(1.0 - r)
+    (r < 1.0).then_some(1.0 - crate::active::ease(r))
 }
 
 #[cfg(test)]

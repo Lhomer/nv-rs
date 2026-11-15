@@ -53,6 +53,10 @@ pub const HIT_WAVE: f32 = 5.0;
 /// A joint turns against its parent at most this many times its role's spin
 /// (`crate::flinch::Role::spin`).
 pub const SPIN_ROOM: f32 = 1.3;
+/// An arm's joint at most its role's spin (the human arms of 2026-11-15: 4 to 6 rad/s), the speed
+/// saturating smoothly from [`SPIN_KNEE`] of it.
+pub const ARM_SPIN_ROOM: f32 = 1.1;
+pub const SPIN_KNEE: f32 = 0.6;
 
 /// Each Bip01 bone's share of the body's mass (`crate::flinch::BONES`' order; segment fractions).
 pub const SHARES: [f32; 20] = [
@@ -476,6 +480,8 @@ impl Body {
             self.state[p].v[2] += carry;
             self.carry_limbs(support, h);
             self.push_in(h);
+            // Before the move too: a hit's push never moves a limb faster than it may turn.
+            self.limit_spin();
             let before: Vec<State> = self.state.clone();
             for s in &mut self.state {
                 s.com = add(s.com, scale(s.v, h));
@@ -488,6 +494,7 @@ impl Body {
             self.pins(targets, &gains, h);
             self.hold_joints();
             self.limit_bends(targets);
+            self.limit_turns(&before, h);
             for (s, b) in self.state.iter_mut().zip(&before) {
                 let v = scale(sub(s.com, b.com), 1.0 / h);
                 let w = scale(qlog(qmul(s.q, qconj(b.q))), 1.0 / h);
@@ -538,6 +545,68 @@ impl Body {
             let ip = self.inv_inertia_world(p);
             self.state[i].w = add(self.state[i].w, mv(&ii, tau));
             self.state[p].w = sub(self.state[p].w, mv(&ip, tau));
+        }
+    }
+
+    /// Each joint's turn against its parent held to its role's speed (an arm's to
+    /// [`ARM_SPIN_ROOM`] times its spin, about 4 to 6 rad/s; others' to [`SPIN_ROOM`] times),
+    /// smoothly: below [`SPIN_KNEE`] of the bound nothing changes, above it the speed saturates
+    /// toward the bound (`tanh`), so a big hit's arms slow into their limit instead of being
+    /// clipped. Taken off the child (the lighter end): the parent's motion is not touched.
+    fn limit_spin(&mut self) {
+        let t = tuning::get();
+        for i in 0..self.state.len() {
+            let Some(p) = self.segments[i].parent else {
+                continue;
+            };
+            let role = self.segments[i].role;
+            let room = if role.is_arm() {
+                t.arm_spin_room
+            } else {
+                t.spin_room
+            };
+            let most = role.spin() * room;
+            let rel = sub(self.state[i].w, self.state[p].w);
+            let speed = length(rel);
+            let knee = most * SPIN_KNEE;
+            if speed > knee && speed.is_finite() && most > knee {
+                let allowed = knee + (most - knee) * ((speed - knee) / (most - knee)).tanh();
+                let off = scale(rel, 1.0 - allowed / speed);
+                self.state[i].w = sub(self.state[i].w, off);
+            }
+        }
+    }
+
+    /// The arms' bound on what the step moved (its constraints and motors move the bones too):
+    /// each arm joint's turn against its parent over the small step `h` eased back to its allowed
+    /// speed, the bone turned about its joint (parents first, so each child rides its parent's
+    /// final pose).
+    fn limit_turns(&mut self, before: &[State], h: f32) {
+        let t = tuning::get();
+        for i in 0..self.state.len() {
+            let Some(p) = self.segments[i].parent else {
+                continue;
+            };
+            let role = self.segments[i].role;
+            // The arms only: the legs follow the steps' pins, which must not be fought.
+            if !role.is_arm() {
+                continue;
+            }
+            let most = role.spin() * t.arm_spin_room;
+            let knee = most * SPIN_KNEE;
+            let was = qmul(qconj(before[p].q), before[i].q);
+            let now = qmul(qconj(self.state[p].q), self.state[i].q);
+            let d = qlog(qmul(now, qconj(was)));
+            let speed = length(d) / h;
+            if !(speed > knee && speed.is_finite() && most > knee) {
+                continue;
+            }
+            let allowed = knee + (most - knee) * ((speed - knee) / (most - knee)).tanh();
+            let joint = self.joint(i);
+            let rel = qmul(qexp(scale(d, allowed / speed)), was);
+            let q = qnorm(qmul(self.state[p].q, rel));
+            self.state[i].q = q;
+            self.state[i].com = add(joint, qrot(q, scale(self.segments[i].seg, 0.5)));
         }
     }
 
@@ -703,19 +772,7 @@ impl Body {
     /// stopping the motion they damp); no joint turning against its parent faster than its role
     /// allows ([`SPIN_ROOM`] times its spin).
     fn damp(&mut self, targets: &Targets, gains: &Gains, h: f32) {
-        for i in 0..self.state.len() {
-            let Some(p) = self.segments[i].parent else {
-                continue;
-            };
-            let most = self.segments[i].role.spin() * tuning::get().spin_room;
-            let rel = sub(self.state[i].w, self.state[p].w);
-            let speed = length(rel);
-            if speed > most && speed.is_finite() {
-                // Taken off the child (the lighter end): the parent's motion is not touched.
-                let off = scale(rel, 1.0 - most / speed);
-                self.state[i].w = sub(self.state[i].w, off);
-            }
-        }
+        self.limit_spin();
         for i in 0..self.state.len() {
             let c = gains.joints[i].1;
             let Some(p) = self.segments[i].parent else {
