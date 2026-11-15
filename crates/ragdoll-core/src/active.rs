@@ -56,6 +56,11 @@ pub const SPIN_ROOM: f32 = 1.3;
 /// An arm's joint at most its role's spin (the human arms of 2026-11-15: 4 to 6 rad/s), the speed
 /// saturating smoothly from [`SPIN_KNEE`] of it.
 pub const ARM_SPIN_ROOM: f32 = 1.1;
+/// A bone's speed (m/s) and spin (rad/s) at most, and how far from the pelvis any bone may be (m)
+/// before the body is not believed ([`Body::check`]).
+pub const MAX_SPEED: f32 = 12.0;
+pub const MAX_SPIN: f32 = 30.0;
+pub const MAX_SPREAD: f32 = 2.5;
 pub const SPIN_KNEE: f32 = 0.6;
 
 /// Each Bip01 bone's share of the body's mass (`crate::flinch::BONES`' order; segment fractions).
@@ -465,7 +470,9 @@ impl Body {
         if dt <= 0.0 || targets.rot.len() != self.state.len() {
             return;
         }
-        let n = t.substeps.round().clamp(1.0, 32.0) as usize;
+        // Small steps no longer than `1 / (60 x SUBSTEPS)` s however long the frame (a slow frame,
+        // a hitch: 50 ms in 8 steps of 6 ms blew an armed body up in the lab).
+        let n = ((dt * 60.0 * t.substeps).ceil()).clamp(1.0, 64.0) as usize;
         let h = dt / n as f32;
         let fade = (-dt / t.muscle_back.max(0.02)).exp();
         let gains = self.gains(targets, strength);
@@ -914,6 +921,44 @@ impl Body {
         (0..self.state.len())
             .map(|i| (self.state[i].q, self.joint(i)))
             .collect()
+    }
+
+    /// The body checked after a step: every bone's motion finite, held to [`MAX_SPEED`] and
+    /// [`MAX_SPIN`], every bone within [`MAX_SPREAD`] of the pelvis. `Err` says what went wrong
+    /// (the caller drops the body back to the animation).
+    pub fn check(&mut self) -> Result<(), String> {
+        let pelvis = self
+            .state
+            .get(self.pelvis)
+            .map(|s| s.com)
+            .unwrap_or([0.0; 3]);
+        for (i, s) in self.state.iter_mut().enumerate() {
+            let finite = s
+                .com
+                .iter()
+                .chain(s.v.iter())
+                .chain(s.w.iter())
+                .chain(s.q.iter())
+                .all(|x| x.is_finite());
+            if !finite {
+                return Err(format!("bone {i}'s motion is not finite"));
+            }
+            if length(sub(s.com, pelvis)) > MAX_SPREAD {
+                return Err(format!(
+                    "bone {i} is {:.2} m from the pelvis",
+                    length(sub(s.com, pelvis))
+                ));
+            }
+            let v = length(s.v);
+            if v > MAX_SPEED {
+                s.v = scale(s.v, MAX_SPEED / v);
+            }
+            let w = length(s.w);
+            if w > MAX_SPIN {
+                s.w = scale(s.w, MAX_SPIN / w);
+            }
+        }
+        Ok(())
     }
 
     /// The fastest the body's centre of mass moves (m/s).

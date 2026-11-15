@@ -80,10 +80,10 @@ use engine::prelude::*;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use ragdoll_core::active;
 /// The pure parts (the roles, the springs, the spread, the vector helpers, stage 3's timings) live
 /// in `crates/ragdoll-core`, shared with `tools/ragdoll-lab`.
 pub use ragdoll_core::flinch::*;
+use ragdoll_core::{active, pose};
 
 // --- The rig and the flinching actors. -----------------------------------------------------------
 
@@ -154,7 +154,7 @@ pub struct Fall {
     pub windmill: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Bone {
     pub node: u32,
     pub role: Role,
@@ -168,6 +168,11 @@ pub struct Bone {
     /// given ([`Follow`]).
     pub parent: Option<usize>,
     pub follow: Follow,
+    /// The nodes between its rig parent and it (top down; none of them written), and (without a
+    /// rig parent) the node it hangs from: the animated world under it is worked out from them
+    /// (`ragdoll_core::pose`), never read back from what the layer wrote.
+    pub between: Vec<u32>,
+    pub above: u32,
 }
 
 static RIGS: Mutex<Vec<Rig>> = Mutex::new(Vec::new());
@@ -190,6 +195,9 @@ const LOCAL_ROTATION: u32 = 0x34;
 const LOCAL_TRANSLATION: u32 = 0x58;
 const WORLD_ROTATION: u32 = 0x68;
 const WORLD_TRANSLATION: u32 = 0x8c;
+/// `NiAVObject`'s local and world scale.
+const LOCAL_SCALE: u32 = 0x64;
+const WORLD_SCALE: u32 = 0x98;
 /// `NiUpdateData`'s constructor (time, flags) and `NiAVObject::Update` (as `KnockExplosion` updates
 /// a body).
 const UPDATE_DATA: u32 = 0x0043_d410;
@@ -268,6 +276,8 @@ fn find_bones(e: &mut Engine, root: u32) -> Vec<Bone> {
                     written: None,
                     parent: None,
                     follow: Follow::REST,
+                    between: Vec::new(),
+                    above: 0,
                 });
             }
         }
@@ -284,15 +294,22 @@ fn find_bones(e: &mut Engine, root: u32) -> Vec<Bone> {
     // Each bone's rig parent: the nearest node above it that is a rig bone.
     let nodes: Vec<u32> = found.iter().map(|b| b.node).collect();
     for bone in &mut found {
-        let mut at = e.mem.u32(bone.node + PARENT);
+        bone.above = e.mem.u32(bone.node + PARENT);
+        let mut at = bone.above;
         let mut up = 0;
+        let mut between = Vec::new();
         while at != 0 && up < 32 {
             if let Some(i) = nodes.iter().position(|&n| n == at) {
                 bone.parent = Some(i);
                 break;
             }
+            between.push(at);
             at = e.mem.u32(at + PARENT);
             up += 1;
+        }
+        if bone.parent.is_some() {
+            between.reverse();
+            bone.between = between;
         }
     }
     found
@@ -586,30 +603,41 @@ pub fn apply(e: &mut Engine) {
         // The ragdoll controller pass writes this actor's bones (an armed or attacking actor):
         // the offsets go on there ([`before_ragdoll_anim`]); here they are only worked out.
         let wrapped = wrapped_recently(rig.actor);
-        // The pose under the offset: what the animation wrote, or (when it did not write the bone
-        // again) the pose the last offset was written over.
+        // The pose under the offset: what the animation wrote, or (while the bone still holds
+        // what was written, also after the game's ragdoll-controller pass wrote it back a hair
+        // off) the pose the last write was over (`ragdoll_core::pose::base_of`).
         for bone in &mut rig.bones {
             let now = (
                 read9(e, bone.node + LOCAL_ROTATION),
                 read3(e, bone.node + LOCAL_TRANSLATION),
             );
-            let base = match (bone.pose, bone.written) {
-                (Some(pose), Some(w)) if w == now => pose,
-                _ => now,
-            };
-            bone.pose = Some(base);
+            bone.pose = Some(pose::base_of(now, bone.pose, bone.written));
         }
-        // The animated pose in the world: the bones' as the game's update left them.
-        let anim: Vec<(M3, V3)> = rig
-            .bones
-            .iter()
-            .map(|b| {
-                (
-                    read9(e, b.node + WORLD_ROTATION),
-                    read3(e, b.node + WORLD_TRANSLATION),
-                )
-            })
-            .collect();
+        // The animated pose in the world, worked out from the animation's own locals down from
+        // the actor's root (never read back from the bones, which may hold the last write), and
+        // each bone's parent node's animated world.
+        let n = rig.bones.len();
+        let mut world: Vec<pose::Xf> = Vec::with_capacity(n);
+        let mut parents: Vec<pose::Xf> = Vec::with_capacity(n);
+        for b in 0..n {
+            let bone = &rig.bones[b];
+            let mut up = match bone.parent {
+                Some(p) => world[p],
+                None => read_world(e, bone.above),
+            };
+            for &node in &bone.between {
+                up = up.then(&read_local(e, node));
+            }
+            let base = bone.pose.unwrap_or_default();
+            let own = pose::Xf {
+                r: base.0,
+                t: base.1,
+                s: local_scale(e, bone.node),
+            };
+            parents.push(up);
+            world.push(up.then(&own));
+        }
+        let anim: Vec<(M3, V3)> = world.iter().map(|w| (w.r, w.t)).collect();
         let Some(pi) = bone_of(&rig, Role::Pelvis, 2) else {
             continue;
         };
@@ -719,6 +747,7 @@ pub fn apply(e: &mut Engine) {
         let m = 1.0 / UNITS_PER_METRE;
         let mut shown: Vec<M3> = target.clone();
         let mut pelvis_offset = rig.shift;
+        let mut failed: Option<String> = None;
         if let Some(body) = rig.body.as_mut() {
             let targets = active::Targets {
                 rot: target.iter().map(active::qfrom_m).collect(),
@@ -741,6 +770,9 @@ pub fn apply(e: &mut Engine) {
                 dt,
                 active::strength(rig.hit_at.elapsed().as_secs_f32()),
             );
+            if let Err(why) = body.check() {
+                failed = Some(format!("the body: {why}"));
+            }
             let w = active::weight(since);
             let pose = body.pose();
             for b in 0..n {
@@ -753,48 +785,81 @@ pub fn apply(e: &mut Engine) {
                 rig.body = None;
             }
         }
-        let resting = rig.body.is_none() && !busy;
         // Each bone's world offset over its animation: its parent's shown and animated rotations
-        // taken back, its own shown one on (`A(p) S(p)^T S(b) A(b)^T`).
+        // taken back, its own shown one on (`A(p) S(p)^T S(b) A(b)^T`), made orthonormal.
         let offsets: Vec<M3> = (0..n)
             .map(|b| {
                 let own = mul(&shown[b], &transpose(&anim[b].0));
-                match rig.bones[b].parent {
+                pose::ortho(&match rig.bones[b].parent {
                     Some(p) => mul(&mul(&anim[p].0, &transpose(&shown[p])), &own),
                     None => own,
+                })
+            })
+            .collect();
+        // Anything not believable (a body gone wrong, an offset that is no rotation, a pelvis
+        // pushed far, an animated pose not where the actor is): the body goes and the animation
+        // has the bones again, said once.
+        if failed.is_none() {
+            let joints: Vec<V3> = anim.iter().map(|a| a.1).collect();
+            let at = read3(e, root + WORLD_TRANSLATION);
+            if let Err(why) = pose::sane(&offsets, pelvis_offset, &joints, at) {
+                failed = Some(why);
+            }
+        }
+        if let Some(why) = failed {
+            note(format!(
+                "{}: the active ragdoll is dropped back to the animation: {why}",
+                describe(e, rig.actor)
+            ));
+            rig.body = None;
+            rig.balance = None;
+            rig.brace = None;
+            rig.fall = None;
+            rig.shift = [0.0; 3];
+            rig.pending.clear();
+            // Its bones put back to the animation's pose, then it goes.
+            POSES
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retain(|p| p.0 != rig.actor);
+            for bone in &mut rig.bones {
+                if let Some((rot, t)) = bone.pose {
+                    write9(e, bone.node + LOCAL_ROTATION, &rot);
+                    write3(e, bone.node + LOCAL_TRANSLATION, t);
+                }
+            }
+            update(e, root);
+            continue;
+        }
+        let resting = rig.body.is_none() && !busy;
+        // What each bone is written with: the local its shown pose needs (absolute, the same
+        // however often it is written; `ragdoll_core::pose::local_for`).
+        let locals: Vec<(M3, V3)> = (0..n)
+            .map(|b| {
+                let bone = &rig.bones[b];
+                let base = bone.pose.unwrap_or_default();
+                if resting {
+                    base
+                } else {
+                    let shift = (bone.role == Role::Pelvis).then_some(pelvis_offset);
+                    pose::local_for(&parents[b], base, &offsets[b], shift)
                 }
             })
             .collect();
-        remember_pose(&rig, &offsets, pelvis_offset, resting);
+        remember_pose(&rig, &locals, resting);
         if wrapped {
-            // Written by the ragdoll controller pass's wrapper this frame (or the next).
+            // Written by the ragdoll controller pass's wrapper this frame (or the next): the same
+            // locals, so nothing is written twice over itself here.
+            for (bone, l) in rig.bones.iter_mut().zip(&locals) {
+                bone.written = Some(*l);
+            }
             if resting && rig.since.elapsed().as_secs_f32() > 0.2 {
                 continue;
             }
             keep.push(rig);
             continue;
         }
-        for (index, bone) in rig.bones.iter_mut().enumerate() {
-            let (pose_rot, pose_t) = bone.pose.unwrap_or_default();
-            let (rot, t) = if resting {
-                (pose_rot, pose_t)
-            } else {
-                let parent = e.mem.u32(bone.node + PARENT);
-                let p = if parent == 0 {
-                    IDENTITY
-                } else {
-                    read9(e, parent + WORLD_ROTATION)
-                };
-                // The world-space offset carried into the bone's frame: P^T R P L.
-                let r = offsets[index];
-                let rot = mul(&mul(&mul(&transpose(&p), &r), &p), &pose_rot);
-                let t = if bone.role == Role::Pelvis {
-                    add(pose_t, apply_m(&transpose(&p), pelvis_offset))
-                } else {
-                    pose_t
-                };
-                (rot, t)
-            };
+        for (bone, &(rot, t)) in rig.bones.iter_mut().zip(&locals) {
             if rot.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite()) {
                 write9(e, bone.node + LOCAL_ROTATION, &rot);
                 write3(e, bone.node + LOCAL_TRANSLATION, t);
@@ -935,20 +1000,13 @@ pub fn body_velocities(actor: u32) -> Vec<(u32, V3)> {
 
 // --- The ragdoll controller pass (armed and attacking actors; module documentation). ----------
 
-/// What the pose layer worked out for an actor at its last frame: its 3D, each rig bone's node,
-/// world offset and whether it is the pelvis, the pelvis's world offset, whether it rests; and
-/// what the last write over the pass left (per node: the pose under it and what was written).
+/// What the pose layer worked out for an actor at its last frame: its 3D, and each rig bone's node
+/// with the local it is to hold (absolute, `ragdoll_core::pose::local_for`).
 #[derive(Clone, Debug, Default)]
 struct Pose {
     root: u32,
-    bones: Vec<(u32, M3, bool)>,
-    pelvis: V3,
-    resting: bool,
-    written: Vec<Written>,
+    locals: Vec<(u32, M3, V3)>,
 }
-
-/// A node, the pose under the wrapper's write and what it wrote.
-type Written = (u32, (M3, V3), (M3, V3));
 
 static POSES: Mutex<Vec<(u32, Pose)>> = Mutex::new(Vec::new());
 /// When the pass's wrapper last wrote each actor's bones.
@@ -956,32 +1014,22 @@ static WRAPPED: Mutex<Vec<(u32, Instant)>> = Mutex::new(Vec::new());
 /// The wrapper's writes count for this long (the pass runs every frame while it is on).
 const WRAP_HOLDS: f32 = 0.1;
 
-fn remember_pose(rig: &Rig, offsets: &[M3], pelvis: V3, resting: bool) {
+fn remember_pose(rig: &Rig, locals: &[(M3, V3)], resting: bool) {
     let mut poses = POSES.lock().unwrap_or_else(|p| p.into_inner());
-    let old = poses
-        .iter()
-        .position(|p| p.0 == rig.actor)
-        .map(|i| poses.remove(i).1);
+    poses.retain(|p| p.0 != rig.actor);
     if resting {
         return;
     }
-    let written = old
-        .filter(|o| o.root == rig.root)
-        .map(|o| o.written)
-        .unwrap_or_default();
     poses.push((
         rig.actor,
         Pose {
             root: rig.root,
-            bones: rig
+            locals: rig
                 .bones
                 .iter()
-                .zip(offsets)
-                .map(|(b, r)| (b.node, *r, b.role == Role::Pelvis))
+                .zip(locals)
+                .map(|(b, l)| (b.node, l.0, l.1))
                 .collect(),
-            pelvis,
-            resting,
-            written,
         },
     ));
 }
@@ -992,18 +1040,22 @@ fn wrapped_recently(actor: u32) -> bool {
     list.iter().any(|w| w.0 == actor)
 }
 
-/// Over `00888970` (the ragdoll controller pass of `actor`), before the game's own: the pose
-/// layer's offsets written onto the bones as they are now, so the pass reads them, keeps the
-/// hands on the weapon through them and writes them back (module documentation).
+/// Over `00888970` (the ragdoll controller pass of `actor`), before the game's own: the locals the
+/// pose layer worked out written onto the bones, so the pass reads them, keeps the hands on the
+/// weapon through them and writes them back (module documentation). They are absolute: written
+/// however often (the pass runs from more than one place), they do not add up (f36ddda's
+/// composed them over what the bones held, which after the pass already held them). No update of
+/// the scene graph here: this runs on the AI thread, and the pass and the game's own update bring
+/// the world transforms up.
 pub fn before_ragdoll_anim(e: &mut Engine, actor: u32) {
     let pose = {
         let poses = POSES.lock().unwrap_or_else(|p| p.into_inner());
         poses.iter().find(|p| p.0 == actor).map(|p| p.1.clone())
     };
-    let Some(mut pose) = pose else {
+    let Some(pose) = pose else {
         return;
     };
-    if pose.resting || pose.root == 0 || e.call(ACTOR_3D, &args![actor]).u32() != pose.root {
+    if pose.root == 0 || e.call(ACTOR_3D, &args![actor]).u32() != pose.root {
         return;
     }
     let process = e.mem.u32(actor + PROCESS);
@@ -1013,42 +1065,10 @@ pub fn before_ragdoll_anim(e: &mut Engine, actor: u32) {
     {
         return; // its ragdoll (or its death) owns the bones
     }
-    let mut written = Vec::with_capacity(pose.bones.len());
-    for &(node, r, pelvis) in &pose.bones {
-        let now = (
-            read9(e, node + LOCAL_ROTATION),
-            read3(e, node + LOCAL_TRANSLATION),
-        );
-        // A bone nothing wrote again since this wrote it (a paused frame) keeps its pose under.
-        let base = pose
-            .written
-            .iter()
-            .find(|w| w.0 == node && w.2 == now)
-            .map_or(now, |w| w.1);
-        let parent = e.mem.u32(node + PARENT);
-        let p = if parent == 0 {
-            IDENTITY
-        } else {
-            read9(e, parent + WORLD_ROTATION)
-        };
-        let rot = mul(&mul(&mul(&transpose(&p), &r), &p), &base.0);
-        let t = if pelvis {
-            add(base.1, apply_m(&transpose(&p), pose.pelvis))
-        } else {
-            base.1
-        };
-        if rot.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite()) {
+    for &(node, rot, t) in &pose.locals {
+        if pose::is_rotation(&rot, 1e-3) && t.iter().all(|x| x.is_finite()) {
             write9(e, node + LOCAL_ROTATION, &rot);
             write3(e, node + LOCAL_TRANSLATION, t);
-            written.push((node, base, (rot, t)));
-        }
-    }
-    update(e, pose.root);
-    pose.written = written;
-    {
-        let mut poses = POSES.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(p) = poses.iter_mut().find(|p| p.0 == actor) {
-            p.1.written = pose.written;
         }
     }
     let mut list = WRAPPED.lock().unwrap_or_else(|p| p.into_inner());
@@ -1059,9 +1079,40 @@ pub fn before_ragdoll_anim(e: &mut Engine, actor: u32) {
     if first {
         note(format!(
             "{}: its bones go through the game's ragdoll controller pass (grab or foot IK: an \
-             armed or attacking actor): the flinch is written there",
+             armed or attacking actor): the pose is written there",
             describe(e, actor)
         ));
+    }
+}
+
+/// A node's local transform (rotation, translation, scale).
+fn read_local(e: &Engine, node: u32) -> pose::Xf {
+    pose::Xf {
+        r: pose::ortho(&read9(e, node + LOCAL_ROTATION)),
+        t: read3(e, node + LOCAL_TRANSLATION),
+        s: local_scale(e, node),
+    }
+}
+
+/// A node's world transform (none: the identity).
+fn read_world(e: &Engine, node: u32) -> pose::Xf {
+    if node == 0 {
+        return pose::Xf::IDENTITY;
+    }
+    let s = e.mem.f32(node + WORLD_SCALE);
+    pose::Xf {
+        r: pose::ortho(&read9(e, node + WORLD_ROTATION)),
+        t: read3(e, node + WORLD_TRANSLATION),
+        s: if s.is_finite() && s > 0.0 { s } else { 1.0 },
+    }
+}
+
+fn local_scale(e: &Engine, node: u32) -> f32 {
+    let s = e.mem.f32(node + LOCAL_SCALE);
+    if s.is_finite() && s > 0.0 {
+        s
+    } else {
+        1.0
     }
 }
 

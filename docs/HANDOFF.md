@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (the active ragdoll's stretching and freeze)
+
+- **Now (`ragdoll_core::balance::Stepping::follow` implicit; `ragdoll_core::pose`; `active::Body::check`, adaptive substeps; `active_ragdoll::apply` base remembered with tolerance, animated world from locals, absolute writes, sanity and drop; `before_ragdoll_anim` writes the stored locals, no update):** the f36ddda blow-up reproduced in the lab at 50 ms frames and fixed; the write path made idempotent. Not run in game.
+- **Patrick:** an armed Powder Ganger stuttered, stretched and grew, then the game froze; fix so it cannot happen (orthonormal rotations, no scale, clamps, non-finite checks with a logged drop to the animation, lab tests for the frame-time range, repeated hits mid-step and the controller-pass write path).
+
 ### Claude, 2026-11-15 (merge #570-#596; arm speed and the wall brace)
 
 - **Now:** slaterain main through e32ec7f merged (cefcabeb; unions only; the drawing-thread files are upstream's). Then `ragdoll_core::active` `limit_spin`/`limit_turns` (arms held to 1.1x their role's speed, smoothly), the brace's `brace_target`, `BRACE_OUT`/`BRACE_LOW`/`BRACE_FIRM`/`BRACE_WORLD`, quintic brace weight, slower reach (0.7 s); lab scenarios all assert `armspin<=6.5`. Not run in game.

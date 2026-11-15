@@ -10,6 +10,8 @@
 //!   stepping state (the host's `crate::balance`).
 //! - [`knock`]: the knockdowns' bodies, momentum transfer, topple speed, impact stacking and launch
 //!   (the host's `crate::knockdown` and `crate::hit_force`).
+//! - [`pose`]: the pose layer's writes made so they cannot run away (absolute locals over the
+//!   animation's own, rotations kept orthonormal, sanity checks).
 //! - [`rounds`]: the calibres, ammo loads and the share of a round's momentum left in a body (the
 //!   host's `crate::ballistics`).
 //! - [`tuning`]: every constant above (and the game's ini settings that feed them) by name, with a
@@ -20,6 +22,7 @@ pub mod active;
 pub mod balance;
 pub mod flinch;
 pub mod knock;
+pub mod pose;
 pub mod rounds;
 pub mod tuning;
 

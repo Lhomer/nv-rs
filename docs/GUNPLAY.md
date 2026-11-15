@@ -443,6 +443,34 @@ Patrick, 2026-11-15. Rides on Hit Reactions and Balance (either on).
   falls`, `the steps could not catch it: falls`, `into its ragdoll after <t> s of going over`,
   `braces for the ground with its arms`.
 
+### Active ragdoll: the stretching and the freeze (Patrick, 2026-11-15, f36ddda)
+
+An armed Powder Ganger in the Test Range flinched, took its catch step, then stuttered,
+stretched and grew, and the game froze. Two causes, both fixed:
+- **The pelvis's follow ran away.** Stage 2's `Stepping::follow` (the pelvis carried over the
+  feet) integrated a 6 Hz critically damped spring explicitly in two halves of the frame: at a
+  slow frame (50 ms: a hitch, a slow machine) it diverged right after a foot landed and the shift
+  jumped by the actor's move; the body was pulled after it, growing every frame. It is now
+  integrated implicitly in steps of at most 4 ms, stable at any frame time; the lab reproduced
+  the blow-up (armed, two .357s, a .44, one catch step, 50 ms frames) and now passes it.
+- **The writes could add up.** A bone the game's ragdoll-controller pass wrote back a hair off
+  was taken for fresh animation and got the offset again, and the animated world pose was read
+  back from bones that held the last write. Now the base is remembered while a bone still holds
+  what was written (within tolerances), the animated world pose is worked out from the
+  animation's own locals, every rotation is made orthonormal (no scale ever written), and what
+  is written is the absolute local the shown pose needs (`ragdoll_core::pose`), so the pass's
+  wrapper writing it again changes nothing (and it no longer updates the scene graph on the AI
+  thread).
+- **Guards:** the body's steps are never longer than 2 ms whatever the frame; every frame the
+  body is checked (finite, speeds held to 12 m/s and 30 rad/s, no bone 2.5 m from the pelvis)
+  and the pose (offsets rotations, the pelvis moved at most 80 units, the animated joints where
+  the actor is); anything wrong drops the body back to the animation, logged `the active ragdoll
+  is dropped back to the animation: <why>`.
+- **Lab tests:** an armed body hit five times while it steps at 240, 144, 60, 30 and 20 frames a
+  second stays believable and returns to its animation; the game's write path over the lab's
+  poses (the pass writing back three times a frame, a hair off, the animation skipping frames)
+  makes exactly the shown pose and never adds up.
+
 ### Active ragdoll: arm speed and the wall brace (f36ddda lab review, 2026-11-15)
 
 - **Standing arm speed is limited too** (it was only in the ragdoll: a .50 reached 13.7 rad/s,

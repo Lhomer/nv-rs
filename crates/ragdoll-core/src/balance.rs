@@ -477,17 +477,35 @@ impl Stepping {
     }
 
     /// The pelvis's offset moved toward `target` (a critically damped spring, 6 Hz) over `dt`.
+    ///
+    /// Integrated implicitly (backward Euler, stable at any frame time): the explicit halves it had
+    /// ran away at a 50 ms frame (a hitch, a slow machine) right after a foot landed and the
+    /// shift jumped by the actor's move (Patrick, 2026-11-15: an armed Powder Ganger stretched and
+    /// froze the game).
     pub fn follow(&mut self, target: V3, dt: f32) {
         let w = std::f32::consts::TAU * 6.0;
         let dt = dt.clamp(0.0, 0.05);
-        for _ in 0..2 {
-            let h = dt / 2.0;
-            let acc = sub(
-                times(sub(target, self.shift), w * w),
-                times(self.shift_v, 2.0 * w),
+        // x' = v, v' = w^2 (target - x) - 2 w v, backward Euler over small steps.
+        let n = (dt / 0.004).ceil().max(1.0) as usize;
+        let h = dt / n as f32;
+        let (k, c) = (w * w, 2.0 * w);
+        let den = 1.0 + c * h + k * h * h;
+        for _ in 0..n {
+            let v = times(
+                add(self.shift_v, times(sub(target, self.shift), k * h)),
+                1.0 / den,
             );
-            self.shift_v = add(self.shift_v, times(acc, h));
-            self.shift = add(self.shift, times(self.shift_v, h));
+            self.shift_v = v;
+            self.shift = add(self.shift, times(v, h));
+        }
+        if !self
+            .shift
+            .iter()
+            .chain(self.shift_v.iter())
+            .all(|x| x.is_finite())
+        {
+            self.shift = [0.0; 3];
+            self.shift_v = [0.0; 3];
         }
     }
 }
@@ -615,5 +633,34 @@ mod tests {
         l.left_leg = false;
         l.right_arm = false;
         assert!(!l.legs() && l.arm(0) && !l.arm(1));
+    }
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+
+    /// The pelvis's follow settles at every frame time the game may run at (it ran away at 50 ms).
+    #[test]
+    fn the_follow_is_stable_at_any_frame_time() {
+        for dt in [1.0 / 240.0, 1.0 / 60.0, 1.0 / 30.0, 0.05, 0.2] {
+            let mut s = Stepping::new(
+                [0.0, 1.0, 0.0],
+                1.0,
+                0,
+                [[-8.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+                vec![],
+                1.0,
+                [0.0; 3],
+                Outcome::Caught,
+                0.0,
+            );
+            s.shift = [0.0, 30.0, 0.0];
+            for _ in 0..((2.0 / dt) as usize) {
+                s.follow([0.0; 3], dt);
+                assert!(length(s.shift) <= 31.0, "dt {dt}: {:?}", s.shift);
+            }
+            assert!(length(s.shift) < 0.5, "dt {dt}: settled {:?}", s.shift);
+        }
     }
 }

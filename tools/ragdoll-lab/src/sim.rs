@@ -94,6 +94,8 @@ pub struct Rig {
     pub hit_at: f64,
     /// Where the feet stand (the pins' targets between steps), the steps' last targets.
     pub planted: Option<([V3; 2], f64)>,
+    /// Why the body was dropped back to the animation (the game's `active_ragdoll` does the same).
+    pub failed: Option<String>,
     pub held: Vec<Option<M3>>,
 }
 
@@ -115,6 +117,7 @@ impl Rig {
             body: None,
             hit_at: 0.0,
             planted: None,
+            failed: None,
             held: Vec::new(),
         }
     }
@@ -178,6 +181,8 @@ pub struct Stats {
     /// frame (m/s) and the biggest jerk (m/s3).
     pub velocity_jump: f32,
     pub jerk: f32,
+    /// How often the body was dropped back to the animation as not believable.
+    pub dropped: u32,
 }
 
 /// What a ray from a point along a direction hits on the body: the bone and the point.
@@ -196,6 +201,8 @@ pub struct Sim {
     /// The body holds a weapon (aims it) and is attacking (an attack a big hit interrupts).
     pub armed: bool,
     pub attacking: bool,
+    /// The standing body's frame time (s): [`STEP`], or the game's range in the tests.
+    pub dt: f32,
     pub t: f64,
     pub pos: V3,
     pub rig: Rig,
@@ -232,6 +239,7 @@ impl Sim {
             range: 10.0,
             armed: false,
             attacking: false,
+            dt: STEP,
             t: 0.0,
             pos: [0.0; 3],
             rig: Rig::new(Limbs::WHOLE),
@@ -370,6 +378,10 @@ impl Sim {
     fn rest_local(&self, b: usize) -> V3 {
         let parent = mq::PARENT[b].map_or([0.0; 3], |p| mq::JOINT[p]);
         scale(sub(mq::JOINT[b], parent), self.scale)
+    }
+
+    fn state_is_standing(&self) -> bool {
+        matches!(self.state, State::Standing)
     }
 
     pub fn standing(&self) -> bool {
@@ -1007,7 +1019,13 @@ impl Sim {
     /// One step of the simulation.
     pub fn step(&mut self) {
         tuning::set(self.tune);
-        let dt = STEP;
+        // The standing body's frame time: the game's varies (its frame rate); the ragdoll's
+        // world keeps [`STEP`].
+        let dt = if self.state_is_standing() {
+            self.dt
+        } else {
+            STEP
+        };
         self.t += dt as f64;
         self.posed_before = self.posed;
         match self.state {
@@ -1133,10 +1151,25 @@ impl Sim {
                     }
                 }
                 body.step(&targets, dt, active::strength(since_hit));
+                if let Err(why) = body.check() {
+                    self.rig.failed = Some(why);
+                }
                 active::weight((self.t - self.rig.since) as f32)
             }
             None => 0.0,
         };
+        // A body gone wrong is dropped back to the animation, said once (the game's too).
+        if let Some(why) = self.rig.failed.take() {
+            self.note(format!(
+                "the active ragdoll is dropped back to the animation: {why}"
+            ));
+            self.stats.dropped += 1;
+            self.rig.body = None;
+            self.rig.balance = None;
+            self.rig.brace = None;
+            self.rig.fall = None;
+            self.rig.shift = [0.0; 3];
+        }
         // The shown pose: the targets and the body's, blended by the body's weight (eased).
         let mut rots = target;
         let mut pelvis = pelvis_target;

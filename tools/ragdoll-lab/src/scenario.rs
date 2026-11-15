@@ -653,3 +653,226 @@ mod tests {
         assert!(failed.is_empty(), "{failed:#?}");
     }
 }
+
+/// The game's frame times, repeated hits on an armed body while it steps, and the game's write
+/// path through its ragdoll-controller pass (Patrick, 2026-11-15: a Powder Ganger stretched, grew
+/// and froze the game in f36ddda).
+#[cfg(test)]
+#[allow(clippy::needless_range_loop)]
+mod robustness {
+    use super::*;
+    use crate::mannequin::{self as mq, COUNT, PARENT};
+    use ragdoll_core::active;
+    use ragdoll_core::pose::{self, Xf};
+
+    /// Every bone finite and where a body can be: within 2.5 m of the pelvis, the pelvis within
+    /// 3 m of the actor's reference.
+    fn believable(sim: &Sim) -> Result<(), String> {
+        let pelvis = sim.posed[mq::PELVIS].1;
+        for (b, (r, p)) in sim.posed.iter().enumerate() {
+            if !(r.iter().chain(p.iter()).all(|x| x.is_finite())) {
+                return Err(format!("bone {b} not finite"));
+            }
+            if !pose::is_rotation(r, 1e-3) {
+                return Err(format!("bone {b}'s rotation is no rotation"));
+            }
+            if length(sub(*p, pelvis)) > 2.5 * UNITS_PER_METRE {
+                return Err(format!("bone {b} {:?} far from the pelvis {:?}", p, pelvis));
+            }
+        }
+        if sim.standing() && length(sub(pelvis, sim.pos)) > 3.0 * UNITS_PER_METRE {
+            return Err("the pelvis left the actor".into());
+        }
+        Ok(())
+    }
+
+    /// An armed Powder Ganger's log: a .357 round, another 0.3 s later while it steps, more while
+    /// it is still reacting, at every frame time the game may run at: always believable, never
+    /// dropped, and back in its animation at the end.
+    #[test]
+    fn armed_repeated_hits_mid_step_at_the_games_frame_times() {
+        for dt in [1.0 / 240.0, 1.0 / 144.0, 1.0 / 60.0, 1.0 / 30.0, 0.05] {
+            let mut sim = Sim::new(GroundKind::Flat);
+            let spec = Spec::parse(
+                "armed=1&hits=357@lupperarm,357@chest+0.3,44@chest+0.25,9mm@head+0.1,357@rthigh+0.4",
+            )
+            .unwrap();
+            prepare(&mut sim, &spec, Tuning::GAME).unwrap();
+            sim.dt = dt;
+            let mut next = 0;
+            let mut wait = 0.3f32;
+            let mut frames = 0;
+            while frames < (8.0 / dt) as usize {
+                if next < spec.hits.len() {
+                    wait -= dt;
+                    if wait <= 0.0 {
+                        fire(&mut sim, &spec.hits[next]);
+                        next += 1;
+                        wait = spec.hits.get(next).map_or(0.0, |h| h.delay);
+                    }
+                }
+                sim.step();
+                frames += 1;
+                if let Err(why) = believable(&sim) {
+                    panic!("dt {dt}: frame {frames}: {why}");
+                }
+            }
+            assert_eq!(sim.stats.dropped, 0, "dt {dt}: dropped");
+            assert!(sim.stats.hits >= 5, "dt {dt}: {} hits", sim.stats.hits);
+            assert!(
+                sim.recovered() || !sim.standing(),
+                "dt {dt}: still reacting"
+            );
+            if sim.standing() {
+                let anim = sim.anim();
+                for b in 0..COUNT {
+                    assert!(
+                        length(sub(sim.posed[b].1, anim[b].1)) < 1.0,
+                        "dt {dt}: bone {b} not back in its animation"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The game's write path, on the lab's shown poses: each frame the bones' locals are worked
+    /// out over the animation's (`pose::local_for`), written, then the game's pass reads them and
+    /// writes them back a hair off, three times a frame, and some frames the animation does not
+    /// write at all. The world pose the written locals make is the shown pose, every frame, and
+    /// nothing adds up.
+    #[test]
+    fn the_controller_pass_write_path() {
+        let mut sim = Sim::new(GroundKind::Flat);
+        let spec = Spec::parse("armed=1&hits=357@lupperarm,44@chest+0.3").unwrap();
+        prepare(&mut sim, &spec, Tuning::GAME).unwrap();
+        // The bones' locals in the "game": start as the animation's.
+        let anim_locals = |sim: &Sim| -> Vec<(M3, V3)> {
+            let anim = sim.anim();
+            (0..COUNT)
+                .map(|b| match PARENT[b] {
+                    Some(p) => (
+                        mul(&transpose(&anim[p].0), &anim[b].0),
+                        apply_m(&transpose(&anim[p].0), sub(anim[b].1, anim[p].1)),
+                    ),
+                    None => (anim[b].0, sub(anim[b].1, sim.pos)),
+                })
+                .collect()
+        };
+        let mut locals = anim_locals(&sim);
+        let mut bases: Vec<Option<(M3, V3)>> = vec![None; COUNT];
+        let mut written: Vec<Option<(M3, V3)>> = vec![None; COUNT];
+        let mut next = 0;
+        let mut wait = 0.3f32;
+        let mut noise = 0u32;
+        for frame in 0..600 {
+            if next < spec.hits.len() {
+                wait -= STEP;
+                if wait <= 0.0 {
+                    fire(&mut sim, &spec.hits[next]);
+                    next += 1;
+                    wait = spec.hits.get(next).map_or(0.0, |h| h.delay);
+                }
+            }
+            sim.step();
+            // The animation writes the locals afresh on most frames, not on every one.
+            if frame % 7 != 3 {
+                locals = anim_locals(&sim);
+            }
+            // The layer: each bone's base, the animated world from the bases, the locals.
+            let mut world: Vec<Xf> = Vec::with_capacity(COUNT);
+            let mut parents: Vec<Xf> = Vec::with_capacity(COUNT);
+            for b in 0..COUNT {
+                bases[b] = Some(pose::base_of(locals[b], bases[b], written[b]));
+                let up = match PARENT[b] {
+                    Some(p) => world[p],
+                    None => Xf {
+                        r: IDENTITY,
+                        t: sim.pos,
+                        s: 1.0,
+                    },
+                };
+                let base = bases[b].unwrap();
+                parents.push(up);
+                world.push(up.then(&Xf {
+                    r: base.0,
+                    t: base.1,
+                    s: 1.0,
+                }));
+            }
+            let anim = sim.anim();
+            for b in 0..COUNT {
+                assert!(
+                    length(sub(world[b].t, anim[b].1)) < 0.5,
+                    "frame {frame}: bone {b}'s animated world went off: {:?} vs {:?}",
+                    world[b].t,
+                    anim[b].1
+                );
+            }
+            let shown: Vec<M3> = sim.posed.iter().map(|p| p.0).collect();
+            let offsets: Vec<M3> = (0..COUNT)
+                .map(|b| {
+                    let own = mul(&shown[b], &transpose(&world[b].r));
+                    pose::ortho(&match PARENT[b] {
+                        Some(p) => mul(&mul(&world[p].r, &transpose(&shown[p])), &own),
+                        None => own,
+                    })
+                })
+                .collect();
+            let shift = sub(sim.posed[mq::PELVIS].1, world[mq::PELVIS].t);
+            let out: Vec<(M3, V3)> = (0..COUNT)
+                .map(|b| {
+                    let s = (b == mq::PELVIS).then_some(shift);
+                    pose::local_for(&parents[b], bases[b].unwrap(), &offsets[b], s)
+                })
+                .collect();
+            // Written by the layer, then three times by the pass: written, read back a hair off.
+            for _ in 0..3 {
+                for b in 0..COUNT {
+                    let mut back = out[b];
+                    noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let n = (noise >> 9) as f32 / (1u32 << 23) as f32 - 0.5;
+                    back.0[(noise % 9) as usize] += n * 6e-4;
+                    back.1[(noise % 3) as usize] += n * 0.01;
+                    locals[b] = back;
+                }
+            }
+            written = out.iter().map(|w| Some(*w)).collect();
+            // The world the written locals make is the shown pose.
+            let mut made: Vec<Xf> = Vec::with_capacity(COUNT);
+            for b in 0..COUNT {
+                let up = match PARENT[b] {
+                    Some(p) => made[p],
+                    None => Xf {
+                        r: IDENTITY,
+                        t: sim.pos,
+                        s: 1.0,
+                    },
+                };
+                made.push(up.then(&Xf {
+                    r: out[b].0,
+                    t: out[b].1,
+                    s: 1.0,
+                }));
+            }
+            for b in 0..COUNT {
+                assert!(
+                    pose::is_rotation(&out[b].0, 1e-4),
+                    "frame {frame}: bone {b} written with no rotation"
+                );
+                let d = length(sub(made[b].t, sim.posed[b].1));
+                assert!(
+                    d < 1.0,
+                    "frame {frame}: bone {b} written {d:.2} units off its shown place"
+                );
+                let turn = active::qlog(active::qmul(
+                    active::qconj(active::qfrom_m(&made[b].r)),
+                    active::qfrom_m(&sim.posed[b].0),
+                ));
+                assert!(
+                    length(turn) < 0.02,
+                    "frame {frame}: bone {b} turned off its shown pose"
+                );
+            }
+        }
+    }
+}
