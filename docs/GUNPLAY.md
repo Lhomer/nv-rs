@@ -471,6 +471,42 @@ stretched and grew, and the game froze. Two causes, both fixed:
   poses (the pass writing back three times a frame, a hair off, the animation skipping frames)
   makes exactly the shown pose and never adds up.
 
+### Active ragdoll: our own controller, one write for every actor (Patrick, 2026-11-15)
+
+- **No more writes through the game's ragdoll-controller pass.** The flinch, catch steps, brace
+  and windmill used to be written in two places: once at the draw's set-up, and again inside the
+  game's `bhkRagdollController` pass (`00888970`, wrapped by nv-rs) for actors that took it. That
+  pass is where the stretching Powder Ganger crashed, and the gate was wrong too: the log said
+  the pass was taken by "an armed or attacking actor", but any actor with foot IK, grab IK or
+  feedback took it, armed or not. Patrick's Powder Ganger FF001322 was unarmed. The wrapper is
+  gone (its `overridable.tsv` row too). Now every actor, unarmed, armed or attacking, is written
+  the same way, once a frame after the game has animated it: absolute locals over the animated
+  pose (`ragdoll_core::pose::local_for`). The game's pass still runs before that write, untouched,
+  and our write comes after it. Armed actors keep their aim as before. The flinch log line now
+  ends `posed over its animation by nv-rs's own write (every actor alike, no ragdoll-controller
+  pass)`.
+- **World awareness by the game's own ray casts** (`jip::commands::world_ray_cast`, JIP's
+  `TES::Pick`; hits on actors, the reacting actor's own limbs included, are passed and the cast
+  goes on):
+  - The floor under each foot and each step's target is a cast straight down. The navmesh is the
+    fallback.
+  - A wall between a foot and its step's target is two casts at knee height (the second 10 units
+    higher must hit about as far off, so a ramp or a stair the step goes up is not a wall).
+  - The ledge test is unchanged in kind (the floor under the target too far down), now on the
+    cast floor.
+  - The brace casts from the shoulders along the push (90 units) when it starts. The hands stop
+    a hand's thickness (5 units) short of the wall's face instead of reaching through it
+    (`brace_target(shoulder, dir, wall)`).
+- **Havok's ragdoll only for the fall**, as before: the hand-over starts Havok's ragdoll from the
+  body's bone velocities (`knockdown::give_launch`), and corpses, saves, looting and dragging stay
+  on Havok. The every-frame guards from the crash fix stay: the body is checked to be finite and
+  bounded, rotations orthonormal, no scale, offsets clamped, and it drops back to the animation
+  on anything wrong.
+- **Lab:** the same model. Its brace casts for the wall with Rapier and the step check casts at
+  knee height. The write-path test now runs unarmed, armed and attacking mannequins, with no
+  later rewrite (the new model) and with three rewrites a frame after the write, a hair off; all
+  hold the shown pose exactly. All 20 scenarios pass.
+
 ### Active ragdoll: arm speed and the wall brace (f36ddda lab review, 2026-11-15)
 
 - **Standing arm speed is limited too** (it was only in the ragdoll: a .50 reached 13.7 rad/s,

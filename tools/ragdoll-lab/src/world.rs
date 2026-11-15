@@ -282,3 +282,26 @@ pub fn ground_point(world: &PhysicsWorld, at: V3) -> Option<V3> {
     let p = ray.point_at(hit.time_of_impact);
     Some(from_m(p))
 }
+
+/// How far ahead of `at` along `dir` (flat) a fixed surface is (units), within `range` (units):
+/// the host's `wall_ahead`, by the game's ray cast there.
+pub fn wall_ahead(world: &PhysicsWorld, at: V3, dir: V3, range: f32) -> Option<f32> {
+    let l = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
+    if !(l > 1e-6 && l.is_finite()) {
+        return None;
+    }
+    let ray = Ray::new(to_m(at), Vec3::new(dir[0] / l, dir[1] / l, 0.0));
+    let (_, hit) =
+        world.cast_ray_and_get_normal(&ray, range / 70.0, true, QueryFilter::only_fixed())?;
+    // A face near upright (not a ramp or a stair's tread); the host tells them apart by a second,
+    // higher cast.
+    (hit.normal.z.abs() < 0.45).then_some(hit.time_of_impact * 70.0)
+}
+
+/// Whether a fixed surface stands between a foot at `from` and its step's target `to`, at knee
+/// height (the host's `wall_between`).
+pub fn wall_between(world: &PhysicsWorld, from: V3, to: V3) -> bool {
+    let d = [to[0] - from[0], to[1] - from[1], 0.0];
+    let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    len > 1e-3 && wall_ahead(world, [from[0], from[1], from[2] + 25.0], d, len + 8.0).is_some()
+}

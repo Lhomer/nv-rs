@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (active ragdoll: our own controller)
+
+- **Now (the `00888970` wrapper removed: `active_ragdoll` `before_ragdoll_anim`, `POSES`, `WRAPPED`, the knockdown registration, the gunplay FIX entry, the `overridable.tsv` row; `active_ragdoll` `cast_world`, `ground_point`, `wall_between`, `wall_ahead`; `Brace::wall`; `jip::commands::world_ray_cast`; `flinch::brace_target(.., wall)`; the lab's `world::wall_ahead`/`wall_between` and `one_write_path_for_every_actor`):** every actor is written once, after its animation, the same way; floor, walls and ledges by the game's ray casts; the brace stops at the wall. Not run in game.
+- **Patrick:** stop writing through the game's ragdoll-controller pass, write over the animated pose identically for armed, attacking and unarmed actors, world awareness by the game's ray casts, Havok only for the limp fall, every-frame safety checks; his Powder Ganger FF001322 was unarmed, so fix the "armed or attacking" wording and test an unarmed actor on that path.
+
 ### Claude, 2026-11-15 (the active ragdoll's stretching and freeze)
 
 - **Now (`ragdoll_core::balance::Stepping::follow` implicit; `ragdoll_core::pose`; `active::Body::check`, adaptive substeps; `active_ragdoll::apply` base remembered with tolerance, animated world from locals, absolute writes, sanity and drop; `before_ragdoll_anim` writes the stored locals, no update):** the f36ddda blow-up reproduced in the lab at 50 ms frames and fixed; the write path made idempotent. Not run in game.

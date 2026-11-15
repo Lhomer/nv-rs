@@ -18,8 +18,11 @@ runs on the constants).
 
 `src/sim.rs` is the game's glue around that code (`active_ragdoll::hit`, `apply`,
 `balance_frame`, `push`, the brace and the fall; `knockdown::after_hit`, `knock_down`, the get-up),
-written after the host's functions with the game's bones replaced by the mannequin's and its
-navmesh by a ray down onto the ground.
+written after the host's functions with the game's bones replaced by the mannequin's and the
+game's ray casts (the floor under the feet, a wall in a step's way at knee height, the wall ahead
+of the shoulders a brace stops at) by Rapier's. As in the game, the pose is written once over
+the animated pose, the same for unarmed, armed and attacking bodies; the test
+`one_write_path_for_every_actor` checks that write for all three.
 
 The standing body is the game's active ragdoll body (`ragdoll_core::active`): capsules with
 PD motors on every joint tracking the animation, soft right after a hit and ramping back, the

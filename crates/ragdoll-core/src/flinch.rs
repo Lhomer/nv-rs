@@ -343,17 +343,25 @@ pub const BRACE_FIRM: f32 = 1.0;
 /// How much the bracing arms track their world rotation (1: the wall point, whatever the torso).
 pub const BRACE_WORLD: f32 = 0.5;
 
-/// Where a brace's hand goes from its shoulder `shoulder` along the push `dir` (game units).
-pub fn brace_target(shoulder: V3, dir: V3) -> V3 {
+/// Where a brace's hand goes from its shoulder `shoulder` along the push `dir` (game units): its
+/// reach ahead, or (a wall found `wall` units ahead by a ray cast) the wall's face less a hand.
+pub fn brace_target(shoulder: V3, dir: V3, wall: Option<f32>) -> V3 {
     let t = tuning::get();
+    let mut out = t.brace_reach_out * UNITS_PER_METRE;
+    if let Some(w) = wall.filter(|w| w.is_finite() && *w > 0.0) {
+        out = out.min((w - BRACE_HAND).max(0.2 * UNITS_PER_METRE));
+    }
     add(
         shoulder,
         add(
-            scale(dir, t.brace_reach_out * UNITS_PER_METRE),
+            scale(dir, out),
             [0.0, 0.0, -t.brace_reach_low * UNITS_PER_METRE],
         ),
     )
 }
+
+/// A hand's thickness short of the wall (game units).
+pub const BRACE_HAND: f32 = 5.0;
 /// Bracing on the ground (the host's `crate::knockdown`, the ragdoll's first moments): for this
 /// long (s) after the ragdoll takes the body, while the pelvis is more than this high over its
 /// lowest bone (units) and dropping faster than this (units a second), the hands and forearms are
@@ -510,6 +518,22 @@ pub fn brace_weight(t: f32) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A wall nearer than the reach holds the hand at its face; none (or one beyond) leaves the
+    /// reach as it was.
+    #[test]
+    fn the_brace_meets_the_wall() {
+        let shoulder = [0.0, 0.0, 100.0];
+        let dir = [0.0, 1.0, 0.0];
+        let free = brace_target(shoulder, dir, None);
+        assert_eq!(brace_target(shoulder, dir, Some(1e4)), free);
+        assert_eq!(brace_target(shoulder, dir, Some(f32::NAN)), free);
+        let near = brace_target(shoulder, dir, Some(20.0));
+        assert!((near[1] - (20.0 - BRACE_HAND)).abs() < 1e-3, "{near:?}");
+        assert_eq!(near[2], free[2]);
+        let touching = brace_target(shoulder, dir, Some(1.0));
+        assert!(touching[1] > 0.0);
+    }
 
     /// A kicked bone swings out and springs back past its pose (an overshoot), then comes to rest.
     #[test]

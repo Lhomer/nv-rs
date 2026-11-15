@@ -735,15 +735,33 @@ mod robustness {
         }
     }
 
-    /// The game's write path, on the lab's shown poses: each frame the bones' locals are worked
-    /// out over the animation's (`pose::local_for`), written, then the game's pass reads them and
-    /// writes them back a hair off, three times a frame, and some frames the animation does not
-    /// write at all. The world pose the written locals make is the shown pose, every frame, and
-    /// nothing adds up.
+    /// The host's one write path (`active_ragdoll`: our own controller, a post-animation write of
+    /// absolute locals over the animated pose), the same for every actor: unarmed, armed and
+    /// attacking. The Powder Ganger that grew and froze (FF001322) was unarmed and still went
+    /// through the game's ragdoll-controller pass (foot IK alone takes an actor there), so each
+    /// kind is run, with and without something rewriting the bones after the write.
     #[test]
-    fn the_controller_pass_write_path() {
+    fn one_write_path_for_every_actor() {
+        for spec in [
+            "hits=357@lupperarm,44@chest+0.3",
+            "armed=1&hits=357@lupperarm,44@chest+0.3",
+            "attacking=1&hits=357@lupperarm,44@chest+0.3",
+        ] {
+            for rewrites in [0, 3] {
+                write_path(spec, rewrites);
+            }
+        }
+    }
+
+    /// The write path on the lab's shown poses for `spec`: each frame the bones' locals are worked
+    /// out over the animation's (`pose::local_for`) and written; then `rewrites` times something
+    /// (a pass that runs after the write: the game's, before nv-rs stopped writing through it)
+    /// reads them and writes them back a hair off; and some frames the animation does not write at
+    /// all. The world pose the written locals make is the shown pose, every frame, and nothing
+    /// adds up.
+    fn write_path(name: &str, rewrites: usize) {
         let mut sim = Sim::new(GroundKind::Flat);
-        let spec = Spec::parse("armed=1&hits=357@lupperarm,44@chest+0.3").unwrap();
+        let spec = Spec::parse(name).unwrap();
         prepare(&mut sim, &spec, Tuning::GAME).unwrap();
         // The bones' locals in the "game": start as the animation's.
         let anim_locals = |sim: &Sim| -> Vec<(M3, V3)> {
@@ -825,8 +843,9 @@ mod robustness {
                     pose::local_for(&parents[b], bases[b].unwrap(), &offsets[b], s)
                 })
                 .collect();
-            // Written by the layer, then three times by the pass: written, read back a hair off.
-            for _ in 0..3 {
+            // Written by the layer, then `rewrites` times by a later pass, read back a hair off.
+            locals.clone_from(&out);
+            for _ in 0..rewrites {
                 for b in 0..COUNT {
                     let mut back = out[b];
                     noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -857,12 +876,13 @@ mod robustness {
             for b in 0..COUNT {
                 assert!(
                     pose::is_rotation(&out[b].0, 1e-4),
-                    "frame {frame}: bone {b} written with no rotation"
+                    "{name:?}, {rewrites} rewrites, frame {frame}: bone {b} written with no rotation"
                 );
                 let d = length(sub(made[b].t, sim.posed[b].1));
                 assert!(
                     d < 1.0,
-                    "frame {frame}: bone {b} written {d:.2} units off its shown place"
+                    "{name:?}, {rewrites} rewrites, frame {frame}: bone {b} written {d:.2} units \
+                     off its shown place"
                 );
                 let turn = active::qlog(active::qmul(
                     active::qconj(active::qfrom_m(&made[b].r)),
@@ -870,7 +890,7 @@ mod robustness {
                 ));
                 assert!(
                     length(turn) < 0.02,
-                    "frame {frame}: bone {b} turned off its shown pose"
+                    "{name:?}, {rewrites} rewrites, frame {frame}: bone {b} turned off its shown pose"
                 );
             }
         }

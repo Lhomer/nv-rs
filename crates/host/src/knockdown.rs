@@ -276,15 +276,6 @@ pub fn install(e: &mut Engine) {
         }
         Ret::default()
     });
-    // The ragdoll controller pass over a living actor's bones (grab and foot IK): the pose
-    // layer's offsets go on first (`crate::active_ragdoll::before_ragdoll_anim`).
-    e.register(crate::active_ragdoll::RAGDOLL_ANIM, |e, a| {
-        if crate::gunplay::is_on() && a[0] != 0 {
-            crate::active_ragdoll::before_ragdoll_anim(e, a[0]);
-        }
-        engine::units::fallout_ai::actor_p2::fn_00888970(e, Ptr::new(a[0]), a[1]);
-        Ret::default()
-    });
 }
 
 /// After the game applied the hit `hit` to `target`: a knockdown or a stagger (module

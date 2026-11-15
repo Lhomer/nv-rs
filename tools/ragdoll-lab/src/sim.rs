@@ -51,12 +51,16 @@ pub const GET_UP: f32 = 1.6;
 /// How far from the body the scripted and clicked shots come (m), and how wide a shotgun's
 /// pattern grows a metre (units of spread radius per metre of range).
 pub const PELLET_SPREAD: f32 = 2.4;
+/// How far ahead of the shoulders a brace looks for its wall (units; the host's `BRACE_PROBE`).
+pub const BRACE_PROBE: f32 = 90.0;
 
 /// Hands reaching to a wall along `dir` (stage 3), `t` seconds in.
 #[derive(Clone, Copy, Debug)]
 pub struct Brace {
     pub dir: V3,
     pub t: f32,
+    /// How far ahead of the shoulders the wall is (units; a ray cast at the brace's start).
+    pub wall: Option<f32>,
 }
 
 /// The fall into the ragdoll under way (stage 3; the host's `active_ragdoll::Fall`).
@@ -650,7 +654,11 @@ impl Sim {
         });
         for (foot, to) in planned.steps {
             let from = feet[foot];
-            let ground = classify(to, from[2], world::ground_point(&self.world, to));
+            let ground = if world::wall_between(&self.world, from, to) {
+                Step::Blocked
+            } else {
+                classify(to, from[2], world::ground_point(&self.world, to))
+            };
             match ground {
                 Step::Floor(z) => {
                     let to = [to[0], to[1], z + ankle[foot]];
@@ -711,7 +719,8 @@ impl Sim {
         let stepping = Stepping::new(dir, v, 0, start, steps, scale_, self.pos, outcome, self.t);
         self.rig.balance = Some(stepping);
         if against_wall && self.rig.brace.is_none() {
-            self.rig.brace = Some(Brace { dir, t: 0.0 });
+            let wall = self.wall_ahead(dir);
+            self.rig.brace = Some(Brace { dir, t: 0.0, wall });
         }
         self.rig.since = self.t;
         self.note(format!(
@@ -731,11 +740,22 @@ impl Sim {
 
     // --- Stage 3 (the host's `start_brace`, `reach_arm`, `brace_frame`, `fall_frame`, `fall`). ---
 
+    /// The wall's distance ahead of the shoulders along `dir` (units), by a ray cast (the host's,
+    /// by the game's).
+    fn wall_ahead(&self, dir: V3) -> Option<f32> {
+        let anim = self.anim();
+        let u = mq::bone_of(Role::UpperArm, 0)?;
+        let v = mq::bone_of(Role::UpperArm, 1).unwrap_or(u);
+        let at = scale(add(anim[u].1, anim[v].1), 0.5);
+        world::wall_ahead(&self.world, at, dir, BRACE_PROBE)
+    }
+
     fn start_brace(&mut self, dir: V3, v: f32) {
         let limit = self.tune.brace_holds * self.tune.balance.max(1.0) / 100.0;
         let arms = self.rig.limbs.arm(0) || self.rig.limbs.arm(1);
         if arms {
-            self.rig.brace = Some(Brace { dir, t: 0.0 });
+            let wall = self.wall_ahead(dir);
+            self.rig.brace = Some(Brace { dir, t: 0.0, wall });
             self.stats.braced = true;
         }
         if v > limit || !arms {
@@ -810,7 +830,7 @@ impl Sim {
                 continue;
             };
             let shoulder = anim[u].1;
-            let target = brace_target(shoulder, b.dir);
+            let target = brace_target(shoulder, b.dir, b.wall);
             if let Some((ui, ur, fi, fr)) = self.reach_arm(anim, side, target, w) {
                 out[ui] = Some(ur);
                 out[fi] = Some(fr);

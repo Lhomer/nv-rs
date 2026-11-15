@@ -691,6 +691,28 @@ pub fn rgb_dec_to_hex(rgb: u32) -> u32 {
 #[cfg(test)]
 pub(crate) mod test_support;
 
+/// The game's ray cast as JIP's `GetRayCastPos` makes it (`TES::Pick` along a direction, the
+/// player's controller's collision filter with JIP's default layer), for the host's own use (the
+/// active ragdoll's floor, ledge and wall probes, `crates/host/src/active_ragdoll.rs`): from
+/// `from` along `dir` (unit) at most `range`, all in game units; the hit point and the object hit
+/// (0 for none), or `None` when the game has no `TES` or player controller yet, or nothing was
+/// hit within the range.
+pub fn world_ray_cast(
+    e: &mut Engine,
+    from: [f32; 3],
+    dir: [f32; 3],
+    range: f32,
+) -> Option<([f32; 3], u32)> {
+    // Column 1 of the rotation is the cast's direction (`havok_refs::ray_cast`).
+    let rot = [0.0, dir[0], 0.0, 0.0, dir[1], 0.0, 0.0, dir[2], 0.0];
+    let cast = havok_refs::ray_cast(e, [from[0], from[1], from[2], 1.0], rot, range, -1)?;
+    if !(cast.fraction.is_finite() && cast.fraction < 1.0) {
+        return None;
+    }
+    let p = havok_refs::hit_point(&cast);
+    Some(([p[0], p[1], p[2]], cast.object))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
