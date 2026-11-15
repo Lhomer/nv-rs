@@ -28,6 +28,7 @@ mod prepare;
 pub mod shot;
 pub mod sm;
 pub mod state;
+pub mod touch_overlay;
 mod window;
 
 /// Writes every live wgpu device's pipeline cache and pipeline list now, when they changed: for

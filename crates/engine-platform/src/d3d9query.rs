@@ -138,7 +138,7 @@ pub(super) fn create_query(e: &mut Engine, this: Ptr, kind: u32, out: Ptr) -> u3
         },
     );
     device_add_ref(e, this);
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     super::d3d9real::query_created(e, this.addr(), object, kind);
     e.mem.set_u32(out.addr(), object);
     D3D_OK
@@ -169,7 +169,7 @@ fn release(e: &mut Engine, this: Ptr) -> u32 {
     let left = q.references;
     if left == 0 {
         let q = queries(e).queries.remove(&this.addr()).expect("the query");
-        #[cfg(windows)]
+        #[cfg(wgpu_window)]
         super::d3d9real::forget(e, this.addr());
         e.mem.free(this.addr());
         device_release(e, Ptr::new(q.device));
@@ -206,7 +206,7 @@ fn issue(e: &mut Engine, this: Ptr, flags: u32) -> u32 {
         _ => panic!("IDirect3DQuery9::Issue({flags:#x}) is not provided"),
     };
     query(e, this).state = state;
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     super::d3d9real::query_issue(e, this.addr(), flags);
     D3D_OK
 }
@@ -244,7 +244,7 @@ fn get_data(e: &mut Engine, this: Ptr, data: Ptr, size: u32, flags: u32) -> u32 
         }
         State::Begun => S_FALSE,
         State::Ended => {
-            #[cfg(windows)]
+            #[cfg(wgpu_window)]
             if let Some((hr, value)) = super::d3d9real::query_get_data(e, this.addr(), flags) {
                 if hr == D3D_OK {
                     write_result(e, data, size, value);

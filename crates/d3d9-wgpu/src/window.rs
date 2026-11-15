@@ -556,7 +556,30 @@ pub(crate) fn client_size(hwnd: isize) -> Option<(u32, u32)> {
     })
 }
 
-#[cfg(not(windows))]
+/// Android: the native window's size in pixels.
+#[cfg(target_os = "android")]
+pub(crate) fn client_size(hwnd: isize) -> Option<(u32, u32)> {
+    if hwnd == 0 {
+        return None;
+    }
+    // SAFETY: the activity's native window (`ANativeWindow*`), alive while the game draws in it.
+    let (w, h) = unsafe {
+        (
+            ANativeWindow_getWidth(hwnd as *mut std::ffi::c_void),
+            ANativeWindow_getHeight(hwnd as *mut std::ffi::c_void),
+        )
+    };
+    (w > 0 && h > 0).then_some((w as u32, h as u32))
+}
+
+#[cfg(target_os = "android")]
+#[link(name = "android")]
+extern "C" {
+    fn ANativeWindow_getWidth(window: *mut std::ffi::c_void) -> i32;
+    fn ANativeWindow_getHeight(window: *mut std::ffi::c_void) -> i32;
+}
+
+#[cfg(not(any(windows, target_os = "android")))]
 pub(crate) fn client_size(_hwnd: isize) -> Option<(u32, u32)> {
     None
 }

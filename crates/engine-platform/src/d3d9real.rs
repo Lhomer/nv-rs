@@ -38,23 +38,44 @@
 //! game's x87 precision switch is modelled (`crate::direct3d_device_created`,
 //! from the game's own flags), and the backend's thread's floating-point state is not the game's.
 
-use crate::mouse_look::{absolute_to_pixels, should_recentre, MouseLook, RawMotion};
+use crate::mouse_look::RawMotion;
+#[cfg(windows)]
+use crate::mouse_look::{absolute_to_pixels, should_recentre, MouseLook};
 use crate::Engine;
+
+/// Android: no real Direct3D 9 device or real backend (wgpu draws alone): the names the layer
+/// keeps for them, never made.
+#[cfg(not(windows))]
+#[derive(Clone, Debug)]
+pub enum IDirect3DDevice9 {}
+#[cfg(windows)]
+type QueryBoard = super::d3d9backend::QueryBoard;
+#[cfg(not(windows))]
+#[derive(Default, Debug)]
+pub struct QueryBoard;
 use d3d9_stream::{Cmd, Data, Reply, Slot, Stream};
 use std::collections::{HashMap, HashSet};
+#[cfg(windows)]
 use windows::core::PCSTR;
+#[cfg(windows)]
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+#[cfg(windows)]
 use windows::Win32::Graphics::Direct3D9::*;
+#[cfg(windows)]
 use windows::Win32::Graphics::Gdi::ClientToScreen;
+#[cfg(windows)]
 use windows::Win32::System::LibraryLoader::GetModuleHandleA;
+#[cfg(windows)]
 use windows::Win32::UI::HiDpi::{
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+#[cfg(windows)]
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE,
     MOUSE_VIRTUAL_DESKTOP, RAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICE_FLAGS, RAWINPUTHEADER,
     RID_INPUT, RIM_TYPEMOUSE,
 };
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// The backends `NV_D3D9` names.
@@ -204,7 +225,7 @@ pub struct Real {
     locks: engine_core::AddrMap<u32, Vec<(u32, u32, u32)>>,
     /// With the render thread: the real queries as the backend carried them out
     /// (`d3d9backend::QueryBoard`), and how many `D3DISSUE_END`s of each the game recorded.
-    query_board: Option<std::sync::Arc<super::d3d9backend::QueryBoard>>,
+    query_board: Option<std::sync::Arc<QueryBoard>>,
     query_ends: engine_core::AddrMap<u32, u64>,
     /// How many queries the game made at each address (the board's `made`: a query made again at
     /// a destroyed one's address is not read as the old one).
@@ -453,8 +474,10 @@ fn is_forwarded(e: &Engine, object: u32) -> bool {
 
 // The window.
 
+#[cfg(windows)]
 const CLASS_NAME: PCSTR = PCSTR(b"nv-rs-d3d9\0".as_ptr());
 
+#[cfg(windows)]
 extern "system" fn window_procedure(
     window: HWND,
     message: u32,
@@ -579,6 +602,7 @@ fn input() -> &'static std::sync::Mutex<Input> {
     INPUT.get_or_init(|| std::sync::Mutex::new(Input::default()))
 }
 
+#[cfg(windows)]
 fn release_input() {
     if let Ok(mut i) = input().lock() {
         i.keys = [false; 256];
@@ -588,6 +612,7 @@ fn release_input() {
 }
 
 /// Frees the cursor [`hold_cursor`] held (no clip; Windows shows it again).
+#[cfg(windows)]
 fn let_go_of_cursor() {
     if CURSOR_HELD.swap(false, std::sync::atomic::Ordering::Relaxed) {
         unsafe {
@@ -602,12 +627,14 @@ fn let_go_of_cursor() {
 /// it strays half way to the area's edge ([`recentre`]), so it never rests on the edge (where it
 /// showed, playtest 2026-11-03). The motion the game reads comes from raw input, not the cursor's
 /// position.
+#[cfg(windows)]
 static CURSOR_CENTRE: [std::sync::atomic::AtomicI32; 2] = [
     std::sync::atomic::AtomicI32::new(0),
     std::sync::atomic::AtomicI32::new(0),
 ];
 
 /// Half the held client area's width and height, in pixels ([`recentre`]).
+#[cfg(windows)]
 static CURSOR_HALF: [std::sync::atomic::AtomicI32; 2] = [
     std::sync::atomic::AtomicI32::new(0),
     std::sync::atomic::AtomicI32::new(0),
@@ -623,6 +650,7 @@ thread_local! {
 /// it), or once it has strayed half way to the edge (`mouse_look::should_recentre`). The warp is
 /// noted, so that its echo, on a PC whose Windows reports one as raw input, is not taken for the
 /// player's movement.
+#[cfg(windows)]
 fn recentre(always: bool) {
     let centre = [
         CURSOR_CENTRE[0].load(std::sync::atomic::Ordering::Relaxed),
@@ -647,31 +675,39 @@ fn recentre(always: bool) {
 
 /// Prints `line` once for each `printed` flag (what the raw mouse turned out to send, for a
 /// player's report).
+#[cfg(windows)]
 fn note_once(printed: &std::sync::atomic::AtomicBool, line: &str) {
     if !printed.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!("NV_D3D9={}: {line}", tag());
     }
 }
 
+#[cfg(windows)]
 static ABSOLUTE_NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(windows)]
 static ECHO_NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the window holds the cursor (clipped to its client area, hidden over it).
+#[cfg(windows)]
 static CURSOR_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(windows)]
 fn cursor_held() -> bool {
     CURSOR_HELD.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether Windows is moving or sizing the game's window (between `WM_ENTERSIZEMOVE` and
 /// `WM_EXITSIZEMOVE`): the cursor stays free and its movement doesn't reach the game.
+#[cfg(windows)]
 static MOVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(windows)]
 fn moving() -> bool {
     MOVING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether the window `window` belongs to (its top-level window) is the one in front.
+#[cfg(windows)]
 fn in_front(window: HWND) -> bool {
     unsafe {
         let root = GetAncestor(window, GA_ROOT);
@@ -680,6 +716,7 @@ fn in_front(window: HWND) -> bool {
 }
 
 /// Whether any of the mouse's buttons is down (as the mouse has them, swapped or not).
+#[cfg(windows)]
 fn any_mouse_button_down() -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2,
@@ -691,6 +728,7 @@ fn any_mouse_button_down() -> bool {
 
 /// A mouse button message's DirectInput button (left, right, middle, X1, X2) and whether it went
 /// down; `None` for other messages.
+#[cfg(windows)]
 fn mouse_button_of(message: u32, wparam: WPARAM) -> Option<(usize, bool)> {
     let x = if (wparam.0 >> 16) & 0xffff == 2 { 4 } else { 3 };
     match message {
@@ -711,6 +749,7 @@ fn mouse_button_of(message: u32, wparam: WPARAM) -> Option<(usize, bool)> {
 /// `SetCooperativeLevel` with `DISCL_EXCLUSIVE | DISCL_FOREGROUND`). A minimised window has no
 /// client area to hold it in: the cursor is let go of, and taken again when it is restored and
 /// activated or moved over.
+#[cfg(windows)]
 fn hold_cursor(window: HWND) {
     unsafe {
         if IsIconic(GetAncestor(window, GA_ROOT)).as_bool() {
@@ -766,6 +805,7 @@ fn hold_cursor(window: HWND) {
 
 /// Registers the window for the mouse's raw input: its relative counts are what DirectInput
 /// hands an exclusive mouse (no pointer acceleration, not stopped at the screen's edge).
+#[cfg(windows)]
 fn register_raw_mouse(window: HWND) {
     let device = RAWINPUTDEVICE {
         usUsagePage: 1,
@@ -783,6 +823,7 @@ fn register_raw_mouse(window: HWND) {
 /// decides whether it reaches the game), and with the original's way the first one takes the
 /// cursor if the window has not taken it yet (`MouseLook::takes_on_motion`). The held cursor is
 /// put back at the centre once it strays half way to the edge ([`recentre`]).
+#[cfg(windows)]
 fn raw_mouse(window: HWND, lparam: LPARAM) {
     let mut raw = RAWINPUT::default();
     let mut size = std::mem::size_of::<RAWINPUT>() as u32;
@@ -862,6 +903,44 @@ pub fn held_keys() -> [bool; 256] {
     input().lock().map(|i| i.keys).unwrap_or([false; 256])
 }
 
+/// Android: a key (its DirectInput code) held down or let go by the touch controls (the app's
+/// virtual stick and buttons), as the window's keyboard holds them on Windows.
+#[cfg(target_os = "android")]
+pub fn touch_key(dik: u8, down: bool) {
+    if let Ok(mut i) = input().lock() {
+        i.keys[usize::from(dik)] = down;
+    }
+}
+
+/// Android: a mouse button (DirectInput's order: left, right, middle) held or let go by a touch
+/// button (fire, aim).
+#[cfg(target_os = "android")]
+pub fn touch_button(button: usize, down: bool) {
+    if let Ok(mut i) = input().lock() {
+        if let Some(b) = i.buttons.get_mut(button) {
+            *b = down;
+        }
+    }
+}
+
+/// Android: the look swipe's motion (mouse counts) since the last frame, added up until the host
+/// takes it ([`take_input`]).
+#[cfg(target_os = "android")]
+pub fn touch_motion(dx: i32, dy: i32) {
+    if let Ok(mut i) = input().lock() {
+        i.motion[0] = i.motion[0].saturating_add(dx);
+        i.motion[1] = i.motion[1].saturating_add(dy);
+    }
+}
+
+/// Android: every touch let go (the activity paused, the window lost).
+#[cfg(target_os = "android")]
+pub fn touch_release_all() {
+    if let Ok(mut i) = input().lock() {
+        *i = Input::default();
+    }
+}
+
 /// The real window's input for this frame: the keys and buttons held, the motion since the last
 /// call (taken: it starts again from 0).
 pub fn take_input() -> Input {
@@ -877,6 +956,7 @@ pub fn take_input() -> Input {
 
 /// The DirectInput key code of a key message (`lParam`: scan code in bits 16..23, the extended
 /// bit 24); `None` for the fake shifts Windows sends around some extended keys.
+#[cfg(windows)]
 fn dik(lparam: isize) -> Option<u8> {
     let scan = ((lparam >> 16) & 0xff) as u8;
     let extended = lparam & (1 << 24) != 0;
@@ -903,6 +983,7 @@ fn dik(lparam: isize) -> Option<u8> {
 
 /// A message of the real window that is input (the mouse's motion comes from its raw input,
 /// [`raw_mouse`]).
+#[cfg(windows)]
 fn window_input(_window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) {
     let Ok(mut i) = input().lock() else { return };
     let look = MouseLook::asked();
@@ -943,6 +1024,7 @@ fn window_input(_window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) {
 /// A window to make on the window thread: title, style, extended style, rectangle, the real
 /// parent (0 for a top-level window), how a top-level `WS_VISIBLE` one is shown, and where the
 /// handle goes (0 when it failed).
+#[cfg(windows)]
 struct Request {
     title: Vec<u8>,
     style: u32,
@@ -955,6 +1037,7 @@ struct Request {
 
 /// The window thread: it makes every real window (a child window's messages go to the thread
 /// that made it, so parent and children share it) and pumps their messages.
+#[cfg(windows)]
 fn window_thread() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<Request>> {
     static THREAD: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Request>>> =
         std::sync::OnceLock::new();
@@ -971,6 +1054,7 @@ fn window_thread() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<Request>
 /// scripted runs, so that one does not take the keyboard and the cursor from whoever works
 /// beside it), and at the bottom of the window stack, behind that person's windows. Off, it is
 /// shown as the game's `WS_VISIBLE` window is: activated.
+#[cfg(windows)]
 fn shown_in_background() -> bool {
     std::env::var_os("NV_D3D9_BACKGROUND").is_some()
 }
@@ -980,6 +1064,7 @@ fn shown_in_background() -> bool {
 /// all. What the game reads about its window comes from the modelled one (`super::window`: its
 /// style with `WS_VISIBLE`, its rectangle, the active window), never from the real one, so the
 /// game sees the same window whichever this is.
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Showing {
     /// Shown and activated, as Windows shows the game's window.
@@ -993,6 +1078,7 @@ enum Showing {
     Never,
 }
 
+#[cfg(windows)]
 impl Showing {
     /// The run's choice: `NV_D3D9_HIDDEN=1` before `NV_D3D9_BACKGROUND`.
     fn asked() -> Showing {
@@ -1052,13 +1138,16 @@ static BORDERLESS_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::At
 static BORDERLESS_CHILD: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 /// `PBT_APMRESUMESUSPEND`, `PBT_APMRESUMEAUTOMATIC`: the machine woke from sleep.
+#[cfg(windows)]
 const PBT_APMRESUMESUSPEND: u32 = 7;
+#[cfg(windows)]
 const PBT_APMRESUMEAUTOMATIC: u32 = 0x12;
 
 /// The display changed (`WM_DISPLAYCHANGE`, on the window thread, which is per-monitor DPI aware
 /// with the borderless window): when `window` is the borderless window, it and the game's window
 /// that fills it take the primary monitor's new size, so the picture covers the screen at a new
 /// resolution as it did at the old one (each backend fits its frames to the window).
+#[cfg(windows)]
 fn refit_borderless(window: HWND) {
     let borderless = BORDERLESS_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
     if borderless == 0 || window.0 as isize != borderless {
@@ -1095,6 +1184,7 @@ static GAME_CHILD_RECT: std::sync::Mutex<[i32; 4]> = std::sync::Mutex::new([0; 4
 /// The message [`switch_window_mode`] posts to the game's top-level window (`WM_APP` + 0x4e5),
 /// `wparam` 1 for the borderless window, 0 for a window: done on the window thread
 /// ([`restyle`]), in its DPI awareness, as [`refit_borderless`] is.
+#[cfg(windows)]
 const WM_WINDOW_MODE: u32 = WM_APP + 0x4e5;
 
 /// `rect` (left, top, right, bottom) after a `SetWindowPos` to `moved` with `flags`: the position
@@ -1102,11 +1192,11 @@ const WM_WINDOW_MODE: u32 = WM_APP + 0x4e5;
 pub(crate) fn rect_after_move(rect: [i32; 4], moved: [i32; 4], flags: u32) -> [i32; 4] {
     let (mut left, mut top) = (rect[0], rect[1]);
     let (mut width, mut height) = (rect[2].wrapping_sub(rect[0]), rect[3].wrapping_sub(rect[1]));
-    if flags & SWP_NOMOVE.0 == 0 {
+    if flags & 2 == 0 {
         left = moved[0];
         top = moved[1];
     }
-    if flags & SWP_NOSIZE.0 == 0 {
+    if flags & 1 == 0 {
         width = moved[2].wrapping_sub(moved[0]);
         height = moved[3].wrapping_sub(moved[1]);
     }
@@ -1136,6 +1226,7 @@ pub fn is_borderless() -> bool {
 /// thread ([`restyle`]). The game draws on as before: Direct3D 9 stretches the back buffer over
 /// the window's area and wgpu fits its swap chain to it each frame. False when it can't be done
 /// now: no real window, or no size of the game's to go back to.
+#[cfg(windows)]
 pub fn switch_window_mode(on: bool) -> bool {
     let top = GAME_TOP.load(std::sync::atomic::Ordering::Relaxed);
     if top == 0 {
@@ -1176,6 +1267,7 @@ pub fn switch_window_mode(on: bool) -> bool {
 /// [`switch_window_mode`] on the window thread: `top` (the game's top-level window) and the child
 /// it draws in take the borderless window's style and the monitor's size, or the game's own styles
 /// and rectangles. Its visibility stays as it is (a scripted run's hidden window stays hidden).
+#[cfg(windows)]
 unsafe fn restyle(top: HWND, on: bool) {
     let child = GAME_CHILD.load(std::sync::atomic::Ordering::Relaxed);
     let visible = if IsWindowVisible(top).as_bool() {
@@ -1244,6 +1336,7 @@ pub fn want_vsync(on: bool) -> bool {
 
 /// The primary monitor's resolution in pixels (its current display mode, whatever the display
 /// scaling), `None` when Windows doesn't say.
+#[cfg(windows)]
 pub fn native_size() -> Option<(u32, u32)> {
     use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
     let mut mode = DEVMODEW {
@@ -1261,6 +1354,7 @@ pub fn native_size() -> Option<(u32, u32)> {
         .then_some((mode.dmPelsWidth, mode.dmPelsHeight))
 }
 
+#[cfg(windows)]
 unsafe fn run_window_thread(rx: std::sync::mpsc::Receiver<Request>) {
     let module = GetModuleHandleA(None).unwrap_or_default();
     let class = WNDCLASSA {
@@ -1405,6 +1499,7 @@ fn record_game_window(
 /// `CreateWindowExA` made the modelled window `handle` (a child of `parent` when that is not
 /// 0): a real window of the same title, styles and rectangle (a child of the parent's real
 /// window).
+#[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
 pub fn window_created(
     e: &mut Engine,
@@ -1460,6 +1555,7 @@ pub fn window_created(
 }
 
 /// The real window takes the title the game gave its record (`SetWindowTextA`).
+#[cfg(windows)]
 pub fn window_titled(e: &mut Engine, handle: u32, title: &[u8]) {
     let Some(window) = real_window(e, handle) else {
         return;
@@ -1473,6 +1569,7 @@ pub fn window_titled(e: &mut Engine, handle: u32, title: &[u8]) {
 
 /// `SetWindowPos` moved or sized the modelled window `handle` (`SWP_NOSIZE`, `SWP_NOMOVE` in
 /// `flags`): the real window follows.
+#[cfg(windows)]
 pub fn window_moved(e: &mut Engine, handle: u32, rect: [i32; 4], flags: u32) {
     let Some(window) = real_window(e, handle) else {
         return;
@@ -1507,6 +1604,98 @@ pub fn window_moved(e: &mut Engine, handle: u32, rect: [i32; 4], flags: u32) {
     }
 }
 
+// The window on Android (the test build, docs/ANDROID.md): the activity's native window, handed
+// over by the app ([`set_native_window`]); the game's window draws into it, filling it. No window
+// thread, no styles: the activity owns the window.
+
+/// The activity's native window (`ANativeWindow*`) and its size in pixels, 0 until the app hands it
+/// over ([`set_native_window`]).
+#[cfg(target_os = "android")]
+static NATIVE_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+#[cfg(target_os = "android")]
+static NATIVE_SIZE: std::sync::Mutex<(u32, u32)> = std::sync::Mutex::new((0, 0));
+
+/// The app's native window (`ANativeWindow*`, 0 when it is gone) and its size: the game's window
+/// draws into it (`d3d9_wgpu` makes its surface on it).
+#[cfg(target_os = "android")]
+pub fn set_native_window(window: isize, width: u32, height: u32) {
+    NATIVE_WINDOW.store(window, std::sync::atomic::Ordering::Relaxed);
+    *NATIVE_SIZE.lock().unwrap_or_else(|p| p.into_inner()) = (width, height);
+    d3d9_wgpu::window_changed();
+}
+
+/// The activity's window's size (the "monitor" the game fills).
+#[cfg(target_os = "android")]
+pub fn native_size() -> Option<(u32, u32)> {
+    let size = *NATIVE_SIZE.lock().unwrap_or_else(|p| p.into_inner());
+    (size.0 > 0 && size.1 > 0).then_some(size)
+}
+
+/// No switching on Android: the activity's window is the game's, always full screen.
+#[cfg(target_os = "android")]
+pub fn switch_window_mode(_on: bool) -> bool {
+    false
+}
+
+/// `CreateWindowExA` made the modelled window `handle`: the game's top-level window is the
+/// activity's native window (waited for a little, the activity hands it over when it has one); a
+/// child of it draws there too.
+#[cfg(target_os = "android")]
+#[allow(clippy::too_many_arguments)]
+pub fn window_created(
+    e: &mut Engine,
+    handle: u32,
+    _title: &[u8],
+    style: u32,
+    ex_style: u32,
+    rect: [i32; 4],
+    parent: u32,
+) {
+    if !wanted() {
+        return;
+    }
+    let mut window = NATIVE_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+    let start = std::time::Instant::now();
+    while window == 0 && start.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        window = NATIVE_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+    }
+    if window == 0 {
+        eprintln!("NV_D3D9={}: no native window from the activity", tag());
+        return;
+    }
+    let real_parent = if parent != 0 {
+        real_window(e, parent).unwrap_or(0)
+    } else {
+        0
+    };
+    record_game_window(window, style, ex_style, rect, real_parent, parent != 0);
+    eprintln!(
+        "NV_D3D9={}: window {handle:#x} (style {style:#x}, parent {parent:#x}, {rect:?}) draws in the native window {window:#x}",
+        tag()
+    );
+    let _device = engine_core::real_threads::device_guard(e);
+    real(e).windows.insert(handle, window);
+}
+
+/// No title on Android.
+#[cfg(target_os = "android")]
+pub fn window_titled(_e: &mut Engine, _handle: u32, _title: &[u8]) {}
+
+/// The game's rectangles kept (as on Windows); the native window itself does not move.
+#[cfg(target_os = "android")]
+pub fn window_moved(e: &mut Engine, handle: u32, rect: [i32; 4], flags: u32) {
+    let Some(window) = real_window(e, handle) else {
+        return;
+    };
+    for (game, kept) in [(&GAME_TOP, &GAME_TOP_RECT), (&GAME_CHILD, &GAME_CHILD_RECT)] {
+        if game.load(std::sync::atomic::Ordering::Relaxed) == window {
+            let mut kept = lock_rect(kept);
+            *kept = rect_after_move(*kept, rect, flags);
+        }
+    }
+}
+
 // The device.
 
 /// `D3DCREATE_MULTITHREADED`: the real device takes calls from any thread.
@@ -1524,7 +1713,7 @@ pub fn want_render_thread(e: &mut Engine, on: bool) {
 /// game's side reads its queries without waiting (the render thread).
 fn backend_of(
     which: Backends,
-    board: Option<std::sync::Arc<super::d3d9backend::QueryBoard>>,
+    board: Option<std::sync::Arc<QueryBoard>>,
     answers: Option<std::sync::Arc<d3d9_wgpu::QueryAnswers>>,
     warm: bool,
     wgpu_cache: Option<std::path::PathBuf>,
@@ -1536,6 +1725,7 @@ fn backend_of(
             None => b,
         }
     };
+    #[cfg(windows)]
     let real = || -> Box<dyn d3d9_stream::Backend> {
         Box::new(
             match board.clone() {
@@ -1544,6 +1734,12 @@ fn backend_of(
             }
             .with_warm(warm),
         )
+    };
+    // Android: no real Direct3D 9; wgpu draws whatever was asked.
+    #[cfg(not(windows))]
+    let real = || -> Box<dyn d3d9_stream::Backend> {
+        let _ = (&board, warm);
+        Box::new(wgpu(d3d9_wgpu::Output::Window))
     };
     match which {
         Backends::Real => real(),
@@ -1577,7 +1773,9 @@ impl d3d9_stream::Backend for WgpuWithReport {
                 self.back_buffer = back_buffers.to_words().first().copied().unwrap_or(0);
             }
             Cmd::Present { .. } => {
+                #[cfg(windows)]
                 let (wgpu, back) = (&mut self.wgpu, self.back_buffer);
+                #[cfg(windows)]
                 shot::report_with(|| {
                     wgpu.device()
                         .and_then(|d| d.read_surface_pixels(back))
@@ -1660,7 +1858,7 @@ fn make_stream(e: &mut Engine, which: Backends) -> Stream {
         // (`query_get_data`); wgpu's are read by a sync command.
         let board = which
             .real()
-            .then(|| std::sync::Arc::new(super::d3d9backend::QueryBoard::default()));
+            .then(|| std::sync::Arc::new(QueryBoard::default()));
         real(e).query_board = board.clone();
         // wgpu alone on the window: its occlusion counts, posted by the render thread.
         let answers = matches!(which, Backends::Wgpu)
@@ -1794,9 +1992,15 @@ pub fn device_created(
     else {
         return;
     };
+    #[cfg(windows)]
     let shared = native
         .and_then(|n| n.0.downcast::<super::d3d9backend::SharedDevice>().ok())
         .map(|s| s.0);
+    #[cfg(not(windows))]
+    let shared: Option<IDirect3DDevice9> = {
+        let _ = native;
+        None
+    };
     let r = real(e);
     r.devices.retain(|(d, _)| *d != device);
     r.devices.push((device, shared));
@@ -2904,6 +3108,12 @@ fn wgpu_answer(r: &mut Real, query: u32) -> Option<Option<(u32, u32)>> {
 /// [`query_get_data`] with the render thread, without waiting for it: `None` without the render
 /// thread, or for a `D3DGETDATA_FLUSH` read whose `END` the real device has not issued yet (the
 /// call waits then).
+#[cfg(not(windows))]
+fn query_without_waiting(_r: &mut Real, _query: u32, _flags: u32) -> Option<Option<(u32, u32)>> {
+    None
+}
+
+#[cfg(windows)]
 fn query_without_waiting(r: &mut Real, query: u32, flags: u32) -> Option<Option<(u32, u32)>> {
     let board = r.query_board.as_ref()?;
     let recorded = r.query_ends.get(&query).copied().unwrap_or(0);
@@ -3037,6 +3247,7 @@ pub fn texture_set_lod(e: &mut Engine, texture: u32, lod: u32, model: u32) {
 // takes them only at those presents (counted from 1), so a short stretch can be taken every frame.
 // Nothing is read or made when `NV_SHOT` is unset; the game's state and the model are not touched.
 // ---------------------------------------------------------------------------------------------
+#[cfg(windows)]
 pub(super) mod shot {
     use super::*;
     use std::path::PathBuf;
@@ -3507,6 +3718,7 @@ pub(super) fn face_check_texture(
 }
 
 /// `NV_FACE_CHECK`: a level of the face texture went to the real surface.
+#[cfg(windows)]
 pub(super) fn face_check_upload(
     surface: u32,
     real_surface: &IDirect3DSurface9,

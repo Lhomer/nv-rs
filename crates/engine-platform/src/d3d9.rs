@@ -309,7 +309,7 @@ pub struct DeviceState {
     /// The devices and their resources (`super::d3d9device`).
     pub(crate) device_objects: super::d3d9device::Objects,
     /// The backend behind the modelled objects (`NV_D3D9`, ADR-0008).
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     pub(crate) real: super::d3d9real::Real,
 }
 
@@ -621,7 +621,7 @@ pub fn direct3d_create9(e: &mut Engine, sdk: u32) -> u32 {
     device!(e)
         .objects
         .insert(object, Direct3D { references: 1 });
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     super::d3d9real::direct3d_created(e);
     object
 }

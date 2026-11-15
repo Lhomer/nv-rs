@@ -212,6 +212,10 @@ static SAVING: AtomicBool = AtomicBool::new(false);
 /// for it at the main loop's next pass.
 static SAVE_COUNTDOWN: AtomicU32 = AtomicU32::new(0);
 static SAVE_ASKED: AtomicBool = AtomicBool::new(false);
+/// The phone's range (`crate::phone_range`): main loop passes left before it starts by itself
+/// once the main menu is up (0: none due), and how many it waits.
+static PHONE_START_IN: AtomicU32 = AtomicU32::new(0);
+const PHONE_START_TICKS: u32 = 120;
 /// Frames after the set-up before the save: the placed references settle.
 const SAVE_AFTER_FRAMES: u32 = 90;
 
@@ -307,6 +311,14 @@ pub fn install(e: &mut Engine) {
         Ret::default()
     });
     e.on_site(TICK, |e, _| {
+        let wait = PHONE_START_IN.load(Ordering::Relaxed);
+        if wait > 0 {
+            PHONE_START_IN.store(wait - 1, Ordering::Relaxed);
+            if wait == 1 && phase() == Phase::Off {
+                START_ASKED.store(true, Ordering::Relaxed);
+                step("the phone's range: starting by itself");
+            }
+        }
         if START_ASKED.swap(false, Ordering::Relaxed) {
             step("the main loop's pass: starting");
             start(e);
@@ -679,7 +691,8 @@ pub fn first_start<C>(
 /// start is said in the log and on the screen, with the menu's list enabled again.
 fn start(e: &mut Engine) {
     start_scan(e);
-    if resume(e) {
+    // The phone's range never saves, its prepared save neither (`crate::phone_range`).
+    if !crate::phone_range::on() && resume(e) {
         return;
     }
     let configured = cell();
@@ -1057,7 +1070,9 @@ pub fn frame(e: &mut Engine, player: u32) {
                     note(e, "Test Range: press Home for the range menu.");
                 } else {
                     setup(e, player);
-                    if CACHE.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
+                    if !crate::phone_range::on()
+                        && CACHE.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+                    {
                         SAVE_COUNTDOWN.store(SAVE_AFTER_FRAMES, Ordering::Relaxed);
                     }
                 }
@@ -1093,6 +1108,7 @@ pub fn frame(e: &mut Engine, player: u32) {
     if answer != NO_ANSWER {
         act(e, player, answer);
     }
+    crate::phone_range::frame(e, player);
 }
 
 /// A frame ran during the start's load ([`frame`]).
@@ -1144,9 +1160,9 @@ static PENDING_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 /// Home's press (its going down), on the real window's keyboard (Windows).
 fn home_pressed() -> bool {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "android"))]
     let down = engine_platform::d3d9real::held_keys()[DIK_HOME];
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "android")))]
     let down = false;
     let was = KEY_DOWN.swap(down, Ordering::Relaxed);
     down && !was
@@ -1186,6 +1202,8 @@ const LINE_SIZE: u32 = 0x200;
 /// The game's `PlaceAtMe` worker (`cdecl`: reference, form, count, distance, direction, health
 /// scale), answering the last reference placed.
 const PLACE_AT_ME: u32 = 0x005c_4b30;
+/// `LookupFormByID`.
+const LOOKUP_FORM: u32 = 0x0048_39c0;
 /// `ShowMessageBox` (`cdecl`: text, 0, 0, callback, 0, the menu type 0x17, 0, 0, ten buttons, 0)
 /// and the pressed button (`Interface::GetMessageMenuResult`).
 const SHOW_MESSAGE_BOX: u32 = 0x0070_3e80;
@@ -1529,6 +1547,9 @@ fn setup(e: &mut Engine, player: u32) {
         }
     };
     place_targets(e, player, best, spot.as_deref());
+    if crate::phone_range::on() {
+        phone_setup(e, player, best, &weapons);
+    }
     eprintln!(
         "Test Range: {} weapons, a lane of targets; Home opens the range menu",
         weapons.len()
@@ -1796,7 +1817,12 @@ fn place_targets(e: &mut Engine, player: u32, heading: f32, spot: Option<&Spot>)
     let hostile = with_range(|r| r.hostile);
     let mut targets = Vec::new();
     let (mut h, mut c) = (0usize, 0usize);
-    for (metres, humanoid, side) in plan(clear, lanes) {
+    let planned = if crate::phone_range::on() {
+        vec![(crate::phone_range::TARGET_METRES.min(clear), true, 0.0)]
+    } else {
+        plan(clear, lanes)
+    };
+    for (metres, humanoid, side) in planned {
         let (dx, dy) = offset(heading, metres, side);
         let wanted = [here[0] + dx, here[1] + dy, here[2]];
         let floor = spot.map(|s| &s.floor);
@@ -1841,6 +1867,21 @@ fn place_targets(e: &mut Engine, player: u32, heading: f32, spot: Option<&Spot>)
         run_line(e, &format!("{t}.setangle z {angle:.0}"));
         for line in stance(&t, hostile) {
             run_line(e, &line);
+        }
+        if crate::phone_range::on() {
+            // Where it stands, for the reset button (`phone_reset`).
+            let mut spot = PHONE_SPOT.lock().unwrap_or_else(|p| p.into_inner());
+            if spot.is_none() {
+                *spot = Some((base, at, angle));
+            }
+            drop(spot);
+            // Invincible: essential (knocked out, never killed) and far more health than any
+            // weapon takes, kept up (`phone_keep`).
+            run_line(e, &format!("setessential {} 1", id(base_id)));
+            run_line(
+                e,
+                &format!("{t}.setav health {}", crate::phone_range::TARGET_HEALTH),
+            );
         }
         targets.push(e.mem.u32(placed + FORM_ID));
     }
@@ -2082,6 +2123,11 @@ fn act(e: &mut Engine, player: u32, answer: u8) {
 pub fn add_option(e: &mut Engine) {
     // The base game's master is read for the range's places while the menu is up.
     start_scan(e);
+    crate::phone_range::start_scan(e);
+    // The phone's range starts by itself once the menu has settled (`TICK`).
+    if crate::phone_range::on() && phase() == Phase::Off {
+        PHONE_START_IN.store(PHONE_START_TICKS, Ordering::Relaxed);
+    }
     if let Some(text) = PENDING_ERROR
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -2135,6 +2181,155 @@ const OPTIONS: u32 = 0x011d_ab88;
 const ARRAY_ADD: u32 = 0x007c_b2e0;
 const TITLE_MENU: u32 = 1;
 const QUIT_CHOOSE: u32 = 0x007d_0a10;
+
+// --- The phone's range (`crate::phone_range`). --------------------------------------------------
+
+/// The phone's target's base, where it first stood and its heading (degrees), for the reset.
+static PHONE_SPOT: Mutex<Option<(u32, [f32; 3], f32)>> = Mutex::new(None);
+
+/// The phone's guns (form ids) and their ammo (form ids), once set up.
+static PHONE_GUNS: Mutex<(Vec<u32>, Vec<u32>)> = Mutex::new((Vec::new(), Vec::new()));
+
+/// The phone's set-up: the obstacles behind the target, the guns given and the first in hand.
+fn phone_setup(e: &mut Engine, player: u32, heading: f32, weapons: &[u32]) {
+    let ids: Vec<u32> = weapons.iter().map(|&w| e.mem.u32(w + FORM_ID)).collect();
+    let guns = crate::phone_range::gun_ids(&ids);
+    let mut ammo: Vec<u32> = Vec::new();
+    for &g in &guns {
+        let form = e.call(LOOKUP_FORM, &args![g]).u32();
+        if form != 0 {
+            if let Some(a) = ammo_of(e, form) {
+                ammo.push(e.mem.u32(a + FORM_ID));
+            }
+        }
+    }
+    for &g in &guns {
+        run_line(e, &format!("player.additem {} 1 1", id(g)));
+    }
+    if let Some(&first) = guns.first() {
+        run_line(e, &format!("player.equipitem {} 0 1", id(first)));
+    }
+    step(&format!(
+        "the phone's range: {} of {} guns found, {} ammo kinds",
+        guns.len(),
+        crate::phone_range::GUNS.len(),
+        ammo.len()
+    ));
+    *PHONE_GUNS.lock().unwrap_or_else(|p| p.into_inner()) = (guns, ammo);
+    phone_keep(e);
+    // The obstacles, behind the target as the player sees it.
+    let pieces = crate::phone_range::pieces();
+    for (piece, form_id) in pieces {
+        let base = e.call(LOOKUP_FORM, &args![form_id]).u32();
+        if base == 0 {
+            continue;
+        }
+        let placed = e
+            .call(PLACE_AT_ME, &args![player, base, 1u32, 0u32, 0u32, 1.0f32])
+            .u32();
+        if placed == 0 {
+            step(&format!(
+                "the phone's range: {piece:?} {form_id:08X} could not be placed"
+            ));
+            continue;
+        }
+        let (behind, side) = piece.spot();
+        let (x, y) = offset(heading, crate::phone_range::TARGET_METRES + behind, side);
+        let r = id(e.mem.u32(placed + FORM_ID));
+        run_line(e, &format!("{r}.moveto player {x:.0} {y:.0} 0"));
+        run_line(
+            e,
+            &format!(
+                "{r}.setangle z {:.0}",
+                heading.to_degrees().rem_euclid(360.0)
+            ),
+        );
+        step(&format!(
+            "the phone's range: {piece:?} {form_id:08X} placed as {r}"
+        ));
+    }
+}
+
+/// The phone's "weapon" button: the next gun in hand.
+pub(crate) fn phone_next_weapon(e: &mut Engine, index: &AtomicU32) {
+    let guns = PHONE_GUNS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .0
+        .clone();
+    if guns.is_empty() {
+        return;
+    }
+    let next = (index.load(Ordering::Relaxed) as usize + 1) % guns.len();
+    index.store(next as u32, Ordering::Relaxed);
+    run_line(e, &format!("player.equipitem {} 0 1", id(guns[next])));
+}
+
+/// The phone's "reset" button: the target taken away and a fresh one put where the first stood
+/// (by the obstacles), facing the same way.
+pub(crate) fn phone_reset(e: &mut Engine, player: u32) {
+    let spot = *PHONE_SPOT.lock().unwrap_or_else(|p| p.into_inner());
+    let Some((base, at, angle)) = spot else {
+        return;
+    };
+    let targets = with_range(|r| std::mem::take(&mut r.targets));
+    for t in targets {
+        let t = id(t);
+        run_line(e, &format!("{t}.disable"));
+        run_line(e, &format!("{t}.markfordelete"));
+    }
+    let placed = e
+        .call(PLACE_AT_ME, &args![player, base, 1u32, 0u32, 0u32, 1.0f32])
+        .u32();
+    if placed == 0 {
+        step("the phone's range: the target could not be placed again");
+        return;
+    }
+    let t = id(e.mem.u32(placed + FORM_ID));
+    for (axis, v) in ["x", "y", "z"].iter().zip(at) {
+        run_line(e, &format!("{t}.setpos {axis} {v:.0}"));
+    }
+    run_line(e, &format!("{t}.setangle z {angle:.0}"));
+    let hostile = with_range(|r| r.hostile);
+    for line in stance(&t, hostile) {
+        run_line(e, &line);
+    }
+    run_line(
+        e,
+        &format!("setessential {} 1", id(e.mem.u32(base + FORM_ID))),
+    );
+    run_line(
+        e,
+        &format!("{t}.setav health {}", crate::phone_range::TARGET_HEALTH),
+    );
+    let placed_id = e.mem.u32(placed + FORM_ID);
+    with_range(|r| r.targets = vec![placed_id]);
+    step(&format!("the phone's range: the target put back as {t}"));
+}
+
+/// The phone's keeping: the guns' ammo topped up (500 each) and the target healed.
+pub(crate) fn phone_keep(e: &mut Engine) {
+    let ammo = PHONE_GUNS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .1
+        .clone();
+    for a in ammo {
+        let a = id(a);
+        run_line(e, &format!("player.removeitem {a} 99999 1"));
+        run_line(e, &format!("player.additem {a} 500 1"));
+    }
+    for t in with_range(|r| r.targets.clone()) {
+        run_line(
+            e,
+            &format!(
+                "{}.restoreav health {}",
+                id(t),
+                crate::phone_range::TARGET_HEALTH
+            ),
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,65 @@
+# The Android test build (docs/ANDROID.md): the real engine on the phone, booting straight into
+# the phone's Test Range (`host::phone_range`) with touch controls. Its own workspace, so the main
+# workspace (and its Windows play build and lock file) is untouched; built and packaged by
+# .github/workflows/android-test.yml.
+[package]
+name = "nvrs-android"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "nvrs_android"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+host = { path = "../crates/host" }
+engine-platform = { path = "../crates/engine-platform" }
+d3d9-wgpu = { path = "../crates/d3d9-wgpu" }
+android-activity = { version = "=0.6.1", features = ["native-activity"] }
+
+[workspace]
+
+# As the main workspace: wgpu-hal with the repository's changes (vendor/README.md).
+[patch.crates-io]
+wgpu-hal = { path = "../vendor/wgpu-hal" }
+
+[profile.release]
+debug = 1
+panic = "unwind"
+
+[package.metadata.android]
+package = "io.github.lhomer.nvrs.test"
+apk_name = "nv-rs-android-test"
+build_targets = ["aarch64-linux-android"]
+
+# Android 11 and later (the "all files" permission below).
+[package.metadata.android.sdk]
+min_sdk_version = 30
+target_sdk_version = 34
+
+[package.metadata.android.application]
+label = "NV-RS Test"
+debuggable = false
+# Full screen, no title bar.
+theme = "@android:style/Theme.NoTitleBar.Fullscreen"
+
+[package.metadata.android.application.activity]
+orientation = "sensorLandscape"
+config_changes = "orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize|density"
+
+# Reading the player's own game files from a folder they copy to the phone (/sdcard/NVRS): the
+# "all files" access, granted by hand in the app's settings (docs/ANDROID.md). The app's own folder
+# (Android/data/io.github.lhomer.nvrs.test/files) needs no permission.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.MANAGE_EXTERNAL_STORAGE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_EXTERNAL_STORAGE"
+
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.vulkan.level"
+required = true
+version = 1

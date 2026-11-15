@@ -535,7 +535,7 @@ macro_rules! forwarded {
         $vis fn $name(e: &mut Engine, this: Ptr, $($a: $t),*) -> u32 {
             let model = $model(e, this, $($a),*);
             // A call the model refuses changes nothing, so the real device does not get it.
-            #[cfg(windows)]
+            #[cfg(wgpu_window)]
             if model == D3D_OK {
                 super::d3d9real::$real(e, this.addr(), $(Word::word($a),)* model);
             }
@@ -589,7 +589,7 @@ fn fwd_create_texture(
     let model = create_texture(
         e, this, width, height, levels, usage, format, pool, out, shared,
     );
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     if model == D3D_OK {
         let texture = e.mem.u32(out.addr());
         let surfaces = device!(e).device_objects.textures[&texture].levels.clone();
@@ -623,7 +623,7 @@ fn fwd_create_cube_texture(
     shared: u32,
 ) -> u32 {
     let model = create_cube_texture(e, this, edge, levels, usage, format, pool, out, shared);
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     if model == D3D_OK {
         let texture = e.mem.u32(out.addr());
         let surfaces = device!(e).device_objects.textures[&texture].levels.clone();
@@ -684,7 +684,7 @@ fn fwd_create_surface(
             shared,
         )
     };
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     if model == D3D_OK {
         let surface = e.mem.u32(out.addr());
         super::d3d9real::surface_created(
@@ -1306,7 +1306,7 @@ pub fn create_device(
     };
     device!(e).device_objects.devices.insert(object, device);
     crate::direct3d_device_created(e, behavior);
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     {
         let d = &device!(e).device_objects.devices[&object];
         let (present, back_buffers, depth) =
@@ -1414,11 +1414,11 @@ pub(super) fn device_release(e: &mut Engine, this: Ptr) -> u32 {
             .collect();
         for surface in implicit {
             device!(e).device_objects.surfaces.remove(&surface);
-            #[cfg(windows)]
+            #[cfg(wgpu_window)]
             super::d3d9real::forget(e, surface);
             e.mem.free(surface);
         }
-        #[cfg(windows)]
+        #[cfg(wgpu_window)]
         super::d3d9real::forget(e, this.addr());
         e.vcall(d.direct3d, 4 * 2, &[]);
         e.mem.free(this.addr());
@@ -1682,7 +1682,7 @@ fn surface_release(e: &mut Engine, this: Ptr) -> u32 {
                 e.mem.free(s.bits);
             }
         }
-        #[cfg(windows)]
+        #[cfg(wgpu_window)]
         super::d3d9real::forget(e, this.addr());
         e.mem.free(this.addr());
         // A surface the program made (CreateRenderTarget, CreateDepthStencilSurface) held its
@@ -1832,7 +1832,7 @@ fn begin_scene(e: &mut Engine, this: Ptr) -> u32 {
         }
     };
     mark(e, super::d3d9draw::Key::InScene);
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     super::d3d9real::begin_scene(e, this.addr(), model);
     model
 }
@@ -1849,7 +1849,7 @@ fn end_scene(e: &mut Engine, this: Ptr) -> u32 {
         }
     };
     mark(e, super::d3d9draw::Key::InScene);
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     super::d3d9real::end_scene(e, this.addr(), model);
     model
 }
@@ -1876,7 +1876,7 @@ fn clear(
     stencil: u32,
 ) -> u32 {
     let model = clear_answer(e, this, count, rects, flags);
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     super::d3d9real::clear(
         e,
         this.addr(),
@@ -1929,7 +1929,7 @@ fn present(e: &mut Engine, this: Ptr, source: u32, dest: u32, window: u32, dirty
     } else {
         D3D_OK
     };
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     super::d3d9real::present(e, this.addr(), source, dest, window, dirty, model);
     let _ = (source, dest, window, dirty);
     model
@@ -2223,7 +2223,7 @@ fn surface_mut(e: &mut Engine, surface: u32) -> &mut Surface {
 
 /// A managed or system-memory texture's levels kept in host memory, still all zero, whose real
 /// levels exist (`NV_D3D9=real` made them): from now on the real levels keep their pixels.
-#[cfg(windows)]
+#[cfg(wgpu_window)]
 fn pixels_to_real_levels(e: &mut Engine, pool: u32, levels: &[u32]) {
     if pool != D3DPOOL_MANAGED && pool != D3DPOOL_SYSTEMMEM {
         return;
@@ -2739,7 +2739,7 @@ fn create_offscreen_plain_surface(
     s.bits = bits;
     s.pitch = pitch;
     device_add_ref(e, this);
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     super::d3d9real::offscreen_created(e, this.addr(), surface, width, height, format, pool);
     e.mem.set_u32(out.addr(), surface);
     D3D_OK
@@ -2809,7 +2809,7 @@ fn color_fill(e: &mut Engine, this: Ptr, surface: u32, rect: Ptr, colour: u32) -
             }
         }
     }
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     super::d3d9real::color_fill(e, this.addr(), surface, rect.addr(), colour, D3D_OK);
     let _ = this;
     D3D_OK
@@ -2837,7 +2837,7 @@ fn get_render_target_data(e: &mut Engine, this: Ptr, source: u32, destination: u
     if !ok {
         return D3DERR_INVALIDCALL;
     }
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     if super::d3d9real::get_render_target_data(
         e,
         this.addr(),
@@ -2991,7 +2991,7 @@ fn reset(e: &mut Engine, this: Ptr, present: Ptr) -> u32 {
         .collect();
     for surface in implicit {
         device!(e).device_objects.surfaces.remove(&surface);
-        #[cfg(windows)]
+        #[cfg(wgpu_window)]
         super::d3d9real::forget(e, surface);
         e.mem.free(surface);
     }
@@ -3047,7 +3047,7 @@ fn reset(e: &mut Engine, this: Ptr, present: Ptr) -> u32 {
         d.scissor = [0, 0, width, height];
         d.lost = false;
     }
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     super::d3d9real::device_reset(e, this.addr(), &bytes, &back_buffers, depth_stencil);
     D3D_OK
 }
@@ -3149,11 +3149,11 @@ fn texture_destroy(e: &mut Engine, this: Ptr) {
             e.mem.free(s.bits);
             // A level destroyed while locked: its staging block goes with it.
             e.mem.free(s.staging);
-            #[cfg(windows)]
+            #[cfg(wgpu_window)]
             super::d3d9real::forget(e, level);
             e.mem.free(level);
         }
-        #[cfg(windows)]
+        #[cfg(wgpu_window)]
         super::d3d9real::forget(e, this.addr());
         e.mem.free(this.addr());
         device_release(e, Ptr::new(t.device));
@@ -3208,7 +3208,7 @@ fn texture_set_lod(e: &mut Engine, this: Ptr, lod: u32) -> u32 {
 /// level too (a managed texture; the model's answer stands).
 fn fwd_texture_set_lod(e: &mut Engine, this: Ptr, lod: u32) -> u32 {
     let previous = texture_set_lod(e, this, lod);
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     if texture(e, this).pool == D3DPOOL_MANAGED {
         super::d3d9real::texture_set_lod(e, this.addr(), lod, previous);
     }
@@ -3404,13 +3404,13 @@ fn surface_unlock_rect(e: &mut Engine, this: Ptr) -> u32 {
     s.locked = false;
     let staging = std::mem::take(&mut s.staging);
     let bits = if staging != 0 { staging } else { s.bits };
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     let uploaded = {
         let (pitch, desc) = (s.pitch, s.desc);
         let (_, size) = level_layout(desc[0], desc[6], desc[7]);
         super::d3d9real::surface_unlocked(e, this.addr(), bits, pitch, pitch, size / pitch.max(1))
     };
-    #[cfg(not(windows))]
+    #[cfg(not(wgpu_window))]
     let uploaded = false;
     if staging != 0 {
         unstage(e, this, staging, uploaded);
@@ -3446,7 +3446,7 @@ fn stage(e: &mut Engine, this: Ptr) -> u32 {
         // Zero until written: the block is zeroed.
         None => false,
     };
-    #[cfg(windows)]
+    #[cfg(wgpu_window)]
     if from_real && !super::d3d9real::read_surface(e, this.addr(), block, size) {
         panic!(
             "IDirect3DSurface9::LockRect: the real level {:#x} could not be read back (not \
@@ -3554,9 +3554,9 @@ fn stored_bytes(e: &mut Engine, this: Ptr, size: u32) -> Vec<u8> {
         Some(Pixels::Host(bytes)) => bytes.clone(),
         Some(Pixels::Real { .. }) => {
             let block = e.mem.alloc(size);
-            #[cfg(windows)]
+            #[cfg(wgpu_window)]
             let read = super::d3d9real::read_surface(e, this.addr(), block, size);
-            #[cfg(not(windows))]
+            #[cfg(not(wgpu_window))]
             let read = false;
             let bytes = e.mem.bytes(block, size);
             e.mem.free(block);

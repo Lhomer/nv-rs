@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (the Android test build)
+
+- **Now (docs/ANDROID.md; `android/` (own workspace, `nvrs_android`); `.github/workflows/android-test.yml` (APK at the `android-test` release); `crates/engine-platform/build.rs` `cfg(wgpu_window)` (Windows and Android), `d3d9real.rs` portable with its Win32 parts `cfg(windows)` and Android's `set_native_window`, `touch_*`; `files.rs` file times and case-insensitive `/` paths off Windows; `crates/d3d9-wgpu` Android surface, `touch_overlay`; `crates/host/src/phone_range.rs` and the phone hooks in `test_range.rs`):** compiles for aarch64-linux-android; the APK is built by CI. Never run on a phone: no device or game files here. Side effect: engine-platform and host now build their tests on Linux without the finish_output guard (#512); engine-platform's Linux tests leave one code-page test failing (not modelled off Windows).
+- **Patrick:** a barebones Android build of the real engine (arm64, Vulkan) booting into a Test Range-style room: one invincible NPC, furniture, railings, half-walls, low obstacles, a pistol, a shotgun, a hunting rifle, an anti-materiel rifle and a melee weapon with unlimited ammo; touch controls (stick, swipe look, fire, aim, reload, switch, reset); his own game files from a folder on the phone; saves never touched; APK from CI at a stable link; Windows unaffected.
+
 ### Claude, 2026-11-15 (active ragdoll: the world and what hits leave)
 
 - **Now (`ragdoll_core::obstacle`: `World`, `scan`, `resolve`, `trip_on`, `trips_over`, `recovery_step`, `fold_launch`; `ragdoll_core::condition`; `active::Body::counter_brace`, `flex`, `within_reach`; `flinch::brace_target(.., top)`; host `GameWorld`, `brace_obstacle`, `condition_of`, `condition_hit`, `begin_fall`, `Fall::fold`, `Brace::top`, knockdown's pain escalation; the lab's grounds and six scenes):** obstacles at several heights and across the body, braces at their height, fold-over, trips on low obstacles, fatigue, pain escalation, regional injury, counter-side bracing. Not run in game: the ray budget per push (about 20 level and up to 70 downward casts) and the actor value codes 27 to 30 for crippled limbs are unchecked in game.

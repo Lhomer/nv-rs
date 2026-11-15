@@ -777,6 +777,9 @@ pub struct Device {
     /// whether it showed at the last present (turned on, its meter starts again).
     fps_meter: Arc<std::sync::Mutex<frame_rate::Meter>>,
     fps_overlay: Option<frame_rate::Overlay>,
+    /// The touch controls' drawing (`crate::touch_overlay`, the Android test build), made when
+    /// shapes are first set.
+    touch_overlay: Option<crate::touch_overlay::Overlay>,
     fps_was_shown: bool,
     shots: Option<Shots>,
     warned: HashSet<String>,
@@ -1194,6 +1197,7 @@ impl Device {
             frames_shown: 0,
             fps_meter: Arc::default(),
             fps_overlay: None,
+            touch_overlay: None,
             fps_was_shown: false,
             shots,
             warned: HashSet::new(),
@@ -5823,6 +5827,26 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         self.fps_overlay = Some(overlay);
     }
 
+    /// The touch controls ([`crate::touch_overlay`]) drawn into the window's frame `view`; the
+    /// drawing made when first needed (again if the window's format changed).
+    fn draw_touch(
+        &mut self,
+        view: &wgpu::TextureView,
+        (format, width, height): (wgpu::TextureFormat, u32, u32),
+    ) {
+        if !crate::touch_overlay::any() {
+            return;
+        }
+        self.end_pass();
+        let mut overlay = match self.touch_overlay.take() {
+            Some(o) if o.format == format => o,
+            _ => crate::touch_overlay::Overlay::new(&self.device, format),
+        };
+        let queue = self.queue.clone();
+        overlay.draw(&queue, self.encoder(), view, (width, height));
+        self.touch_overlay = Some(overlay);
+    }
+
     /// Shows `p` in the game's window ([`loading`]): for a long step of the backend's own before
     /// play, which calls it as it goes. Only a device on the game's window draws it; every call
     /// also writes one log line with the same numbers (for a launcher). The game's own frames
@@ -5980,6 +6004,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                 let full = tex.map_or(size, |t| (t.width(), t.height()));
                 self.start_over(&sv, full, &view, (format, cw, ch));
             }
+            // The touch controls over it all (none set: nothing).
+            self.draw_touch(&view, (format, cw, ch));
             // With a capture, the frame the window gets too (`wgpu-window-N.bmp`): the
             // swapchain's own texture, read back before it is presented.
             if shot && copyable && format == wgpu::TextureFormat::Bgra8Unorm {
@@ -6867,7 +6893,30 @@ extern "system" {
     fn GetModuleHandleW(name: *const u16) -> isize;
 }
 
-#[cfg(not(windows))]
+/// Android (the test build, docs/ANDROID.md): the surface on the activity's native window
+/// (`window` an `ANativeWindow*`, which the activity keeps while the game draws in it).
+#[cfg(target_os = "android")]
+pub(crate) fn surface_for(
+    instance: &wgpu::Instance,
+    window: isize,
+) -> Result<wgpu::Surface<'static>, String> {
+    use raw_window_handle::{
+        AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle,
+    };
+    let native = std::ptr::NonNull::new(window as *mut std::ffi::c_void).ok_or("no window")?;
+    // SAFETY: the activity's native window, alive while the game draws (the app hands a new one
+    // over, and the old surface is made again, when the activity's window changes).
+    unsafe {
+        instance
+            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(RawDisplayHandle::Android(AndroidDisplayHandle::new())),
+                raw_window_handle: RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(native)),
+            })
+            .map_err(|e| format!("create_surface: {e}"))
+    }
+}
+
+#[cfg(not(any(windows, target_os = "android")))]
 pub(crate) fn surface_for(
     _instance: &wgpu::Instance,
     _window: isize,

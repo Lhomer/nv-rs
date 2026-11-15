@@ -330,7 +330,10 @@ pub fn full_path(e: &Engine, name: &[u8]) -> Vec<u8> {
 /// `0x5C` stays one character.
 fn real_path(path: &[u8]) -> std::path::PathBuf {
     if path.is_ascii() {
+        #[cfg(windows)]
         return std::path::PathBuf::from(String::from_utf8_lossy(path).into_owned());
+        #[cfg(not(windows))]
+        return host_case(&String::from_utf8_lossy(path));
     }
     let mut wide: Vec<u16> = Vec::with_capacity(path.len());
     let mut start = 0;
@@ -350,8 +353,79 @@ fn real_path(path: &[u8]) -> std::path::PathBuf {
     }
     #[cfg(not(windows))]
     {
-        std::path::PathBuf::from(String::from_utf16_lossy(&wide))
+        host_case(&String::from_utf16_lossy(&wide))
     }
+}
+
+/// Elsewhere than on Windows (the Android test build): the game's path on the host's file system,
+/// whose names keep their case and whose separator is `/`. The game's `\` become `/`; a path that
+/// does not exist as given is looked up a part at a time in any case (the game asks for its files
+/// in its own case, `Data\Shaders\ShaderPackage019.sdp` for `shaderpackage019.sdp`); the parts
+/// past the first that matches none are kept as given (a file about to be made). The folders'
+/// listings are kept: the player's game files do not change while the game runs.
+#[cfg(not(windows))]
+fn host_case(text: &str) -> std::path::PathBuf {
+    use std::collections::HashMap;
+    use std::path::{Component, Path, PathBuf};
+    use std::sync::Mutex;
+    type Listing = (Option<std::time::SystemTime>, Vec<std::ffi::OsString>);
+    static LISTINGS: Mutex<Option<HashMap<PathBuf, Listing>>> = Mutex::new(None);
+    let given = PathBuf::from(text.replace('\\', "/"));
+    if given.exists() {
+        return given;
+    }
+    let mut out = PathBuf::new();
+    let mut parts = given.components().peekable();
+    while let Some(part) = parts.next() {
+        let name = match part {
+            Component::Normal(name) => name,
+            other => {
+                out.push(other.as_os_str());
+                continue;
+            }
+        };
+        let here = if out.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            out.as_path()
+        };
+        if here.join(name).exists() {
+            out.push(name);
+            continue;
+        }
+        let found = {
+            // A folder's listing again when the folder changed since (its time of last change).
+            let changed = std::fs::metadata(here).and_then(|m| m.modified()).ok();
+            let mut cache = LISTINGS.lock().unwrap_or_else(|p| p.into_inner());
+            let cache = cache.get_or_insert_with(HashMap::new);
+            let fresh = cache
+                .get(here)
+                .is_some_and(|l| l.0 == changed && changed.is_some());
+            if !fresh {
+                let names = std::fs::read_dir(here)
+                    .map(|d| d.flatten().map(|e| e.file_name()).collect())
+                    .unwrap_or_default();
+                cache.insert(here.to_path_buf(), (changed, names));
+            }
+            let wanted = name.to_string_lossy();
+            cache.get(here).and_then(|l| {
+                l.1.iter()
+                    .find(|n| n.to_string_lossy().eq_ignore_ascii_case(&wanted))
+                    .cloned()
+            })
+        };
+        match found {
+            Some(real) => out.push(real),
+            None => {
+                out.push(name);
+                for rest in parts {
+                    out.push(rest.as_os_str());
+                }
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// The ANSI code page the game's `...A` calls turn names with: on Windows the system's
@@ -1178,10 +1252,26 @@ fn write_find_data(
             meta.last_write_time(),
         )
     };
+    // Elsewhere (the Android test build): the host's times as FILETIMEs (100 ns since 1601), a
+    // time the system does not keep as the last write; a directory or an archive file.
     #[cfg(not(windows))]
     let (attributes, created, accessed, written): (u32, u64, u64, u64) = {
-        let _ = &meta;
-        panic!("FindFirstFileA(\"{shown}\"): file times are only provided on Windows");
+        let _ = shown;
+        let ticks = |t: std::io::Result<std::time::SystemTime>| -> Option<u64> {
+            let since = t.ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+            Some(super::zone::UNIX_EPOCH_TICKS + (since.as_nanos() / 100) as u64)
+        };
+        let written = ticks(meta.modified()).unwrap_or(super::zone::UNIX_EPOCH_TICKS);
+        (
+            if meta.is_dir() {
+                FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                FILE_ATTRIBUTE_ARCHIVE
+            },
+            ticks(meta.created()).unwrap_or(written),
+            ticks(meta.accessed()).unwrap_or(written),
+            written,
+        )
     };
     let d = data.addr();
     e.mem.set_u32(d, attributes);
@@ -3592,8 +3682,21 @@ mod tests_kept_files {
     /// The scratch file `name` in `dir` with `bytes`; its full path.
     fn file(dir: &str, name: &str, bytes: &[u8]) -> String {
         let path = format!("{dir}\\{name}");
+        // The host's own path (elsewhere than on Windows the game's `\\` is the host's `/`).
+        #[cfg(windows)]
         std::fs::write(&path, bytes).unwrap();
+        #[cfg(not(windows))]
+        std::fs::write(path.replace('\\', "/"), bytes).unwrap();
         path
+    }
+
+    /// A test's game path (`\\`) as the host's (elsewhere than on Windows, `/`).
+    fn host(path: &str) -> String {
+        if cfg!(windows) {
+            path.to_string()
+        } else {
+            path.replace('\\', "/")
+        }
     }
 
     fn open(e: &mut Engine, path: &str, access: u32) -> u32 {
@@ -3743,8 +3846,8 @@ mod tests_kept_files {
         let incoming = file(&dir, "Incoming.bsa", &new);
         let h = open(&mut e, &path, GENERIC_READ);
         assert_eq!(read(&mut e, h, 100), old[..100].to_vec());
-        std::fs::rename(&incoming, &path).expect("a rename over a file the game has open");
-        assert_eq!(std::fs::read(&path).unwrap(), new);
+        std::fs::rename(host(&incoming), host(&path)).expect("a rename over a file the game has open");
+        assert_eq!(std::fs::read(host(&path)).unwrap(), new);
         assert_eq!(read(&mut e, h, 100), old[100..200].to_vec());
         assert_eq!(size(&mut e, h), 6000);
         set_file_pointer(&mut e, h, (-50i32) as u32, Ptr::new(0), 2);
@@ -3761,7 +3864,7 @@ mod tests_kept_files {
         let path = file(&dir, "Deleted.bsa", &old);
         let h = open(&mut e, &path, GENERIC_READ);
         assert_eq!(read(&mut e, h, 100), old[..100].to_vec());
-        std::fs::remove_file(&path).expect("deleting a file the game has open");
+        std::fs::remove_file(host(&path)).expect("deleting a file the game has open");
         assert_eq!(read(&mut e, h, 100), old[100..200].to_vec());
         assert_eq!(size(&mut e, h), 6000);
         assert_eq!(open(&mut e, &path, GENERIC_READ), INVALID_HANDLE_VALUE);
@@ -3779,7 +3882,7 @@ mod tests_kept_files {
         assert_eq!(delete_file_a(&mut e, Ptr::new(name)), 1);
         assert!(read(&mut e, h, 100).is_empty());
         assert_eq!(size(&mut e, h), 0);
-        assert_eq!(std::fs::read(&path).unwrap(), old);
+        assert_eq!(std::fs::read(host(&path)).unwrap(), old);
         close(&mut e, h);
 
         // The game's own write open takes the file into the run: the earlier read handle then
@@ -3800,7 +3903,7 @@ mod tests_kept_files {
             [&b"THE RUN!"[..], &old[108..110]].concat()
         );
         assert_eq!(size(&mut e, r), 6008);
-        assert_eq!(std::fs::read(&path).unwrap(), old);
+        assert_eq!(std::fs::read(host(&path)).unwrap(), old);
         close(&mut e, r);
         close(&mut e, w);
         let _ = std::fs::remove_dir_all(&dir);

@@ -88,7 +88,10 @@ pub mod d3d9backend;
 pub mod d3d9device;
 pub mod d3d9draw;
 pub mod d3d9query;
-#[cfg(windows)]
+#[cfg(wgpu_window)]
+// On Android the real Direct3D 9's diagnostics (the face check, the borderless window's bookkeeping)
+// have no caller: wgpu draws alone.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub mod d3d9real;
 pub mod d3d9resource;
 pub mod d3dx;
@@ -212,6 +215,7 @@ pub(crate) fn finish_drawing_at_exit(
 pub fn end_process(code: i32) -> ! {
     finish_drawing_at_exit(DRAW_EXIT_LIMIT);
     // What the start screen's capture still holds reaches the console and the log first.
+    #[cfg(wgpu_window)]
     d3d9_wgpu::loading::finish_output();
     engine_core::profile::stop();
     std::process::exit(code)

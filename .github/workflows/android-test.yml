@@ -1,0 +1,120 @@
+name: Android test build
+# The Android test build (docs/ANDROID.md): the real engine for arm64 Android (aarch64-linux-android),
+# packaged as an APK with cargo-apk from android/ (its own workspace; the Windows play build and the
+# main workspace are untouched). No game files are in it: the app reads the player's own.
+#
+# Signing: the publish job signs the APK with the test key kept beside it in the release
+# (nvrs-test.keystore, password nvrs-test, made by the first publish), so each new APK installs over
+# the last one (the app's folder kept). A test key, public on purpose; the repository holds no binary.
+#
+# On a claude/** branch a second job publishes the APK at a stable link, the rolling prerelease
+# tagged android-test (its file replaced by each successful build):
+# https://github.com/Lhomer/nv-rs/releases/download/android-test/nv-rs-android-test.apk
+on:
+  push:
+    branches: ['claude/**']
+    paths:
+      - 'android/**'
+      - 'crates/**'
+      - 'vendor/**'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/android-test.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-test-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  apk:
+    name: apk
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Room for the engine's build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/emulator /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: The toolchain (rust-toolchain.toml) and the Android target
+        run: |
+          rustup show
+          rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: android
+          key: android-test
+      - name: cargo-apk
+        run: cargo install cargo-apk --version 0.10.0 --locked
+      - name: Build the APK
+        working-directory: android
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
+          echo "SDK $ANDROID_HOME, NDK $ANDROID_NDK_ROOT"
+          ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools"
+          cargo apk build --release
+          mkdir -p ../release
+          cp target/release/apk/nv-rs-android-test.apk ../release/
+          sha256sum ../release/nv-rs-android-test.apk | sed 's#  .*/#  #' > ../release/nv-rs-android-test.apk.sha256
+          printf 'commit=%s\napk=nv-rs-android-test.apk\nbytes=%s\n' "$GITHUB_SHA" "$(stat -c %s ../release/nv-rs-android-test.apk)" > ../release/android-latest.txt
+          cat ../release/android-latest.txt
+      - name: Upload the APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-apk
+          path: release
+
+  publish:
+    name: publish
+    needs: apk
+    if: ${{ startsWith(github.ref, 'refs/heads/claude/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: android-apk
+          path: release
+      - name: Publish the rolling prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="android-test"
+          short="${GITHUB_SHA:0:7}"
+          title="nv-rs Android test build ($short)"
+          notes="$(printf '%s\n' \
+            "The Android test build of the branch \`$GITHUB_REF_NAME\` (arm64, Vulkan), replaced by each successful build." \
+            "" \
+            "- Commit: $GITHUB_SHA ($short)" \
+            "- A test build: no game files are in it; the app reads your own Fallout: New Vegas 1.4.0.525 files from a folder you copy to the phone. docs/ANDROID.md says which and where." \
+            "" \
+            "Files: nv-rs-android-test.apk (install it), its SHA-256, android-latest.txt (the build's commit), nvrs-test.keystore (the public test key every build is signed with).")"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "$title" --notes "$notes" --prerelease
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$title" --notes "$notes" --prerelease
+          fi
+          # The test key: the release's, or made now and kept there for the next builds.
+          mkdir -p key
+          if ! gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern nvrs-test.keystore --dir key; then
+            keytool -genkeypair -keystore key/nvrs-test.keystore -storepass nvrs-test -keypass nvrs-test \
+              -alias nvrs-test -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=nv-rs Android test build"
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber key/nvrs-test.keystore
+          fi
+          sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          tools="$(ls -d "$sdk"/build-tools/* | sort -V | tail -1)"
+          "$tools/apksigner" sign --ks key/nvrs-test.keystore --ks-pass pass:nvrs-test --key-pass pass:nvrs-test \
+            --ks-key-alias nvrs-test --out release/signed.apk release/nv-rs-android-test.apk
+          "$tools/apksigner" verify release/signed.apk
+          mv release/signed.apk release/nv-rs-android-test.apk
+          rm -f release/signed.apk.idsig
+          (cd release && sha256sum nv-rs-android-test.apk > nv-rs-android-test.apk.sha256)
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
+            release/nv-rs-android-test.apk release/nv-rs-android-test.apk.sha256
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber release/android-latest.txt

@@ -45,6 +45,7 @@ pub mod movement;
 pub mod native_inflate;
 pub mod patch_data;
 pub mod perk_every_level;
+pub mod phone_range;
 pub mod phys_blend;
 pub mod pickpocket_chance;
 pub mod player_move;
