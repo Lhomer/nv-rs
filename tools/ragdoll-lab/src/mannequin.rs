@@ -151,12 +151,12 @@ pub fn ragdoll_limits(bone: usize) -> [[f32; 2]; 3] {
         HEAD => s(0.5, 0.4, 0.7),
         L_CLAVICLE | R_CLAVICLE => s(0.2, 0.2, 0.25),
         L_UPPERARM | R_UPPERARM => s(1.4, 1.3, 0.9),
-        // An elbow bends forward only (about X), a little twist.
-        L_FOREARM | R_FOREARM => [[-0.05, 2.4], [-0.1, 0.1], [-0.6, 0.6]],
+        // An elbow bends forward only (about X; its stop at straight), a little twist.
+        L_FOREARM | R_FOREARM => [[0.0, 2.4], [-0.1, 0.1], [-0.6, 0.6]],
         // A hip: forward far, back a little; out and in; twist.
         L_THIGH | R_THIGH => [[-0.4, 1.7], [-0.6, 0.6], [-0.5, 0.5]],
-        // A knee bends back only.
-        L_CALF | R_CALF => [[-2.3, 0.05], [-0.05, 0.05], [-0.15, 0.15]],
+        // A knee bends back only (its stop at straight).
+        L_CALF | R_CALF => [[-2.3, 0.0], [-0.05, 0.05], [-0.15, 0.15]],
         L_FOOT | R_FOOT => s(0.6, 0.3, 0.3),
         L_HAND | R_HAND => s(0.8, 0.4, 0.5),
         _ => s(0.0, 0.0, 0.0),

@@ -72,12 +72,18 @@ pub const HYPEREXTEND: f32 = 0.03;
 pub const ELBOW_LEAN: f32 = 0.3;
 pub const KNEE_LEAN: f32 = 0.15;
 pub const AXIS_BEND: f32 = 0.2;
+/// The least flex (rad) an elbow's or a knee's target keeps ([`Body::hinged`]).
+pub const TARGET_FLEX: f32 = 0.06;
 /// How much firmer a hinge's motor is near and past its stop (as a negative dip).
 pub const HINGE_FIRM: f32 = 4.0;
 /// How near its stop (rad) a hinge's motor is made firmer.
 pub const HINGE_NEAR: f32 = 0.08;
 /// The share of the way back into its range a hinge past it is turned each small step.
 pub const HINGE_SHARE: f32 = 0.05;
+/// The same for a knee.
+pub const KNEE_SHARE: f32 = 0.05;
+/// How short of its straight length a leg's foot pin is held (a share of it).
+pub const REACH_SHORT: f32 = 0.995;
 
 /// Each Bip01 bone's share of the body's mass (`crate::flinch::BONES`' order; segment fractions).
 pub const SHARES: [f32; 20] = [
@@ -476,7 +482,9 @@ impl Body {
             ) else {
                 continue;
             };
-            if let Some(turn) = hinge_limit(u, f, axis, flex, lean) {
+            // The targets a little off straight (a person's joints seldom lock), so a limb flung
+            // straight by its motion is not driven onto its stop.
+            if let Some(turn) = hinge_limit_from(u, f, axis, TARGET_FLEX, flex, lean) {
                 let fixed = qnorm(qmul(now[p], qmul(turn, rel)));
                 out.get_or_insert_with(|| rot.to_vec())[i] = fixed;
             }
@@ -536,7 +544,14 @@ impl Body {
                 continue;
             };
             if let Some(turn) = hinge_limit(u, f, axis, flex, lean) {
-                let turn = qexp(scale(qlog(turn), HINGE_SHARE));
+                // A knee more (its foot's pin pulls it straight), an elbow gently (a firm stop on
+                // an arm made spin of its own).
+                let share = if self.segments[i].role == Role::Calf {
+                    KNEE_SHARE
+                } else {
+                    HINGE_SHARE
+                };
+                let turn = qexp(scale(qlog(turn), share));
                 let joint = self.joint(i);
                 let q = qnorm(qmul(qp, qmul(turn, rel)));
                 self.state[i].q = q;
@@ -977,12 +992,40 @@ impl Body {
 
     /// The pelvis's support and the feet's and hands' pins as soft positional constraints toward
     /// their targets (the world).
+    /// `at` (a foot's pin target, m) brought within its leg's straight reach from its hip (the
+    /// foot's grandparent's joint: hip, knee, ankle), a hair short of straight.
+    fn within_reach(&self, foot: usize, at: V3) -> V3 {
+        let Some(calf) = self.segments.get(foot).and_then(|s| s.parent) else {
+            return at;
+        };
+        let Some(thigh) = self.segments[calf].parent else {
+            return at;
+        };
+        let hip = self.joint(thigh);
+        let reach =
+            (length(self.segments[thigh].seg) + length(self.segments[calf].seg)) * REACH_SHORT;
+        let d = sub(at, hip);
+        let l = length(d);
+        if l > reach && l.is_finite() {
+            add(hip, scale(d, reach / l))
+        } else {
+            at
+        }
+    }
+
     fn pins(&mut self, targets: &Targets, gains: &Gains, h: f32) {
         let mut list: Vec<(usize, V3, f32)> = Vec::new();
         if gains.support.0 > 0.0 {
             list.push((self.pelvis, targets.pelvis, gains.support.0));
         }
-        list.extend(targets.feet.iter().map(|&(i, at)| (i, at, gains.foot.0)));
+        // A foot's pin no further from its hip than the leg reaches straight: a pin past it would
+        // pull the knee straight and on, backwards (stepping down a stair).
+        list.extend(
+            targets
+                .feet
+                .iter()
+                .map(|&(i, at)| (i, self.within_reach(i, at), gains.foot.0)),
+        );
         list.extend(targets.hands.iter().map(|&(i, at)| (i, at, gains.hand.0)));
         for (i, at, k) in list {
             if i >= self.state.len() || k <= 0.0 {
@@ -1250,16 +1293,21 @@ pub fn hinge_angles(u: V3, f: V3, axis: V3) -> (f32, f32) {
 /// or `None` when it is within it. A child folded far backwards goes to whichever end of the
 /// range is nearer round the circle.
 pub fn hinge_limit(u: V3, f: V3, axis: V3, flex: f32, lean: f32) -> Option<Q> {
+    hinge_limit_from(u, f, axis, -HYPEREXTEND, flex, lean)
+}
+
+/// [`hinge_limit`] with the range's low end at `low` (rad of flex).
+pub fn hinge_limit_from(u: V3, f: V3, axis: V3, low: f32, flex: f32, lean: f32) -> Option<Q> {
     let n = unit(axis)?;
     let (a, l) = hinge_angles(u, f, n);
     let tau = std::f32::consts::TAU;
-    let a2 = if a < -HYPEREXTEND {
-        let to_low = -HYPEREXTEND - a;
+    let a2 = if a < low {
+        let to_low = low - a;
         let to_high = (a + tau) - flex;
         if to_high < to_low {
             flex
         } else {
-            -HYPEREXTEND
+            low
         }
     } else {
         a.min(flex)

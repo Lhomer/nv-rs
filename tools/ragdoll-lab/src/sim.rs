@@ -55,7 +55,7 @@ pub const BRACE_PROBE: f32 = 90.0;
 pub const FORWARD: V3 = [0.0, 1.0, 0.0];
 /// The share of the way back to straight a ragdoll elbow or knee bent backwards is turned each
 /// step ([`Sim::stop_ragdoll_hinges`]).
-pub const RAGDOLL_HINGE_SHARE: f32 = 0.5;
+pub const RAGDOLL_HINGE_SHARE: f32 = 1.0;
 
 /// Hands reaching to a wall along `dir` (stage 3), `t` seconds in.
 #[derive(Clone, Copy, Debug)]
@@ -906,6 +906,16 @@ impl Sim {
             let (kc, kp) = (mp / (mp + mc), mc / (mp + mc));
             if let Some(b) = self.world.bodies.get_mut(hc) {
                 b.set_angvel(vec(add(wc, scale(n, fix * kc))), true);
+                // Past straight by more than the allowance: turned back onto the stop about its
+                // joint (each ragdoll body's origin is its joint), so a hard fall cannot drive it
+                // further than a step's motion.
+                if over < 0.0 {
+                    let turn = rotation(scale(n, -over));
+                    let now = m3_of(*b.rotation());
+                    let fixed = mul(&turn, &now);
+                    b.set_rotation(quat_of(&fixed), true);
+                    self.posed[child].0 = fixed;
+                }
             }
             if let Some(b) = self.world.bodies.get_mut(hp) {
                 b.set_angvel(vec(sub(wp, scale(n, fix * kp))), true);
@@ -1155,7 +1165,15 @@ impl Sim {
         self.posed_before = self.posed;
         match self.state {
             State::Standing => self.pose_frame(dt),
-            State::Ragdoll { .. } => self.ragdoll_frame(),
+            State::Ragdoll { .. } => {
+                self.ragdoll_frame();
+                // And after its step: what the step drove past a stop is held there before it is
+                // shown.
+                if let State::Ragdoll { bodies, .. } = &self.state {
+                    let handles = bodies.clone();
+                    self.stop_ragdoll_hinges(&handles);
+                }
+            }
             State::GettingUp { .. } => self.get_up_frame(dt),
         }
         let bent = back_bend(&self.posed);

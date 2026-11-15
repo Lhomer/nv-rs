@@ -509,6 +509,13 @@ Now, all in `ragdoll_core` (the lab and the game share it):
     sledgehammer's spin fold an elbow past its stop and round), held to their stops the same way.
   - The get-up blends each bone against its parent.
   - The arm speed, smoothness and all other expectations still hold.
+- **Margin (after 5aff676c's lab CI failed on the ledge at 3.2°, against 2.65° on another
+  machine).** The motors' targets keep elbows and knees 0.06 rad off straight (`TARGET_FLEX`;
+  people seldom lock them), so a limb flung straight is not driven onto its stop. A leg's foot pin
+  is held within the leg's straight reach from its actual hip (`within_reach`), so stepping down a
+  stair cannot pull the knee past straight. The lab ragdoll's stops are at straight, and a joint
+  past one is turned back onto it before and after each step. The most any scenario shows now is
+  1.2° past the allowance (stairs-down), against the test's 3°.
 
 ### Active ragdoll: our own controller, one write for every actor (Patrick, 2026-11-15)
 
