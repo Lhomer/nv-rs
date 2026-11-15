@@ -74,6 +74,10 @@ pub const KNEE_LEAN: f32 = 0.15;
 pub const AXIS_BEND: f32 = 0.2;
 /// The least flex (rad) an elbow's or a knee's target keeps ([`Body::hinged`]).
 pub const TARGET_FLEX: f32 = 0.06;
+/// Counter-side bracing ([`Body::hit`]): how much a hit (per m/s of its push) softens the bones on
+/// its side and stiffens those away from it (as dips).
+pub const COUNTER_SOFT: f32 = 0.1;
+pub const COUNTER_STIFF: f32 = 0.2;
 /// How much firmer a hinge's motor is near and past its stop (as a negative dip).
 pub const HINGE_FIRM: f32 = 4.0;
 /// How near its stop (rad) a hinge's motor is made firmer.
@@ -518,6 +522,23 @@ impl Body {
         out
     }
 
+    /// The world rotations `rot` with the hinge of bone `i` (an elbow, a knee) flexed `angle`
+    /// (rad) more about its axis (a hurt leg's sag, `crate::condition::Condition::sag`); its
+    /// children keep their world rotations (a foot stays level).
+    pub fn flex(&self, rot: &mut [Q], i: usize, angle: f32) {
+        let (Some(p), Some(axis)) = (
+            self.segments.get(i).and_then(|s| s.parent),
+            self.hinge.get(i).copied().flatten(),
+        ) else {
+            return;
+        };
+        if rot.len() != self.state.len() || !angle.is_finite() || angle == 0.0 {
+            return;
+        }
+        let n = qrot(rot[p], axis);
+        rot[i] = qnorm(qmul(qexp(scale(n, angle)), rot[i]));
+    }
+
     fn hinged_targets(&self, targets: &Targets) -> Option<Targets> {
         let rot = self.hinged(&targets.rot)?;
         let mut t = targets.clone();
@@ -699,7 +720,32 @@ impl Body {
             // arms keeping their aim).
             *d = (*d + add_).clamp(-5.0, 0.9);
         }
+        self.counter_brace(at, p);
         i
+    }
+
+    /// Counter-side bracing (after Kickback's idea): a hit of momentum `p` (N s) at `at` (m)
+    /// softens the bones on its side of the body and stiffens those away from it, each by how far
+    /// to that side it is (across the pelvis), more for a harder hit (its push over 1 m/s, at most
+    /// 2).
+    fn counter_brace(&mut self, at: V3, p: f32) {
+        let centre = self.state[self.pelvis].com;
+        let Some(toward) = unit(sub(at, centre)) else {
+            return;
+        };
+        let k = (p / self.mass.max(1.0)).clamp(0.0, 2.0);
+        for b in 0..self.state.len() {
+            let Some(r) = unit(sub(self.state[b].com, centre)) else {
+                continue;
+            };
+            let s = dot(r, toward);
+            let add_ = if s > 0.0 {
+                COUNTER_SOFT * k * s
+            } else {
+                COUNTER_STIFF * k * s
+            };
+            self.dip[b] = (self.dip[b] + add_).clamp(-5.0, 0.9);
+        }
     }
 
     /// One frame of `dt` seconds toward `targets`, the motors at `strength` (0 to 1) of full.

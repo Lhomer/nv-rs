@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (active ragdoll: the world and what hits leave)
+
+- **Now (`ragdoll_core::obstacle`: `World`, `scan`, `resolve`, `trip_on`, `trips_over`, `recovery_step`, `fold_launch`; `ragdoll_core::condition`; `active::Body::counter_brace`, `flex`, `within_reach`; `flinch::brace_target(.., top)`; host `GameWorld`, `brace_obstacle`, `condition_of`, `condition_hit`, `begin_fall`, `Fall::fold`, `Brace::top`, knockdown's pain escalation; the lab's grounds and six scenes):** obstacles at several heights and across the body, braces at their height, fold-over, trips on low obstacles, fatigue, pain escalation, regional injury, counter-side bracing. Not run in game: the ray budget per push (about 20 level and up to 70 downward casts) and the actor value codes 27 to 30 for crippled limbs are unchecked in game.
+- **Patrick:** obstacles probed at several heights and with several rays; braces at the real height; fold over on big hits; trips on low obstacles; Kickback ideas (fatigue, cumulative pain, lasting injury, counter-side bracing); lab scenes with headless tests.
+
 ### Claude, 2026-11-15 (per-gun velocity: real editor IDs)
 
 - **Now (`crates/host/data/gun_velocity.tsv` rewritten; `data/official_weapons.tsv`; `gun_velocity` tests `every_entry_is_an_official_weapon`, `every_official_calibre_gun_has_an_entry`):** every entry is an official `WEAP`, and every official calibre gun (94 records) has one. Not run in game: the next log's `Per-gun velocity:` line should list none of either.

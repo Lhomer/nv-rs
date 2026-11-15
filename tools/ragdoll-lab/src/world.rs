@@ -16,15 +16,25 @@ pub enum GroundKind {
     Stairs,
     Wall,
     Ledge,
+    Railing,
+    GapRailing,
+    HalfWall,
+    Table,
+    Curb,
 }
 
-pub const GROUNDS: [(&str, GroundKind); 6] = [
+pub const GROUNDS: [(&str, GroundKind); 11] = [
     ("flat", GroundKind::Flat),
     ("slope", GroundKind::Slope),
     ("uneven", GroundKind::Uneven),
     ("stairs", GroundKind::Stairs),
     ("wall", GroundKind::Wall),
     ("ledge", GroundKind::Ledge),
+    ("railing", GroundKind::Railing),
+    ("gaprailing", GroundKind::GapRailing),
+    ("halfwall", GroundKind::HalfWall),
+    ("table", GroundKind::Table),
+    ("curb", GroundKind::Curb),
 ];
 
 impl GroundKind {
@@ -44,6 +54,17 @@ impl GroundKind {
 pub const SLOPE_DEGREES: f32 = 15.0;
 /// Where the wall's face is, the ledge's edge and the stairs' first step, along -Y (units).
 pub const WALL_AT: f32 = -25.0;
+/// The waist-high obstacles behind the body (a push from its front meets them): their near face
+/// (Y), a railing's and a half-wall's top (1 m), a table's top (0.74 m), a railing's posts'
+/// spacing and the gap railing's bars' (the rays across the body at 0 and 0.2 m either side pass
+/// between its bars: only its top rail, met from above, finds it); the curb's height (0.21 m).
+pub const OBSTACLE_AT: f32 = -24.0;
+pub const RAIL_TOP: f32 = 70.0;
+pub const TABLE_TOP: f32 = 52.0;
+pub const POST_EVERY: f32 = 40.0;
+pub const BAR_EVERY: f32 = 14.0;
+pub const CURB_AT: f32 = -20.0;
+pub const CURB_HEIGHT: f32 = 15.0;
 pub const LEDGE_AT: f32 = -20.0;
 pub const LEDGE_DROP: f32 = 150.0;
 pub const STAIRS_AT: f32 = -15.0;
@@ -250,6 +271,72 @@ pub fn build(world: &mut PhysicsWorld, kind: GroundKind) -> Ground {
                 [200.0, WALL_AT, 180.0],
             );
         }
+        GroundKind::Railing | GroundKind::GapRailing => {
+            add_box(world, &mut tris, [-far, -far, -40.0], [far, far, 0.0]);
+            let (y0, y1) = (OBSTACLE_AT - 5.0, OBSTACLE_AT);
+            add_box(
+                world,
+                &mut tris,
+                [-150.0, y0, RAIL_TOP - 4.0],
+                [150.0, y1, RAIL_TOP],
+            );
+            let (every, first) = if kind == GroundKind::Railing {
+                (POST_EVERY, -140.0)
+            } else {
+                (BAR_EVERY, -BAR_EVERY * 0.5 - BAR_EVERY * 10.0)
+            };
+            let mut x = first;
+            while x <= 150.0 {
+                add_box(
+                    world,
+                    &mut tris,
+                    [x - 1.0, y0 + 1.5, 0.0],
+                    [x + 1.0, y1 - 1.5, RAIL_TOP - 4.0],
+                );
+                x += every;
+            }
+        }
+        GroundKind::HalfWall => {
+            add_box(world, &mut tris, [-far, -far, -40.0], [far, far, 0.0]);
+            add_box(
+                world,
+                &mut tris,
+                [-200.0, OBSTACLE_AT - 12.0, 0.0],
+                [200.0, OBSTACLE_AT, RAIL_TOP],
+            );
+        }
+        GroundKind::Table => {
+            add_box(world, &mut tris, [-far, -far, -40.0], [far, far, 0.0]);
+            let (y0, y1) = (OBSTACLE_AT - 50.0, OBSTACLE_AT);
+            add_box(
+                world,
+                &mut tris,
+                [-45.0, y0, TABLE_TOP - 3.0],
+                [45.0, y1, TABLE_TOP],
+            );
+            for (x, y) in [
+                (-42.0, y1 - 3.0),
+                (42.0, y1 - 3.0),
+                (-42.0, y0 + 3.0),
+                (42.0, y0 + 3.0),
+            ] {
+                add_box(
+                    world,
+                    &mut tris,
+                    [x - 2.0, y - 2.0, 0.0],
+                    [x + 2.0, y + 2.0, TABLE_TOP - 3.0],
+                );
+            }
+        }
+        GroundKind::Curb => {
+            add_box(world, &mut tris, [-far, CURB_AT, -40.0], [far, far, 0.0]);
+            add_box(
+                world,
+                &mut tris,
+                [-far, -far, -40.0],
+                [far, CURB_AT, CURB_HEIGHT],
+            );
+        }
         GroundKind::Ledge => {
             add_box(world, &mut tris, [-far, LEDGE_AT, -40.0], [far, far, 0.0]);
             add_box(
@@ -304,4 +391,12 @@ pub fn wall_between(world: &PhysicsWorld, from: V3, to: V3) -> bool {
     let d = [to[0] - from[0], to[1] - from[1], 0.0];
     let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
     len > 1e-3 && wall_ahead(world, [from[0], from[1], from[2] + 25.0], d, len + 8.0).is_some()
+}
+
+/// How far from `from` along `dir` (unit) a fixed surface is (units), within `range` (units):
+/// the game's ray cast (`ragdoll_core::obstacle::World::cast`).
+pub fn cast(world: &PhysicsWorld, from: V3, dir: V3, range: f32) -> Option<f32> {
+    let ray = Ray::new(to_m(from), Vec3::new(dir[0], dir[1], dir[2]));
+    let (_, toi) = world.cast_ray(&ray, range / 70.0, true, QueryFilter::only_fixed())?;
+    Some(toi * 70.0)
 }

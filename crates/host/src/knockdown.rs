@@ -337,7 +337,12 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
     let (mass, measured) = mass_of(e, target, body, scale);
     let speed = total / mass * t.hit_force.max(0) as f32 / 100.0;
     let topple = topple_speed(body, scale, t.knockdown_threshold);
-    let decision = reaction(speed, topple);
+    // Pain (this hit's own push over the topple speed, added to what earlier hits left)
+    // escalates the reaction: sustained fire staggers, then knocks down
+    // (`ragdoll_core::condition`; the actor's fatigue and hurt limbs are kept with it).
+    let own = p / mass * t.hit_force.max(0) as f32 / 100.0;
+    let stage = crate::active_ragdoll::condition_hit(e, target, own / topple.max(0.1), point);
+    let decision = ragdoll_core::condition::escalate(reaction(speed, topple), stage);
     note(format!(
         "{who}: {} {p:.1} N s (DT {dt:.0}); stack {:.1} N s left of earlier hits + this = {total:.1} \
          N s over {} hits (half-life {half_life:.2} s), along ({:.2}, {:.2}, {:.2}) -> {speed:.2} \

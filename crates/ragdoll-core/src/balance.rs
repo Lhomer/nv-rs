@@ -331,6 +331,8 @@ pub enum Outcome {
     Ledge,
     /// More steps than it can take: it falls.
     Overrun,
+    /// A low obstacle caught the swinging foot: it stumbles (`crate::obstacle`).
+    Trip,
 }
 
 /// A body stepping to catch itself (module documentation).

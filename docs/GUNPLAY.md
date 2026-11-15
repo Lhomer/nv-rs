@@ -471,6 +471,51 @@ stretched and grew, and the game froze. Two causes, both fixed:
   poses (the pass writing back three times a frame, a hair off, the animation skipping frames)
   makes exactly the shown pose and never adds up.
 
+### Active ragdoll: the world around it, and what hits leave (Patrick, 2026-11-15)
+
+All in `ragdoll_core`, so the lab and the game decide alike. The host answers through the game's
+ray casts (past actors) and navmesh, the lab through Rapier (`obstacle::World`).
+- **Obstacles** (`obstacle::scan`):
+  - Level rays at seven heights from the shin to the shoulders, each at three points across the
+    body (0.2 m apart), plus rays down from 2 m every 4 units ahead. So a railing or a table with
+    gaps between its posts, rails or legs, and a top between two heights, are still found.
+  - The nearest hit gives the distance, a ray down just past it gives the top.
+  - By height: low (below the knee, 0.45 m: it trips a step), waist-high (a railing, a table's
+    edge, a half-wall, up to 1.25 m) or a wall.
+- **The catch steps** (`obstacle::resolve`, one copy now for the host and the lab):
+  - Each step lands on its floor, or is stopped by a wall in its way (two rays at knee height),
+    by a waist-high obstacle or wall the body meets along the push (a railing's gaps let a foot's
+    ray through, not the body), or by a ledge.
+  - A swinging foot that does not clear a low obstacle (a curb, debris, a low box) catches on it
+    (`Outcome::Trip`). The body stumbles: with little push left (70% of it kept, under 0.9 m/s,
+    less with a hurt leg) it steps over the obstacle, else it pitches over it into its ragdoll
+    (`tripped over a low obstacle`).
+- **Braces at the obstacle's height** (`brace_target(.., top)`): on a waist-high obstacle the
+  hands go onto its top just past its edge, within the shoulder's reach (the elbow fix's IK).
+  On a wall, as before.
+- **Folding over** (`obstacle::fold_launch`): too big a push into a waist-high obstacle, or a
+  knockdown with one within 0.8 m along the push, folds the body over it. The ragdoll is launched
+  up enough that the hips clear its top, and pivots over it (`folded over a waist-high
+  obstacle`).
+- **What hits leave** (`condition::Condition`, ideas after blugart-dev's Kickback, no code of
+  it), kept per actor across reactions (the host keeps the 64 most recently hit):
+  - *Fatigue*: each hit tires the motors, up to half their strength, setting in over about a
+    second and fading with an 8 s half-life.
+  - *Pain*: each hit's push over the topple speed, times 1.5 and at most 0.6 a hit (a shot's
+    pellets count as one hit), adds up with a 2.5 s half-life. At 1.2 a hit staggers at least,
+    at 2.6 it knocks down (`condition::escalate`), whatever the hit alone would do. Two quick
+    pistol rounds stay a flinch, about five stagger, fourteen in 1.4 s knock down.
+  - *Injury*: a hit on an arm or a leg hurts that limb, healing with a 45 s half-life. A
+    crippled limb (actor values 27 to 30, left/right attack and mobility condition, at 0) is
+    fully hurt. A hurt arm's motors are weak (it dangles); a hurt leg's knee bends up to
+    0.35 rad more and the pelvis drops over it, and its stumbles pitch over sooner.
+  - *Counter-side bracing* (`Body::hit`): bones away from a hit stiffen and the hit side
+    softens, by how far to either side they are.
+- **Lab:** new grounds (railing, gap railing, half-wall, table, curb) and scenes `railing-brace`,
+  `half-wall-fold`, `table-edge-brace`, `curb-trip`, `gap-railing` and `sustained-fire`, with
+  the expectations `braced:waist`, `tripped` and `escalated`. All 26 scenarios pass, with the arm
+  speed cap, no standing shoves and the elbow/knee limits.
+
 ### Active ragdoll: elbows and knees are one-way hinges (Patrick, 2026-11-15, c87282a reel)
 
 Patrick saw the wall brace's arms bend backwards in the c87282a lab reel (.45-70, wall behind).

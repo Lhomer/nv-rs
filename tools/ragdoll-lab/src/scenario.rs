@@ -83,8 +83,10 @@ impl Default for Spec {
 /// `steps=0`, `braced`, `fall:<kind>`, `flinched` (a bone turned 2 degrees or more), `aim<=D`
 /// (an armed body's weapon hand stayed within D degrees of its aim), `armspin<=W` (no arm bone
 /// turned faster than W rad/s while it stood), `ragdollarmspin<=W` (nor in its ragdoll),
-/// `interrupted` (its attack), `attacking` (it was not)).
-pub const BUILT_IN: [(&str, &str, &str); 20] = [
+/// `interrupted` (its attack), `attacking` (it was not), `backbend<=D`, `tripped` (a swinging
+/// foot caught on a low obstacle), `braced:waist` / `braced:wall` (what the hands went on),
+/// `escalated` (the hits' reactions went from a flinch through a stagger to a knockdown)).
+pub const BUILT_IN: [(&str, &str, &str); 26] = [
     (
         "pistol-chest",
         "ground=flat&hits=9mm@chest",
@@ -184,6 +186,38 @@ pub const BUILT_IN: [(&str, &str, &str); 20] = [
         "armed-shotgun",
         "ground=flat&armed=1&range=4&hits=12ga@chest",
         "fell,armspin<=6.5",
+    ),
+    // The world (Patrick, 2026-11-15): obstacles found at several heights and across the body,
+    // braced on at their height, folded over, tripped on; and sustained fire escalating.
+    (
+        "railing-brace",
+        "ground=railing&hits=4570@chest",
+        "upright,braced:waist,armspin<=6.5",
+    ),
+    (
+        "half-wall-fold",
+        "ground=halfwall&hits=50mg@chest",
+        "fell,fall:folded over a waist-high obstacle,ragdollarmspin<=8.5,armspin<=6.5",
+    ),
+    (
+        "table-edge-brace",
+        "ground=table&hits=4570@chest",
+        "upright,braced:waist,armspin<=6.5",
+    ),
+    (
+        "curb-trip",
+        "ground=curb&hits=4570@chest",
+        "tripped,fell,fall:tripped over a low obstacle,armspin<=6.5",
+    ),
+    (
+        "gap-railing",
+        "ground=gaprailing&hits=4570@chest",
+        "upright,braced:waist,armspin<=6.5",
+    ),
+    (
+        "sustained-fire",
+        "ground=flat&hits=9mm@chest*14~0.1",
+        "fell,escalated,armspin<=6.5",
     ),
 ];
 
@@ -372,6 +406,8 @@ pub struct Report {
     pub velocity_jump: f32,
     pub jerk: f32,
     pub back_bend: f32,
+    pub tripped: bool,
+    pub brace_kind: Option<String>,
     pub expect: Vec<(String, bool)>,
     pub log: Vec<String>,
 }
@@ -395,7 +431,7 @@ impl Report {
              \"time_s\":{:.2},\"peak_speed_mps\":{:.3},\"topple_mps\":{:.3},\"decisions\":[{}],\
              \"arm_spin\":{:.2},\"ragdoll_arm_spin\":{:.2},\"flinch_deg\":{:.2},\"armed\":{},\
              \"aim_drift_deg\":{:.2},\"interrupted\":{},\"velocity_jump_mps\":{:.3},\"jerk\":{:.1},\
-             \"back_bend_deg\":{:.2},\
+             \"back_bend_deg\":{:.2},\"tripped\":{},\"brace_kind\":{},\
              \"expectations\":[{}],\"passed\":{},\"log\":[{}]}}",
             s(&self.name),
             s(self.ground),
@@ -421,6 +457,8 @@ impl Report {
             self.velocity_jump,
             self.jerk,
             self.back_bend,
+            self.tripped,
+            self.brace_kind.as_deref().map_or("null".into(), s),
             expect.join(","),
             self.passed(),
             list(&self.log)
@@ -555,6 +593,8 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
         velocity_jump: st.velocity_jump,
         jerk: st.jerk,
         back_bend: st.back_bend,
+        tripped: st.tripped,
+        brace_kind: st.brace_kind.clone(),
         expect: Vec::new(),
         log: sim.log.iter().rev().take(60).rev().cloned().collect(),
     };
@@ -571,6 +611,9 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
                 "flinched" => report.flinch >= 2.0,
                 "interrupted" => report.interrupted,
                 "attacking" => !report.interrupted,
+                "tripped" => report.tripped,
+                "escalated" => escalated(&report.decisions),
+                e if e.starts_with("braced:") => report.brace_kind.as_deref() == Some(&e[7..]),
                 e if e.starts_with("vjump<=") => e[7..]
                     .parse::<f32>()
                     .is_ok_and(|v| report.velocity_jump <= v),
@@ -602,6 +645,24 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
         })
         .collect();
     Ok(report)
+}
+
+/// Whether a run's decisions escalated as sustained fire should: from a flinch (`None`) through
+/// a stagger to a knockdown, never back down.
+fn escalated(decisions: &[String]) -> bool {
+    let rank = |d: &String| match d.as_str() {
+        "None" => Some(0u8),
+        "Stagger" => Some(1),
+        "Knockdown" => Some(2),
+        _ => None,
+    };
+    let Some(r) = decisions.iter().map(rank).collect::<Option<Vec<u8>>>() else {
+        return false;
+    };
+    r.first() == Some(&0)
+        && r.contains(&1)
+        && r.last() == Some(&2)
+        && r.windows(2).all(|w| w[0] <= w[1])
 }
 
 #[cfg(test)]

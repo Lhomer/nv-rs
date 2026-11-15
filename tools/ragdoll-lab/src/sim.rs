@@ -21,12 +21,14 @@ use crate::mannequin::{self as mq, COUNT};
 use crate::weapons::{self, Weapon};
 use crate::world::{self, Ground, GroundKind};
 use ragdoll_core::active;
-use ragdoll_core::balance::{classify, plan, Ground as Step, Limbs, Outcome, Stepping};
+use ragdoll_core::balance::{plan, Limbs, Outcome, Stepping};
+use ragdoll_core::condition::{self, Condition};
 use ragdoll_core::flinch::*;
 use ragdoll_core::knock::{
     add_hit, body_mass, launch_direction, launch_speed, reaction, topple_speed, transferred, Body,
     Push, Reaction, HOLD_SECONDS, LYING_HEIGHT, STILL_FRAMES, STILL_SPEED,
 };
+use ragdoll_core::obstacle;
 use ragdoll_core::tuning::{self, Tuning};
 use rapier3d::prelude::*;
 
@@ -62,8 +64,10 @@ pub const RAGDOLL_HINGE_SHARE: f32 = 1.0;
 pub struct Brace {
     pub dir: V3,
     pub t: f32,
-    /// How far ahead of the shoulders the wall is (units; a ray cast at the brace's start).
+    /// How far ahead the obstacle is (units; ray casts at the brace's start).
     pub wall: Option<f32>,
+    /// A waist-high obstacle's top (world z, units): the hands go on it.
+    pub top: Option<f32>,
 }
 
 /// The fall into the ragdoll under way (stage 3; the host's `active_ragdoll::Fall`).
@@ -76,6 +80,8 @@ pub struct Fall {
     pub lead: f32,
     pub windmill: bool,
     pub why: &'static str,
+    /// Folding over a waist-high obstacle: its top (world z, units).
+    pub fold: Option<f32>,
 }
 
 /// The rig (the host's `active_ragdoll::Rig`): each bone's spring, the pelvis's drop, the steps,
@@ -193,6 +199,9 @@ pub struct Stats {
     /// The most any elbow or knee was bent backwards, standing, in the ragdoll or getting up
     /// (degrees; [`back_bend`]).
     pub back_bend: f32,
+    /// A swinging foot caught on a low obstacle; what the brace was on ("waist", "wall").
+    pub tripped: bool,
+    pub brace_kind: Option<String>,
 }
 
 /// An elbow's or a knee's bend in the pose `posed` (rad, negative: backwards past straight), from
@@ -261,6 +270,19 @@ fn hinge_flex(child: usize) -> f32 {
     lim[1].max(-lim[0])
 }
 
+/// The lab's world as the reacting body asks it (`ragdoll_core::obstacle::World`; the host asks
+/// the game's ray casts and navmesh).
+struct Probe<'a>(&'a PhysicsWorld);
+
+impl obstacle::World for Probe<'_> {
+    fn floor(&mut self, at: V3) -> Option<V3> {
+        world::ground_point(self.0, at)
+    }
+    fn cast(&mut self, from: V3, dir: V3, range: f32) -> Option<f32> {
+        world::cast(self.0, from, dir, range)
+    }
+}
+
 /// A Rapier vector as the lab's.
 fn v3(v: Vec3) -> V3 {
     [v.x, v.y, v.z]
@@ -289,6 +311,9 @@ pub struct Sim {
     pub rig: Rig,
     pub state: State,
     pub stack: Option<Stack>,
+    /// What hits have left in the body: fatigue, pain, injured limbs (`ragdoll_core::condition`;
+    /// the host keeps one per actor).
+    pub condition: Condition,
     pub last_knock: Option<f64>,
     pub last_up: Option<f64>,
     pub posed: [Xf; COUNT],
@@ -326,6 +351,7 @@ impl Sim {
             rig: Rig::new(Limbs::WHOLE),
             state: State::Standing,
             stack: None,
+            condition: Condition::default(),
             last_knock: None,
             last_up: None,
             posed: [IDENT_XF; COUNT],
@@ -538,7 +564,13 @@ impl Sim {
         let hit_force = self.tune.hit_force.max(0.0) / 100.0;
         let speed = stacked.total / mass * hit_force;
         let topple = self.topple();
-        let decision = reaction(speed, topple);
+        // Pain (this hit's own push over the topple speed, added to what is left of earlier
+        // hits') escalates the reaction: sustained fire staggers, then knocks down.
+        let (role, side) = mq::role_side(self.nearest_bone(point));
+        let own = p / mass * hit_force;
+        self.condition
+            .hit(own / topple.max(0.1), condition::region_of(role, side));
+        let decision = condition::escalate(reaction(speed, topple), self.condition.stage());
         self.stats.peak_speed = self.stats.peak_speed.max(speed);
         self.stats.topple = topple;
         self.stats.decisions.push(format!("{decision:?}"));
@@ -682,7 +714,7 @@ impl Sim {
         let one_leg = !self.rig.limbs.legs();
         let anim = self.anim();
         let pelvis = add(anim[mq::PELVIS].1, self.rig.shift);
-        let (mut feet, carried) = match &self.rig.balance {
+        let (feet, carried) = match &self.rig.balance {
             Some(s) if !s.recovering => (s.planted, s.v * 0.5),
             _ => ([self.posed[mq::L_FOOT].1, self.posed[mq::R_FOOT].1], 0.0),
         };
@@ -709,66 +741,85 @@ impl Sim {
                 lead: self.tune.fall_lead,
                 windmill: false,
                 why: "one leg",
+                fold: None,
             });
             self.rig.balance = None;
             self.note(format!("on one leg it cannot step: falls ({v:.2} m/s)"));
             return;
         }
-        let mut outcome =
+        let outcome =
             if planned.need > self.tune.step_length * scale_ * self.tune.max_steps() as f32 {
                 Outcome::Overrun
             } else {
                 Outcome::Caught
             };
         let start = feet;
-        let mut steps = Vec::new();
-        let mut said = Vec::new();
         let ankle: [f32; 2] = [0, 1].map(|f| {
             world::ground_point(&self.world, start[f])
                 .map(|g| start[f][2] - g[2])
                 .filter(|h| (0.0..=25.0).contains(h))
                 .unwrap_or(8.0 * scale_)
         });
-        for (foot, to) in planned.steps {
-            let from = feet[foot];
-            let ground = if world::wall_between(&self.world, from, to) {
-                Step::Blocked
-            } else {
-                classify(to, from[2], world::ground_point(&self.world, to))
-            };
-            match ground {
-                Step::Floor(z) => {
-                    let to = [to[0], to[1], z + ankle[foot]];
+        // The steps on the world (`ragdoll_core::obstacle::resolve`, the host's too): floors,
+        // walls, ledges, and low obstacles a swinging foot catches on.
+        // What the body meets along the push (a railing's gaps let a foot's knee-height ray
+        // through, not the body): no step lands past it.
+        let floor_z = world::ground_point(&self.world, pelvis).map_or(0.0, |g| g[2]);
+        let ahead = obstacle::scan(
+            &mut Probe(&self.world),
+            pelvis,
+            floor_z,
+            dir,
+            planned.need + BRACE_PROBE,
+            scale_,
+        )
+        .map(|o| (pelvis, dir, o));
+        let r = obstacle::resolve(
+            &mut Probe(&self.world),
+            &planned.steps,
+            feet,
+            ankle,
+            scale_,
+            outcome,
+            ahead,
+        );
+        let (mut steps, mut outcome, mut said) = (r.steps, r.outcome, r.said);
+        if let (Outcome::Trip, Some(o)) = (outcome, r.tripped) {
+            self.stats.tripped = true;
+            if obstacle::trips_over(v, self.condition.leg_weakness()) {
+                self.rig.fall = Some(Fall {
+                    dir,
+                    speed: v,
+                    point: pelvis,
+                    t: 0.0,
+                    lead: self.tune.fall_lead,
+                    windmill: false,
+                    why: "tripped over a low obstacle",
+                    fold: None,
+                });
+                self.rig.balance = None;
+                self.note(format!(
+                    "pushed {v:.2} m/s: its foot caught on a {:.0}-unit {}, it pitches over it",
+                    o.height,
+                    o.kind.name()
+                ));
+                return;
+            }
+            // Little push left: it stumbles, then steps over it.
+            if let Some(&(foot, caught)) = steps.last() {
+                if let Some(to) = obstacle::recovery_step(
+                    &mut Probe(&self.world),
+                    caught,
+                    &o,
+                    dir,
+                    ankle[foot],
+                    scale_,
+                ) {
                     steps.push((foot, to));
-                    feet[foot] = to;
-                }
-                Step::Ledge => {
-                    steps.push((foot, [to[0], to[1], from[2]]));
-                    outcome = Outcome::Ledge;
-                    said.push("a ledge");
-                    break;
-                }
-                Step::Blocked => {
-                    let mut placed = false;
-                    for k in [0.66f32, 0.33] {
-                        let short = add(from, scale(sub(to, from), k));
-                        if let Step::Floor(z) =
-                            classify(short, from[2], world::ground_point(&self.world, short))
-                        {
-                            steps.push((foot, [short[0], short[1], z + ankle[foot]]));
-                            placed = true;
-                            break;
-                        }
-                    }
-                    outcome = Outcome::Wall;
-                    said.push(if placed {
-                        "a wall: the step shortened"
-                    } else {
-                        "a wall: no room to step"
-                    });
-                    break;
                 }
             }
+            outcome = Outcome::Caught;
+            said.push("it stumbles, then steps over it");
         }
         let against_wall = outcome == Outcome::Wall;
         if against_wall {
@@ -796,8 +847,13 @@ impl Sim {
         let stepping = Stepping::new(dir, v, 0, start, steps, scale_, self.pos, outcome, self.t);
         self.rig.balance = Some(stepping);
         if against_wall && self.rig.brace.is_none() {
-            let wall = self.wall_ahead(dir);
-            self.rig.brace = Some(Brace { dir, t: 0.0, wall });
+            let (wall, top, _) = self.brace_obstacle(dir);
+            self.rig.brace = Some(Brace {
+                dir,
+                t: 0.0,
+                wall,
+                top,
+            });
         }
         self.rig.since = self.t;
         self.note(format!(
@@ -827,24 +883,62 @@ impl Sim {
         world::wall_ahead(&self.world, at, dir, BRACE_PROBE)
     }
 
+    /// What the brace meets along `dir` (the host's `brace_obstacle`): the obstacle's distance,
+    /// its top when it is waist-high (the hands go on it), and its kind; rays at several heights
+    /// and across the body (`ragdoll_core::obstacle::scan`), else the shoulders' ray.
+    fn brace_obstacle(&self, dir: V3) -> (Option<f32>, Option<f32>, Option<obstacle::Kind>) {
+        let anim = self.anim();
+        let at = anim[mq::PELVIS].1;
+        let floor_z = world::ground_point(&self.world, at).map_or(0.0, |g| g[2]);
+        match obstacle::scan(
+            &mut Probe(&self.world),
+            at,
+            floor_z,
+            dir,
+            BRACE_PROBE,
+            self.scale,
+        ) {
+            Some(o) => (
+                Some(o.distance),
+                (o.kind == obstacle::Kind::Waist).then_some(o.top),
+                Some(o.kind),
+            ),
+            None => (self.wall_ahead(dir), None, None),
+        }
+    }
+
     fn start_brace(&mut self, dir: V3, v: f32) {
         let limit = self.tune.brace_holds * self.tune.balance.max(1.0) / 100.0;
         let arms = self.rig.limbs.arm(0) || self.rig.limbs.arm(1);
+        let (wall, top, kind) = self.brace_obstacle(dir);
         if arms {
-            let wall = self.wall_ahead(dir);
-            self.rig.brace = Some(Brace { dir, t: 0.0, wall });
+            self.rig.brace = Some(Brace {
+                dir,
+                t: 0.0,
+                wall,
+                top,
+            });
             self.stats.braced = true;
+            self.stats.brace_kind = Some(if top.is_some() { "waist" } else { "wall" }.to_string());
         }
         if v > limit || !arms {
             let point = self.anim()[mq::PELVIS].1;
+            // Over a waist-high obstacle the body folds over it (its hips pivot on the top); a
+            // wall it crumples against.
+            let fold = top.filter(|_| kind == Some(obstacle::Kind::Waist));
             self.rig.fall = Some(Fall {
                 dir,
-                speed: v * 0.5,
+                speed: if fold.is_some() { v } else { v * 0.5 },
                 point,
                 t: 0.0,
                 lead: self.tune.brace_reach + 0.1,
                 windmill: false,
-                why: "crumpled against a wall",
+                why: if fold.is_some() {
+                    "folded over a waist-high obstacle"
+                } else {
+                    "crumpled against a wall"
+                },
+                fold,
             });
         }
         self.note(format!(
@@ -957,7 +1051,7 @@ impl Sim {
                 continue;
             };
             let shoulder = anim[u].1;
-            let target = brace_target(shoulder, b.dir, b.wall);
+            let target = brace_target(shoulder, b.dir, b.wall, b.top);
             if let Some((ui, ur, fi, fr)) = self.reach_arm(anim, side, target, w) {
                 out[ui] = Some(ur);
                 out[fi] = Some(fr);
@@ -1006,7 +1100,20 @@ impl Sim {
             f.dir[0],
             f.dir[1]
         ));
-        self.knock_down(f.dir, f.speed, f.why);
+        match f.fold {
+            // Over the top: launched up enough that the hips clear it (`fold_launch`).
+            Some(top) => {
+                let (d, s) = obstacle::fold_launch(
+                    f.dir,
+                    f.speed,
+                    self.posed[mq::PELVIS].1[2],
+                    top,
+                    self.scale,
+                );
+                self.knock_down(d, s, f.why);
+            }
+            None => self.knock_down(f.dir, f.speed, f.why),
+        }
         true
     }
 
@@ -1019,6 +1126,20 @@ impl Sim {
             return true;
         }
         let dir = unit([direction[0], direction[1], 0.0]).unwrap_or([0.0, 1.0, 0.0]);
+        // A waist-high obstacle close behind: it folds over it.
+        let pelvis = self.anim()[mq::PELVIS].1;
+        let floor_z = world::ground_point(&self.world, pelvis).map_or(0.0, |g| g[2]);
+        let reach = obstacle::FOLD_REACH * self.scale * UNITS_PER_METRE;
+        let fold = obstacle::scan(
+            &mut Probe(&self.world),
+            pelvis,
+            floor_z,
+            dir,
+            reach,
+            self.scale,
+        )
+        .filter(|o| o.kind == obstacle::Kind::Waist)
+        .map(|o| o.top);
         self.rig.fall = Some(Fall {
             dir,
             speed,
@@ -1026,7 +1147,12 @@ impl Sim {
             t: 0.0,
             lead: self.tune.fall_lead,
             windmill: false,
-            why: "knockdown",
+            why: if fold.is_some() {
+                "folded over a waist-high obstacle"
+            } else {
+                "knockdown"
+            },
+            fold,
         });
         self.rig.active = true;
         self.rig.since = self.t;
@@ -1060,6 +1186,7 @@ impl Sim {
                 lead: self.tune.ledge_lead,
                 windmill: true,
                 why: "stepped off a ledge",
+                fold: None,
             });
             self.rig.shift = s.shift;
             return out;
@@ -1134,6 +1261,7 @@ impl Sim {
                 lead: self.tune.overrun_lead,
                 windmill: false,
                 why: "more than its steps could catch",
+                fold: None,
             });
             return out;
         }
@@ -1162,6 +1290,7 @@ impl Sim {
             STEP
         };
         self.t += dt as f64;
+        self.condition.decay(dt);
         self.posed_before = self.posed;
         match self.state {
             State::Standing => self.pose_frame(dt),
@@ -1290,6 +1419,17 @@ impl Sim {
                     anim: anim.iter().map(|a| active::qfrom_m(&a.0)).collect(),
                     forward: FORWARD,
                 };
+                // A hurt leg sags: its knee bent more, the pelvis lower over it.
+                let mut targets = targets;
+                for side in 0..2usize {
+                    let (knee, drop) = self.condition.sag(side);
+                    if knee > 0.0 {
+                        if let Some(c) = mq::bone_of(Role::Calf, side as u8) {
+                            body.flex(&mut targets.rot, c, knee);
+                        }
+                        targets.pelvis[2] -= drop * 0.5;
+                    }
+                }
                 let since_hit = (self.t - self.rig.hit_at) as f32;
                 // A deliberate brace: the bracing arms' motors firmer while they reach and hold.
                 if let Some(w) = self.rig.brace.and_then(|br| brace_weight(br.t)) {
@@ -1299,7 +1439,18 @@ impl Sim {
                         }
                     }
                 }
-                body.step(&targets, dt, active::strength(since_hit));
+                // A hurt arm's motors weak (it dangles); fatigue weakens them all.
+                for b in 0..COUNT {
+                    let (role, side) = mq::role_side(b);
+                    if role.is_arm() && side < 2 && self.rig.brace.is_none() {
+                        let d = self.condition.dangle(side as usize);
+                        if d > 0.0 {
+                            body.dip[b] = body.dip[b].max(d);
+                        }
+                    }
+                }
+                let strength = active::strength(since_hit) * self.condition.motor_scale();
+                body.step(&targets, dt, strength);
                 if let Err(why) = body.check() {
                     self.rig.failed = Some(why);
                 }

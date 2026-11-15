@@ -84,10 +84,11 @@ use engine::prelude::*;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use ragdoll_core::condition::{self, Condition};
 /// The pure parts (the roles, the springs, the spread, the vector helpers, stage 3's timings) live
 /// in `crates/ragdoll-core`, shared with `tools/ragdoll-lab`.
 pub use ragdoll_core::flinch::*;
-use ragdoll_core::{active, pose};
+use ragdoll_core::{active, obstacle, pose};
 
 // --- The rig and the flinching actors. -----------------------------------------------------------
 
@@ -142,8 +143,10 @@ pub struct Hit {
 pub struct Brace {
     pub dir: V3,
     pub t: f32,
-    /// How far ahead of the shoulders the wall is (game units; the game's ray cast), if found.
+    /// How far ahead the obstacle is (game units; the game's ray casts), if found.
     pub wall: Option<f32>,
+    /// A waist-high obstacle's top (world z, game units): the hands go on it.
+    pub top: Option<f32>,
 }
 
 /// The fall into the ragdoll under way (stage 3): along `dir` at `speed` (m/s), for the attacker,
@@ -158,6 +161,8 @@ pub struct Fall {
     pub t: f32,
     pub lead: f32,
     pub windmill: bool,
+    /// Folding over a waist-high obstacle: its top (world z, game units).
+    pub fold: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -751,8 +756,11 @@ pub fn apply(e: &mut Engine) {
         let mut pelvis_offset = rig.shift;
         let mut failed: Option<String> = None;
         let forward = facing(e, &rig);
+        let cond = condition_of(rig.actor);
+        let calves: [Option<usize>; 2] =
+            [bone_of(&rig, Role::Calf, 0), bone_of(&rig, Role::Calf, 1)];
         if let Some(body) = rig.body.as_mut() {
-            let targets = active::Targets {
+            let mut targets = active::Targets {
                 rot: target.iter().map(active::qfrom_m).collect(),
                 pelvis: scale(pelvis_target, m),
                 feet: feet_now.iter().map(|&(i, at)| (i, scale(at, m))).collect(),
@@ -770,10 +778,29 @@ pub fn apply(e: &mut Engine) {
                     }
                 }
             }
+            // What earlier hits left (`ragdoll_core::condition`): a hurt arm's motors weak (it
+            // dangles), a hurt leg's knee bent more and the pelvis lower over it, fatigue weakening
+            // every motor.
+            for (b, d) in body.dip.iter_mut().enumerate() {
+                let bone = &rig.bones[b];
+                if bone.role.is_arm() && bone.side < 2 && rig.brace.is_none() {
+                    let dangle = cond.dangle(bone.side as usize);
+                    if dangle > 0.0 {
+                        *d = d.max(dangle);
+                    }
+                }
+            }
+            for (side, calf) in calves.iter().enumerate() {
+                let (knee, drop) = cond.sag(side);
+                if let (Some(c), true) = (calf, knee > 0.0) {
+                    body.flex(&mut targets.rot, *c, knee);
+                    targets.pelvis[2] -= drop * 0.5;
+                }
+            }
             body.step(
                 &targets,
                 dt,
-                active::strength(rig.hit_at.elapsed().as_secs_f32()),
+                active::strength(rig.hit_at.elapsed().as_secs_f32()) * cond.motor_scale(),
             );
             if let Err(why) = body.check() {
                 failed = Some(format!("the body: {why}"));
@@ -1075,6 +1102,7 @@ fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
             t: 0.0,
             lead: LEDGE_LEAD,
             windmill: true,
+            fold: None,
         });
         rig.shift = s.shift;
         return out;
@@ -1156,6 +1184,7 @@ fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
             t: 0.0,
             lead: OVERRUN_LEAD,
             windmill: false,
+            fold: None,
         });
         rig.shift = shift;
         return out;
@@ -1177,7 +1206,7 @@ fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
 /// centre of mass with `v = p / mass x iBalance %`; past its feet, it takes catch steps
 /// ([`crate::balance`]).
 pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggressor: u32) {
-    use crate::balance::{classify, plan, Ground, Outcome, Stepping};
+    use crate::balance::{plan, Outcome, Stepping};
     let strength = crate::gunplay::tuning().balance;
     if strength <= 0 || !crate::gunplay::is_on() || !(p > 0.0 && mass > 0.0) {
         return; // Balance off (or nothing pushed): the flinch alone, said by `hit`
@@ -1212,7 +1241,7 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
         return;
     };
     let pelvis = add(read3(e, rig.bones[pi].node + WORLD_TRANSLATION), rig.shift);
-    let (mut feet, carried) = match &rig.balance {
+    let (feet, carried) = match &rig.balance {
         Some(s) if !s.recovering => (s.planted, s.v * 0.5),
         _ => (
             [
@@ -1241,6 +1270,7 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
             t: 0.0,
             lead: FALL_LEAD,
             windmill: false,
+            fold: None,
         });
         rig.balance = None;
         drop(rigs);
@@ -1250,15 +1280,13 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
         interrupt_attack(e, actor, "it falls");
         return;
     }
-    let mut outcome =
+    let outcome =
         if planned.need > crate::balance::STEP_LENGTH * scale_ * crate::balance::MAX_STEPS as f32 {
             Outcome::Overrun
         } else {
             Outcome::Caught
         };
     let start = feet;
-    let mut steps = Vec::new();
-    let mut said = Vec::new();
     drop(rigs);
     interrupt_attack(e, actor, "pushed past its feet");
     // Each foot's ankle over its ground (the navmesh's height is the ground's; the foot bone is
@@ -1269,50 +1297,68 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
             .filter(|h| (0.0..=25.0).contains(h))
             .unwrap_or(8.0 * scale_)
     });
-    for (foot, to) in planned.steps {
-        let from = feet[foot];
-        // A wall between the foot and its target (the game's ray cast at the knees) blocks the
-        // step; else the floor under the target says floor, ledge or blocked.
-        let ground = if wall_between(e, from, to) {
-            Ground::Blocked
-        } else {
-            classify(to, from[2], ground_point(e, actor, to))
-        };
-        match ground {
-            Ground::Floor(z) => {
-                let to = [to[0], to[1], z + ankle[foot]];
+    // The steps on the world (`ragdoll_core::obstacle::resolve`, the lab's too): floors, walls,
+    // ledges, a waist-high obstacle or a wall the body meets along the push (a railing's gaps let
+    // a foot's knee-height ray through, not the body), and low obstacles a swinging foot catches.
+    let floor_z = ground_point(e, actor, pelvis).map_or(start[0][2] - ankle[0], |g| g[2]);
+    let ahead = obstacle::scan(
+        &mut GameWorld { e, actor },
+        pelvis,
+        floor_z,
+        dir,
+        planned.need + BRACE_PROBE,
+        scale_,
+    )
+    .map(|o| (pelvis, dir, o));
+    let r = obstacle::resolve(
+        &mut GameWorld { e, actor },
+        &planned.steps,
+        feet,
+        ankle,
+        scale_,
+        outcome,
+        ahead,
+    );
+    let (mut steps, mut outcome, mut said) = (r.steps, r.outcome, r.said);
+    if let (Outcome::Trip, Some(o)) = (outcome, r.tripped) {
+        if obstacle::trips_over(v, condition_of(actor).leg_weakness()) {
+            begin_fall(
+                e,
+                actor,
+                root,
+                Fall {
+                    dir,
+                    speed: v,
+                    aggressor,
+                    point: pelvis,
+                    t: 0.0,
+                    lead: FALL_LEAD,
+                    windmill: false,
+                    fold: None,
+                },
+            );
+            note(format!(
+                "{who}: pushed {v:.2} m/s: its foot caught on a {:.0}-unit {}, it pitches over it",
+                o.height,
+                o.kind.name()
+            ));
+            return;
+        }
+        // Little push left: it stumbles, then steps over it.
+        if let Some(&(foot, caught)) = steps.last() {
+            if let Some(to) = obstacle::recovery_step(
+                &mut GameWorld { e, actor },
+                caught,
+                &o,
+                dir,
+                ankle[foot],
+                scale_,
+            ) {
                 steps.push((foot, to));
-                feet[foot] = to;
-            }
-            Ground::Ledge => {
-                steps.push((foot, [to[0], to[1], from[2]]));
-                outcome = Outcome::Ledge;
-                said.push("a ledge");
-                break;
-            }
-            Ground::Blocked => {
-                // A wall or an obstacle: as far as there is room.
-                let mut placed = false;
-                for k in [0.66f32, 0.33] {
-                    let short = add(from, scale(sub(to, from), k));
-                    if let Ground::Floor(z) =
-                        classify(short, from[2], ground_point(e, actor, short))
-                    {
-                        let short = [short[0], short[1], z + ankle[foot]];
-                        steps.push((foot, short));
-                        placed = true;
-                        break;
-                    }
-                }
-                outcome = Outcome::Wall;
-                said.push(if placed {
-                    "a wall: the step shortened"
-                } else {
-                    "a wall: no room to step"
-                });
-                break;
             }
         }
+        outcome = Outcome::Caught;
+        said.push("it stumbles, then steps over it");
     }
     let against_wall = outcome == Outcome::Wall;
     if against_wall {
@@ -1359,6 +1405,7 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
             dir,
             t: 0.0,
             wall: None,
+            top: None,
         });
     }
     rig.since = Instant::now();
@@ -1382,11 +1429,10 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
 // --- The world, by the game's own ray casts (`jip::commands::world_ray_cast`). ------------------
 
 /// How far down a floor is looked for under a point (units), how far up from it the cast starts;
-/// how far ahead of the shoulders a wall is looked for; the knee height a step's way is probed at.
+/// how far ahead a wall or an obstacle is looked for (`obstacle::scan`, the shoulders' ray).
 const FLOOR_FROM: f32 = 50.0;
 const FLOOR_RANGE: f32 = 300.0;
 const BRACE_PROBE: f32 = 90.0;
-const KNEE: f32 = 25.0;
 
 /// `TESObjectREFR::IsActor` (vtable slot `0x100`, as `crate::quick_loot` calls it).
 const IS_ACTOR_SLOT: u32 = 0x100;
@@ -1428,34 +1474,147 @@ fn ground_point(e: &mut Engine, actor: u32, at: V3) -> Option<V3> {
     crate::knockdown::navmesh_point(e, actor, at)
 }
 
-/// Whether a wall stands between a foot at `from` and its step's target `to`: the game's ray cast
-/// at knee height hits something, and one a little higher hits it about as far off (a face near
-/// upright, not a ramp or a stair the step goes up, which the higher cast meets further on).
-fn wall_between(e: &mut Engine, from: V3, to: V3) -> bool {
-    let d = [to[0] - from[0], to[1] - from[1], 0.0];
-    let len = length(d);
-    let Some(dir) = unit(d) else {
-        return false;
-    };
-    let low = wall_ahead(e, [from[0], from[1], from[2] + KNEE], dir, len + 8.0);
-    let Some(low) = low else {
-        return false;
-    };
-    let high = wall_ahead(
-        e,
-        [from[0], from[1], from[2] + KNEE + 10.0],
-        dir,
-        len + 20.0,
-    );
-    high.is_some_and(|h| (h - low).abs() < 5.0)
-}
-
 /// How far ahead of `at` along `dir` (flat) a wall is (game units), within `range`.
 fn wall_ahead(e: &mut Engine, at: V3, dir: V3, range: f32) -> Option<f32> {
     let dir = unit([dir[0], dir[1], 0.0])?;
     let hit = cast_world(e, at, dir, range)?;
     let d = length(sub([hit[0], hit[1], 0.0], [at[0], at[1], 0.0]));
     d.is_finite().then_some(d)
+}
+
+/// The game's world as a reacting body asks it (`ragdoll_core::obstacle::World`): the floor
+/// ([`ground_point`]) and the game's ray cast past actors ([`cast_world`]).
+struct GameWorld<'a> {
+    e: &'a mut Engine,
+    actor: u32,
+}
+
+impl obstacle::World for GameWorld<'_> {
+    fn floor(&mut self, at: V3) -> Option<V3> {
+        ground_point(self.e, self.actor, at)
+    }
+    fn cast(&mut self, from: V3, dir: V3, range: f32) -> Option<f32> {
+        cast_world(self.e, from, dir, range).map(|hit| length(sub(hit, from)))
+    }
+}
+
+/// What a brace meets along `dir` (the lab's `brace_obstacle`): the obstacle's distance from the
+/// pelvis, its top when it is waist-high (the hands go on it), and its kind; the game's ray casts
+/// at several heights and across the body (`obstacle::scan`), else the shoulders' ray.
+fn brace_obstacle(
+    e: &mut Engine,
+    actor: u32,
+    root: u32,
+    dir: V3,
+) -> (Option<f32>, Option<f32>, Option<obstacle::Kind>) {
+    let (pelvis, shoulders) = {
+        let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(rig) = rigs.iter().find(|r| r.actor == actor && r.root == root) else {
+            return (None, None, None);
+        };
+        let at =
+            |role| bone_of(rig, role, 2).map(|i| read3(e, rig.bones[i].node + WORLD_TRANSLATION));
+        (at(Role::Pelvis), at(Role::UpperArm))
+    };
+    let scale_ = actor_scale(e, actor);
+    if let Some(at) = pelvis {
+        let floor_z = ground_point(e, actor, at).map_or(at[2] - 60.0, |g| g[2]);
+        if let Some(o) = obstacle::scan(
+            &mut GameWorld { e, actor },
+            at,
+            floor_z,
+            dir,
+            BRACE_PROBE,
+            scale_,
+        ) {
+            let top = (o.kind == obstacle::Kind::Waist).then_some(o.top);
+            return (Some(o.distance), top, Some(o.kind));
+        }
+    }
+    (
+        shoulders.and_then(|at| wall_ahead(e, at, dir, BRACE_PROBE)),
+        None,
+        None,
+    )
+}
+
+/// A fall begun from the steps (a stumble that pitches over): the rig's fall set, its steps ended.
+fn begin_fall(e: &mut Engine, actor: u32, root: u32, fall: Fall) {
+    let _ = e;
+    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(rig) = rigs.iter_mut().find(|r| r.actor == actor && r.root == root) {
+        if rig.fall.is_none() {
+            rig.fall = Some(fall);
+        }
+        rig.balance = None;
+    }
+}
+
+// --- What hits leave in an actor (`ragdoll_core::condition`), kept per actor across reactions. --
+
+/// Each actor's condition and when it was last brought up to date.
+static CONDITIONS: Mutex<Vec<(u32, Condition, Instant)>> = Mutex::new(Vec::new());
+
+/// How many actors' conditions are kept (the most recently hit).
+const CONDITIONS_KEPT: usize = 64;
+
+/// The actor values of the limbs' condition: left attack (arm), right attack, left mobility
+/// (leg), right mobility (FNV's `LeftAttackCondition` 27 to `RightMobilityCondition` 30).
+const LIMB_CONDITIONS: [(u32, condition::Region); 4] = [
+    (27, condition::Region::LeftArm),
+    (28, condition::Region::RightArm),
+    (29, condition::Region::LeftLeg),
+    (30, condition::Region::RightLeg),
+];
+
+/// `actor`'s condition now (rested since it was last hit).
+pub fn condition_of(actor: u32) -> Condition {
+    let mut all = CONDITIONS.lock().unwrap_or_else(|p| p.into_inner());
+    match all.iter_mut().find(|c| c.0 == actor) {
+        Some(c) => {
+            c.1.decay(c.2.elapsed().as_secs_f32());
+            c.2 = Instant::now();
+            c.1
+        }
+        None => Condition::default(),
+    }
+}
+
+/// A hit of `severity` (its own push over the topple speed) at `point` on `actor`: its condition
+/// updated (fatigue, pain, the struck limb's injury; a crippled limb fully hurt) and the stage
+/// pain alone escalates this hit to (`crate::knockdown::after_hit`).
+pub fn condition_hit(e: &mut Engine, actor: u32, severity: f32, point: V3) -> condition::Stage {
+    let region = {
+        let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+        rigs.iter()
+            .find(|r| r.actor == actor)
+            .and_then(|rig| {
+                rig.bones
+                    .iter()
+                    .min_by(|a, b| {
+                        let da = length(sub(read3(e, a.node + WORLD_TRANSLATION), point));
+                        let db = length(sub(read3(e, b.node + WORLD_TRANSLATION), point));
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|b| condition::region_of(b.role, b.side))
+            })
+            .unwrap_or(condition::Region::Torso)
+    };
+    let mut c = condition_of(actor);
+    c.hit(severity, region);
+    for (av, limb) in LIMB_CONDITIONS {
+        let v = e.vcall(actor + 0xa4, 0xc, &args![av]).f64() as f32;
+        if v.is_finite() && v <= 0.0 {
+            c.cripple(limb);
+        }
+    }
+    let mut all = CONDITIONS.lock().unwrap_or_else(|p| p.into_inner());
+    all.retain(|x| x.0 != actor);
+    all.push((actor, c, Instant::now()));
+    if all.len() > CONDITIONS_KEPT {
+        all.remove(0);
+    }
+    c.stage()
 }
 
 /// A wall's brace begun (stage 3): the hands reach to it; past what a brace holds the body
@@ -1467,42 +1626,52 @@ fn start_brace(e: &mut Engine, actor: u32, root: u32, dir: V3, v: f32, aggressor
         return;
     };
     let arms = rig.limbs.arm(0) || rig.limbs.arm(1);
-    // The wall's distance ahead of the shoulders (the game's ray cast): the hands meet it there.
-    let shoulders =
-        bone_of(rig, Role::UpperArm, 2).map(|u| read3(e, rig.bones[u].node + WORLD_TRANSLATION));
     drop(rigs);
-    let wall = shoulders.and_then(|at| wall_ahead(e, at, dir, BRACE_PROBE));
+    // What the brace meets (`brace_obstacle`): a waist-high obstacle's top the hands go on.
+    let (wall, top, kind) = brace_obstacle(e, actor, root, dir);
     let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     let Some(rig) = rigs.iter_mut().find(|r| r.actor == actor && r.root == root) else {
         return;
     };
     if arms {
-        rig.brace = Some(Brace { dir, t: 0.0, wall });
+        rig.brace = Some(Brace {
+            dir,
+            t: 0.0,
+            wall,
+            top,
+        });
     }
+    // Over a waist-high obstacle it folds over (its hips pivot on the top); a wall it crumples
+    // against.
+    let fold = top.filter(|_| kind == Some(obstacle::Kind::Waist));
     if v > limit || !arms {
         let point = bone_of(rig, Role::Pelvis, 2)
             .map(|i| read3(e, rig.bones[i].node + WORLD_TRANSLATION))
             .unwrap_or([0.0; 3]);
         rig.fall = Some(Fall {
             dir,
-            speed: v * 0.5,
+            speed: if fold.is_some() { v } else { v * 0.5 },
             aggressor,
             point,
             t: 0.0,
             lead: BRACE_REACH + 0.1,
             windmill: false,
+            fold,
         });
     }
     drop(rigs);
     note(format!(
-        "{}: braces against a wall with {}{}",
+        "{}: braces against a {} with {}{}",
         describe(e, actor),
+        kind.map_or("wall", |k| k.name()),
         if arms {
             "its hands"
         } else {
             "no arm to brace with"
         },
-        if v > limit || !arms {
+        if (v > limit || !arms) && fold.is_some() {
+            format!(": the push ({v:.2} m/s) is too much, it folds over it into its ragdoll")
+        } else if v > limit || !arms {
             format!(": the push ({v:.2} m/s) is too much, it crumples into its ragdoll")
         } else {
             String::new()
@@ -1564,7 +1733,7 @@ fn brace_frame(e: &mut Engine, rig: &mut Rig, out: &mut [Option<M3>], dt: f32) {
             continue;
         };
         let shoulder = read3(e, rig.bones[u].node + WORLD_TRANSLATION);
-        let target = brace_target(shoulder, b.dir, b.wall);
+        let target = brace_target(shoulder, b.dir, b.wall, b.top);
         if let Some((ui, ur, fi, fr)) = reach_arm(e, rig, side, target, w) {
             out[ui] = Some(ur);
             out[fi] = Some(fr);
@@ -1622,13 +1791,22 @@ fn fall_frame(e: &mut Engine, rig: &mut Rig, out: &mut [Option<M3>], dt: f32) ->
             f.dir[0],
             f.dir[1]
         ));
+        // Folding over: launched up enough that the hips clear the top (`fold_launch`).
+        let (dir, speed) = match f.fold {
+            Some(top) => {
+                let pelvis_z = bone_of(rig, Role::Pelvis, 2)
+                    .map_or(top, |i| read3(e, rig.bones[i].node + WORLD_TRANSLATION)[2]);
+                obstacle::fold_launch(f.dir, f.speed, pelvis_z, top, actor_scale(e, rig.actor))
+            }
+            None => (f.dir, f.speed),
+        };
         crate::knockdown::knock_down_next_update(
             rig.actor,
             rig.id,
             f.aggressor,
             f.point,
-            f.dir,
-            f.speed,
+            dir,
+            speed,
         );
     }
     if f.t > f.lead + FALL_WAIT {
@@ -1696,6 +1874,25 @@ pub fn fall(
         return true;
     }
     let dir = unit([direction[0], direction[1], 0.0]).unwrap_or([0.0, 1.0, 0.0]);
+    // A waist-high obstacle close behind: it folds over it (`obstacle::FOLD_REACH`).
+    let pelvis =
+        bone_of(rig, Role::Pelvis, 2).map(|i| read3(e, rig.bones[i].node + WORLD_TRANSLATION));
+    drop(rigs);
+    let fold = pelvis.and_then(|at| {
+        let floor_z = ground_point(e, actor, at).map_or(at[2] - 60.0, |g| g[2]);
+        let scale_ = actor_scale(e, actor);
+        let reach = obstacle::FOLD_REACH * scale_ * UNITS_PER_METRE;
+        obstacle::scan(&mut GameWorld { e, actor }, at, floor_z, dir, reach, scale_)
+            .filter(|o| o.kind == obstacle::Kind::Waist)
+            .map(|o| o.top)
+    });
+    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(rig) = rigs.iter_mut().find(|r| r.actor == actor && r.root == root) else {
+        return false;
+    };
+    if rig.fall.is_some() {
+        return true;
+    }
     rig.fall = Some(Fall {
         dir,
         speed,
@@ -1704,6 +1901,7 @@ pub fn fall(
         t: 0.0,
         lead: FALL_LEAD,
         windmill: false,
+        fold,
     });
     rig.since = Instant::now();
     true

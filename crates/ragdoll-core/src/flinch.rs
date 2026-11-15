@@ -344,10 +344,22 @@ pub const BRACE_FIRM: f32 = 1.0;
 pub const BRACE_WORLD: f32 = 0.5;
 
 /// Where a brace's hand goes from its shoulder `shoulder` along the push `dir` (game units): its
-/// reach ahead, or (a wall found `wall` units ahead by a ray cast) the wall's face less a hand.
-pub fn brace_target(shoulder: V3, dir: V3, wall: Option<f32>) -> V3 {
+/// reach ahead, or (a wall found `wall` units ahead by a ray cast) the wall's face less a hand,
+/// or (a waist-high obstacle, its top at `top`, world z) on its top just past its edge.
+pub fn brace_target(shoulder: V3, dir: V3, wall: Option<f32>, top: Option<f32>) -> V3 {
     let t = tuning::get();
     let mut out = t.brace_reach_out * UNITS_PER_METRE;
+    // A waist-high obstacle (a railing, a table, a half-wall; `crate::obstacle`): the hands on its
+    // top, just past its edge.
+    if let (Some(w), Some(z)) = (
+        wall.filter(|w| w.is_finite() && *w > 0.0),
+        top.filter(|z| z.is_finite()),
+    ) {
+        return add(
+            add(shoulder, scale(dir, w + BRACE_ON_TOP)),
+            [0.0, 0.0, z + BRACE_HAND - shoulder[2]],
+        );
+    }
     if let Some(w) = wall.filter(|w| w.is_finite() && *w > 0.0) {
         out = out.min((w - BRACE_HAND).max(0.2 * UNITS_PER_METRE));
     }
@@ -362,6 +374,8 @@ pub fn brace_target(shoulder: V3, dir: V3, wall: Option<f32>) -> V3 {
 
 /// A hand's thickness short of the wall (game units).
 pub const BRACE_HAND: f32 = 5.0;
+/// How far past a waist-high obstacle's edge the hands go onto its top (game units).
+pub const BRACE_ON_TOP: f32 = 4.0;
 
 /// How far behind the body an arm may reach from the shoulder (rad back from straight down: a
 /// person's shoulder extension, about 45 degrees), and how far out to the side a reach behind goes
@@ -709,13 +723,13 @@ mod tests {
     fn the_brace_meets_the_wall() {
         let shoulder = [0.0, 0.0, 100.0];
         let dir = [0.0, 1.0, 0.0];
-        let free = brace_target(shoulder, dir, None);
-        assert_eq!(brace_target(shoulder, dir, Some(1e4)), free);
-        assert_eq!(brace_target(shoulder, dir, Some(f32::NAN)), free);
-        let near = brace_target(shoulder, dir, Some(20.0));
+        let free = brace_target(shoulder, dir, None, None);
+        assert_eq!(brace_target(shoulder, dir, Some(1e4), None), free);
+        assert_eq!(brace_target(shoulder, dir, Some(f32::NAN), None), free);
+        let near = brace_target(shoulder, dir, Some(20.0), None);
         assert!((near[1] - (20.0 - BRACE_HAND)).abs() < 1e-3, "{near:?}");
         assert_eq!(near[2], free[2]);
-        let touching = brace_target(shoulder, dir, Some(1.0));
+        let touching = brace_target(shoulder, dir, Some(1.0), None);
         assert!(touching[1] > 0.0);
     }
 
