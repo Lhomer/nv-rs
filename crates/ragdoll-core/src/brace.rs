@@ -60,10 +60,16 @@ pub const ONE_ARM: f32 = 0.6;
 /// The weapon hand (0 left, 1 right): Fallout's actors hold every weapon in the right hand (a
 /// two-handed one's support hand is the left).
 pub const WEAPON_SIDE: u8 = 1;
-/// A released hand is back once its path is this near the free arm's wrist (game units), or after
-/// this long (s); then the arm is handed back over this long (s, eased).
-pub const RETURN_NEAR: f32 = 1.5;
-pub const RETURN_MOST: f32 = 1.5;
+/// A released hand's way back to its home ([`Phase::Released`]): a critically damped path of this
+/// frequency (Hz), no faster than [`REACH_SPEED`]; locked on within [`REGRIP_LOCK`] (game units);
+/// handed back once the free arm's wrist is within [`HANDOVER_NEAR`] of the home too (game units),
+/// or after [`RETURN_MOST`] (s); the hand-over takes [`RETURN_FADE`] (s, eased).
+pub const RETURN_HZ: f32 = 2.0;
+/// The way back turns around the shoulder at most this fast (rad/s).
+pub const RETURN_SWEEP: f32 = 3.5;
+pub const REGRIP_LOCK: f32 = 0.5;
+pub const HANDOVER_NEAR: f32 = 0.75;
+pub const RETURN_MOST: f32 = 3.0;
 pub const RETURN_FADE: f32 = 0.5;
 /// The planted hand's pin (the physical body's): its frequency (Hz) on the arm's mass, critically
 /// damped.
@@ -149,17 +155,22 @@ pub enum Phase {
         /// The surface's way out at the plant (the contact pushes along it, never pulls).
         normal: V3,
     },
-    /// Let go (or never touched), `t` seconds ago: the arm's motors ease back over the brace's
-    /// release from `from` (the weight they had); the shown hand goes back along its path (the
-    /// same caps as its reach) to where the free arm's hand is, then (`back` seconds since it got
-    /// there) the arm is handed back to the free arm over [`RETURN_FADE`]. Never reaches again.
+    /// Let go (or never touched), `t` seconds ago: the hand goes back to its home (a two-handed
+    /// weapon's grip, carried by the weapon hand; else where the animation has it, carried by the
+    /// body) along a critically damped path relative to the home, so the body's own motion carries
+    /// it and it never goes past ([`RETURN_HZ`]): `off` its offset from the home and how fast that
+    /// shrinks, `first` the offset's length when it set off, `home` the home at the last update.
+    /// Within [`REGRIP_LOCK`] it locks on (`locked`). Once locked and the free arm's own wrist is
+    /// on the home too ([`HANDOVER_NEAR`]) the arm is handed back to the free arm over
+    /// [`RETURN_FADE`] (`back` seconds since). Never reaches again.
     Released {
         t: f32,
-        from: f32,
-        path: (V3, V3),
+        off: V3,
+        vel: V3,
+        first: f32,
+        home: V3,
+        locked: bool,
         back: Option<f32>,
-        /// Where it let go (the arm's motors ease back from reaching there).
-        left: V3,
         why: &'static str,
     },
 }
@@ -192,8 +203,10 @@ impl Hand {
     }
 
     /// A frame of `dt` seconds, `brace_t` seconds into the brace: `wrist` and `shoulder` where the
-    /// shown arm has them now, `free` where the free arm's wrist is (the arm as the body and its
-    /// targets have it, before the brace's IK: where a released hand goes back to), `reach` the
+    /// shown arm has them now, `home` where the hand goes back to once released (a two-handed
+    /// weapon's grip as the weapon hand carries it; else the animation's hand as the body carries
+    /// it), `free` where the free arm's wrist is (the arm as the body and its targets have it,
+    /// before the brace's IK: the hand-over waits for it to be home too), `reach` the
     /// arm's length (shoulder to wrist, straight), `target` where the brace sends the hand
     /// (`crate::flinch::brace_target`),
     /// `surface` what it braces against (if anything), `let_go` a reason to let go now (the body
@@ -203,6 +216,7 @@ impl Hand {
         &mut self,
         surface: Option<&Surface>,
         wrist: V3,
+        home: V3,
         free: V3,
         shoulder: V3,
         reach: f32,
@@ -284,15 +298,17 @@ impl Hand {
                 if let Some(why) = let_go.or_else(|| {
                     (brace_t >= k.brace_reach + k.brace_hold).then_some("touched nothing")
                 }) {
-                    let from = self.reach_weight(brace_t);
                     let blended = self.reach_t >= REACH_BLEND;
+                    let off = sub(pos, home);
                     self.phase = Phase::Released {
                         t: 0.0,
-                        from,
-                        path: (pos, vel),
+                        off,
+                        vel: [0.0; 3],
+                        first: length(off),
+                        home,
+                        locked: false,
                         // Let go before the arm was fully on its path: handed straight back.
                         back: (!blended).then_some(RETURN_FADE),
-                        left: pos,
                         why,
                     };
                     return Some(Event::Released(why));
@@ -311,26 +327,42 @@ impl Hand {
                     let_go
                 };
                 if let Some(why) = why {
+                    let off = sub(here, home);
                     self.phase = Phase::Released {
                         t: 0.0,
-                        from: 1.0,
-                        path: (here, [0.0; 3]),
+                        off,
+                        vel: [0.0; 3],
+                        first: length(off),
+                        home,
+                        locked: false,
                         back: None,
-                        left: here,
                         why,
                     };
                     return Some(Event::Released(why));
                 }
                 None
             }
-            Phase::Released { t, path, back, .. } => {
+            Phase::Released {
+                t,
+                off,
+                vel,
+                home: kept,
+                locked,
+                back,
+                ..
+            } => {
                 *t += dt;
+                *kept = home;
+                // On along its way home (the last of it too: no snap), locked on within the lock.
+                (*off, *vel) = step_home(*off, *vel, home, shoulder, dt);
+                if length(*off) <= REGRIP_LOCK {
+                    *locked = true;
+                }
                 match back {
                     Some(b) => *b += dt,
                     None => {
-                        let (pos, vel) = step_path(path.0, path.1, free, shoulder, dt);
-                        *path = (pos, vel);
-                        if length(sub(pos, free)) <= RETURN_NEAR || *t >= RETURN_MOST {
+                        let home_too = *locked && length(sub(free, home)) <= HANDOVER_NEAR;
+                        if home_too || *t >= RETURN_MOST {
                             *back = Some(0.0);
                         }
                     }
@@ -347,15 +379,13 @@ impl Hand {
         match self.phase {
             Phase::Reaching { .. } => crate::active::ease(brace_t / k.brace_reach.max(1e-3)),
             Phase::Planted { .. } => 1.0,
-            Phase::Released { t, from, .. } => {
-                from * (1.0 - crate::active::ease(t / k.brace_release.max(1e-3)))
-            }
+            Phase::Released { .. } => self.plant_weight(),
         }
     }
 
     /// Where the shown wrist goes this frame (game units): along its reaching path, then its
-    /// approach onto the plant (decelerating to rest), then the plant; while letting go, where it
-    /// was.
+    /// approach onto the plant (decelerating to rest), then the plant; let go, along its way back
+    /// to its home.
     pub fn goal(&self) -> Option<V3> {
         match self.phase {
             Phase::Reaching { path } => path.map(|p| p.0),
@@ -381,7 +411,39 @@ impl Hand {
                     scale(at, h01),
                 ))
             }
-            Phase::Released { path, .. } => Some(path.0),
+            Phase::Released { off, home, .. } => Some(add(home, off)),
+        }
+    }
+
+    /// A released hand's offset from its home now (game units): where its way back has got to,
+    /// to put on the home as it is this frame.
+    pub fn home_offset(&self) -> Option<V3> {
+        match self.phase {
+            Phase::Released { off, .. } => Some(off),
+            _ => None,
+        }
+    }
+
+    /// Let go and locked on its home (a two-handed weapon's grip: the grip hold takes it from
+    /// here, `Sim`'s and the host's).
+    pub fn on_home(&self) -> bool {
+        matches!(self.phase, Phase::Released { locked: true, .. })
+    }
+
+    /// How far back home a released hand is (0 as it let go, 1 locked on): the share of its way
+    /// back done, for turning the hand onto its grip as it comes.
+    pub fn home_share(&self) -> f32 {
+        match self.phase {
+            Phase::Released {
+                off, first, locked, ..
+            } => {
+                if locked || first <= 1e-3 {
+                    1.0
+                } else {
+                    (1.0 - length(off) / first).clamp(0.0, 1.0)
+                }
+            }
+            _ => 0.0,
         }
     }
 
@@ -411,13 +473,11 @@ impl Hand {
         }
     }
 
-    /// Where the arm's motors reach (game units): where the shown hand goes while it reaches and
-    /// is planted; where it let go while they ease back.
+    /// Where the arm's motors reach (game units): where the shown hand goes, all the way (its
+    /// reach, its plant, its way back home), so the physical arm comes home with it; the weight
+    /// is [`Hand::plant_weight`]'s (eased off once handed back).
     pub fn motor_goal(&self) -> Option<V3> {
-        match self.phase {
-            Phase::Released { left, .. } => Some(left),
-            _ => self.goal(),
-        }
+        self.goal()
     }
 
     /// Let go (or never touched): coming back.
@@ -431,9 +491,7 @@ impl Hand {
 
     /// Done: let go and eased out.
     pub fn done(&self) -> bool {
-        let k = crate::tuning::get();
-        matches!(self.phase, Phase::Released { t, back: Some(b), .. }
-            if b >= RETURN_FADE && t >= k.brace_release)
+        matches!(self.phase, Phase::Released { back: Some(b), .. } if b >= RETURN_FADE)
     }
 }
 
@@ -468,6 +526,47 @@ fn step_path(mut pos: V3, mut vel: V3, goal: V3, shoulder: V3, dt: f32) -> (V3, 
     (pos, vel)
 }
 
+/// A released hand's offset from its home a frame on, and how fast it changes: a critically damped
+/// spring to none ([`RETURN_HZ`]), no faster than [`REACH_SPEED`], and never faster toward home
+/// than it can stop by the home (the speed toward it at most the spring's frequency times the
+/// distance left): no overshoot, no swing.
+fn step_home(mut off: V3, mut vel: V3, home: V3, shoulder: V3, dt: f32) -> (V3, V3) {
+    if dt <= 0.0 {
+        return (off, vel);
+    }
+    let om = std::f32::consts::TAU * RETURN_HZ;
+    let a = sub(scale(off, -om * om), scale(vel, 2.0 * om));
+    vel = add(vel, scale(a, dt));
+    let most = REACH_SPEED * UNITS_PER_METRE;
+    let speed = length(vel);
+    if speed > most {
+        vel = scale(vel, most / speed);
+    }
+    let d = length(off);
+    if let Some(n) = unit(scale(off, -1.0)) {
+        // Toward home at most om * d (and never past it in this step); across, damped away.
+        let toward = dot(vel, n).clamp(0.0, (om * d).min(d / dt));
+        let across = sub(vel, scale(n, dot(vel, n)));
+        vel = add(scale(n, toward), scale(across, (-2.0 * om * dt).exp()));
+    }
+    // Around the shoulder no faster than [`RETURN_SWEEP`] (the arm speed cap): the step shortened
+    // (shorter toward home never goes past it).
+    let (a, b) = (
+        sub(add(home, off), shoulder),
+        sub(add(home, add(off, scale(vel, dt))), shoulder),
+    );
+    let (la, lb) = (length(a), length(b));
+    if la > 1.0 && lb > 1.0 {
+        let angle = (dot(a, b) / (la * lb)).clamp(-1.0, 1.0).acos();
+        let most = RETURN_SWEEP * dt;
+        if angle > most {
+            vel = scale(vel, most / angle);
+        }
+    }
+    off = add(off, scale(vel, dt));
+    (off, vel)
+}
+
 /// From `a` toward `b` (both from the shoulder) by `w`: the way turned (spherically) and the
 /// distance eased.
 fn around(a: V3, b: V3, w: f32) -> V3 {
@@ -494,6 +593,30 @@ fn around(a: V3, b: V3, w: f32) -> V3 {
         )
     };
     scale(dir, la + (lb - la) * w)
+}
+
+/// An armed actor's support hand grips its weapon (two-handed) when the animation has it within
+/// this of the weapon hand (game units, about 50 cm): its home after a brace is the grip.
+pub const GRIP_NEAR: f32 = 35.0;
+
+/// Whether an actor's support (left) hand grips its weapon: armed, and the animation has the
+/// support hand `anim_support` within [`GRIP_NEAR`] of the weapon hand `anim_weapon`.
+pub fn grips(armed: bool, anim_support: V3, anim_weapon: V3) -> bool {
+    armed && length(sub(anim_support, anim_weapon)) <= GRIP_NEAR
+}
+
+/// Where a bone (`anim_hand`, rotation and position in the animation) is when it rides on
+/// another (`anim_carrier` in the animation, `carrier` now): a released hand's home (its grip on
+/// the weapon hand, or its place by the body).
+pub fn carried(anim_carrier: (M3, V3), anim_hand: (M3, V3), carrier: (M3, V3)) -> (M3, V3) {
+    use crate::flinch::{apply_m, mul, transpose};
+    let back = transpose(&anim_carrier.0);
+    let local_p = apply_m(&back, sub(anim_hand.1, anim_carrier.1));
+    let local_r = mul(&back, &anim_hand.0);
+    (
+        mul(&carrier.0, &local_r),
+        add(carrier.1, apply_m(&carrier.0, local_p)),
+    )
 }
 
 /// The reason a brace's planted hands let go this frame, if any: the body recovered (its steps
@@ -665,9 +788,18 @@ mod tests {
         for i in 0..90 {
             t += dt;
             let target = [0.0, 60.0, 100.0];
-            if let Some(Event::Planted(_)) =
-                h.update(Some(&s), p, p, shoulder, 60.0, target, t, dt, None)
-            {
+            if let Some(Event::Planted(_)) = h.update(
+                Some(&s),
+                p,
+                [0.0, 30.0, 100.0],
+                [0.0, 30.0, 100.0],
+                shoulder,
+                60.0,
+                target,
+                t,
+                dt,
+                None,
+            ) {
                 planted += 1;
             }
             // The free hand would go on into the wall at 60 units a second.
@@ -690,10 +822,14 @@ mod tests {
             "at rest on the wall"
         );
         assert!(h.planted());
+        // Let go: back home (a grip that moves) along a path that never goes past it nor swings,
+        // locked on, handed back once the free arm's wrist is there too.
+        let home0: V3 = [0.0, 25.0, 90.0];
         assert_eq!(
             h.update(
                 Some(&s),
                 p,
+                home0,
                 p,
                 shoulder,
                 60.0,
@@ -704,12 +840,19 @@ mod tests {
             ),
             Some(Event::Released("recovered"))
         );
-        for _ in 0..120 {
+        let start = sub(h.goal().unwrap(), home0);
+        let toward = unit(scale(start, -1.0)).unwrap();
+        let mut least = length(start);
+        for i in 0..240 {
             t += dt;
+            // The grip moves with the weapon hand; the free arm's wrist gets there after a while.
+            let home = add(home0, [3.0 * (t * 2.0).sin(), 0.0, 0.0]);
+            let free = if i < 90 { p } else { home };
             h.update(
                 Some(&s),
-                [0.0, 30.0, 100.0],
-                [0.0, 30.0, 100.0],
+                p,
+                home,
+                free,
                 shoulder,
                 60.0,
                 [0.0, 60.0, 100.0],
@@ -717,14 +860,24 @@ mod tests {
                 dt,
                 None,
             );
+            let rel = sub(h.goal().unwrap(), home);
+            assert!(dot(rel, toward) <= 1e-3, "never past the grip: frame {i}");
+            let d = length(rel);
+            assert!(d <= least + 1e-3, "never further from it again: frame {i}");
+            least = least.min(d);
+            if i < 90 {
+                assert!(h.plant_weight() > 0.999, "held until the free arm is there");
+            }
         }
-        assert!(h.done() && !h.planted(), "no reach again");
+        assert_eq!(h.home_share(), 1.0);
+        assert!(h.done() && !h.planted(), "handed back, no reach again");
         // Pushed off: the shoulder past the arm's reach from the plant.
         let mut h = Hand::new(1);
         h.update(
             Some(&s),
             [0.0, 44.5, 100.0],
-            [0.0, 44.5, 100.0],
+            [0.0, 30.0, 100.0],
+            [0.0, 30.0, 100.0],
             shoulder,
             60.0,
             [0.0, 60.0, 100.0],
@@ -736,7 +889,8 @@ mod tests {
         let e = h.update(
             Some(&s),
             [0.0, 44.5, 100.0],
-            [0.0, 44.5, 100.0],
+            [0.0, 30.0, 100.0],
+            [0.0, 30.0, 100.0],
             [0.0, -30.0, 100.0],
             60.0,
             [0.0, 60.0, 100.0],

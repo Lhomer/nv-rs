@@ -87,7 +87,8 @@ two-handed weapon, aiming), `armed=pistol` (a one-handed one, the left arm hangi
 `attacking=1` (attacking; armed too), `expect` (`upright`, `fell`, `braced`, `steps>=1`,
 `steps=0`, `fall:<kind>`, `flinched`, `aim<=D` degrees, `armspin<=W` and `ragdollarmspin<=W`
 rad/s, `interrupted`, `attacking`, `vjump<=V` m/s, `jerk<=J` m/s3, `onehand` / `bothhands`
-(which hands braced), `handbounce<=N`, `handjitter<=V` m/s, `handslip<=C` cm, `elbowosc<=N`).
+(which hands braced), `handbounce<=N`, `handjitter<=V` m/s, `handslip<=C` cm, `elbowosc<=N`,
+`regripped`, `regripover<=C` cm, `regripwobble<=N`).
 
 Each run goes until the body has recovered (or 12 s after the last hit). The report (JSON in
 `<pre id="results">`, in `window.ragdollLab.results`, and on the console;
@@ -101,8 +102,12 @@ stood), `recovery_s` (from the first hit until it stood at rest again), `peak_sp
 (the biggest change of a bone's velocity in one frame while it stands) and `jerk` (m/s3),
 `brace_hands` (which arms braced), `hand_losses` (a bracing hand coming off the surface while it
 holds), `hand_jitter_mps` and `hand_slip_cm` (a settled hand's speed and slide),
-`elbow_reversals` (a planted elbow swinging back more than 3 degrees), whether the expectations
-held, and the log's last lines. Every built-in scene is held to no hand bounce, and
+`elbow_reversals` (a planted elbow swinging back more than 3 degrees), `regrip_watched`,
+`regrip_overshoot_cm`, `regrip_reversals` and `regrip_drift_cm` (a two-handed weapon's support
+hand going back to its grip after a brace: past the grip, its distance growing again, off the grip
+once on it), whether the expectations
+held, and the log's last lines. Every built-in scene is held to no hand bounce and no regrip
+wobble, and
 `braces_hold_across_pushes_and_weapons` runs 108 braces across grounds, weapons and sides
 (`ragdoll_core::brace`, docs/GUNPLAY.md).
 

@@ -236,7 +236,36 @@ pub struct Stats {
     pub hand_jitter: f32,
     pub hand_slip: f32,
     pub elbow_reversals: u32,
+    /// A two-handed weapon's support hand going back to its grip after a brace (the shown pose,
+    /// relative to the grip, which moves with the weapon hand): whether it was watched, how far
+    /// it went past the grip along its way back (cm), how often its distance to the grip grew
+    /// again by more than [`REGRIP_SWING`] (a wobble), and how far it came off the grip after it
+    /// first got within [`REGRIP_LOCK`] (cm).
+    pub regrip_watched: bool,
+    pub regrip_overshoot: f32,
+    pub regrip_reversals: u32,
+    pub regrip_drift: f32,
 }
+
+/// The support hand's way back to its grip, watched ([`Sim::watch_regrip`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RegripWatch {
+    /// Seconds since it set off back (none: not watching); the way to the grip at the start.
+    since: Option<f32>,
+    toward: V3,
+    /// The least distance to the grip so far (since the last swing), and whether it has got
+    /// within the lock.
+    least: f32,
+    locked: bool,
+    done: bool,
+}
+
+/// The support hand's distance to its grip growing again by more than this (units, 0.5 cm) is a
+/// swing; within this of the grip (units) it is on it.
+pub const REGRIP_SWING: f32 = 0.35;
+pub const REGRIP_LOCK: f32 = 1.0;
+/// How long the regrip is watched after the hand sets off back (s).
+pub const REGRIP_WATCH: f32 = 3.0;
 
 /// A bracing hand watched for bounce (the shown pose against the brace's surface).
 #[derive(Clone, Copy, Debug, Default)]
@@ -381,6 +410,9 @@ pub struct Sim {
     pub hand_lock: [Option<M3>; 2],
     /// Each free arm's wrist this frame (before the brace's IK).
     pub free_wrist: [Option<V3>; 2],
+    /// The support hand's regrip, watched; the grip hold on ([`Sim::grip_hold_weight`]).
+    pub regrip: RegripWatch,
+    pub grip_hold: bool,
     velocity: Option<[V3; COUNT]>,
     acceleration: Option<[V3; COUNT]>,
     pub stats: Stats,
@@ -422,6 +454,8 @@ impl Sim {
             watch: [HandWatch::default(); 2],
             hand_lock: [None; 2],
             free_wrist: [None; 2],
+            regrip: RegripWatch::default(),
+            grip_hold: false,
             velocity: None,
             acceleration: None,
             stats: Stats::default(),
@@ -465,6 +499,8 @@ impl Sim {
         // A fresh body: no fatigue, pain or hurt limbs left from an earlier run.
         self.condition = Condition::default();
         self.watch = [HandWatch::default(); 2];
+        self.regrip = RegripWatch::default();
+        self.grip_hold = false;
         self.last_knock = None;
         self.last_up = None;
         self.stats = Stats {
@@ -1165,9 +1201,11 @@ impl Sim {
             let reach = length(sub(posed[f].1, posed[u].1)) + length(sub(posed[h].1, posed[f].1));
             let target = brace_target(anim[u].1, b.dir, b.wall, b.top);
             let free = self.free_wrist[side as usize].unwrap_or(posed[h].1);
+            let home = self.home(&posed, side).map_or(free, |x| x.1);
             match hand.update(
                 b.surface.as_ref(),
                 posed[h].1,
+                home,
                 free,
                 posed[u].1,
                 reach,
@@ -1191,17 +1229,10 @@ impl Sim {
             }
             // The arm's motors reach for where the shown hand goes (its path, its plant: from the
             // shoulder, carried onto the animation's), so the physical arm, its pin and the shown
-            // arm agree; without a path yet, toward the brace's target; let go, back to the
-            // animation (the shown hand follows the free arm's back).
+            // arm agree (its way back home too, so the physical arm comes home with the shown one);
+            // without a path yet, toward the brace's target.
             let (target, w) = match hand.motor_goal() {
-                Some(g) => (
-                    add(anim[u].1, sub(g, posed[u].1)),
-                    if hand.released() {
-                        hand.reach_weight(b.t)
-                    } else {
-                        hand.plant_weight()
-                    },
-                ),
+                Some(g) => (add(anim[u].1, sub(g, posed[u].1)), hand.plant_weight()),
                 None => (target, hand.reach_weight(b.t)),
             };
             if let Some((ui, ur, fi, fr)) = self.reach_arm(anim, side, target, w) {
@@ -1496,6 +1527,24 @@ impl Sim {
             }
             let anim = self.anim();
             self.brace_frame(&anim, &mut overrides, dt);
+            // The grip hold: the support arm's motors on the grip too (the physical arm stays on
+            // the weapon; once the brace hand is handed back or the brace is over).
+            let bracing = self
+                .rig
+                .brace
+                .and_then(|b| b.hands[0])
+                .is_some_and(|h| !h.released());
+            if self.grip_hold && !bracing {
+                if let (Some(grip), Some(u)) =
+                    (self.grip(&self.posed), mq::bone_of(Role::UpperArm, 0))
+                {
+                    let goal = add(anim[u].1, sub(grip.1, self.posed[u].1));
+                    if let Some((ui, ur, fi, fr)) = self.reach_arm(&anim, 0, goal, 1.0) {
+                        overrides[ui] = Some(ur);
+                        overrides[fi] = Some(fr);
+                    }
+                }
+            }
             if self.fall_frame(&mut overrides, dt) {
                 return;
             }
@@ -1687,6 +1736,12 @@ impl Sim {
                 let (Some(goal), w) = (hand.goal(), hand.plant_weight()) else {
                     continue;
                 };
+                // Let go: on its way back home, the home as this frame has it (no lag behind the
+                // weapon hand that carries a grip).
+                let goal = match (hand.home_offset(), self.home(&out, hand.side)) {
+                    (Some(off), Some(home)) => add(home.1, off),
+                    _ => goal,
+                };
                 let (Some(u), Some(f), Some(h)) = (
                     mq::bone_of(Role::UpperArm, hand.side),
                     mq::bone_of(Role::Forearm, hand.side),
@@ -1713,10 +1768,20 @@ impl Sim {
                     let (iu, ifo) = (mul(&r1, &pu), mul(&mul(&r1, &r2), &pf));
                     // The hand with the arm: carried by its forearm while it reaches, held as it
                     // touched once planted (the palm stays on the surface).
+                    let carried = mul(&ifo, &mul(&transpose(&pf), &ph));
                     let ih = if hand.planted() {
                         *self.hand_lock[hand.side as usize].get_or_insert(ph)
+                    } else if let (true, Some(home)) = (hand.released(), self.home(&out, hand.side))
+                    {
+                        // Turned onto its grip as it comes home (from as it let go).
+                        let from = self.hand_lock[hand.side as usize].unwrap_or(carried);
+                        active::m_from_q(active::qslerp(
+                            active::qfrom_m(&from),
+                            active::qfrom_m(&home.0),
+                            active::ease(hand.home_share()),
+                        ))
                     } else {
-                        mul(&ifo, &mul(&transpose(&pf), &ph))
+                        carried
                     };
                     let blend = |free: M3, ik: M3| {
                         active::m_from_q(active::qslerp(
@@ -1735,8 +1800,42 @@ impl Sim {
                 out = self.place(&rots, pelvis);
             }
         }
+        // The grip hold: a two-handed weapon's support hand, back on its grip after a brace, kept
+        // there while the body is physical (its weight: the body's in the shown pose), so it never
+        // swings off the weapon as the arm is handed back.
+        if let Some(on) = self.grip_hold_weight(shown_w) {
+            if let Some(grip) = self.grip(&out) {
+                let (u, f, h) = (mq::L_UPPERARM, mq::L_FOREARM, mq::L_HAND);
+                let (pu, pf) = (self.posed[u].0, self.posed[f].0);
+                let shoulder = out[u].1;
+                let elbow = add(shoulder, sub(self.posed[f].1, self.posed[u].1));
+                let wrist = add(elbow, sub(self.posed[h].1, self.posed[f].1));
+                if let Some((r1, r2)) = hands::plant_arm(
+                    shoulder,
+                    elbow,
+                    wrist,
+                    grip.1,
+                    1.0,
+                    FORWARD,
+                    hands::MOST_TWIST * self.dt,
+                ) {
+                    let blend = |a: M3, b: M3| {
+                        active::m_from_q(active::qslerp(
+                            active::qfrom_m(&a),
+                            active::qfrom_m(&b),
+                            on,
+                        ))
+                    };
+                    rots[u] = blend(rots[u], mul(&r1, &pu));
+                    rots[f] = blend(rots[f], mul(&mul(&r1, &r2), &pf));
+                    rots[h] = blend(rots[h], grip.0);
+                    out = self.place(&rots, pelvis);
+                }
+            }
+        }
         self.posed = out;
         self.watch_hands();
+        self.watch_regrip();
         self.measure(&before, dt);
         if self.rig.body.is_some() && shown_w <= 0.0 && !busy {
             self.rig.body = None;
@@ -1836,6 +1935,100 @@ impl Sim {
             }
             w.touching = touching && holding;
             w.last = Some(wrist);
+        }
+    }
+
+    /// The grip hold's weight now (none: no hold): once a two-handed weapon's support hand is back
+    /// on its grip after a brace, while the body is physical, the body's weight `shown_w` in the
+    /// shown pose (the hand stays on the grip as the body blends back to the animation).
+    fn grip_hold_weight(&mut self, shown_w: f32) -> Option<f32> {
+        if self.grip(&self.posed).is_none() || self.rig.body.is_none() {
+            self.grip_hold = false;
+            return None;
+        }
+        if let Some(h) = self.rig.brace.and_then(|b| b.hands[0]) {
+            if h.on_home() {
+                self.grip_hold = true;
+            }
+        }
+        self.grip_hold.then_some(shown_w.clamp(0.0, 1.0))
+    }
+
+    /// Where a released brace hand goes back to in the pose `pose` (rotation and wrist): a
+    /// two-handed weapon's support hand to its grip ([`Sim::grip`]); else the animation's hand as
+    /// the bone its arm hangs from carries it (`ragdoll_core::brace::carried`).
+    pub fn home(&self, pose: &[Xf; COUNT], side: u8) -> Option<Xf> {
+        if side == 0 {
+            if let Some(g) = self.grip(pose) {
+                return Some(g);
+            }
+        }
+        let h = mq::bone_of(Role::Hand, side)?;
+        let c = mq::PARENT[mq::bone_of(Role::UpperArm, side)?]?;
+        let anim = self.anim();
+        Some(hands::carried(anim[c], anim[h], pose[c]))
+    }
+
+    /// Where the support (left) hand grips the weapon in the pose `pose`, when it does
+    /// (`ragdoll_core::brace::grips`: armed, the animation's hands close): the animation's grip
+    /// as the weapon (right) hand carries it.
+    pub fn grip(&self, pose: &[Xf; COUNT]) -> Option<Xf> {
+        let anim = self.anim();
+        let (r, l) = (anim[mq::R_HAND], anim[mq::L_HAND]);
+        hands::grips(self.armed, l.1, r.1).then(|| hands::carried(r, l, pose[mq::R_HAND]))
+    }
+
+    /// The support hand going back to its grip after a brace ([`Stats::regrip_overshoot`],
+    /// `regrip_reversals`, `regrip_drift`): from when its brace hand lets go until
+    /// [`REGRIP_WATCH`] seconds on, its wrist against the grip as the weapon hand carries it.
+    fn watch_regrip(&mut self) {
+        let Some(grip) = self.grip(&self.posed) else {
+            return;
+        };
+        let wrist = self.posed[mq::L_HAND].1;
+        let rel = sub(wrist, grip.1);
+        let d = length(rel);
+        let w = &mut self.regrip;
+        if w.done {
+            return;
+        }
+        let released = self
+            .rig
+            .brace
+            .and_then(|b| b.hands[0])
+            .is_some_and(|h| h.released());
+        match w.since {
+            None => {
+                if released {
+                    w.since = Some(0.0);
+                    w.toward = unit(scale(rel, -1.0)).unwrap_or([0.0; 3]);
+                    w.least = d;
+                    self.stats.regrip_watched = true;
+                }
+            }
+            Some(t) => {
+                let t = t + self.dt;
+                w.since = Some(t);
+                // Past the grip along its way back.
+                let past = dot(rel, w.toward).max(0.0) / UNITS_PER_METRE * 100.0;
+                self.stats.regrip_overshoot = self.stats.regrip_overshoot.max(past);
+                if d < w.least {
+                    w.least = d;
+                } else if d > w.least + REGRIP_SWING {
+                    self.stats.regrip_reversals += 1;
+                    w.least = d;
+                }
+                if d <= REGRIP_LOCK {
+                    w.locked = true;
+                }
+                if w.locked {
+                    let off = (d / UNITS_PER_METRE * 100.0) - REGRIP_LOCK / UNITS_PER_METRE * 100.0;
+                    self.stats.regrip_drift = self.stats.regrip_drift.max(off.max(0.0));
+                }
+                if t >= REGRIP_WATCH {
+                    w.done = true;
+                }
+            }
         }
     }
 

@@ -471,6 +471,39 @@ stretched and grew, and the game froze. Two causes, both fixed:
   poses (the pass writing back three times a frame, a hair off, the animation skipping frames)
   makes exactly the shown pose and never adds up.
 
+### Active ragdoll: the support hand regrips smoothly (Patrick, 2026-11-15, e2e5531 reel)
+
+After a brace, a two-handed weapon's support hand wobbled as it went back to the gun. It went
+back toward the physical free arm's wrist (in the lab still about 42 units from the grip). The
+arm was then handed back far from the gun, and the soft, freshly hit arm swung onto it: about
+5 cm past the grip, settling over about 2 s. Now (`ragdoll_core::brace`, the game and the lab):
+
+- **Home is the grip.** A released hand goes back to its home. For an armed actor holding its
+  weapon two-handed (`brace::grips`: the animation's support hand within 35 units of the weapon
+  hand; this also covers two-handed pistol stances) the home is the grip, carried by the weapon
+  hand (`brace::carried`). Otherwise it is the animation's hand, carried by the bone its arm
+  hangs from.
+- **A critically damped way back.** The path is kept as an offset from the home, so the weapon
+  hand's motion carries it and only the offset shrinks: critically damped (2 Hz), at most
+  1.5 m/s, at most 3.5 rad/s around the shoulder, never faster toward the grip than it can stop
+  at it (no overshoot, no swing). Each frame the shown hand goes on the home as that frame has
+  it (no lag behind the weapon hand), and the hand turns onto its grip orientation as it comes.
+- **The arm's motors follow the same path,** so the physical arm comes back with the shown one.
+- **Locks, then the grip hold.** Within 0.5 units of the grip it counts as locked. From then on
+  the grip hold keeps the support hand on the grip (the shown arm and its motors) while the body
+  is physical, fading with the body's weight as it blends back into the animation (where the hand
+  is on the grip anyway). The brace hands the arm back only once the free arm's own wrist is on
+  the grip (or after 3 s), so nothing moves at the hand-over.
+- **Measured in the lab** (`watch_regrip`, the shown pose against the grip, for 3 s from the
+  release): how far the hand goes past the grip along its way back, how often its distance to the
+  grip grows again by more than 0.5 cm (a wobble), and how far it comes off the grip once within
+  1 unit. Every scene and the 108-brace sweep fail on more than 0.5 cm past, any wobble, or more
+  than 0.5 cm of drift. New scenes: `rifle-wall-regrip`, `rifle-railing-regrip` (expectations
+  `regripped`, `regripover<=C`, `regripwobble<=N`). Before: about 5 cm past and 30 or more
+  swings; now 0 cm, no wobble, no drift in all 35 regrips of the sweep.
+- **Not run in game.** The 35-unit grip test reads the game's own animated hands; whether every
+  two-handed weapon's stance falls within it is unchecked.
+
 ### Active ragdoll: hands plant on what they brace against; armed actors brace one-handed (Patrick, 2026-11-15, b7aaa5a reel)
 
 Patrick saw the arms bounce around when bracing instead of meeting the wall, railing or table and

@@ -92,9 +92,11 @@ impl Default for Spec {
 /// `onehand` (only the free, left, hand braced) / `bothhands`, `handbounce<=N` (a hand came off
 /// the surface N times while it held), `handjitter<=V` (a settled hand moved at most V m/s),
 /// `handslip<=C` (nor slid more than C cm), `elbowosc<=N` (a planted elbow turned back on itself
-/// at most N times)). Every scenario is held to no bounce, jitter, slide or oscillation as well
+/// at most N times), `regripped` (a two-handed weapon's support hand went back to its grip after
+/// the brace, watched), `regripover<=C` (it went at most C cm past the grip), `regripwobble<=N`
+/// (its distance to the grip grew again at most N times)). Every scenario is held to no bounce, jitter, slide or oscillation as well
 /// (`the_built_in_scenarios_hold`).
-pub const BUILT_IN: [(&str, &str, &str); 30] = [
+pub const BUILT_IN: [(&str, &str, &str); 32] = [
     (
         "pistol-chest",
         "ground=flat&hits=9mm@chest",
@@ -248,6 +250,18 @@ pub const BUILT_IN: [(&str, &str, &str); 30] = [
         "armed-rifle-railing-brace",
         "ground=railing&armed=rifle&hits=4570@chest",
         "upright,braced:waist,onehand,armspin<=6.5",
+    ),
+    // The support hand goes back to the rifle's grip smoothly after the brace (Patrick,
+    // 2026-11-15, e2e5531 reel: it wobbled as it regripped).
+    (
+        "rifle-wall-regrip",
+        "ground=wall&armed=rifle&hits=4570@chest/10",
+        "upright,braced,onehand,regripped,regripover<=0.5,regripwobble<=0,armspin<=6.5",
+    ),
+    (
+        "rifle-railing-regrip",
+        "ground=railing&armed=rifle&hits=4570@chest/-10",
+        "upright,braced:waist,onehand,regripped,regripover<=0.5,regripwobble<=0,armspin<=6.5",
     ),
 ];
 
@@ -446,6 +460,10 @@ pub struct Report {
     pub hand_jitter: f32,
     pub hand_slip: f32,
     pub elbow_reversals: u32,
+    pub regrip_watched: bool,
+    pub regrip_overshoot: f32,
+    pub regrip_reversals: u32,
+    pub regrip_drift: f32,
     pub expect: Vec<(String, bool)>,
     pub log: Vec<String>,
 }
@@ -471,7 +489,8 @@ impl Report {
              \"aim_drift_deg\":{:.2},\"interrupted\":{},\"velocity_jump_mps\":{:.3},\"jerk\":{:.1},\
              \"back_bend_deg\":{:.2},\"tripped\":{},\"brace_kind\":{},\
              \"brace_hands\":[{},{}],\"hand_losses\":{},\"hand_jitter_mps\":{:.3},\
-             \"hand_slip_cm\":{:.2},\"elbow_reversals\":{},\
+             \"hand_slip_cm\":{:.2},\"elbow_reversals\":{},\"regrip_watched\":{},\
+             \"regrip_overshoot_cm\":{:.2},\"regrip_reversals\":{},\"regrip_drift_cm\":{:.2},\
              \"expectations\":[{}],\"passed\":{},\"log\":[{}]}}",
             s(&self.name),
             s(self.ground),
@@ -505,6 +524,10 @@ impl Report {
             self.hand_jitter,
             self.hand_slip,
             self.elbow_reversals,
+            self.regrip_watched,
+            self.regrip_overshoot,
+            self.regrip_reversals,
+            self.regrip_drift,
             expect.join(","),
             self.passed(),
             list(&self.log)
@@ -647,6 +670,10 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
         hand_jitter: st.hand_jitter,
         hand_slip: st.hand_slip,
         elbow_reversals: st.elbow_reversals,
+        regrip_watched: st.regrip_watched,
+        regrip_overshoot: st.regrip_overshoot,
+        regrip_reversals: st.regrip_reversals,
+        regrip_drift: st.regrip_drift,
         expect: Vec::new(),
         log: sim.log.iter().rev().take(60).rev().cloned().collect(),
     };
@@ -676,6 +703,13 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
                 e if e.starts_with("handslip<=") => {
                     e[10..].parse::<f32>().is_ok_and(|c| report.hand_slip <= c)
                 }
+                "regripped" => report.regrip_watched,
+                e if e.starts_with("regripover<=") => e[12..]
+                    .parse::<f32>()
+                    .is_ok_and(|c| report.regrip_overshoot <= c),
+                e if e.starts_with("regripwobble<=") => e[14..]
+                    .parse::<u32>()
+                    .is_ok_and(|n| report.regrip_reversals <= n),
                 e if e.starts_with("elbowosc<=") => e[10..]
                     .parse::<u32>()
                     .is_ok_and(|n| report.elbow_reversals <= n),
@@ -791,6 +825,11 @@ mod tests {
                     r.back_bend
                 ));
             }
+            // A rifle's support hand goes back to its grip without a wobble (Patrick, 2026-11-15:
+            // it wobbled as it regripped in the e2e5531 reel).
+            if let Some(why) = regrip_wobble(&r) {
+                failed.push(format!("{name}: the regrip wobbled: {why}"));
+            }
             // A bracing hand meets the surface and stays (Patrick, 2026-11-15: the arms bounced
             // in the b7aaa5a reel): no loss of contact while it holds, no jitter or slide once
             // settled, no oscillating elbow.
@@ -822,6 +861,8 @@ mod tests {
         let mut runs = 0;
         let mut worst = [0.0f32; 6];
         let mut spin_run = String::new();
+        let mut regrips = 0;
+        let mut worst_regrip = [0.0f32; 3];
         for ground in ["wall", "railing", "table", "gaprailing"] {
             for armed in ["0", "pistol", "rifle"] {
                 for gun in ["4570", "44", "308"] {
@@ -872,6 +913,15 @@ mod tests {
                         {
                             why.push(format!("aim drift {:.1} deg", r.aim_drift));
                         }
+                        if let Some(w) = regrip_wobble(&r) {
+                            why.push(format!("regrip: {w}"));
+                        }
+                        if r.regrip_watched {
+                            regrips += 1;
+                            worst_regrip[0] = worst_regrip[0].max(r.regrip_overshoot);
+                            worst_regrip[1] = worst_regrip[1].max(r.regrip_reversals as f32);
+                            worst_regrip[2] = worst_regrip[2].max(r.regrip_drift);
+                        }
                         if !why.is_empty() {
                             failed.push(format!("{}: {}", spec.name, why.join(", ")));
                         }
@@ -885,11 +935,39 @@ mod tests {
              {:.1} deg",
             worst[0], worst[1], worst[2], worst[3], worst[4], worst[5]
         );
+        println!(
+            "{regrips} regrips watched; worst: overshoot {:.2} cm, {} wobbles, drift {:.2} cm",
+            worst_regrip[0], worst_regrip[1], worst_regrip[2]
+        );
         assert!(
             planted >= runs / 3,
             "few braces touched: {planted} of {runs}"
         );
+        assert!(regrips >= 18, "few regrips watched: {regrips}");
         assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    /// What a regrip may do: how far past the grip it may go (cm), how often its distance may grow
+    /// again (never), how far it may come off the grip once on it (cm).
+    const MOST_REGRIP_OVERSHOOT: f32 = 0.5;
+    const MOST_REGRIP_WOBBLES: u32 = 0;
+    const MOST_REGRIP_DRIFT: f32 = 0.5;
+
+    fn regrip_wobble(r: &Report) -> Option<String> {
+        if !r.regrip_watched {
+            return None;
+        }
+        let mut why = Vec::new();
+        if r.regrip_overshoot > MOST_REGRIP_OVERSHOOT {
+            why.push(format!("{:.2} cm past the grip", r.regrip_overshoot));
+        }
+        if r.regrip_reversals > MOST_REGRIP_WOBBLES {
+            why.push(format!("{} wobbles", r.regrip_reversals));
+        }
+        if r.regrip_drift > MOST_REGRIP_DRIFT {
+            why.push(format!("{:.2} cm off the grip once on it", r.regrip_drift));
+        }
+        (!why.is_empty()).then(|| why.join(", "))
     }
 
     /// The arm speed cap while standing (the scenes' `armspin<=6.5`), and how far an armed body's

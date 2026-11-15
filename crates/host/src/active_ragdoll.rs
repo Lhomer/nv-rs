@@ -131,6 +131,9 @@ pub struct Rig {
     /// released hand goes back to), and a planted hand's shown rotation, held as it touched.
     pub free_wrist: [Option<V3>; 2],
     pub hand_lock: [Option<M3>; 2],
+    /// The grip hold ([`home_of`]): a two-handed weapon's support hand, back on its grip after a
+    /// brace, kept there while the body is physical.
+    pub grip_hold: bool,
 }
 
 /// A hit waiting for the physical body (`ragdoll_core::active::Body::hit`'s words; game units).
@@ -456,6 +459,7 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         held: Vec::new(),
         free_wrist: [None; 2],
         hand_lock: [None; 2],
+        grip_hold: false,
     });
     true
 }
@@ -705,6 +709,39 @@ pub fn apply(e: &mut Engine) {
             }
         }
         brace_frame(e, &mut rig, &anim, &mut overrides, dt);
+        // The grip hold (`home_of`): once the support hand is back on a two-handed weapon's grip
+        // after a brace, its arm's motors stay on the grip while the body is physical (the
+        // physical arm never swings off the weapon as the brace hands it back).
+        if rig.body.is_none() || !grips(&rig, &anim) {
+            rig.grip_hold = false;
+        } else if rig
+            .brace
+            .and_then(|b| b.hands[0])
+            .is_some_and(|h| h.on_home())
+        {
+            rig.grip_hold = true;
+        }
+        let support_bracing = rig
+            .brace
+            .and_then(|b| b.hands[0])
+            .is_some_and(|h| !h.released());
+        if rig.grip_hold && !support_bracing {
+            if let (Some(grip), Some(u), Some(f), Some(h)) = (
+                home_of(&rig, &anim, 0, |i| world_of(e, &rig, i)),
+                bone_of(&rig, Role::UpperArm, 0),
+                bone_of(&rig, Role::Forearm, 0),
+                bone_of(&rig, Role::Hand, 0),
+            ) {
+                let shoulder = read3(e, rig.bones[u].node + WORLD_TRANSLATION);
+                let goal = add(anim[u].1, sub(grip.1, shoulder));
+                let fwd = facing(e, &rig);
+                if let Some((r1, r2)) = reach_arm_ik(anim[u].1, anim[f].1, anim[h].1, goal, fwd, 0)
+                {
+                    overrides[u] = Some(r1);
+                    overrides[f] = Some(r2);
+                }
+            }
+        }
         if fall_frame(e, &mut rig, &mut overrides, dt) {
             continue; // in the ragdoll now: it owns the bones
         }
@@ -809,6 +846,7 @@ pub fn apply(e: &mut Engine) {
             .collect();
         let armed = rig.armed;
         let brace_now = rig.brace;
+        let mut phys_w = 0.0f32;
         if let Some(body) = rig.body.as_mut() {
             let mut targets = active::Targets {
                 rot: target.iter().map(active::qfrom_m).collect(),
@@ -865,6 +903,7 @@ pub fn apply(e: &mut Engine) {
                 failed = Some(format!("the body: {why}"));
             }
             let w = active::weight(since);
+            phys_w = w;
             let pose = body.pose();
             // The targets as the body tracks them (no elbow or knee past its human range) and the
             // body, blended (`Body::shown`: the elbows and knees against their parents).
@@ -878,25 +917,72 @@ pub fn apply(e: &mut Engine) {
                 rig.body = None;
             }
         }
-        // A brace hand on its path or plant: the shown arm put on it (`brace::plant_arm`), solved
-        // from the arm as it was shown a frame before (the bones' last write) on the shoulder where
-        // it is now, so it moves on from itself whatever the physical arm under it does, blended
-        // with the free arm by the plant's weight; the free arms' wrists kept (where a released
-        // hand goes back to).
-        if let Some(br) = rig.brace {
+        // A brace hand on its path, plant or way home: the shown arm put on it
+        // (`brace::plant_arm`), solved from the arm as it was shown a frame before (the bones' last
+        // write) on the shoulder where it is now, so it moves on from itself whatever the physical
+        // arm under it does, blended with the free arm by the plant's weight; the free arms' wrists
+        // kept (the hand-over waits for them). Then the grip hold.
+        if rig.brace.is_some() || rig.grip_hold {
             let shown_at = shown_positions(&rig, &anim, &shown, pi, pelvis_offset);
             for side in 0..2u8 {
                 rig.free_wrist[side as usize] =
                     bone_of(&rig, Role::Hand, side).map(|h| shown_at[h]);
             }
-            for hand in br.hands.iter().flatten() {
-                let (Some(goal), w) = (hand.goal(), hand.plant_weight()) else {
-                    continue;
-                };
+            // A bone as the shown pose has it so far (rotation and joint).
+            let now = |shown: &[M3], at: &[V3], i: usize| Some((shown[i], at[i]));
+            let mut put: Vec<PutArm> = Vec::new();
+            if let Some(br) = rig.brace {
+                for hand in br.hands.iter().flatten() {
+                    let (Some(goal), w) = (hand.goal(), hand.plant_weight()) else {
+                        continue;
+                    };
+                    let home = home_of(&rig, &anim, hand.side, |i| now(&shown, &shown_at, i));
+                    // Let go: on its way back home, the home as this frame has it (no lag behind
+                    // the weapon hand that carries a grip); the hand turned onto it as it comes.
+                    let (goal, turn) = match (hand.home_offset(), home) {
+                        (Some(off), Some(home)) => (
+                            add(home.1, off),
+                            Some((home.0, active::ease(hand.home_share()))),
+                        ),
+                        _ => (goal, None),
+                    };
+                    put.push(PutArm {
+                        side: hand.side,
+                        goal,
+                        w,
+                        turn,
+                        planted: hand.planted(),
+                    });
+                }
+            }
+            let support_bracing = rig
+                .brace
+                .and_then(|b| b.hands[0])
+                .is_some_and(|h| !h.released());
+            if rig.grip_hold && !support_bracing && grips(&rig, &anim) {
+                if let Some(grip) = home_of(&rig, &anim, 0, |i| now(&shown, &shown_at, i)) {
+                    put.retain(|p| p.side != 0);
+                    put.push(PutArm {
+                        side: 0,
+                        goal: grip.1,
+                        w: phys_w.clamp(0.0, 1.0),
+                        turn: Some((grip.0, 1.0)),
+                        planted: false,
+                    });
+                }
+            }
+            for PutArm {
+                side,
+                goal,
+                w,
+                turn,
+                planted,
+            } in put
+            {
                 let (Some(u), Some(f), Some(h)) = (
-                    bone_of(&rig, Role::UpperArm, hand.side),
-                    bone_of(&rig, Role::Forearm, hand.side),
-                    bone_of(&rig, Role::Hand, hand.side),
+                    bone_of(&rig, Role::UpperArm, side),
+                    bone_of(&rig, Role::Forearm, side),
+                    bone_of(&rig, Role::Hand, side),
                 ) else {
                     continue;
                 };
@@ -923,12 +1009,21 @@ pub fn apply(e: &mut Engine) {
                 };
                 let iu = mul(&r1, &pu.0);
                 let ifo = mul(&mul(&r1, &r2), &pf.0);
-                // The hand with the arm: carried by its forearm while it reaches, held as it
-                // touched once planted (the palm stays on the surface).
-                let ih = if hand.planted() {
-                    *rig.hand_lock[hand.side as usize].get_or_insert(ph.0)
+                // The hand with the arm: held as it touched once planted (the palm stays on the
+                // surface); on its way home turned onto it (from as it let go); else carried by
+                // its forearm.
+                let carried = mul(&ifo, &mul(&transpose(&pf.0), &ph.0));
+                let ih = if planted {
+                    *rig.hand_lock[side as usize].get_or_insert(ph.0)
+                } else if let Some((home, k)) = turn {
+                    let from = rig.hand_lock[side as usize].unwrap_or(carried);
+                    active::m_from_q(active::qslerp(
+                        active::qfrom_m(&from),
+                        active::qfrom_m(&home),
+                        k,
+                    ))
                 } else {
-                    mul(&ifo, &mul(&transpose(&pf.0), &ph.0))
+                    carried
                 };
                 let blend = |free: M3, ik: M3| {
                     active::m_from_q(active::qslerp(
@@ -1050,6 +1145,54 @@ fn shown_positions(
         at.push(p);
     }
     at
+}
+
+/// An arm put on a goal in the shown pose (a brace hand, the grip hold): its side, the wrist's
+/// goal, the weight, the hand's home rotation and how far it is turned onto it, and whether the
+/// hand is planted (its rotation held as it touched).
+struct PutArm {
+    side: u8,
+    goal: V3,
+    w: f32,
+    turn: Option<(M3, f32)>,
+    planted: bool,
+}
+
+/// Where a released brace hand of `side` goes back to (rotation and wrist, world): the support
+/// (left) hand of an actor holding its weapon two-handed (`ragdoll_core::brace::grips`: armed, its
+/// animation's hands close) to its grip, as the weapon (right) hand carries it; else the
+/// animation's hand as the bone its arm hangs from carries it. `now` gives a bone as it is now.
+fn home_of(
+    rig: &Rig,
+    anim: &[(M3, V3)],
+    side: u8,
+    now: impl Fn(usize) -> Option<(M3, V3)>,
+) -> Option<(M3, V3)> {
+    let h = bone_of(rig, Role::Hand, side)?;
+    if side == 0 && grips(rig, anim) {
+        let w = bone_of(rig, Role::Hand, 1)?;
+        return Some(hands::carried(anim[w], anim[h], now(w)?));
+    }
+    let u = bone_of(rig, Role::UpperArm, side)?;
+    let c = rig.bones[u].parent?;
+    Some(hands::carried(anim[c], anim[h], now(c)?))
+}
+
+/// Whether the actor holds its weapon two-handed now (`ragdoll_core::brace::grips`).
+fn grips(rig: &Rig, anim: &[(M3, V3)]) -> bool {
+    match (bone_of(rig, Role::Hand, 0), bone_of(rig, Role::Hand, 1)) {
+        (Some(l), Some(r)) => hands::grips(rig.armed, anim[l].1, anim[r].1),
+        _ => false,
+    }
+}
+
+/// A rig bone as it was last written (world rotation and position).
+fn world_of(e: &Engine, rig: &Rig, i: usize) -> Option<(M3, V3)> {
+    let node = rig.bones.get(i)?.node;
+    Some((
+        read9(e, node + WORLD_ROTATION),
+        read3(e, node + WORLD_TRANSLATION),
+    ))
 }
 
 /// An armed actor's weapon arm held on its aim while its free arm braces: its motors this many
@@ -1967,10 +2110,12 @@ fn brace_frame(e: &mut Engine, rig: &mut Rig, anim: &[(M3, V3)], out: &mut [Opti
         let reach = length(sub(elbow, shoulder)) + length(sub(wrist, elbow));
         let target = brace_target(anim[u].1, b.dir, b.wall, b.top);
         let free = rig.free_wrist[side as usize].unwrap_or(wrist);
+        let home = home_of(rig, anim, side, |i| world_of(e, rig, i)).map_or(free, |x| x.1);
         let name = if side == 0 { "left" } else { "right" };
         match hand.update(
             b.surface.as_ref(),
             wrist,
+            home,
             free,
             shoulder,
             reach,
@@ -2001,14 +2146,7 @@ fn brace_frame(e: &mut Engine, rig: &mut Rig, anim: &[(M3, V3)], out: &mut [Opti
             None => {}
         }
         let (goal, w) = match hand.motor_goal() {
-            Some(g) => (
-                add(anim[u].1, sub(g, shoulder)),
-                if hand.released() {
-                    hand.reach_weight(b.t)
-                } else {
-                    hand.plant_weight()
-                },
-            ),
+            Some(g) => (add(anim[u].1, sub(g, shoulder)), hand.plant_weight()),
             None => (target, hand.reach_weight(b.t)),
         };
         let hand0 = anim[h].1;

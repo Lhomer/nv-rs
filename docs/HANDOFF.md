@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (the support hand regrips smoothly)
+
+- **Now (`ragdoll_core::brace`: `Phase::Released` an offset from the hand's home (`step_home`, critically damped, no overshoot, `RETURN_SWEEP`), `home_offset`, `home_share`, `on_home`, `grips`, `carried`, `GRIP_NEAR`, `REGRIP_LOCK`, `HANDOVER_NEAR`; the motors follow the way home (`motor_goal`); host `home_of`, `grips`, `world_of`, `PutArm`, `Rig::grip_hold`; lab `Sim::home`, `grip`, `grip_hold_weight`, `watch_regrip` and its stats, scenes `rifle-wall-regrip`, `rifle-railing-regrip`, the regrip check in every scene and the sweep):** no regrip overshoot, wobble or drift in the lab (35 regrips in the sweep). Merged slaterain main up to 4c812f7 just before (79963aac). Not run in game.
+- **Patrick (e2e5531 reel):** on two-handed weapons the support hand wobbled when it regripped after a brace; ease it back along a critically damped path, blend the IK onto the grip, lock only when close; a lab regrip-wobble metric that fails, rifle wall and railing regrip scenes.
+
 ### Claude, 2026-11-15 (brace hands plant; armed actors brace one-handed)
 
 - **Now (`ragdoll_core::brace`: `Surface`, `Hand` (reach path, plant, release), `plant_arm`, `bracing_arms`, `recovered`; `active::Targets::hand_share`/`hand_normal` (one-sided contact pins, `CONTACT_NEAR`), hand pins within the arm's reach; `BRACE_FIRM` 0; host `brace_frame(.., anim, ..)`, `shown_positions`, the shown arm on the hand's path, `Rig::free_wrist`/`hand_lock`, `AIM_FIRM`, `brace_hand` room events; lab `watch_hands` metrics, `armed=pistol|rifle`, four armed brace scenes, `braces_hold_across_pushes_and_weapons`, reset clears the condition):** every lab scene and the 108-brace sweep pass with no hand bounce, jitter or slide, no backward bends, the arm cap held. Not run in game. The table (74 cm) is out of the standing reach: its hands come close and go back.
