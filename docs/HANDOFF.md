@@ -7,6 +7,10 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (merge #567, #568, #569)
+
+- **Merged** slaterain/main's 4a5c2d2 (#567), 7aa0b77 (#568), b94c269 (#569) (JIP LN commands, batches 11 and 12, CCCSetEquipped); not bea99758 (#570, not approved). No conflicts; Cargo.lock unchanged. Fork-only jip changes kept (`push_living_actor`, `high_actors` public). Tests: host (3 known `cell_offsets`), jip 635 of 637: upstream's new `jip_fn_ccc` `location_names` and `location_two_markers_in_one_ring` fail ("SE of" where "East of" is expected: `dx` just over 1.0) on b94c269 alone too, not from the merge; engine-core all; repo_hygiene. It lands after dcff4209 (per-gun velocity), which was pushed before the merge was asked for.
+
 ### Claude, 2026-11-14 (per-gun velocity, detailed stats)
 
 - **Patrick:** a muzzle velocity multiplier per gun (table by editor ID, every vanilla/DLC/GRA gun, fallback from damage vs the calibre's average), momentum/drop/penetration following; a detailed stats panel on a key (rebindable on Settings > Controls) for guns and ammo in the Pip-Boy, looting and barter, with the hint on the item card.

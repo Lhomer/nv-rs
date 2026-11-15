@@ -48,6 +48,7 @@ pub mod commands;
 pub mod console;
 pub mod containers;
 pub mod cosave;
+pub mod equip_hooks;
 pub mod game;
 pub mod identity;
 pub mod input;
@@ -115,6 +116,10 @@ pub struct Jip {
     pub ai_hooks: ai_hooks::State,
     /// JIP's world hooks' maps and values.
     pub world_hooks: world_hooks::State,
+    /// What JIP's script commands keep: the script blocks a script disabled.
+    pub script: commands::jip_fn_script::State,
+    /// What JIP's CC&C commands keep: the actor bases set to NCCS, the location grids.
+    pub ccc: commands::jip_fn_ccc::State,
 }
 
 /// JIP as xNVSE knows it once loaded (`NVSEPlugin_Query`, `NVSEPlugin_Load`): its DLL, name,
@@ -165,6 +170,7 @@ pub fn install_as(e: &mut Engine, answers_installed: bool) {
     ui_hooks::install(e, answers_installed);
     actor_hooks::install(e, answers_installed);
     ai_hooks::install(e, answers_installed);
+    equip_hooks::install(e, answers_installed);
     world_hooks::install(e, answers_installed);
     nvse::plugins::register(e, plugin(answers_installed));
     // `MainGameLoop` only once JIP answers "installed": until then a frame does no JIP work.

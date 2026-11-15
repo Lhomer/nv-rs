@@ -13,9 +13,7 @@
 //! Not here: `ToggleImmortalMode`, the only user of the PlayerMinHealth hook (its handler is
 //! here): its mode 2 also needs JIP's always-on `PlayerCannotBeHit` and hit-effect patches
 //! (`internal/patches_game.h`), JIP's fixes of step 3.9. `CCCSetEquipped` and JIP's always-on
-//! `GetCannotWear` patch (`0x418B10`, which differs from the exe only while that command equips):
-//! a later batch with the CCC commands (the container menu's item lists and active tile, the actor
-//! base's combat style and JIP's inventory map). The getters that only read what these
+//! `GetCannotWear` patch (`0x418B10`) are in `equip_hooks` (step 3.5d). The getters that only read what these
 //! commands set (`GetInteractionDisabled`, `GetInteractionDisabledType`,
 //! `GetScriptEventDisabled`, `IsScriptWaiting`) are the commands track's (step 3.6), over
 //! [`State`].
@@ -1339,7 +1337,13 @@ fn has_script(e: &Engine, form: u32) -> bool {
 /// MarkScriptEvent and sets its flag), enabling clears it (all cleared: the entry, the flag and
 /// the user go); "OnActivate" sets or clears the activation flag, one DoActivate user more or
 /// less, when it changes.
-fn set_events_disabled(e: &mut Engine, form: u32, mask: u32, on_activate: bool, disable: bool) {
+pub(crate) fn set_events_disabled(
+    e: &mut Engine,
+    form: u32,
+    mask: u32,
+    on_activate: bool,
+    disable: bool,
+) {
     if mask != 0 {
         if disable {
             if let std::collections::btree_map::Entry::Vacant(v) =
@@ -1429,7 +1433,7 @@ fn set_script_event_disabled(e: &mut Engine, w: &[u32]) -> Ret {
 }
 
 /// `s_eventMasks->GetPtr(name)`: the mask of the first name with the same `StrHashCI`.
-fn event_mask(name: &[u8]) -> Option<u32> {
+pub(crate) fn event_mask(name: &[u8]) -> Option<u32> {
     let hash = crate::containers::str_hash_ci(name);
     EVENT_MASKS
         .iter()
