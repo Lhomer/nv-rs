@@ -22,6 +22,10 @@ use crate::tuning;
 
 /// Small steps a frame.
 pub const SUBSTEPS: usize = 8;
+/// A brace hand's contact acts on the physical wrist only within this of its rest (m).
+pub const CONTACT_NEAR: f32 = 0.1;
+/// An arm's share of the body's mass (a brace hand's pin moves it).
+pub const ARM_SHARE: f32 = 0.05;
 /// Gravity (m/s2, down the z axis).
 pub const GRAVITY: f32 = 9.81;
 /// How long the body stays physical after its last hit (s), how long it then blends back to the
@@ -274,6 +278,12 @@ pub struct Targets {
     pub pelvis: V3,
     pub feet: Vec<(usize, V3)>,
     pub hands: Vec<(usize, V3)>,
+    /// Per hand pin (empty: all 1): its share of the pin's stiffness (`crate::brace::Hand::pin`).
+    pub hand_share: Vec<f32>,
+    /// Per hand pin (empty or zero: a plain pin): a contact's way out of its surface (unit): the
+    /// pin then only pushes (the wrist pressed into the surface is pushed out and held from
+    /// sliding; one off it is left free).
+    pub hand_normal: Vec<V3>,
     /// The support's share (1 standing; less as it goes over).
     pub support: f32,
     /// Per bone (empty: none): how much its motor tracks its target's world rotation instead of
@@ -968,7 +978,8 @@ impl Body {
                 2.0 * 30.0 * ws * support.max(0.2).sqrt(),
             ),
             foot: (foot_mass * wf * wf, 2.0 * t.foot_zeta * foot_mass * wf),
-            hand: (3.0 * wf * wf * 0.25, 2.0 * 3.0 * wf * 0.5),
+            // A planted brace hand (`crate::brace`): stiff and critically damped on the arm.
+            hand: crate::brace::pin_gains(self.mass * ARM_SHARE),
         }
     }
 
@@ -1038,8 +1049,9 @@ impl Body {
 
     /// The pelvis's support and the feet's and hands' pins as soft positional constraints toward
     /// their targets (the world).
-    /// `at` (a foot's pin target, m) brought within its leg's straight reach from its hip (the
-    /// foot's grandparent's joint: hip, knee, ankle), a hair short of straight.
+    /// `at` (a foot's or a hand's pin target, m) brought within its limb's straight reach from its
+    /// root (the bone's grandparent's joint: hip, knee, ankle; shoulder, elbow, wrist), a hair
+    /// short of straight.
     fn within_reach(&self, foot: usize, at: V3) -> V3 {
         let Some(calf) = self.segments.get(foot).and_then(|s| s.parent) else {
             return at;
@@ -1059,6 +1071,21 @@ impl Body {
         }
     }
 
+    /// Whether hand pin `n` acts: a plain pin always; a contact while its wrist is at or inside
+    /// its rest on the surface (the pin would push it out, not pull it in) and near it (within
+    /// [`CONTACT_NEAR`]: a hand that has not got there yet is not dragged to it).
+    fn hand_presses(&self, targets: &Targets, n: usize) -> bool {
+        let Some(&(i, at)) = targets.hands.get(n) else {
+            return false;
+        };
+        let normal = targets.hand_normal.get(n).copied().unwrap_or([0.0; 3]);
+        if length(normal) < 0.5 || i >= self.state.len() {
+            return true;
+        }
+        let d = sub(at, self.joint(i));
+        dot(d, normal) >= 0.0 && length(d) <= CONTACT_NEAR
+    }
+
     fn pins(&mut self, targets: &Targets, gains: &Gains, h: f32) {
         let mut list: Vec<(usize, V3, f32)> = Vec::new();
         if gains.support.0 > 0.0 {
@@ -1072,7 +1099,24 @@ impl Body {
                 .iter()
                 .map(|&(i, at)| (i, self.within_reach(i, at), gains.foot.0)),
         );
-        list.extend(targets.hands.iter().map(|&(i, at)| (i, at, gains.hand.0)));
+        // A hand's pin likewise no further than the arm reaches straight from its shoulder; a
+        // contact's only while it presses.
+        list.extend(
+            targets
+                .hands
+                .iter()
+                .enumerate()
+                .filter_map(|(n, &(i, at))| {
+                    let share = targets
+                        .hand_share
+                        .get(n)
+                        .copied()
+                        .unwrap_or(1.0)
+                        .clamp(0.0, 1.0);
+                    self.hand_presses(targets, n)
+                        .then(|| (i, self.within_reach(i, at), gains.hand.0 * share))
+                }),
+        );
         for (i, at, k) in list {
             if i >= self.state.len() || k <= 0.0 {
                 continue;
@@ -1137,7 +1181,16 @@ impl Body {
             list.push((self.pelvis, gains.support.1));
         }
         list.extend(targets.feet.iter().map(|&(i, _)| (i, gains.foot.1)));
-        list.extend(targets.hands.iter().map(|&(i, _)| (i, gains.hand.1)));
+        list.extend(targets.hands.iter().enumerate().filter_map(|(n, &(i, _))| {
+            let share = targets
+                .hand_share
+                .get(n)
+                .copied()
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            self.hand_presses(targets, n)
+                .then(|| (i, gains.hand.1 * share.sqrt()))
+        }));
         for (i, c) in list {
             if i >= self.state.len() {
                 continue;
@@ -1435,6 +1488,8 @@ mod tests {
             pelvis: [0.0, 0.0, 0.95],
             feet: vec![(7, [0.1, 0.0, 0.08])],
             hands: vec![],
+            hand_share: vec![],
+            hand_normal: vec![],
             support: 1.0,
             world: vec![],
             anim: vec![],

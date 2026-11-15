@@ -82,10 +82,12 @@ weapon (`fists`, `knife`, `bat`, `sledge`, ...) or an explosive (`frag`, `dynami
 `%2B` for `+` in a URL); `/from` the attacker's direction in degrees (0 the body's front, which
 pushes toward the wall, the ledge and the stairs; 90 its right). Other keys: `ground`, `body`
 (`human`, `mutant`), `scale`, `armour`, `range` (m), `limbs` (four digits: left leg, right leg,
-left arm, right arm; `0111` has lost the left leg), `armed=1` (holding a weapon, aiming),
+left arm, right arm; `0111` has lost the left leg), `armed=1` or `armed=rifle` (holding a
+two-handed weapon, aiming), `armed=pistol` (a one-handed one, the left arm hanging),
 `attacking=1` (attacking; armed too), `expect` (`upright`, `fell`, `braced`, `steps>=1`,
 `steps=0`, `fall:<kind>`, `flinched`, `aim<=D` degrees, `armspin<=W` and `ragdollarmspin<=W`
-rad/s, `interrupted`, `attacking`, `vjump<=V` m/s, `jerk<=J` m/s3).
+rad/s, `interrupted`, `attacking`, `vjump<=V` m/s, `jerk<=J` m/s3, `onehand` / `bothhands`
+(which hands braced), `handbounce<=N`, `handjitter<=V` m/s, `handslip<=C` cm, `elbowosc<=N`).
 
 Each run goes until the body has recovered (or 12 s after the last hit). The report (JSON in
 `<pre id="results">`, in `window.ragdollLab.results`, and on the console;
@@ -96,8 +98,13 @@ stood), `recovery_s` (from the first hit until it stood at rest again), `peak_sp
 `topple_mps`, the decisions (`None`, `Stagger`, `Knockdown`), `arm_spin` and `ragdoll_arm_spin`
 (the fastest an arm bone turned standing, and in the ragdoll, rad/s), `flinch_deg`,
 `aim_drift_deg` (an armed body's weapon hand off its aim), `interrupted`, `velocity_jump_mps`
-(the biggest change of a bone's velocity in one frame while it stands) and `jerk` (m/s3), whether the
-expectations held, and the log's last lines.
+(the biggest change of a bone's velocity in one frame while it stands) and `jerk` (m/s3),
+`brace_hands` (which arms braced), `hand_losses` (a bracing hand coming off the surface while it
+holds), `hand_jitter_mps` and `hand_slip_cm` (a settled hand's speed and slide),
+`elbow_reversals` (a planted elbow swinging back more than 3 degrees), whether the expectations
+held, and the log's last lines. Every built-in scene is held to no hand bounce, and
+`braces_hold_across_pushes_and_weapons` runs 108 braces across grounds, weapons and sides
+(`ragdoll_core::brace`, docs/GUNPLAY.md).
 
 ## Building
 

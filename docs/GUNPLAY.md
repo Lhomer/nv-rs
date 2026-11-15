@@ -471,6 +471,60 @@ stretched and grew, and the game froze. Two causes, both fixed:
   poses (the pass writing back three times a frame, a hair off, the animation skipping frames)
   makes exactly the shown pose and never adds up.
 
+### Active ragdoll: hands plant on what they brace against; armed actors brace one-handed (Patrick, 2026-11-15, b7aaa5a reel)
+
+Patrick saw the arms bounce around when bracing instead of meeting the wall, railing or table and
+stopping. The cause was that the brace only gave the arm motors a reach target: the shown arm was
+whatever the physical arm did, nothing held a hand at the surface, and the motors (made firmer
+for the brace) fought the body, so the hand flailed (the lab measured up to 5.6 m/s, changing
+direction every frame). Now (`ragdoll_core::brace`, the same code in the game and the lab):
+
+- **The reach is a path.** Each bracing hand follows its own critically damped path from where
+  it set off to the brace's target (3 Hz, at most 1.5 m/s, at most 4.5 rad/s around the
+  shoulder, never further than the arm reaches, never past the surface). The path swings around
+  the shoulder, so a reach behind goes down past the hip, not through the chest.
+- **It plants on contact.** Where the path meets the surface (a wall's face, a waist-high
+  obstacle's top or edge), it decelerates onto its rest (a hand's thickness off it) and stays
+  there: no slide, no rebound. It plants only where the arm can hold it.
+- **The shown arm is put on the hand.** The upper arm and forearm are solved onto the path or
+  plant from the arm as it was shown the frame before (the elbow stays in its bending plane and
+  flexes about its own hinge; the upper arm twists at most 2 rad/s), so the arm moves on from
+  itself whatever the physical arm does. The hand bone moves with the forearm while reaching
+  and keeps its rotation once planted.
+- **The body takes the load through a contact.** The physical body's wrist is held at the plant
+  as a one-sided contact (it pushes the wrist out of the surface and holds it from sliding while
+  it presses, never pulls it in; only once the physical hand is within 10 cm of it). The arm's
+  motors reach for the same point. As the body leans in, the elbow and shoulder bend: about
+  8 degrees in the lab's wall brace, settling within about 1.5 degrees.
+- **It lets go once.** A hand lets go when the body has recovered (its steps done, the brace
+  held, the centre of mass slower than 0.25 m/s), pushes off (the shoulder further from the
+  plant than the arm reaches), or after 3 s. It then goes back along a path to where the free
+  arm's hand is, and the arm is handed back over 0.5 s. It never reaches again in the same
+  brace.
+- **The bracing arms' motors are no longer firmer** (`BRACE_FIRM` 0): firmer motors fought the
+  path and the contact, and shook an armed body in the lab.
+- **Armed actors brace one-handed** (`brace::bracing_arms`). Every Fallout weapon is held in the
+  right hand. The left (free) hand braces: a pistol's off hand, a rifle's support hand letting
+  go of the foregrip. The weapon arm keeps its aim (its motors track the aim's world rotation,
+  firm). It joins only on a push past what one arm holds (60% of the brace's limit), when the
+  body has no free arm, or when the free hand cannot reach the surface and the weapon hand can.
+  It keeps the weapon in hand and is never tucked. Unarmed actors brace with both hands.
+- **Measured in the lab** (`watch_hands`, on the shown pose): contact losses while a hand holds,
+  a settled hand's speed and slide, and a planted elbow's swings back of more than 3 degrees.
+  `the_built_in_scenarios_hold` fails any scene with a loss, jitter over 0.02 m/s, a slide over
+  0.3 cm or more than two swings. `braces_hold_across_pushes_and_weapons` runs 108 braces (wall,
+  railing, table, gapped railing; unarmed, pistol, rifle; .45-70, .44 and .308; from the front
+  and 15 degrees either side). It also holds them to no backward bend, the 6.5 rad/s arm cap and
+  30 degrees of aim drift. Worst there: 0.012 m/s, 0.02 cm, two swings, 6.49 rad/s, 18.8
+  degrees. New scenes: `armed-pistol-wall-brace`, `armed-rifle-wall-brace`,
+  `armed-pistol-railing-brace` and `armed-rifle-railing-brace` (`armed=pistol|rifle`,
+  expectation `onehand`). The lab's reset now also clears the body's condition: earlier runs'
+  hurt limbs had carried into later scenes.
+- **Not yet:** the lab's table (74 cm) is below the standing body's reach, so its hands come
+  within about 3 cm and go back without touching (a waist bend is not modelled). None of it has
+  been run in game: the plant uses the game's own ray casts and bones, but its feel there is
+  unchecked.
+
 ### Active ragdoll: the world around it, and what hits leave (Patrick, 2026-11-15)
 
 All in `ragdoll_core`, so the lab and the game decide alike. The host answers through the game's

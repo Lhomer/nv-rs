@@ -54,6 +54,8 @@ pub struct Spec {
     pub range: f32,
     pub limbs: Limbs,
     pub armed: bool,
+    /// The weapon is two-handed (`armed=rifle`, or `armed=1`) or one-handed (`armed=pistol`).
+    pub two_handed: bool,
     pub attacking: bool,
     pub tune: Vec<(String, f32)>,
     pub hits: Vec<Hit>,
@@ -71,6 +73,7 @@ impl Default for Spec {
             range: 10.0,
             limbs: Limbs::WHOLE,
             armed: false,
+            two_handed: true,
             attacking: false,
             tune: Vec::new(),
             hits: Vec::new(),
@@ -85,8 +88,13 @@ impl Default for Spec {
 /// turned faster than W rad/s while it stood), `ragdollarmspin<=W` (nor in its ragdoll),
 /// `interrupted` (its attack), `attacking` (it was not), `backbend<=D`, `tripped` (a swinging
 /// foot caught on a low obstacle), `braced:waist` / `braced:wall` (what the hands went on),
-/// `escalated` (the hits' reactions went from a flinch through a stagger to a knockdown)).
-pub const BUILT_IN: [(&str, &str, &str); 26] = [
+/// `escalated` (the hits' reactions went from a flinch through a stagger to a knockdown),
+/// `onehand` (only the free, left, hand braced) / `bothhands`, `handbounce<=N` (a hand came off
+/// the surface N times while it held), `handjitter<=V` (a settled hand moved at most V m/s),
+/// `handslip<=C` (nor slid more than C cm), `elbowosc<=N` (a planted elbow turned back on itself
+/// at most N times)). Every scenario is held to no bounce, jitter, slide or oscillation as well
+/// (`the_built_in_scenarios_hold`).
+pub const BUILT_IN: [(&str, &str, &str); 30] = [
     (
         "pistol-chest",
         "ground=flat&hits=9mm@chest",
@@ -219,6 +227,28 @@ pub const BUILT_IN: [(&str, &str, &str); 26] = [
         "ground=flat&hits=9mm@chest*14~0.1",
         "fell,escalated,armspin<=6.5",
     ),
+    // Armed bodies brace one-handed (Patrick, 2026-11-15): the free hand braces, the weapon arm
+    // keeps its aim (a rifle's support hand lets go of it).
+    (
+        "armed-pistol-wall-brace",
+        "ground=wall&armed=pistol&hits=4570@chest",
+        "upright,braced,onehand,armspin<=6.5",
+    ),
+    (
+        "armed-rifle-wall-brace",
+        "ground=wall&armed=rifle&hits=4570@chest",
+        "upright,braced,onehand,armspin<=6.5",
+    ),
+    (
+        "armed-pistol-railing-brace",
+        "ground=railing&armed=pistol&hits=4570@chest",
+        "upright,braced:waist,onehand,armspin<=6.5",
+    ),
+    (
+        "armed-rifle-railing-brace",
+        "ground=railing&armed=rifle&hits=4570@chest",
+        "upright,braced:waist,onehand,armspin<=6.5",
+    ),
 ];
 
 fn weapon_of(name: &str, opt: Option<&str>) -> Result<Weapon, String> {
@@ -329,7 +359,10 @@ impl Spec {
                     spec.armour = value.parse().map_err(|_| "armour".to_string())?
                 }
                 "range" => spec.range = value.parse().map_err(|_| "range".to_string())?,
-                "armed" => spec.armed = value != "0",
+                "armed" => {
+                    spec.armed = value != "0";
+                    spec.two_handed = value != "pistol";
+                }
                 "attacking" => {
                     spec.attacking = value != "0";
                     spec.armed |= spec.attacking;
@@ -408,6 +441,11 @@ pub struct Report {
     pub back_bend: f32,
     pub tripped: bool,
     pub brace_kind: Option<String>,
+    pub brace_hands: [bool; 2],
+    pub hand_losses: u32,
+    pub hand_jitter: f32,
+    pub hand_slip: f32,
+    pub elbow_reversals: u32,
     pub expect: Vec<(String, bool)>,
     pub log: Vec<String>,
 }
@@ -432,6 +470,8 @@ impl Report {
              \"arm_spin\":{:.2},\"ragdoll_arm_spin\":{:.2},\"flinch_deg\":{:.2},\"armed\":{},\
              \"aim_drift_deg\":{:.2},\"interrupted\":{},\"velocity_jump_mps\":{:.3},\"jerk\":{:.1},\
              \"back_bend_deg\":{:.2},\"tripped\":{},\"brace_kind\":{},\
+             \"brace_hands\":[{},{}],\"hand_losses\":{},\"hand_jitter_mps\":{:.3},\
+             \"hand_slip_cm\":{:.2},\"elbow_reversals\":{},\
              \"expectations\":[{}],\"passed\":{},\"log\":[{}]}}",
             s(&self.name),
             s(self.ground),
@@ -459,6 +499,12 @@ impl Report {
             self.back_bend,
             self.tripped,
             self.brace_kind.as_deref().map_or("null".into(), s),
+            self.brace_hands[0],
+            self.brace_hands[1],
+            self.hand_losses,
+            self.hand_jitter,
+            self.hand_slip,
+            self.elbow_reversals,
             expect.join(","),
             self.passed(),
             list(&self.log)
@@ -481,6 +527,7 @@ pub fn prepare(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<(), String> {
     sim.range = spec.range.clamp(0.5, 200.0);
     sim.set_limbs(spec.limbs);
     sim.armed = spec.armed;
+    sim.two_handed = spec.two_handed;
     sim.attacking = spec.attacking;
     if sim.ground.kind != spec.ground {
         sim.set_ground(spec.ground);
@@ -595,6 +642,11 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
         back_bend: st.back_bend,
         tripped: st.tripped,
         brace_kind: st.brace_kind.clone(),
+        brace_hands: st.brace_hands,
+        hand_losses: st.hand_losses,
+        hand_jitter: st.hand_jitter,
+        hand_slip: st.hand_slip,
+        elbow_reversals: st.elbow_reversals,
         expect: Vec::new(),
         log: sim.log.iter().rev().take(60).rev().cloned().collect(),
     };
@@ -613,6 +665,20 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
                 "attacking" => !report.interrupted,
                 "tripped" => report.tripped,
                 "escalated" => escalated(&report.decisions),
+                "onehand" => report.brace_hands == [true, false],
+                "bothhands" => report.brace_hands == [true, true],
+                e if e.starts_with("handbounce<=") => e[12..]
+                    .parse::<u32>()
+                    .is_ok_and(|n| report.hand_losses <= n),
+                e if e.starts_with("handjitter<=") => e[12..]
+                    .parse::<f32>()
+                    .is_ok_and(|v| report.hand_jitter <= v),
+                e if e.starts_with("handslip<=") => {
+                    e[10..].parse::<f32>().is_ok_and(|c| report.hand_slip <= c)
+                }
+                e if e.starts_with("elbowosc<=") => e[10..]
+                    .parse::<u32>()
+                    .is_ok_and(|n| report.elbow_reversals <= n),
                 e if e.starts_with("braced:") => report.brace_kind.as_deref() == Some(&e[7..]),
                 e if e.starts_with("vjump<=") => e[7..]
                     .parse::<f32>()
@@ -725,9 +791,118 @@ mod tests {
                     r.back_bend
                 ));
             }
+            // A bracing hand meets the surface and stays (Patrick, 2026-11-15: the arms bounced
+            // in the b7aaa5a reel): no loss of contact while it holds, no jitter or slide once
+            // settled, no oscillating elbow.
+            if r.hand_losses > 0
+                || r.hand_jitter > MOST_HAND_JITTER
+                || r.hand_slip > MOST_HAND_SLIP
+                || r.elbow_reversals > MOST_ELBOW_REVERSALS
+            {
+                failed.push(format!(
+                    "{name}: the brace's hands bounced: {} losses of contact, {:.3} m/s, {:.2} cm \
+                     slide, {} elbow reversals",
+                    r.hand_losses, r.hand_jitter, r.hand_slip, r.elbow_reversals
+                ));
+            }
         }
         assert!(failed.is_empty(), "{failed:#?}");
     }
+
+    /// The braces hold up beyond the built-in scenes (Patrick, 2026-11-15: the arms bounced): at
+    /// a wall, a railing, a table and a gapped railing, unarmed and armed (a pistol, a rifle),
+    /// pushed by three guns from three sides, no hand bounces, jitters, slides or oscillates, no
+    /// elbow or knee bends backwards, no arm turns faster than the cap while it stands, and an
+    /// armed body keeps its weapon arm near its aim.
+    #[test]
+    fn braces_hold_across_pushes_and_weapons() {
+        let mut sim = Sim::new(GroundKind::Flat);
+        let mut failed = Vec::new();
+        let mut planted = 0;
+        let mut runs = 0;
+        let mut worst = [0.0f32; 6];
+        let mut spin_run = String::new();
+        for ground in ["wall", "railing", "table", "gaprailing"] {
+            for armed in ["0", "pistol", "rifle"] {
+                for gun in ["4570", "44", "308"] {
+                    for from in ["0", "15", "-15"] {
+                        let text = format!(
+                            "name={ground}-{armed}-{gun}-{from}&ground={ground}&armed={armed}&hits={gun}@chest/{from}"
+                        );
+                        let spec = Spec::parse(&text).unwrap();
+                        let r = run(&mut sim, &spec, Tuning::GAME).unwrap();
+                        runs += 1;
+                        worst[0] = worst[0].max(r.hand_jitter);
+                        worst[1] = worst[1].max(r.hand_slip);
+                        worst[2] = worst[2].max(r.elbow_reversals as f32);
+                        worst[3] = worst[3].max(r.back_bend);
+                        if r.upright && r.arm_spin > worst[4] {
+                            worst[4] = r.arm_spin;
+                            spin_run = spec.name.clone();
+                        }
+                        if armed != "0" && !r.brace_hands[1] && r.upright {
+                            worst[5] = worst[5].max(r.aim_drift);
+                        }
+                        if r.log.iter().any(|l| l.contains("hand plants")) {
+                            planted += 1;
+                        }
+                        let mut why = Vec::new();
+                        if r.hand_losses > 0 {
+                            why.push(format!("{} losses", r.hand_losses));
+                        }
+                        if r.hand_jitter > MOST_HAND_JITTER {
+                            why.push(format!("jitter {:.3} m/s", r.hand_jitter));
+                        }
+                        if r.hand_slip > MOST_HAND_SLIP {
+                            why.push(format!("slide {:.2} cm", r.hand_slip));
+                        }
+                        if r.elbow_reversals > MOST_ELBOW_REVERSALS {
+                            why.push(format!("{} elbow reversals", r.elbow_reversals));
+                        }
+                        if r.back_bend > MOST_BACK_BEND {
+                            why.push(format!("back bend {:.1} deg", r.back_bend));
+                        }
+                        if r.upright && r.arm_spin > MOST_ARM_SPIN {
+                            why.push(format!("arm spin {:.2} rad/s", r.arm_spin));
+                        }
+                        if armed != "0"
+                            && !r.brace_hands[1]
+                            && r.upright
+                            && r.aim_drift > MOST_BRACE_AIM
+                        {
+                            why.push(format!("aim drift {:.1} deg", r.aim_drift));
+                        }
+                        if !why.is_empty() {
+                            failed.push(format!("{}: {}", spec.name, why.join(", ")));
+                        }
+                    }
+                }
+            }
+        }
+        println!(
+            "{planted} of {runs} runs planted a hand; worst: jitter {:.3} m/s, slide {:.2} cm, \
+             {} elbow reversals, back bend {:.1} deg, arm spin {:.2} rad/s ({spin_run}), aim drift \
+             {:.1} deg",
+            worst[0], worst[1], worst[2], worst[3], worst[4], worst[5]
+        );
+        assert!(
+            planted >= runs / 3,
+            "few braces touched: {planted} of {runs}"
+        );
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    /// The arm speed cap while standing (the scenes' `armspin<=6.5`), and how far an armed body's
+    /// weapon arm may turn off its aim while its free hand braces (degrees).
+    const MOST_ARM_SPIN: f32 = 6.5;
+    const MOST_BRACE_AIM: f32 = 30.0;
+
+    /// The most a settled brace hand may move (m/s) and slide (cm), and how often a planted
+    /// elbow may turn back on itself by more than `sim::ELBOW_SWING` (twice: it takes the load,
+    /// gives it back as the body recovers, and settles).
+    const MOST_HAND_JITTER: f32 = 0.02;
+    const MOST_HAND_SLIP: f32 = 0.3;
+    const MOST_ELBOW_REVERSALS: u32 = 2;
 
     /// The most an elbow or a knee may show bent backwards past the hinges' allowance
     /// (`active::HYPEREXTEND`, 1.7 degrees past straight) in degrees: a soft stop's give.

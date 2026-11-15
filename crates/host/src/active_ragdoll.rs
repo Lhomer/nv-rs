@@ -85,6 +85,7 @@ use engine::prelude::*;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use ragdoll_core::brace::{self as hands, Hand, Surface};
 use ragdoll_core::condition::{self, Condition};
 /// The pure parts (the roles, the springs, the spread, the vector helpers, stage 3's timings) live
 /// in `crates/ragdoll-core`, shared with `tools/ragdoll-lab`.
@@ -126,6 +127,10 @@ pub struct Rig {
     pub before: Option<Vec<(M3, V3)>>,
     pub planted: Option<([V3; 2], Instant)>,
     pub held: Vec<Option<M3>>,
+    /// The brace's hands: each free arm's wrist this frame (before the brace's IK: where a
+    /// released hand goes back to), and a planted hand's shown rotation, held as it touched.
+    pub free_wrist: [Option<V3>; 2],
+    pub hand_lock: [Option<M3>; 2],
 }
 
 /// A hit waiting for the physical body (`ragdoll_core::active::Body::hit`'s words; game units).
@@ -148,6 +153,22 @@ pub struct Brace {
     pub wall: Option<f32>,
     /// A waist-high obstacle's top (world z, game units): the hands go on it.
     pub top: Option<f32>,
+    /// What the hands meet, and each bracing hand (`ragdoll_core::brace`; none: that arm does not
+    /// brace: missing, or an armed actor's weapon arm keeping its aim).
+    pub surface: Option<Surface>,
+    pub hands: [Option<Hand>; 2],
+}
+
+impl Brace {
+    /// The brace's weight on an arm's motor targets (how far its reach is in, 0 to 1).
+    pub fn weight(&self, side: usize) -> f32 {
+        self.hands[side].map_or(0.0, |h| h.reach_weight(self.t))
+    }
+
+    /// Whether an armed actor's weapon arm stays on its aim (it does not brace).
+    pub fn aims(&self, side: usize, armed: bool) -> bool {
+        armed && side == hands::WEAPON_SIDE as usize && self.hands[side].is_none()
+    }
 }
 
 /// The fall into the ragdoll under way (stage 3): along `dir` at `speed` (m/s), for the attacker,
@@ -433,6 +454,8 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         before: None,
         planted: None,
         held: Vec::new(),
+        free_wrist: [None; 2],
+        hand_lock: [None; 2],
     });
     true
 }
@@ -681,7 +704,7 @@ pub fn apply(e: &mut Engine) {
                 }
             }
         }
-        brace_frame(e, &mut rig, &mut overrides, dt);
+        brace_frame(e, &mut rig, &anim, &mut overrides, dt);
         if fall_frame(e, &mut rig, &mut overrides, dt) {
             continue; // in the ragdoll now: it owns the bones
         }
@@ -740,13 +763,21 @@ pub fn apply(e: &mut Engine) {
             .bones
             .iter()
             .map(|b| {
-                if b.role.is_arm() {
+                if b.role.is_arm() && b.side < 2 {
                     // The aim kept, or the brace's reach to the wall point (not riding up with a
-                    // torso pitched toward the wall).
-                    let brace = rig.brace.and_then(|br| brace_weight(br.t)).unwrap_or(0.0);
-                    (rig.aim_hold * 1.25)
-                        .max(brace * ragdoll_core::tuning::get().brace_world)
-                        .min(1.0)
+                    // torso pitched toward the wall); an armed actor's weapon arm on its aim while
+                    // its free arm braces.
+                    let side = b.side as usize;
+                    let (brace, aims) = rig.brace.map_or((0.0, false), |br| {
+                        (br.weight(side), br.aims(side, rig.armed))
+                    });
+                    if aims {
+                        1.0
+                    } else {
+                        (rig.aim_hold * 1.25)
+                            .max(brace * ragdoll_core::tuning::get().brace_world)
+                            .min(1.0)
+                    }
                 } else {
                     0.0
                 }
@@ -760,22 +791,49 @@ pub fn apply(e: &mut Engine) {
         let cond = condition_of(rig.actor);
         let calves: [Option<usize>; 2] =
             [bone_of(&rig, Role::Calf, 0), bone_of(&rig, Role::Calf, 1)];
+        // A planted brace hand's wrist held where it touched, as a contact
+        // (`ragdoll_core::brace::Hand::pin`).
+        let pins: Vec<(usize, V3, f32, V3)> = rig
+            .brace
+            .iter()
+            .flat_map(|br| br.hands.iter().flatten())
+            .filter_map(|h| {
+                let (at, share, normal) = h.pin()?;
+                Some((
+                    bone_of(&rig, Role::Hand, h.side)?,
+                    scale(at, m),
+                    share,
+                    normal,
+                ))
+            })
+            .collect();
+        let armed = rig.armed;
+        let brace_now = rig.brace;
         if let Some(body) = rig.body.as_mut() {
             let mut targets = active::Targets {
                 rot: target.iter().map(active::qfrom_m).collect(),
                 pelvis: scale(pelvis_target, m),
                 feet: feet_now.iter().map(|&(i, at)| (i, scale(at, m))).collect(),
-                hands: Vec::new(),
+                hands: pins.iter().map(|p| (p.0, p.1)).collect(),
+                hand_share: pins.iter().map(|p| p.2).collect(),
+                hand_normal: pins.iter().map(|p| p.3).collect(),
                 support,
                 world,
                 anim: anim.iter().map(|a| active::qfrom_m(&a.0)).collect(),
                 forward,
             };
-            // A deliberate brace: the bracing arms' motors firmer while they reach and hold.
-            if let Some(w) = rig.brace.and_then(|br| brace_weight(br.t)) {
+            // A deliberate brace: the bracing arms' motors as firm as the tuning says while they
+            // reach and hold; an armed actor's weapon arm held firm on its aim.
+            if let Some(br) = brace_now {
                 for (b, d) in body.dip.iter_mut().enumerate() {
-                    if rig.bones[b].role.is_arm() {
-                        *d = d.min(-ragdoll_core::tuning::get().brace_firm * w);
+                    let bone = &rig.bones[b];
+                    if bone.role.is_arm() && bone.side < 2 {
+                        let side = bone.side as usize;
+                        if br.aims(side, armed) {
+                            *d = d.min(-AIM_FIRM);
+                        } else {
+                            *d = d.min(-ragdoll_core::tuning::get().brace_firm * br.weight(side));
+                        }
                     }
                 }
             }
@@ -818,6 +876,70 @@ pub fn apply(e: &mut Engine) {
             pelvis_offset = add(rig.shift, scale(sub(sim, pelvis_target), w));
             if w <= 0.0 && !busy {
                 rig.body = None;
+            }
+        }
+        // A brace hand on its path or plant: the shown arm put on it (`brace::plant_arm`), solved
+        // from the arm as it was shown a frame before (the bones' last write) on the shoulder where
+        // it is now, so it moves on from itself whatever the physical arm under it does, blended
+        // with the free arm by the plant's weight; the free arms' wrists kept (where a released
+        // hand goes back to).
+        if let Some(br) = rig.brace {
+            let shown_at = shown_positions(&rig, &anim, &shown, pi, pelvis_offset);
+            for side in 0..2u8 {
+                rig.free_wrist[side as usize] =
+                    bone_of(&rig, Role::Hand, side).map(|h| shown_at[h]);
+            }
+            for hand in br.hands.iter().flatten() {
+                let (Some(goal), w) = (hand.goal(), hand.plant_weight()) else {
+                    continue;
+                };
+                let (Some(u), Some(f), Some(h)) = (
+                    bone_of(&rig, Role::UpperArm, hand.side),
+                    bone_of(&rig, Role::Forearm, hand.side),
+                    bone_of(&rig, Role::Hand, hand.side),
+                ) else {
+                    continue;
+                };
+                let before = |i: usize| {
+                    (
+                        read9(e, rig.bones[i].node + WORLD_ROTATION),
+                        read3(e, rig.bones[i].node + WORLD_TRANSLATION),
+                    )
+                };
+                let (pu, pf, ph) = (before(u), before(f), before(h));
+                let shoulder = shown_at[u];
+                let elbow = add(shoulder, sub(pf.1, pu.1));
+                let wrist = add(elbow, sub(ph.1, pf.1));
+                let Some((r1, r2)) = hands::plant_arm(
+                    shoulder,
+                    elbow,
+                    wrist,
+                    goal,
+                    1.0,
+                    forward,
+                    hands::MOST_TWIST * dt,
+                ) else {
+                    continue;
+                };
+                let iu = mul(&r1, &pu.0);
+                let ifo = mul(&mul(&r1, &r2), &pf.0);
+                // The hand with the arm: carried by its forearm while it reaches, held as it
+                // touched once planted (the palm stays on the surface).
+                let ih = if hand.planted() {
+                    *rig.hand_lock[hand.side as usize].get_or_insert(ph.0)
+                } else {
+                    mul(&ifo, &mul(&transpose(&pf.0), &ph.0))
+                };
+                let blend = |free: M3, ik: M3| {
+                    active::m_from_q(active::qslerp(
+                        active::qfrom_m(&free),
+                        active::qfrom_m(&ik),
+                        w.clamp(0.0, 1.0),
+                    ))
+                };
+                shown[u] = pose::ortho(&blend(shown[u], iu));
+                shown[f] = pose::ortho(&blend(shown[f], ifo));
+                shown[h] = pose::ortho(&blend(shown[h], ih));
             }
         }
         // Each bone's world offset over its animation: its parent's shown and animated rotations
@@ -900,6 +1022,39 @@ pub fn apply(e: &mut Engine) {
         rigs.push(f);
     }
 }
+
+/// The shown pose's joints (world, game units): each bone's animated offset from its parent turned
+/// by the parent's shown rotation over its animated one, down from the pelvis moved by
+/// `pelvis_offset`.
+fn shown_positions(
+    rig: &Rig,
+    anim: &[(M3, V3)],
+    shown: &[M3],
+    pelvis: usize,
+    pelvis_offset: V3,
+) -> Vec<V3> {
+    let n = rig.bones.len();
+    let mut at: Vec<V3> = Vec::with_capacity(n);
+    for b in 0..n {
+        let p = match rig.bones[b].parent {
+            Some(p) => add(
+                at[p],
+                apply_m(
+                    &mul(&shown[p], &transpose(&anim[p].0)),
+                    sub(anim[b].1, anim[p].1),
+                ),
+            ),
+            None if b == pelvis => add(anim[b].1, pelvis_offset),
+            None => anim[b].1,
+        };
+        at.push(p);
+    }
+    at
+}
+
+/// An armed actor's weapon arm held on its aim while its free arm braces: its motors this many
+/// times firmer (the active body's dip below 0).
+const AIM_FIRM: f32 = 4.0;
 
 /// The feet go back from where the steps left them to the animation's over this long (s), eased.
 const FEET_BACK: f32 = 0.4;
@@ -1440,11 +1595,14 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
     );
     rig.balance = Some(stepping);
     if against_wall && rig.brace.is_none() {
+        // No arm to brace with (`start_brace` made none): nothing reaches.
         rig.brace = Some(Brace {
             dir,
             t: 0.0,
             wall: None,
             top: None,
+            surface: None,
+            hands: [None, None],
         });
     }
     rig.since = Instant::now();
@@ -1545,11 +1703,11 @@ fn brace_obstacle(
     actor: u32,
     root: u32,
     dir: V3,
-) -> (Option<f32>, Option<f32>, Option<obstacle::Kind>) {
+) -> (Option<f32>, Option<f32>, Option<obstacle::Kind>, Option<V3>) {
     let (pelvis, shoulders) = {
         let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
         let Some(rig) = rigs.iter().find(|r| r.actor == actor && r.root == root) else {
-            return (None, None, None);
+            return (None, None, None, None);
         };
         let at =
             |role| bone_of(rig, role, 2).map(|i| read3(e, rig.bones[i].node + WORLD_TRANSLATION));
@@ -1567,13 +1725,14 @@ fn brace_obstacle(
             scale_,
         ) {
             let top = (o.kind == obstacle::Kind::Waist).then_some(o.top);
-            return (Some(o.distance), top, Some(o.kind));
+            return (Some(o.distance), top, Some(o.kind), Some(at));
         }
     }
     (
         shoulders.and_then(|at| wall_ahead(e, at, dir, BRACE_PROBE)),
         None,
         None,
+        shoulders,
     )
 }
 
@@ -1667,17 +1826,43 @@ fn start_brace(e: &mut Engine, actor: u32, root: u32, dir: V3, v: f32, aggressor
     let arms = rig.limbs.arm(0) || rig.limbs.arm(1);
     drop(rigs);
     // What the brace meets (`brace_obstacle`): a waist-high obstacle's top the hands go on.
-    let (wall, top, kind) = brace_obstacle(e, actor, root, dir);
+    let (wall, top, kind, origin) = brace_obstacle(e, actor, root, dir);
     let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     let Some(rig) = rigs.iter_mut().find(|r| r.actor == actor && r.root == root) else {
         return;
     };
+    let mut which = [false; 2];
     if arms {
+        let surface = origin.and_then(|o| Surface::new(o, dir, wall, top));
+        // Which arms brace (`ragdoll_core::brace::bracing_arms`): an armed actor's free arm, its
+        // weapon arm too only on a push past what one arm holds or when the free arm cannot
+        // reach the surface (the weapon kept in hand).
+        let mut have = [false; 2];
+        let mut reaches = [false; 2];
+        for side in 0..2u8 {
+            have[side as usize] = rig.limbs.arm(side as usize);
+            if let (Some(u), Some(f), Some(h)) = (
+                bone_of(rig, Role::UpperArm, side),
+                bone_of(rig, Role::Forearm, side),
+                bone_of(rig, Role::Hand, side),
+            ) {
+                let at = |i: usize| read3(e, rig.bones[i].node + WORLD_TRANSLATION);
+                let reach = length(sub(at(f), at(u))) + length(sub(at(h), at(f)));
+                let target = brace_target(at(u), dir, wall, top);
+                reaches[side as usize] =
+                    surface.is_none() || hands::can_reach(at(u), target, reach);
+            }
+        }
+        let one_arm = limit * hands::ONE_ARM;
+        which = hands::bracing_arms(have, rig.armed, v, one_arm, reaches);
+        rig.hand_lock = [None; 2];
         rig.brace = Some(Brace {
             dir,
             t: 0.0,
             wall,
             top,
+            surface,
+            hands: [0u8, 1].map(|s| which[s as usize].then(|| Hand::new(s))),
         });
     }
     // Over a waist-high obstacle it folds over (its hips pivot on the top); a wall it crumples
@@ -1698,14 +1883,17 @@ fn start_brace(e: &mut Engine, actor: u32, root: u32, dir: V3, v: f32, aggressor
             fold,
         });
     }
+    let armed = rig.armed;
     drop(rigs);
     room_event(
         e,
         actor,
         "brace",
         &format!(
-            "\"on\":{},\"arms\":{arms},\"wall\":{},\"top\":{},\"speed\":{},\"limit\":{},\"falls\":{},\"fold\":{}",
+            "\"on\":{},\"arms\":{arms},\"hands\":[{},{}],\"armed\":{armed},\"wall\":{},\"top\":{},\"speed\":{},\"limit\":{},\"falls\":{},\"fold\":{}",
             room_events::text(kind.map_or("wall", |k| k.name())),
+            which[0],
+            which[1],
             wall.map_or("null".into(), room_events::num),
             top.map_or("null".into(), room_events::num),
             room_events::num(v),
@@ -1718,10 +1906,13 @@ fn start_brace(e: &mut Engine, actor: u32, root: u32, dir: V3, v: f32, aggressor
         "{}: braces against a {} with {}{}",
         describe(e, actor),
         kind.map_or("wall", |k| k.name()),
-        if arms {
-            "its hands"
-        } else {
-            "no arm to brace with"
+        match (arms, which, armed) {
+            (false, _, _) => "no arm to brace with",
+            (true, [true, false], true) => "its free (left) hand, the weapon kept on its aim",
+            (true, [true, true], true) => "both hands, the weapon kept in hand",
+            (true, [true, false], false) => "its left hand",
+            (true, [false, true], _) => "its right hand",
+            _ => "its hands",
         },
         if (v > limit || !arms) && fold.is_some() {
             format!(": the push ({v:.2} m/s) is too much, it folds over it into its ragdoll")
@@ -1731,27 +1922,6 @@ fn start_brace(e: &mut Engine, actor: u32, root: u32, dir: V3, v: f32, aggressor
             String::new()
         }
     ));
-}
-
-/// The arm of `side` reaching its hand to `target`, blended by `weight`, as a person's arm reaches
-/// (`ragdoll_core::flinch::reach_arm_ik`: the shoulder's range, the elbow's pole and hinge): the
-/// upper arm's and the forearm's rotations.
-fn reach_arm(
-    e: &Engine,
-    rig: &Rig,
-    side: u8,
-    target: V3,
-    weight: f32,
-) -> Option<(usize, M3, usize, M3)> {
-    let u = bone_of(rig, Role::UpperArm, side)?;
-    let f = bone_of(rig, Role::Forearm, side)?;
-    let h = bone_of(rig, Role::Hand, side)?;
-    let shoulder = read3(e, rig.bones[u].node + WORLD_TRANSLATION);
-    let elbow0 = read3(e, rig.bones[f].node + WORLD_TRANSLATION);
-    let hand0 = read3(e, rig.bones[h].node + WORLD_TRANSLATION);
-    let goal = add(hand0, scale(sub(target, hand0), weight.clamp(0.0, 1.0)));
-    let (r1, r2) = reach_arm_ik(shoulder, elbow0, hand0, goal, facing(e, rig), side)?;
-    Some((u, r1, f, r2))
 }
 
 /// The way the actor faces (world, flat): its 3D root's forward (+Y) axis.
@@ -1768,30 +1938,93 @@ fn facing(e: &Engine, rig: &Rig) -> V3 {
     }
 }
 
-/// Stage 3's wall brace for a frame: both hands (the arms it has) reach to the wall ahead along
-/// the push, at the shoulders' height.
-fn brace_frame(e: &mut Engine, rig: &mut Rig, out: &mut [Option<M3>], dt: f32) {
+/// Stage 3's brace for a frame (`ragdoll_core::brace`, as the lab's `brace_frame`): each bracing
+/// hand's path, plant and release from the arm as it was shown (the bones' last write), and the
+/// arm's motor targets reaching where the shown hand goes (from the shoulder, carried onto the
+/// animation's `anim`).
+fn brace_frame(e: &mut Engine, rig: &mut Rig, anim: &[(M3, V3)], out: &mut [Option<M3>], dt: f32) {
     let Some(mut b) = rig.brace.take() else {
         return;
     };
     b.t += dt;
-    let Some(w) = brace_weight(b.t) else {
-        note(format!("{}: lets go of the wall", describe(e, rig.actor)));
-        return;
-    };
+    let com = rig.body.as_ref().map_or(0.0, |body| body.com_speed());
+    let let_go = hands::recovered(rig.balance.is_some(), b.t, com);
+    let forward = facing(e, rig);
+    let mut said = Vec::new();
     for side in 0..2u8 {
-        if !rig.limbs.arm(side as usize) {
-            continue;
-        }
-        let Some(u) = bone_of(rig, Role::UpperArm, side) else {
+        let Some(hand) = b.hands[side as usize].as_mut() else {
             continue;
         };
-        let shoulder = read3(e, rig.bones[u].node + WORLD_TRANSLATION);
-        let target = brace_target(shoulder, b.dir, b.wall, b.top);
-        if let Some((ui, ur, fi, fr)) = reach_arm(e, rig, side, target, w) {
-            out[ui] = Some(ur);
-            out[fi] = Some(fr);
+        let (Some(u), Some(f), Some(h)) = (
+            bone_of(rig, Role::UpperArm, side),
+            bone_of(rig, Role::Forearm, side),
+            bone_of(rig, Role::Hand, side),
+        ) else {
+            continue;
+        };
+        let shown = |i: usize| read3(e, rig.bones[i].node + WORLD_TRANSLATION);
+        let (shoulder, elbow, wrist) = (shown(u), shown(f), shown(h));
+        let reach = length(sub(elbow, shoulder)) + length(sub(wrist, elbow));
+        let target = brace_target(anim[u].1, b.dir, b.wall, b.top);
+        let free = rig.free_wrist[side as usize].unwrap_or(wrist);
+        let name = if side == 0 { "left" } else { "right" };
+        match hand.update(
+            b.surface.as_ref(),
+            wrist,
+            free,
+            shoulder,
+            reach,
+            target,
+            b.t,
+            dt,
+            let_go,
+        ) {
+            Some(hands::Event::Planted(at)) => said.push((
+                format!(
+                    "{name} hand plants at ({:.0}, {:.0}, {:.0})",
+                    at[0], at[1], at[2]
+                ),
+                format!(
+                    "\"hand\":\"{name}\",\"planted\":[{},{},{}]",
+                    room_events::num(at[0]),
+                    room_events::num(at[1]),
+                    room_events::num(at[2])
+                ),
+            )),
+            Some(hands::Event::Released(why)) => said.push((
+                format!("{name} hand lets go: {why}"),
+                format!(
+                    "\"hand\":\"{name}\",\"released\":{}",
+                    room_events::text(why)
+                ),
+            )),
+            None => {}
         }
+        let (goal, w) = match hand.motor_goal() {
+            Some(g) => (
+                add(anim[u].1, sub(g, shoulder)),
+                if hand.released() {
+                    hand.reach_weight(b.t)
+                } else {
+                    hand.plant_weight()
+                },
+            ),
+            None => (target, hand.reach_weight(b.t)),
+        };
+        let hand0 = anim[h].1;
+        let to = add(hand0, scale(sub(goal, hand0), w.clamp(0.0, 1.0)));
+        if let Some((r1, r2)) = reach_arm_ik(anim[u].1, anim[f].1, hand0, to, forward, side) {
+            out[u] = Some(r1);
+            out[f] = Some(r2);
+        }
+    }
+    for (line, fields) in said {
+        note(format!("{}: {line}", describe(e, rig.actor)));
+        room_event(e, rig.actor, "brace_hand", &fields);
+    }
+    if b.hands.iter().all(|h| h.map_or(true, |h| h.done())) {
+        note(format!("{}: lets go of the wall", describe(e, rig.actor)));
+        return;
     }
     rig.brace = Some(b);
 }

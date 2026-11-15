@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (brace hands plant; armed actors brace one-handed)
+
+- **Now (`ragdoll_core::brace`: `Surface`, `Hand` (reach path, plant, release), `plant_arm`, `bracing_arms`, `recovered`; `active::Targets::hand_share`/`hand_normal` (one-sided contact pins, `CONTACT_NEAR`), hand pins within the arm's reach; `BRACE_FIRM` 0; host `brace_frame(.., anim, ..)`, `shown_positions`, the shown arm on the hand's path, `Rig::free_wrist`/`hand_lock`, `AIM_FIRM`, `brace_hand` room events; lab `watch_hands` metrics, `armed=pistol|rifle`, four armed brace scenes, `braces_hold_across_pushes_and_weapons`, reset clears the condition):** every lab scene and the 108-brace sweep pass with no hand bounce, jitter or slide, no backward bends, the arm cap held. Not run in game. The table (74 cm) is out of the standing reach: its hands come close and go back.
+- **Patrick (b7aaa5a reel):** the bracing arms bounced instead of meeting the surface; hands should plant (no rebound), the arm take the load critically damped, release only on recovery or push-off, never re-reach; a lab bounce metric that fails; armed actors brace with the free arm, the weapon arm keeping its aim and joining only on a hard push or when the free arm cannot reach.
+
 ### Claude, 2026-11-15 (the Linux test room)
 
 - **Now (docs/LINUX.md; `linux/` (own workspace, `nvrs-room` and `sdp-convert`); `.github/workflows/linux-test.yml` (tarball at the `linux-test` release); `cfg(wgpu_window)` now Linux too; `d3d9_wgpu::native` (the window's raw handles and size), `shot::ask`; `d3d9real` `inject_*` (renamed from `touch_*`), `inject_wheel`, `ask_shot`, `NV_WGPU_OFFSCREEN=1`; host `phone_range::run` (the room's game loop, the Android app's too), `room_script` (scripted runs), `room_events` (the active ragdoll's events as JSON, recorded in `active_ragdoll.rs` and `knockdown.rs`), `knockdown::state_fields`, `test_range::phone_target`/`phone_guns`):** builds natively on Linux; smoke-tested without game files (the adapter falls back to lavapipe, a folder without the game is refused). Never run with game files: none here. Android CI's first build failed at cargo-apk's release signing (now a throwaway key in the build job; the publish job re-signs).

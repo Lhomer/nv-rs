@@ -3919,6 +3919,7 @@ mod tests_changed_directories {
     use super::*;
 
     const SECOND: u64 = 10_000_000;
+    #[cfg_attr(not(windows), allow(dead_code))]
     const SAVE_138: &str = "Save 138   Alexxander  Doc Mitchell s House  02 02 23.fos";
 
     /// A scratch folder of the test's own (under the system's temporary folder) holding `files`

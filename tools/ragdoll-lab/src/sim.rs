@@ -22,6 +22,7 @@ use crate::weapons::{self, Weapon};
 use crate::world::{self, Ground, GroundKind};
 use ragdoll_core::active;
 use ragdoll_core::balance::{plan, Limbs, Outcome, Stepping};
+use ragdoll_core::brace::{self as hands, Hand, Surface};
 use ragdoll_core::condition::{self, Condition};
 use ragdoll_core::flinch::*;
 use ragdoll_core::knock::{
@@ -53,6 +54,9 @@ pub const GET_UP: f32 = 1.6;
 pub const PELLET_SPREAD: f32 = 2.4;
 /// How far ahead of the shoulders a brace looks for its wall (units; the host's `BRACE_PROBE`).
 pub const BRACE_PROBE: f32 = 90.0;
+/// An armed body's weapon arm held on its aim while its free arm braces: its motors this many
+/// times firmer (the active body's dip below 0).
+pub const AIM_FIRM: f32 = 4.0;
 /// The way the mannequin faces (+Y; the host reads its actor's 3D root).
 pub const FORWARD: V3 = [0.0, 1.0, 0.0];
 /// The share of the way back to straight a ragdoll elbow or knee bent backwards is turned each
@@ -68,6 +72,27 @@ pub struct Brace {
     pub wall: Option<f32>,
     /// A waist-high obstacle's top (world z, units): the hands go on it.
     pub top: Option<f32>,
+    /// What the hands meet, and each bracing hand (`ragdoll_core::brace`; none: that arm does not
+    /// brace: missing, or an armed body's weapon arm keeping its aim).
+    pub surface: Option<Surface>,
+    pub hands: [Option<Hand>; 2],
+}
+
+impl Brace {
+    /// The brace's weight on an arm's targets (how far its reach is in, 0 to 1).
+    pub fn weight(&self, side: usize) -> f32 {
+        self.hands[side].map_or(0.0, |h| h.reach_weight(self.t))
+    }
+
+    /// The most any hand's reach is in.
+    pub fn any_weight(&self) -> f32 {
+        self.weight(0).max(self.weight(1))
+    }
+
+    /// Whether an armed body's weapon arm stays on its aim (it does not brace).
+    pub fn aims(&self, side: usize, armed: bool) -> bool {
+        armed && side == hands::WEAPON_SIDE as usize && self.hands[side].is_none()
+    }
 }
 
 /// The fall into the ragdoll under way (stage 3; the host's `active_ragdoll::Fall`).
@@ -202,7 +227,36 @@ pub struct Stats {
     /// A swinging foot caught on a low obstacle; what the brace was on ("waist", "wall").
     pub tripped: bool,
     pub brace_kind: Option<String>,
+    /// The brace's hands (`ragdoll_core::brace`, the shown pose): which arms braced; how often a
+    /// hand lost the surface while it held (a bounce); the fastest a touching hand moved (m/s) and
+    /// the furthest it slid from where it settled (cm); how often a planted arm's elbow turned
+    /// back on itself by more than [`ELBOW_SWING`] (an oscillation; the worst arm's count).
+    pub brace_hands: [bool; 2],
+    pub hand_losses: u32,
+    pub hand_jitter: f32,
+    pub hand_slip: f32,
+    pub elbow_reversals: u32,
 }
+
+/// A bracing hand watched for bounce (the shown pose against the brace's surface).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HandWatch {
+    touching: bool,
+    since: f32,
+    settled: Option<V3>,
+    last: Option<V3>,
+    elbow: Option<f32>,
+    elbow_dir: f32,
+    reversals: u32,
+}
+
+/// A hand touches when its wrist is within this of its rest on the surface (units).
+pub const TOUCH: f32 = 0.75;
+/// A touching hand counts as settled this long after it touched (s; its approach).
+pub const SETTLE_TOUCH: f32 = hands::APPROACH_MAX + 0.02;
+/// A planted elbow turning back by more than this (rad, 3 degrees) from the furthest it went is a
+/// reversal (an oscillation); less is the torso's sway.
+pub const ELBOW_SWING: f32 = 0.052;
 
 /// An elbow's or a knee's bend in the pose `posed` (rad, negative: backwards past straight), from
 /// the mannequin's own anatomy: about its parent's X axis, `sign` 1 for an elbow (the forearm
@@ -301,8 +355,10 @@ pub struct Sim {
     pub armour: f32,
     pub weapon: Weapon,
     pub range: f32,
-    /// The body holds a weapon (aims it) and is attacking (an attack a big hit interrupts).
+    /// The body holds a weapon (aims it) and is attacking (an attack a big hit interrupts);
+    /// the weapon is two-handed (the left hand supports it) or one-handed (a pistol).
     pub armed: bool,
+    pub two_handed: bool,
     pub attacking: bool,
     /// The standing body's frame time (s): [`STEP`], or the game's range in the tests.
     pub dt: f32,
@@ -319,6 +375,12 @@ pub struct Sim {
     pub posed: [Xf; COUNT],
     /// The pose a frame before (the body's starting motion; the smoothness measures).
     pub posed_before: [Xf; COUNT],
+    /// The brace's hands watched for bounce ([`HandWatch`]); a planted hand's shown rotation, held
+    /// as it touched.
+    pub watch: [HandWatch; 2],
+    pub hand_lock: [Option<M3>; 2],
+    /// Each free arm's wrist this frame (before the brace's IK).
+    pub free_wrist: [Option<V3>; 2],
     velocity: Option<[V3; COUNT]>,
     acceleration: Option<[V3; COUNT]>,
     pub stats: Stats,
@@ -344,6 +406,7 @@ impl Sim {
             weapon: Weapon::default(),
             range: 10.0,
             armed: false,
+            two_handed: true,
             attacking: false,
             dt: STEP,
             t: 0.0,
@@ -356,6 +419,9 @@ impl Sim {
             last_up: None,
             posed: [IDENT_XF; COUNT],
             posed_before: [IDENT_XF; COUNT],
+            watch: [HandWatch::default(); 2],
+            hand_lock: [None; 2],
+            free_wrist: [None; 2],
             velocity: None,
             acceleration: None,
             stats: Stats::default(),
@@ -396,6 +462,9 @@ impl Sim {
         self.rig = Rig::new(self.rig.limbs);
         self.state = State::Standing;
         self.stack = None;
+        // A fresh body: no fatigue, pain or hurt limbs left from an earlier run.
+        self.condition = Condition::default();
+        self.watch = [HandWatch::default(); 2];
         self.last_knock = None;
         self.last_up = None;
         self.stats = Stats {
@@ -465,6 +534,8 @@ impl Sim {
         match b {
             mq::R_UPPERARM => rotation([1.3, 0.0, 0.25]),
             mq::R_FOREARM => rotation([0.3, 0.0, 0.0]),
+            // A one-handed weapon: the left arm hangs.
+            mq::L_UPPERARM | mq::L_FOREARM if !self.two_handed => IDENTITY,
             mq::L_UPPERARM => rotation([1.1, 0.0, -0.55]),
             mq::L_FOREARM => rotation([0.75, 0.0, 0.0]),
             mq::SPINE2 => rotation([0.0, 0.0, -0.12]),
@@ -848,12 +919,7 @@ impl Sim {
         self.rig.balance = Some(stepping);
         if against_wall && self.rig.brace.is_none() {
             let (wall, top, _) = self.brace_obstacle(dir);
-            self.rig.brace = Some(Brace {
-                dir,
-                t: 0.0,
-                wall,
-                top,
-            });
+            self.rig.brace = Some(self.new_brace(dir, v, wall, top));
         }
         self.rig.since = self.t;
         self.note(format!(
@@ -912,12 +978,7 @@ impl Sim {
         let arms = self.rig.limbs.arm(0) || self.rig.limbs.arm(1);
         let (wall, top, kind) = self.brace_obstacle(dir);
         if arms {
-            self.rig.brace = Some(Brace {
-                dir,
-                t: 0.0,
-                wall,
-                top,
-            });
+            self.rig.brace = Some(self.new_brace(dir, v, wall, top));
             self.stats.braced = true;
             self.stats.brace_kind = Some(if top.is_some() { "waist" } else { "wall" }.to_string());
         }
@@ -941,12 +1002,20 @@ impl Sim {
                 fold,
             });
         }
+        let which = self
+            .rig
+            .brace
+            .map_or([false; 2], |b| b.hands.map(|h| h.is_some()));
         self.note(format!(
             "braces against a wall with {}{}",
-            if arms {
-                "its hands"
-            } else {
-                "no arm to brace with"
+            match (arms, which) {
+                (false, _) => "no arm to brace with",
+                (true, [true, false]) if self.armed =>
+                    "its free (left) hand, the weapon kept on its aim",
+                (true, [true, true]) if self.armed => "both hands, the weapon kept in hand",
+                (true, [true, false]) => "its left hand",
+                (true, [false, true]) => "its right hand",
+                _ => "its hands",
             },
             if v > limit || !arms {
                 format!(": the push ({v:.2} m/s) is too much, it crumples into its ragdoll")
@@ -1034,28 +1103,118 @@ impl Sim {
         Some((u, r1, f, r2))
     }
 
+    /// A brace along `dir` against an obstacle `wall` units ahead (its top at `top`), pushed at
+    /// `v` m/s: its surface and which arms brace (`ragdoll_core::brace::bracing_arms`: an armed
+    /// body's free arm; its weapon arm too only on a push past what one arm holds, or when the
+    /// free arm cannot reach).
+    fn new_brace(&mut self, dir: V3, v: f32, wall: Option<f32>, top: Option<f32>) -> Brace {
+        let anim = self.anim();
+        let surface = Surface::new(anim[mq::PELVIS].1, dir, wall, top);
+        let mut arms = [false; 2];
+        let mut reaches = [false; 2];
+        for side in 0..2u8 {
+            arms[side as usize] = self.rig.limbs.arm(side as usize);
+            if let (Some(u), Some(f), Some(h)) = (
+                mq::bone_of(Role::UpperArm, side),
+                mq::bone_of(Role::Forearm, side),
+                mq::bone_of(Role::Hand, side),
+            ) {
+                let reach = length(sub(anim[f].1, anim[u].1)) + length(sub(anim[h].1, anim[f].1));
+                let target = brace_target(anim[u].1, dir, wall, top);
+                reaches[side as usize] =
+                    surface.is_none() || hands::can_reach(anim[u].1, target, reach);
+            }
+        }
+        let one_arm = self.tune.brace_holds * self.tune.balance.max(1.0) / 100.0 * hands::ONE_ARM;
+        let bracing = hands::bracing_arms(arms, self.armed, v, one_arm, reaches);
+        self.stats.brace_hands = bracing;
+        self.watch = [HandWatch::default(); 2];
+        self.hand_lock = [None; 2];
+        Brace {
+            dir,
+            t: 0.0,
+            wall,
+            top,
+            surface,
+            hands: [0u8, 1].map(|s| bracing[s as usize].then(|| Hand::new(s))),
+        }
+    }
+
     fn brace_frame(&mut self, anim: &[Xf; COUNT], out: &mut [Option<M3>], dt: f32) {
         let Some(mut b) = self.rig.brace.take() else {
             return;
         };
         b.t += dt;
-        let Some(w) = brace_weight(b.t) else {
-            self.note("lets go of the wall".into());
-            return;
-        };
+        // The planted hands let go once the body has recovered (`ragdoll_core::brace::recovered`).
+        let com = self.rig.body.as_ref().map_or(0.0, |body| body.com_speed());
+        let let_go = hands::recovered(self.rig.balance.is_some(), b.t, com);
+        let posed = self.posed;
+        let mut said = Vec::new();
         for side in 0..2u8 {
-            if !self.rig.limbs.arm(side as usize) {
-                continue;
-            }
-            let Some(u) = mq::bone_of(Role::UpperArm, side) else {
+            let Some(hand) = b.hands[side as usize].as_mut() else {
                 continue;
             };
-            let shoulder = anim[u].1;
-            let target = brace_target(shoulder, b.dir, b.wall, b.top);
+            let (Some(u), Some(f), Some(h)) = (
+                mq::bone_of(Role::UpperArm, side),
+                mq::bone_of(Role::Forearm, side),
+                mq::bone_of(Role::Hand, side),
+            ) else {
+                continue;
+            };
+            // The shown arm (the frame before): where its wrist is against the surface.
+            let reach = length(sub(posed[f].1, posed[u].1)) + length(sub(posed[h].1, posed[f].1));
+            let target = brace_target(anim[u].1, b.dir, b.wall, b.top);
+            let free = self.free_wrist[side as usize].unwrap_or(posed[h].1);
+            match hand.update(
+                b.surface.as_ref(),
+                posed[h].1,
+                free,
+                posed[u].1,
+                reach,
+                target,
+                b.t,
+                dt,
+                let_go,
+            ) {
+                Some(hands::Event::Planted(at)) => said.push(format!(
+                    "{} hand plants at ({:.0}, {:.0}, {:.0})",
+                    if side == 0 { "left" } else { "right" },
+                    at[0],
+                    at[1],
+                    at[2]
+                )),
+                Some(hands::Event::Released(why)) => said.push(format!(
+                    "{} hand lets go: {why}",
+                    if side == 0 { "left" } else { "right" }
+                )),
+                None => {}
+            }
+            // The arm's motors reach for where the shown hand goes (its path, its plant: from the
+            // shoulder, carried onto the animation's), so the physical arm, its pin and the shown
+            // arm agree; without a path yet, toward the brace's target; let go, back to the
+            // animation (the shown hand follows the free arm's back).
+            let (target, w) = match hand.motor_goal() {
+                Some(g) => (
+                    add(anim[u].1, sub(g, posed[u].1)),
+                    if hand.released() {
+                        hand.reach_weight(b.t)
+                    } else {
+                        hand.plant_weight()
+                    },
+                ),
+                None => (target, hand.reach_weight(b.t)),
+            };
             if let Some((ui, ur, fi, fr)) = self.reach_arm(anim, side, target, w) {
                 out[ui] = Some(ur);
                 out[fi] = Some(fr);
             }
+        }
+        for line in said {
+            self.note(line);
+        }
+        if b.hands.iter().all(|h| h.is_none_or(|h| h.done())) {
+            self.note("lets go of the wall".into());
+            return;
         }
         self.rig.brace = Some(b);
     }
@@ -1390,27 +1549,51 @@ impl Sim {
                     Some(f) => 1.0 - active::ease(f.t / f.lead.max(1e-3)),
                     None => 1.0,
                 };
+                let pins: Vec<(usize, V3, f32, V3)> = self
+                    .rig
+                    .brace
+                    .iter()
+                    .flat_map(|br| br.hands.iter().flatten())
+                    .filter_map(|h| {
+                        let (at, share, normal) = h.pin()?;
+                        Some((
+                            mq::bone_of(Role::Hand, h.side)?,
+                            scale(at, m),
+                            share,
+                            normal,
+                        ))
+                    })
+                    .collect();
                 let targets = active::Targets {
                     rot: target.iter().map(active::qfrom_m).collect(),
                     pelvis: scale(pelvis_target, m),
                     feet,
-                    hands: Vec::new(),
+                    // A brace hand's wrist pinned along its path and where it touched
+                    // (`ragdoll_core::brace::Hand::pin`).
+                    hands: pins.iter().map(|p| (p.0, p.1)).collect(),
+                    hand_share: pins.iter().map(|p| p.2).collect(),
+                    hand_normal: pins.iter().map(|p| p.3).collect(),
                     support,
                     // An armed body keeps its aim: its arms track their world rotations (the
                     // torso flinches under them).
                     world: (0..COUNT)
                         .map(|b| {
-                            if mq::role_side(b).0.is_arm() {
+                            let (role, side) = mq::role_side(b);
+                            if role.is_arm() && side < 2 {
                                 // The aim kept, or the brace's reach to the wall point (not
-                                // riding up with a torso pitched toward the wall).
-                                let brace = self
-                                    .rig
-                                    .brace
-                                    .and_then(|br| brace_weight(br.t))
-                                    .unwrap_or(0.0);
-                                (self.rig.aim_hold * 1.25)
-                                    .max(brace * ragdoll_core::tuning::get().brace_world)
-                                    .min(1.0)
+                                // riding up with a torso pitched toward the wall); an armed
+                                // body's weapon arm on its aim while its free arm braces.
+                                let side = side as usize;
+                                let (brace, aims) = self.rig.brace.map_or((0.0, false), |br| {
+                                    (br.weight(side), br.aims(side, self.armed))
+                                });
+                                if aims {
+                                    1.0
+                                } else {
+                                    (self.rig.aim_hold * 1.25)
+                                        .max(brace * ragdoll_core::tuning::get().brace_world)
+                                        .min(1.0)
+                                }
                             } else {
                                 0.0
                             }
@@ -1431,11 +1614,19 @@ impl Sim {
                     }
                 }
                 let since_hit = (self.t - self.rig.hit_at) as f32;
-                // A deliberate brace: the bracing arms' motors firmer while they reach and hold.
-                if let Some(w) = self.rig.brace.and_then(|br| brace_weight(br.t)) {
+                // A deliberate brace: the bracing arms' motors firmer while they reach and hold;
+                // an armed body's weapon arm held firm on its aim.
+                if let Some(br) = self.rig.brace {
                     for (b, d) in body.dip.iter_mut().enumerate() {
-                        if mq::role_side(b).0.is_arm() {
-                            *d = d.min(-ragdoll_core::tuning::get().brace_firm * w);
+                        let (role, side) = mq::role_side(b);
+                        if role.is_arm() && side < 2 {
+                            let side = side as usize;
+                            if br.aims(side, self.armed) {
+                                *d = d.min(-AIM_FIRM);
+                            } else {
+                                let w = br.weight(side);
+                                *d = d.min(-ragdoll_core::tuning::get().brace_firm * w);
+                            }
                         }
                     }
                 }
@@ -1484,6 +1675,79 @@ impl Sim {
             let sim = scale(pose[mq::PELVIS].1, UNITS_PER_METRE);
             pelvis = add(pelvis_target, scale(sub(sim, pelvis_target), shown_w));
         }
+        let mut out = self.place(&rots, pelvis);
+        // The free arms' wrists (before the brace's IK: where a released hand goes back to).
+        for side in 0..2u8 {
+            self.free_wrist[side as usize] = mq::bone_of(Role::Hand, side).map(|h| out[h].1);
+        }
+        // A planted hand stays where it touched: the shown arm put on it (`brace::plant_arm`).
+        if let Some(br) = self.rig.brace {
+            let mut moved = false;
+            for hand in br.hands.iter().flatten() {
+                let (Some(goal), w) = (hand.goal(), hand.plant_weight()) else {
+                    continue;
+                };
+                let (Some(u), Some(f), Some(h)) = (
+                    mq::bone_of(Role::UpperArm, hand.side),
+                    mq::bone_of(Role::Forearm, hand.side),
+                    mq::bone_of(Role::Hand, hand.side),
+                ) else {
+                    continue;
+                };
+                // Solved from the arm as it was shown a frame before (on the shoulder where it is
+                // now), so the shown arm moves on from itself, whatever the physical arm under it
+                // does; blended with the free arm by the plant's weight.
+                let (pu, pf, ph) = (self.posed[u].0, self.posed[f].0, self.posed[h].0);
+                let shoulder = out[u].1;
+                let elbow = add(shoulder, sub(self.posed[f].1, self.posed[u].1));
+                let wrist = add(elbow, sub(self.posed[h].1, self.posed[f].1));
+                if let Some((r1, r2)) = hands::plant_arm(
+                    shoulder,
+                    elbow,
+                    wrist,
+                    goal,
+                    1.0,
+                    FORWARD,
+                    hands::MOST_TWIST * self.dt,
+                ) {
+                    let (iu, ifo) = (mul(&r1, &pu), mul(&mul(&r1, &r2), &pf));
+                    // The hand with the arm: carried by its forearm while it reaches, held as it
+                    // touched once planted (the palm stays on the surface).
+                    let ih = if hand.planted() {
+                        *self.hand_lock[hand.side as usize].get_or_insert(ph)
+                    } else {
+                        mul(&ifo, &mul(&transpose(&pf), &ph))
+                    };
+                    let blend = |free: M3, ik: M3| {
+                        active::m_from_q(active::qslerp(
+                            active::qfrom_m(&free),
+                            active::qfrom_m(&ik),
+                            w.clamp(0.0, 1.0),
+                        ))
+                    };
+                    rots[u] = blend(rots[u], iu);
+                    rots[f] = blend(rots[f], ifo);
+                    rots[h] = blend(rots[h], ih);
+                    moved = true;
+                }
+            }
+            if moved {
+                out = self.place(&rots, pelvis);
+            }
+        }
+        self.posed = out;
+        self.watch_hands();
+        self.measure(&before, dt);
+        if self.rig.body.is_some() && shown_w <= 0.0 && !busy {
+            self.rig.body = None;
+            self.rig.active = false;
+            self.rig.shift = [0.0; 3];
+            self.note("back in its animation".into());
+        }
+    }
+
+    /// The shown pose's bones placed from their world rotations down from the pelvis.
+    fn place(&self, rots: &[M3; COUNT], pelvis: V3) -> [Xf; COUNT] {
         let mut out = [IDENT_XF; COUNT];
         for b in 0..COUNT {
             let pos = match mq::PARENT[b] {
@@ -1492,13 +1756,86 @@ impl Sim {
             };
             out[b] = (rots[b], pos);
         }
-        self.posed = out;
-        self.measure(&before, dt);
-        if self.rig.body.is_some() && shown_w <= 0.0 && !busy {
-            self.rig.body = None;
-            self.rig.active = false;
-            self.rig.shift = [0.0; 3];
-            self.note("back in its animation".into());
+        out
+    }
+
+    /// The brace's hands watched for bounce in the shown pose ([`Stats::hand_losses`],
+    /// `hand_jitter`, `hand_slip`, `elbow_reversals`): a hand on the surface (its wrist within
+    /// [`TOUCH`] of its rest) that comes off it while its hand still holds is a loss; once settled,
+    /// its speed and slide; a planted arm's elbow turning back on itself, an oscillation.
+    fn watch_hands(&mut self) {
+        let Some(br) = self.rig.brace else {
+            return;
+        };
+        let Some(surface) = br.surface else {
+            return;
+        };
+        let dt = self.dt.max(1e-4);
+        for side in 0..2usize {
+            let Some(hand) = br.hands[side] else {
+                continue;
+            };
+            let (Some(u), Some(f), Some(h)) = (
+                mq::bone_of(Role::UpperArm, side as u8),
+                mq::bone_of(Role::Forearm, side as u8),
+                mq::bone_of(Role::Hand, side as u8),
+            ) else {
+                continue;
+            };
+            let wrist = self.posed[h].1;
+            let holding = !matches!(hand.phase, hands::Phase::Released { .. });
+            let w = &mut self.watch[side];
+            let (gap, _) = surface.gap(wrist);
+            let touching = gap <= hands::HAND + TOUCH;
+            if w.touching && !touching && holding {
+                self.stats.hand_losses += 1;
+            }
+            if touching && holding {
+                if !w.touching {
+                    w.since = 0.0;
+                } else {
+                    w.since += dt;
+                }
+                if w.since >= SETTLE_TOUCH {
+                    let settled = *w.settled.get_or_insert(wrist);
+                    let slip = length(sub(wrist, settled)) / UNITS_PER_METRE * 100.0;
+                    self.stats.hand_slip = self.stats.hand_slip.max(slip);
+                    if let Some(l) = w.last {
+                        let v = length(sub(wrist, l)) / dt / UNITS_PER_METRE;
+                        self.stats.hand_jitter = self.stats.hand_jitter.max(v);
+                    }
+                }
+            }
+            if hand.planted() {
+                let a = sub(self.posed[f].1, self.posed[u].1);
+                let c = sub(wrist, self.posed[f].1);
+                let bend = (dot(a, c) / (length(a) * length(c)).max(1e-6))
+                    .clamp(-1.0, 1.0)
+                    .acos();
+                // A turn back counts once the elbow has come back more than [`ELBOW_SWING`] from
+                // the furthest it went the other way (a visible swing, not the torso's sway).
+                match w.elbow {
+                    None => w.elbow = Some(bend),
+                    Some(extreme) => {
+                        if w.elbow_dir == 0.0 {
+                            if (bend - extreme).abs() > ELBOW_SWING {
+                                w.elbow_dir = (bend - extreme).signum();
+                                w.elbow = Some(bend);
+                            }
+                        } else if (bend - extreme) * w.elbow_dir > 0.0 {
+                            w.elbow = Some(bend);
+                        } else if (extreme - bend) * w.elbow_dir > ELBOW_SWING {
+                            w.reversals += 1;
+                            self.stats.elbow_reversals =
+                                self.stats.elbow_reversals.max(w.reversals);
+                            w.elbow_dir = -w.elbow_dir;
+                            w.elbow = Some(bend);
+                        }
+                    }
+                }
+            }
+            w.touching = touching && holding;
+            w.last = Some(wrist);
         }
     }
 

@@ -337,9 +337,10 @@ pub const BRACE_HOLDS: f32 = 2.5;
 /// below them (m): chest high, a deliberate reach (Patrick, 2026-11-15: it was rubbery and high).
 pub const BRACE_OUT: f32 = 0.45;
 pub const BRACE_LOW: f32 = 0.28;
-/// The bracing arms' motors this many times firmer (the active body's dip below 0): a deliberate
-/// reach and a steady hold, not a rubbery one.
-pub const BRACE_FIRM: f32 = 1.0;
+/// The bracing arms' motors this many times firmer (the active body's dip below 0). None since the
+/// brace's hands follow their own path and plant (`crate::brace`): firmer motors fought the path
+/// and the contact and shook an armed body (the lab's rifle braces, 2026-11-15).
+pub const BRACE_FIRM: f32 = 0.0;
 /// How much the bracing arms track their world rotation (1: the wall point, whatever the torso).
 pub const BRACE_WORLD: f32 = 0.5;
 
@@ -426,7 +427,7 @@ fn side_out(fwd: V3, side: u8) -> V3 {
 
 /// The rotation taking the frame of `a` and `b` (directions, `b` made square to `a`) onto that of
 /// `c` and `d`; `None` when either pair is degenerate.
-fn align(a: V3, b: V3, c: V3, d: V3) -> Option<M3> {
+pub(crate) fn align(a: V3, b: V3, c: V3, d: V3) -> Option<M3> {
     let frame = |x: V3, y: V3| -> Option<M3> {
         let x = unit(x)?;
         let y = unit(sub(y, scale(x, dot(x, y))))?;
