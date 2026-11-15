@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (human arms; armed and attacking actors react)
+
+- **Now (`ragdoll_core::flinch` `SPINS`, `Follow`, `hold_aim`, `rotation_vector`; `active_ragdoll` `blocked`, `before_ragdoll_anim` over `00888970`, `interrupt_attack`, `weapon_drawn`; `knockdown::hold_bones` arms-only while lying; the lab's armed and attacking mannequin and four scenarios):** arms softer, speed-capped and lagging with follow-through; the windmill at a person's pace; armed and attacking actors flinch, step, brace and fall (their pose is written ahead of the game's ragdoll controller pass, whose grab IK used to write over it); small flinches keep the aim; a stagger or more interrupts an attack; every skipped reaction is logged with its reason. Not run in game; the lab's 20 scenarios pass natively and in Chromium.
+- **Patrick:** the lab's and the game's arm flailing looked glitchy and inhuman: softer arm motors, more damping, capped arm speed, a slower windmill, lag and follow-through; NPCs holding a weapon or attacking got no reaction at all: find and fix the override, keep the aim through small flinches, a big hit interrupts the attack, log every skipped reaction; both in the game and the lab, with a lab scenario for an armed or attacking body.
+
 ### Claude, 2026-11-15 (ragdoll lab)
 
 - **Now (`crates/ragdoll-core`, `tools/ragdoll-lab`, `.github/workflows/ragdoll-lab-pages.yml`):** the active ragdoll's pure parts moved into a shared crate the host re-exports (game behaviour unchanged: the same constants, `tuning::get` is them unless the lab sets it; a stepping's clock is passed in); a WebAssembly lab on GitHub Pages runs the game's controller on a capsule mannequin with Rapier (sliders, ini export/import, slow motion, frame step, grounds, `?scenario=all&headless=1` reports). Its 16 built-in scenarios pass natively and in Chromium. The Pages deploy needs the repository's Pages source set to GitHub Actions and the github-pages environment to allow this branch.

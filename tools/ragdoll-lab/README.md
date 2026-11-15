@@ -41,7 +41,9 @@ navmesh by a ray down onto the ground.
 - Click a body part to hit it. Drag to turn the view, scroll to zoom.
 - Pick the weapon (gun and ammo, melee weapon with Strength, skill and power attack, or an
   explosive), the body, its scale and armour, the ground (flat, slope, uneven, stairs, wall,
-  ledge) and the limbs it has.
+  ledge), the limbs it has, and whether it holds a weapon (it aims it, the weapon drawn in its
+  hand) or is attacking. An armed body keeps its aim through a flinch below the stagger; a
+  stagger, a catch step or a knockdown interrupts an attack.
 - Pause, step a frame, slow motion (0.5x, 0.25x, 0.1x), reset. Keys: Space, `.`, R.
 - **Tuning:** every value has a slider (double-click its name for the game's value).
   **Export ini** writes them as text: the `[nv-rs Gunplay]` lines are the game's ini settings
@@ -65,8 +67,10 @@ weapon (`fists`, `knife`, `bat`, `sledge`, ...) or an explosive (`frag`, `dynami
 `%2B` for `+` in a URL); `/from` the attacker's direction in degrees (0 the body's front, which
 pushes toward the wall, the ledge and the stairs; 90 its right). Other keys: `ground`, `body`
 (`human`, `mutant`), `scale`, `armour`, `range` (m), `limbs` (four digits: left leg, right leg,
-left arm, right arm; `0111` has lost the left leg), `expect` (`upright`, `fell`, `braced`,
-`steps>=1`, `steps=0`, `fall:<kind>`).
+left arm, right arm; `0111` has lost the left leg), `armed=1` (holding a weapon, aiming),
+`attacking=1` (attacking; armed too), `expect` (`upright`, `fell`, `braced`, `steps>=1`,
+`steps=0`, `fall:<kind>`, `flinched`, `aim<=D` degrees, `armspin<=W` and `ragdollarmspin<=W`
+rad/s, `interrupted`, `attacking`).
 
 Each run goes until the body has recovered (or 12 s after the last hit). The report (JSON in
 `<pre id="results">`, in `window.ragdollLab.results`, and on the console;
@@ -74,8 +78,10 @@ Each run goes until the body has recovered (or 12 s after the last hit). The rep
 `fall` (`knockdown`, `stepped off a ledge`, `more than its steps could catch`, `one leg`,
 `crumpled against a wall`), `steps`, `braced`, `distance_m` (how far the body ended from where it
 stood), `recovery_s` (from the first hit until it stood at rest again), `peak_speed_mps` against
-`topple_mps`, the decisions (`None`, `Stagger`, `Knockdown`), whether the expectations held, and
-the log's last lines.
+`topple_mps`, the decisions (`None`, `Stagger`, `Knockdown`), `arm_spin` and `ragdoll_arm_spin`
+(the fastest an arm bone turned standing, and in the ragdoll, rad/s), `flinch_deg`,
+`aim_drift_deg` (an armed body's weapon hand off its aim), `interrupted`, whether the
+expectations held, and the log's last lines.
 
 ## Building
 

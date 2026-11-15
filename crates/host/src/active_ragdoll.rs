@@ -32,8 +32,29 @@
 //! the springs come to rest the pose is put back. The actor's reference and its character
 //! controller are never moved (Patrick's rule).
 //!
+//! **Armed and attacking actors** (Patrick, 2026-11-15: they showed no reaction at all). The
+//! game's ragdoll controller pass (`bhkRagdollController::DoRagdollAnim`, `00c7d630`, run per
+//! actor by `00888970` from the AI thread's process-list step `0096cb50`) reads every bone's local
+//! pose and writes it back through the foot IK, the grab IK (an actor holding a weapon: the hands
+//! kept on it) and the ragdoll's feedback. It runs for an actor whose controller has one of them
+//! on, so for armed and attacking actors it wrote their animated pose back over the flinch before
+//! the draw. Now the layer's offsets of this frame are written onto the bones right before that
+//! pass ([`before_ragdoll_anim`], over `00888970`): the pass reads them, its grab IK keeps the
+//! hands on the weapon through them, and it writes them back; the draw set-up then only steps
+//! the springs for those actors (it writes nothing over the pass). An armed actor keeps its aim
+//! through a flinch below the stagger ([`hold_aim`]: its arms' kick cut and the torso's turn under
+//! them taken back by `AIM_HOLD`); a stagger, a catch step or a knockdown interrupts an attack
+//! (`Actor::StopAttack`, `008a8e50`, [`interrupt_attack`]). Every skipped reaction is logged with
+//! its reason ([`blocked`]).
+//!
+//! **The arms** (Patrick, 2026-11-15: they snapped and flailed): softer, well-damped arm springs,
+//! every joint's turn held to a person's speed ([`Role::spin`]), and the poses the arms are given
+//! (arms out while stepping, the wall brace's reach, the ledge's windmill, now at a person's pace)
+//! followed with a lag and a little follow-through ([`Follow`]) instead of jumps.
+//!
 //! **Never:** the player, a dead actor, one knocked down or getting up (`crate::knockdown`), a
-//! companion unless `bKnockdownCompanions`, an actor below the high process (no animated 3D).
+//! companion unless `bKnockdownCompanions`, an actor below the middle-high process (no animated
+//! 3D).
 //!
 //! **For stage 2 and 3:** [`Rig`] (the skeleton's named bones), [`Spring`] (a bone's offset state)
 //! and [`apply`] (the pose layer) are what balance and bracing drive too; [`hit`] is the stimulus
@@ -68,6 +89,9 @@ pub struct Rig {
     /// Stage 3: hands braced on a wall, and the fall into the ragdoll under way.
     pub brace: Option<Brace>,
     pub fall: Option<Fall>,
+    /// Its weapon drawn at the last hit, and how much of its aim it keeps ([`hold_aim`]).
+    pub armed: bool,
+    pub aim_hold: f32,
 }
 
 /// Hands reaching to a wall along `dir` (stage 3), `t` seconds in.
@@ -101,6 +125,10 @@ pub struct Bone {
     /// The animated pose (local rotation, local translation) and what was written over it.
     pub pose: Option<(M3, V3)>,
     pub written: Option<(M3, V3)>,
+    /// The rig bone it hangs from, and (an arm's) its shown pose offset following the poses it is
+    /// given ([`Follow`]).
+    pub parent: Option<usize>,
+    pub follow: Follow,
 }
 
 static RIGS: Mutex<Vec<Rig>> = Mutex::new(Vec::new());
@@ -139,6 +167,13 @@ const MAX_NODES: usize = 400;
 const GET_SCALE: u32 = 0x0056_7400;
 const REFR_POSITION: u32 = 0x30;
 const MOVED_AWAY: f32 = 30.0;
+/// The middle-high process level (the lowest with an animated 3D); `Actor::IsWeaponDrawn` and
+/// `Actor::StopAttack`.
+const MIDDLE_HIGH: u8 = 1;
+const IS_WEAPON_DRAWN: u32 = 0x008a_16d0;
+const STOP_ATTACK: u32 = 0x008a_8e50;
+/// The ragdoll controller pass over an actor's bones (`00888970`, module documentation).
+pub const RAGDOLL_ANIM: u32 = 0x0088_8970;
 
 fn read3(e: &Engine, at: u32) -> V3 {
     [0, 4, 8].map(|o| e.mem.f32(at + o))
@@ -192,6 +227,8 @@ fn find_bones(e: &mut Engine, root: u32) -> Vec<Bone> {
                     spring: Spring::REST,
                     pose: None,
                     written: None,
+                    parent: None,
+                    follow: Follow::REST,
                 });
             }
         }
@@ -205,18 +242,85 @@ fn find_bones(e: &mut Engine, root: u32) -> Vec<Bone> {
     }
     // Parents before children (the pelvis, the spine up, then the limbs), as [`BONES`] lists them.
     found.sort_by_key(|b| BONES.iter().position(|(_, r)| *r == b.role).unwrap_or(99));
+    // Each bone's rig parent: the nearest node above it that is a rig bone.
+    let nodes: Vec<u32> = found.iter().map(|b| b.node).collect();
+    for bone in &mut found {
+        let mut at = e.mem.u32(bone.node + PARENT);
+        let mut up = 0;
+        while at != 0 && up < 32 {
+            if let Some(i) = nodes.iter().position(|&n| n == at) {
+                bone.parent = Some(i);
+                break;
+            }
+            at = e.mem.u32(at + PARENT);
+            up += 1;
+        }
+    }
     found
 }
 
-/// Whether `actor` can flinch now (module documentation).
-fn can_flinch(e: &mut Engine, actor: u32) -> bool {
+/// Why `actor` cannot react now (module documentation), `None` when it can.
+pub fn blocked(e: &mut Engine, actor: u32) -> Option<String> {
     let process = e.mem.u32(actor + PROCESS);
-    process != 0
-        && e.mem.u8(process + PROCESS_LEVEL) == 0
-        && e.mem.u8(process + KNOCK_STATE) == 0
-        && !matches!(e.mem.u32(actor + LIFE_STATE), 1 | 2)
-        && !crate::knockdown::in_get_up(actor)
-        && e.call(ACTOR_3D, &args![actor]).u32() != 0
+    if process == 0 {
+        return Some("no process".into());
+    }
+    let level = e.mem.u8(process + PROCESS_LEVEL);
+    if level > MIDDLE_HIGH {
+        return Some(format!(
+            "process level {level} (below middle-high: no animated 3D)"
+        ));
+    }
+    let knock = e.mem.u8(process + KNOCK_STATE) as i8;
+    if knock != 0 {
+        return Some(format!(
+            "knock state {knock} (in its ragdoll or getting up)"
+        ));
+    }
+    let life = e.mem.u32(actor + LIFE_STATE);
+    if matches!(life, 1 | 2) {
+        return Some(format!("life state {life} (dying or dead)"));
+    }
+    if crate::knockdown::in_get_up(actor) {
+        return Some("getting up from a knockdown".into());
+    }
+    if e.call(ACTOR_3D, &args![actor]).u32() == 0 {
+        return Some("no 3D".into());
+    }
+    None
+}
+
+fn can_flinch(e: &mut Engine, actor: u32) -> bool {
+    blocked(e, actor).is_none()
+}
+
+/// Whether `actor` has its weapon drawn (`Actor::IsWeaponDrawn`, `008a16d0`).
+pub fn weapon_drawn(e: &mut Engine, actor: u32) -> bool {
+    e.call(IS_WEAPON_DRAWN, &args![actor]).u8() != 0
+}
+
+/// The actor's current action (its process's `+0x3e4`; 2 and 4 are attacks, as
+/// `Actor::StopAttack` reads them).
+pub fn current_action(e: &mut Engine, actor: u32) -> i32 {
+    let process = e.mem.u32(actor + PROCESS);
+    if process == 0 {
+        return -1;
+    }
+    e.vcall(process, 0x3e4, &args![]).i32()
+}
+
+/// A big enough hit interrupts an attack (`Actor::StopAttack`, `008a8e50`, which acts only on
+/// actions 2 and 4); logged with `why`.
+pub fn interrupt_attack(e: &mut Engine, actor: u32, why: &str) {
+    let action = current_action(e, actor);
+    if !matches!(action, 2 | 4) {
+        return;
+    }
+    e.call(STOP_ATTACK, &args![actor]);
+    note(format!(
+        "{}: attack interrupted ({why}; action {action})",
+        describe(e, actor)
+    ));
 }
 
 /// The actor's rig made (its bones found) when it has none for its 3D; false when it has no rig
@@ -254,27 +358,69 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         limbs: crate::balance::limbs_of(actor),
         brace: None,
         fall: None,
+        armed: false,
+        aim_hold: 0.0,
     });
     true
 }
 
 /// A hit below the topple speed (from `crate::knockdown`): `actor` takes the momentum `p` (N s,
 /// this hit's) on its `mass` (kg) at `point` along `direction` (unit) (module documentation).
-pub fn hit(e: &mut Engine, actor: u32, p: f32, mass: f32, point: V3, direction: V3) {
+///
+/// `keep_aim`: the hit is below the stagger, so an armed actor keeps its aim ([`hold_aim`]).
+pub fn hit(
+    e: &mut Engine,
+    actor: u32,
+    p: f32,
+    mass: f32,
+    point: V3,
+    direction: V3,
+    keep_aim: bool,
+) {
     let strength = crate::gunplay::tuning().hit_reactions;
-    if strength <= 0 || !crate::gunplay::is_on() || !(p > 0.0 && mass > 0.0) {
+    if !crate::gunplay::is_on() {
         return;
     }
-    if !can_flinch(e, actor) {
+    if strength <= 0 {
+        note(format!(
+            "{}: no flinch: Hit Reactions is 0",
+            describe(e, actor)
+        ));
+        return;
+    }
+    if !(p > 0.0 && mass > 0.0) {
+        note(format!(
+            "{}: no flinch: no momentum ({p:.2} N s on {mass:.0} kg)",
+            describe(e, actor)
+        ));
+        return;
+    }
+    if let Some(why) = blocked(e, actor) {
+        note(format!("{}: no flinch: {why}", describe(e, actor)));
         return;
     }
     let Some(direction) = unit(direction) else {
+        note(format!(
+            "{}: no flinch: the hit has no direction",
+            describe(e, actor)
+        ));
         return;
     };
     let v = p / mass * strength as f32 / 100.0;
     if !ensure_rig(e, actor) {
+        note(format!(
+            "{}: no flinch: its 3D has none of the rig's Bip01 bones",
+            describe(e, actor)
+        ));
         return;
     }
+    let armed = weapon_drawn(e, actor);
+    let action = current_action(e, actor);
+    let aim_hold = if armed && keep_aim {
+        ragdoll_core::tuning::get().aim_hold
+    } else {
+        0.0
+    };
     let root = e.call(ACTOR_3D, &args![actor]).u32();
     let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     let Some(index) = rigs.iter().position(|r| r.actor == actor && r.root == root) else {
@@ -282,6 +428,8 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, mass: f32, point: V3, direction: 
     };
     let rig = &mut rigs[index];
     rig.since = Instant::now();
+    rig.armed = armed;
+    rig.aim_hold = aim_hold;
     let spread = spread_of(v);
     // The struck bone: the rig's bone nearest the impact.
     let positions: Vec<V3> = rig
@@ -359,12 +507,19 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, mass: f32, point: V3, direction: 
     let who = describe(e, actor);
     note(format!(
         "{who}: flinch at {}: {p:.1} N s on {mass:.0} kg -> {v:.2} m/s (Hit Reactions {strength}%), \
-         spread {spread:.2} m, {touched} of {} bones",
+         spread {spread:.2} m, {touched} of {} bones{}",
         BONES
             .iter()
             .find(|(_, r)| *r == struck_role)
             .map_or("a bone", |b| b.0),
-        rig.bones.len()
+        rig.bones.len(),
+        match (armed, aim_hold > 0.0, matches!(action, 2 | 4)) {
+            (true, true, true) => format!("; armed and attacking (action {action}): keeps its aim"),
+            (true, true, false) => "; armed: keeps its aim".to_string(),
+            (true, false, _) => "; armed: the hit takes its aim".to_string(),
+            (false, _, true) => format!("; attacking (action {action})"),
+            _ => String::new(),
+        }
     ));
 }
 
@@ -400,6 +555,9 @@ pub fn apply(e: &mut Engine) {
             continue;
         }
         let flinching = can_flinch(e, rig.actor);
+        // The ragdoll controller pass writes this actor's bones (an armed or attacking actor):
+        // the offsets go on there ([`before_ragdoll_anim`]); here they are only worked out.
+        let wrapped = wrapped_recently(rig.actor);
         // The pose under the offset: what the animation wrote, or (when it did not write the bone
         // again) the pose the last offset was written over.
         for bone in &mut rig.bones {
@@ -427,9 +585,17 @@ pub fn apply(e: &mut Engine) {
             let w0 = std::f32::consts::TAU * f;
             rig.drop_speed += (-w0 * w0 * rig.drop - 2.0 * zeta * w0 * rig.drop_speed) * dt;
             rig.drop = (rig.drop + rig.drop_speed * dt).clamp(-PELVIS_DROP_MAX, 0.0);
+            // The arms follow the poses they are given (or their own) with a lag.
+            for (index, bone) in rig.bones.iter_mut().enumerate() {
+                if bone.role.is_arm() {
+                    let target = overrides[index].map_or([0.0; 3], |o| rotation_vector(&o));
+                    bone.follow.step(target, dt);
+                }
+            }
         } else {
             for bone in &mut rig.bones {
                 bone.spring = Spring::REST;
+                bone.follow = Follow::REST;
             }
             rig.drop = 0.0;
             rig.drop_speed = 0.0;
@@ -438,12 +604,48 @@ pub fn apply(e: &mut Engine) {
             rig.brace = None;
             rig.fall = None;
         }
-        let resting = rig.bones.iter().all(|b| b.spring.at_rest())
+        let resting = rig
+            .bones
+            .iter()
+            .all(|b| b.spring.at_rest() && b.follow.at_rest())
             && rig.drop.abs() < 1e-3
             && rig.balance.is_none()
             && rig.brace.is_none()
             && rig.fall.is_none();
         let shift = rig.shift;
+        // Each bone's world offset R: its pose override (an arm's followed) on its spring's.
+        let mut offsets: Vec<M3> = rig
+            .bones
+            .iter()
+            .enumerate()
+            .map(|(index, bone)| {
+                let spring = rotation(bone.spring.angle);
+                let o = if bone.role.is_arm() {
+                    Some(rotation(bone.follow.angle))
+                } else {
+                    overrides[index]
+                };
+                match o {
+                    Some(o) => mul(&o, &spring),
+                    None => spring,
+                }
+            })
+            .collect();
+        if rig.armed && rig.aim_hold > 0.0 {
+            let parents: Vec<Option<usize>> = rig.bones.iter().map(|b| b.parent).collect();
+            let roles: Vec<Role> = rig.bones.iter().map(|b| b.role).collect();
+            hold_aim(&mut offsets, &parents, &roles, rig.aim_hold);
+        }
+        let pelvis_offset = add([0.0, 0.0, rig.drop * UNITS_PER_METRE], shift);
+        remember_pose(&rig, &offsets, pelvis_offset, resting);
+        if wrapped {
+            // Written by the ragdoll controller pass's wrapper this frame (or the next).
+            if resting && rig.since.elapsed().as_secs_f32() > 0.2 {
+                continue;
+            }
+            keep.push(rig);
+            continue;
+        }
         for (index, bone) in rig.bones.iter_mut().enumerate() {
             let (pose_rot, pose_t) = bone.pose.unwrap_or_default();
             let (rot, t) = if resting {
@@ -456,20 +658,10 @@ pub fn apply(e: &mut Engine) {
                     read9(e, parent + WORLD_ROTATION)
                 };
                 // The world-space offset carried into the bone's frame: P^T R P L.
-                let spring = rotation(bone.spring.angle);
-                let r = match overrides[index] {
-                    Some(o) => mul(&o, &spring),
-                    None => spring,
-                };
+                let r = offsets[index];
                 let rot = mul(&mul(&mul(&transpose(&p), &r), &p), &pose_rot);
                 let t = if bone.role == Role::Pelvis {
-                    add(
-                        pose_t,
-                        apply_m(
-                            &transpose(&p),
-                            add([0.0, 0.0, rig.drop * UNITS_PER_METRE], shift),
-                        ),
-                    )
+                    add(pose_t, apply_m(&transpose(&p), pelvis_offset))
                 } else {
                     pose_t
                 };
@@ -487,6 +679,11 @@ pub fn apply(e: &mut Engine) {
         }
         keep.push(rig);
     }
+    // The pass's wrapper writes only for the rigs still posed (none in its ragdoll, gone or dead).
+    POSES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|p| keep.iter().any(|r| r.actor == p.0 && r.root == p.1.root));
     let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     // Rigs a hit made while this ran come after.
     let fresh = std::mem::take(&mut *rigs);
@@ -494,6 +691,138 @@ pub fn apply(e: &mut Engine) {
     for f in fresh {
         rigs.retain(|r| r.actor != f.actor);
         rigs.push(f);
+    }
+}
+
+// --- The ragdoll controller pass (armed and attacking actors; module documentation). ----------
+
+/// What the pose layer worked out for an actor at its last frame: its 3D, each rig bone's node,
+/// world offset and whether it is the pelvis, the pelvis's world offset, whether it rests; and
+/// what the last write over the pass left (per node: the pose under it and what was written).
+#[derive(Clone, Debug, Default)]
+struct Pose {
+    root: u32,
+    bones: Vec<(u32, M3, bool)>,
+    pelvis: V3,
+    resting: bool,
+    written: Vec<Written>,
+}
+
+/// A node, the pose under the wrapper's write and what it wrote.
+type Written = (u32, (M3, V3), (M3, V3));
+
+static POSES: Mutex<Vec<(u32, Pose)>> = Mutex::new(Vec::new());
+/// When the pass's wrapper last wrote each actor's bones.
+static WRAPPED: Mutex<Vec<(u32, Instant)>> = Mutex::new(Vec::new());
+/// The wrapper's writes count for this long (the pass runs every frame while it is on).
+const WRAP_HOLDS: f32 = 0.1;
+
+fn remember_pose(rig: &Rig, offsets: &[M3], pelvis: V3, resting: bool) {
+    let mut poses = POSES.lock().unwrap_or_else(|p| p.into_inner());
+    let old = poses
+        .iter()
+        .position(|p| p.0 == rig.actor)
+        .map(|i| poses.remove(i).1);
+    if resting {
+        return;
+    }
+    let written = old
+        .filter(|o| o.root == rig.root)
+        .map(|o| o.written)
+        .unwrap_or_default();
+    poses.push((
+        rig.actor,
+        Pose {
+            root: rig.root,
+            bones: rig
+                .bones
+                .iter()
+                .zip(offsets)
+                .map(|(b, r)| (b.node, *r, b.role == Role::Pelvis))
+                .collect(),
+            pelvis,
+            resting,
+            written,
+        },
+    ));
+}
+
+fn wrapped_recently(actor: u32) -> bool {
+    let mut list = WRAPPED.lock().unwrap_or_else(|p| p.into_inner());
+    list.retain(|w| w.1.elapsed().as_secs_f32() < WRAP_HOLDS);
+    list.iter().any(|w| w.0 == actor)
+}
+
+/// Over `00888970` (the ragdoll controller pass of `actor`), before the game's own: the pose
+/// layer's offsets written onto the bones as they are now, so the pass reads them, keeps the
+/// hands on the weapon through them and writes them back (module documentation).
+pub fn before_ragdoll_anim(e: &mut Engine, actor: u32) {
+    let pose = {
+        let poses = POSES.lock().unwrap_or_else(|p| p.into_inner());
+        poses.iter().find(|p| p.0 == actor).map(|p| p.1.clone())
+    };
+    let Some(mut pose) = pose else {
+        return;
+    };
+    if pose.resting || pose.root == 0 || e.call(ACTOR_3D, &args![actor]).u32() != pose.root {
+        return;
+    }
+    let process = e.mem.u32(actor + PROCESS);
+    if process == 0
+        || e.mem.u8(process + KNOCK_STATE) != 0
+        || matches!(e.mem.u32(actor + LIFE_STATE), 1 | 2)
+    {
+        return; // its ragdoll (or its death) owns the bones
+    }
+    let mut written = Vec::with_capacity(pose.bones.len());
+    for &(node, r, pelvis) in &pose.bones {
+        let now = (
+            read9(e, node + LOCAL_ROTATION),
+            read3(e, node + LOCAL_TRANSLATION),
+        );
+        // A bone nothing wrote again since this wrote it (a paused frame) keeps its pose under.
+        let base = pose
+            .written
+            .iter()
+            .find(|w| w.0 == node && w.2 == now)
+            .map_or(now, |w| w.1);
+        let parent = e.mem.u32(node + PARENT);
+        let p = if parent == 0 {
+            IDENTITY
+        } else {
+            read9(e, parent + WORLD_ROTATION)
+        };
+        let rot = mul(&mul(&mul(&transpose(&p), &r), &p), &base.0);
+        let t = if pelvis {
+            add(base.1, apply_m(&transpose(&p), pose.pelvis))
+        } else {
+            base.1
+        };
+        if rot.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite()) {
+            write9(e, node + LOCAL_ROTATION, &rot);
+            write3(e, node + LOCAL_TRANSLATION, t);
+            written.push((node, base, (rot, t)));
+        }
+    }
+    update(e, pose.root);
+    pose.written = written;
+    {
+        let mut poses = POSES.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(p) = poses.iter_mut().find(|p| p.0 == actor) {
+            p.1.written = pose.written;
+        }
+    }
+    let mut list = WRAPPED.lock().unwrap_or_else(|p| p.into_inner());
+    let first = !list.iter().any(|w| w.0 == actor);
+    list.retain(|w| w.0 != actor);
+    list.push((actor, Instant::now()));
+    drop(list);
+    if first {
+        note(format!(
+            "{}: its bones go through the game's ragdoll controller pass (grab or foot IK: an \
+             armed or attacking actor): the flinch is written there",
+            describe(e, actor)
+        ));
     }
 }
 
@@ -695,9 +1024,17 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
     use crate::balance::{classify, plan, Ground, Outcome, Stepping};
     let strength = crate::gunplay::tuning().balance;
     if strength <= 0 || !crate::gunplay::is_on() || !(p > 0.0 && mass > 0.0) {
+        return; // Balance off (or nothing pushed): the flinch alone, said by `hit`
+    }
+    if let Some(why) = blocked(e, actor) {
+        note(format!("{}: no catch steps: {why}", describe(e, actor)));
         return;
     }
-    if !can_flinch(e, actor) || !ensure_rig(e, actor) {
+    if !ensure_rig(e, actor) {
+        note(format!(
+            "{}: no catch steps: its 3D has none of the rig's Bip01 bones",
+            describe(e, actor)
+        ));
         return;
     }
     let Some(dir) = unit([direction[0], direction[1], 0.0]) else {
@@ -736,6 +1073,8 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
     if planned.steps.is_empty() {
         return; // the feet hold it: the flinch alone
     }
+    // Pushed past its feet: no aim kept, and an attack is interrupted (below, without the lock).
+    rig.aim_hold = 0.0;
     if one_leg {
         // One leg cannot step: past its foot it goes over.
         rig.fall = Some(Fall {
@@ -752,6 +1091,7 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
         note(format!(
             "{who}: on one leg it cannot step: falls ({v:.2} m/s)"
         ));
+        interrupt_attack(e, actor, "it falls");
         return;
     }
     let mut outcome =
@@ -764,6 +1104,7 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
     let mut steps = Vec::new();
     let mut said = Vec::new();
     drop(rigs);
+    interrupt_attack(e, actor, "pushed past its feet");
     // Each foot's ankle over its ground (the navmesh's height is the ground's; the foot bone is
     // the ankle): kept for its steps.
     let ankle: [f32; 2] = [0, 1].map(|f| {
@@ -1051,7 +1392,18 @@ pub fn fall(
     if !crate::gunplay::is_on() || (t.hit_reactions <= 0 && t.balance <= 0) {
         return false;
     }
-    if !can_flinch(e, actor) || !ensure_rig(e, actor) {
+    if let Some(why) = blocked(e, actor) {
+        note(format!(
+            "{}: no fall pose: {why}; straight into the ragdoll",
+            describe(e, actor)
+        ));
+        return false;
+    }
+    if !ensure_rig(e, actor) {
+        note(format!(
+            "{}: no fall pose: no rig bones; straight into the ragdoll",
+            describe(e, actor)
+        ));
         return false;
     }
     let root = e.call(ACTOR_3D, &args![actor]).u32();
@@ -1096,6 +1448,8 @@ fn update(e: &mut Engine, root: u32) {
 /// Everything dropped (a load, a new game, the main menu): the nodes go with the game.
 pub fn clear() {
     RIGS.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    POSES.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    WRAPPED.lock().unwrap_or_else(|p| p.into_inner()).clear();
     *LAST.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 

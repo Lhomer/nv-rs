@@ -443,6 +443,37 @@ Patrick, 2026-11-15. Rides on Hit Reactions and Balance (either on).
   falls`, `the steps could not catch it: falls`, `into its ragdoll after <t> s of going over`,
   `braces for the ground with its arms`.
 
+### Active ragdoll: human arms, armed and attacking actors (Patrick, 2026-11-15)
+
+- **The arms** (they snapped and flailed in the lab and the game): softer, well-damped arm springs
+  (clavicle 2.0 Hz / 0.6, upper arm 1.3 / 0.65, forearm 1.5 / 0.7, hand 1.7 / 0.75; kick shares
+  0.6 / 0.75 / 0.65 / 0.55); every joint's turn held to a person's speed (rad/s: arms 4-6, spine
+  7, head 9), before the kick moves the bone; the poses the arms are given (arms out while
+  stepping, now 0.6 rad; the wall brace, reach 0.22 s, release 0.5 s; the ledge windmill, now
+  1.1 turns a second, 1.1 rad) followed with a lag and a little follow-through (a 2.6 Hz, 0.7
+  damping spring, at most 4.5 rad/s) instead of jumps. In the ragdoll the arm bones spin at most
+  8 rad/s, while it flies and while it lies (only an arm over that is touched, so it still
+  sleeps), and the ground brace steers them 0.12 a frame (was 0.25).
+- **Armed and attacking actors got no reaction** because the game's ragdoll controller pass
+  (`bhkRagdollController::DoRagdollAnim`, `00c7d630`, from `00888970`, run per actor by the AI
+  thread's process-list step `0096cb50`) reads each bone's local pose and writes it back through
+  the grab IK (the hands on the weapon), the foot IK and the ragdoll feedback; it runs for an
+  actor with any of them on, which armed actors have, and its write came over the flinch before
+  the draw. Over `00888970` the layer now writes its offsets first
+  (`active_ragdoll::before_ragdoll_anim`); the pass reads them, keeps the hands on the weapon
+  through them and writes them back; the draw set-up only steps the springs for those actors.
+  The process-level gate is now middle-high, as the knockdowns' (it was high only).
+- **Aim and attacks:** an armed actor (`Actor::IsWeaponDrawn`, `008a16d0`) keeps its aim through
+  a flinch below the stagger (its arms' kick cut and the torso's turn under them taken back by
+  0.8, `ragdoll_core::flinch::hold_aim`); a stagger, a knockdown, a catch step or a fall
+  interrupts an attack (`Actor::StopAttack`, `008a8e50`, acting on actions 2 and 4).
+- **Log:** every skipped reaction says why (`no flinch: <reason>`, `no catch steps: <reason>`,
+  `no fall pose: <reason>; straight into the ragdoll`: no process, process level, knock state,
+  life state, getting up, no 3D, no rig bones, Hit Reactions 0, no momentum); `attack interrupted
+  (<why>; action <n>)`; `its bones go through the game's ragdoll controller pass`; the flinch line
+  says `armed: keeps its aim` or `armed: the hit takes its aim`; the clamp line says `lying: arms
+  only`.
+
 ### The shared crate and the ragdoll lab (`crates/ragdoll-core`, `tools/ragdoll-lab`)
 
 Patrick, 2026-11-15: a light web app to try the active ragdoll quickly, on the game's own code so

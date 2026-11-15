@@ -276,6 +276,15 @@ pub fn install(e: &mut Engine) {
         }
         Ret::default()
     });
+    // The ragdoll controller pass over a living actor's bones (grab and foot IK): the pose
+    // layer's offsets go on first (`crate::active_ragdoll::before_ragdoll_anim`).
+    e.register(crate::active_ragdoll::RAGDOLL_ANIM, |e, a| {
+        if crate::gunplay::is_on() && a[0] != 0 {
+            crate::active_ragdoll::before_ragdoll_anim(e, a[0]);
+        }
+        engine::units::fallout_ai::actor_p2::fn_00888970(e, Ptr::new(a[0]), a[1]);
+        Ret::default()
+    });
 }
 
 /// After the game applied the hit `hit` to `target`: a knockdown or a stagger (module
@@ -368,7 +377,8 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
             note(format!("{who}: stack reset on the knockdown"));
             // Stage 3: the posed body goes over first (the flinch's kick on top), then falls into
             // its ragdoll; without the layer, the hard switch as before.
-            crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction);
+            crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction, false);
+            crate::active_ragdoll::interrupt_attack(e, target, "knocked down");
             if !crate::active_ragdoll::fall(e, target, aggressor, point, direction, speed) {
                 knock_down(e, target, aggressor, point, direction, speed)
             }
@@ -378,7 +388,8 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
         // on every hit below topple (the stack's speed, so each rapid hit pushed harder) added up
         // and slid or launched it while it stood (Patrick, 2026-11-15).
         Reaction::Stagger => {
-            crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction);
+            crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction, false);
+            crate::active_ragdoll::interrupt_attack(e, target, "staggered");
             crate::active_ragdoll::push(e, target, p, mass, hit_direction, aggressor);
             note(format!(
             "{who}: stagger (the game's hit reaction only, no push): this hit {:.2} m/s ({p:.1} N s), \
@@ -389,7 +400,7 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
         }
         // Below the stagger too: the physics flinch, per hit (`crate::active_ragdoll`).
         Reaction::None => {
-            crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction);
+            crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction, true);
             crate::active_ragdoll::push(e, target, p, mass, hit_direction, aggressor);
         }
     }
@@ -1187,9 +1198,10 @@ fn get_ups(e: &mut Engine) {
             continue; // up again
         }
         if matches!(state, 1 | 2) {
-            if g.since.elapsed() < FLIGHT {
-                hold_bones(e, g.actor, scale);
-            }
+            // While it flies every bone is held to the bounds; while it lies only an arm
+            // spinning past a person's flung arm is (a bone under its bound is never touched, so
+            // the body still sleeps).
+            hold_bones(e, g.actor, scale, g.since.elapsed() >= FLIGHT);
             if g.since.elapsed() < BRACE_GROUND_FOR {
                 brace_ground(e, &mut g, scale);
             }
@@ -1599,11 +1611,16 @@ fn set_velocity(e: &mut Engine, setter: u32, body: u32, v: [f32; 3]) {
 /// never set, so Havok can let the body come to rest and sleep. (274ad9c and 535c53a also damped
 /// every slow bone each frame, which woke the whole ragdoll every frame: it never slept and kept
 /// trembling.)
-fn hold_bones(e: &mut Engine, actor: u32, scale: f32) {
+fn hold_bones(e: &mut Engine, actor: u32, scale: f32, arms_only: bool) {
     let mut clamped = 0;
     let mut fastest = 0.0f32;
     let most = MAX_BONE_SPEED / scale;
-    for (_, body) in bodies(e, actor) {
+    let arm_spin = ragdoll_core::tuning::get().arm_ragdoll_spin;
+    for (node, body) in bodies(e, actor) {
+        let arm = is_arm_node(e, node);
+        if arms_only && !arm {
+            continue;
+        }
         let at = e.call(LINEAR_VELOCITY, &args![body]).u32();
         let spin_at = e.call(ANGULAR_VELOCITY, &args![body]).u32();
         if at == 0 || spin_at == 0 {
@@ -1611,8 +1628,18 @@ fn hold_bones(e: &mut Engine, actor: u32, scale: f32) {
         }
         let v = read3(e, at);
         let w = read3(e, spin_at);
-        let (nv, a) = clamp_speed(v, most);
-        let (nw, b) = clamp_speed(w, MAX_BONE_SPIN);
+        let (nv, a) = if arms_only {
+            (v, false)
+        } else {
+            clamp_speed(v, most)
+        };
+        // The arms spin no faster than a person's flung arm (Patrick, 2026-11-15: they flailed).
+        let spin = if arm {
+            arm_spin.min(MAX_BONE_SPIN)
+        } else {
+            MAX_BONE_SPIN
+        };
+        let (nw, b) = clamp_speed(w, spin);
         if a {
             set_velocity(e, SET_LINEAR_VELOCITY, body, nv);
             let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
@@ -1630,11 +1657,35 @@ fn hold_bones(e: &mut Engine, actor: u32, scale: f32) {
     if clamped > 0 {
         note(format!(
             "{}: clamp: {clamped} bones held (fastest {fastest:.0} units/s, at most {MAX_BONE_SPEED} \
-             and spin {MAX_BONE_SPIN})",
-            describe(e, actor)
+             and spin {MAX_BONE_SPIN}, arms {arm_spin}){}",
+            describe(e, actor),
+            if arms_only { " (lying: arms only)" } else { "" }
         ));
     }
 }
+
+/// Whether a ragdoll bone's node is an arm's (a clavicle, an upper arm, a forearm, a hand).
+fn is_arm_node(e: &Engine, node: u32) -> bool {
+    let name = e.mem.u32(node + NODE_NAME);
+    if name == 0 {
+        return false;
+    }
+    let text = e.mem.cstr(name);
+    BONES_ARMS
+        .iter()
+        .any(|n| text.eq_ignore_ascii_case(n.as_bytes()))
+}
+
+const BONES_ARMS: [&str; 8] = [
+    "Bip01 L Clavicle",
+    "Bip01 R Clavicle",
+    "Bip01 L UpperArm",
+    "Bip01 R UpperArm",
+    "Bip01 L Forearm",
+    "Bip01 R Forearm",
+    "Bip01 L Hand",
+    "Bip01 R Hand",
+];
 
 /// Stage 3's brace on the ground: while the falling body is still well off the ground and
 /// dropping, its hands and forearms (the arms it has) are steered forward along the fall and down

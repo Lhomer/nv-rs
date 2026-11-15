@@ -15,7 +15,7 @@ const params = new URLSearchParams(location.search);
 const headless = params.get("headless") === "1";
 window.ragdollLab = { done: false, results: null };
 
-const SPEC_KEYS = ["hits", "ground", "body", "scale", "armour", "armor", "dt", "range", "limbs", "tune", "expect", "name"];
+const SPEC_KEYS = ["hits", "ground", "body", "scale", "armour", "armor", "dt", "range", "limbs", "armed", "attacking", "tune", "expect", "name"];
 
 function finish(text) {
   $("results").textContent = text;
@@ -73,7 +73,7 @@ function startPage() {
     const v = (n) => css.getPropertyValue(n).trim();
     palette = {
       skyTop: v("--sky-top"), skyBottom: v("--sky-bottom"),
-      colours: [v("--ground-a"), v("--ground-b"), v("--bone"), v("--struck"), v("--ragdoll"), v("--arrow"), v("--foot")],
+      colours: [v("--ground-a"), v("--ground-b"), v("--bone"), v("--struck"), v("--ragdoll"), v("--arrow"), v("--foot"), v("--weapon")],
       edge: v("--bone-edge"),
     };
   };
@@ -131,6 +131,12 @@ function startPage() {
   const setBody = () => lab.set_body($("body").value, +$("scale").value, +$("armour").value);
   for (const id of ["body", "scale", "armour"]) $(id).addEventListener("change", setBody);
   $("ground").addEventListener("change", () => lab.set_ground($("ground").value));
+  const setStance = () => {
+    if ($("attacking").checked) $("armed").checked = true;
+    lab.set_stance($("armed").checked, $("attacking").checked);
+  };
+  $("armed").addEventListener("change", () => { if (!$("armed").checked) $("attacking").checked = false; setStance(); });
+  $("attacking").addEventListener("change", setStance);
   const limbs = [...document.querySelectorAll("[data-limb]")];
   for (const l of limbs) {
     l.addEventListener("change", () => lab.set_limbs(limbs[0].checked, limbs[1].checked, limbs[2].checked, limbs[3].checked));
@@ -239,7 +245,8 @@ function startPage() {
       $("results").textContent = list.map((x) => x.error ? `error: ${x.error}` :
         `${x.passed ? "PASS" : "FAIL"} ${x.name}: ${x.fell ? `fell (${x.fall})` : "stayed upright"}, ${x.steps} step(s), ` +
         `${x.distance_m.toFixed(2)} m, recovery ${x.recovery_s ?? "-"} s, peak ${x.peak_speed_mps.toFixed(2)} / topple ${x.topple_mps.toFixed(2)} m/s` +
-        (x.braced ? ", braced" : "")).join("\n");
+        (x.braced ? ", braced" : "") + (x.armed ? `, aim drift ${x.aim_drift_deg.toFixed(1)}°` : "") +
+        (x.interrupted ? ", attack interrupted" : "") + `, arm speed ${Math.max(x.arm_spin, x.ragdoll_arm_spin).toFixed(1)} rad/s`).join("\n");
     } catch (_) { $("results").textContent = text; }
     buildFields();
     $("ground").value = lab.ground();
@@ -276,7 +283,10 @@ function startPage() {
       ["Topples at", `${s.topple.toFixed(2)} m/s`],
       ["Stack now", `${s.stack.toFixed(1)} N s`],
       ["Mass", `${s.mass.toFixed(0)} kg`],
+      ["Arm speed", `${s.arm_spin.toFixed(1)} rad/s max`],
     ];
+    if (s.armed) rows.push(["Aim drift", `${s.aim_drift.toFixed(1)}°`]);
+    if (s.attacking || s.interrupted) rows.push(["Attack", s.interrupted ? "interrupted" : "going on"]);
     statusBox.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
   };
 

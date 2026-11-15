@@ -102,6 +102,7 @@ pub const FIX: Fix = Fix {
         crate::hit_force::MELEE_HIT,
         crate::hit_force::KNOCK_EXPLOSION,
         crate::knockdown::HIT_ME,
+        crate::active_ragdoll::RAGDOLL_ANIM,
         crate::knockdown::UPDATE_KNOCK_STATE,
         crate::test_range::REWARD_XP,
         crate::test_range::BEGIN_LEVEL_UP,

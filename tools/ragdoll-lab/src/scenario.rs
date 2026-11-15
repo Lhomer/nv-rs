@@ -53,6 +53,8 @@ pub struct Spec {
     pub armour: f32,
     pub range: f32,
     pub limbs: Limbs,
+    pub armed: bool,
+    pub attacking: bool,
     pub tune: Vec<(String, f32)>,
     pub hits: Vec<Hit>,
     pub expect: Vec<String>,
@@ -68,6 +70,8 @@ impl Default for Spec {
             armour: 0.0,
             range: 10.0,
             limbs: Limbs::WHOLE,
+            armed: false,
+            attacking: false,
             tune: Vec::new(),
             hits: Vec::new(),
             expect: Vec::new(),
@@ -76,15 +80,26 @@ impl Default for Spec {
 }
 
 /// The built-in scenarios: name, the text, the expectations (`upright`, `fell`, `steps>=N`,
-/// `steps=0`, `braced`, `fall:<kind>`).
-pub const BUILT_IN: [(&str, &str, &str); 16] = [
+/// `steps=0`, `braced`, `fall:<kind>`, `flinched` (a bone turned 2 degrees or more), `aim<=D`
+/// (an armed body's weapon hand stayed within D degrees of its aim), `armspin<=W` (no arm bone
+/// turned faster than W rad/s while it stood), `ragdollarmspin<=W` (nor in its ragdoll),
+/// `interrupted` (its attack), `attacking` (it was not)).
+pub const BUILT_IN: [(&str, &str, &str); 20] = [
     (
         "pistol-chest",
         "ground=flat&hits=9mm@chest",
-        "upright,steps=0",
+        "upright,steps=0,flinched,armspin<=6",
     ),
-    ("magnum-chest", "ground=flat&hits=44@chest", "upright"),
-    ("rifle-burst", "ground=flat&hits=556@chest*3~0.1", "upright"),
+    (
+        "magnum-chest",
+        "ground=flat&hits=44@chest",
+        "upright,flinched,armspin<=6",
+    ),
+    (
+        "rifle-burst",
+        "ground=flat&hits=556@chest*3~0.1",
+        "upright,armspin<=6",
+    ),
     (
         "hunting-rifle-side",
         "ground=flat&hits=308@chest/90",
@@ -94,25 +109,33 @@ pub const BUILT_IN: [(&str, &str, &str); 16] = [
     (
         "shotgun-close",
         "ground=flat&range=4&hits=12ga@chest",
-        "fell",
+        "fell,ragdollarmspin<=8.5",
     ),
-    ("anti-materiel", "ground=flat&hits=50mg@chest", "fell"),
+    (
+        "anti-materiel",
+        "ground=flat&hits=50mg@chest",
+        "fell,ragdollarmspin<=8.5",
+    ),
     ("fists", "ground=flat&hits=fists@chest", "upright,steps=0"),
     (
         "sledge-power",
         "ground=flat&hits=sledge:power@chest",
         "fell",
     ),
-    ("frag-2m", "ground=flat&hits=frag@2", "fell"),
+    (
+        "frag-2m",
+        "ground=flat&hits=frag@2",
+        "fell,ragdollarmspin<=8.5",
+    ),
     (
         "wall-brace",
         "ground=wall&hits=4570@chest",
-        "upright,braced",
+        "upright,braced,armspin<=6",
     ),
     (
         "ledge",
         "ground=ledge&hits=4570@chest",
-        "fell,fall:stepped off a ledge",
+        "fell,fall:stepped off a ledge,armspin<=6,ragdollarmspin<=8.5",
     ),
     (
         "slope-down",
@@ -130,6 +153,26 @@ pub const BUILT_IN: [(&str, &str, &str); 16] = [
         "upright,steps>=1",
     ),
     ("one-leg", "ground=flat&limbs=0111&hits=4570@chest", "fell"),
+    (
+        "armed-pistol",
+        "ground=flat&armed=1&hits=9mm@chest",
+        "upright,flinched,aim<=6,steps=0",
+    ),
+    (
+        "attacking-pistol",
+        "ground=flat&attacking=1&hits=9mm@chest*2~0.2",
+        "upright,flinched,aim<=6,attacking",
+    ),
+    (
+        "attacking-magnum",
+        "ground=flat&attacking=1&hits=44@chest",
+        "upright,flinched,interrupted,steps>=1",
+    ),
+    (
+        "armed-shotgun",
+        "ground=flat&armed=1&range=4&hits=12ga@chest",
+        "fell",
+    ),
 ];
 
 fn weapon_of(name: &str, opt: Option<&str>) -> Result<Weapon, String> {
@@ -240,6 +283,11 @@ impl Spec {
                     spec.armour = value.parse().map_err(|_| "armour".to_string())?
                 }
                 "range" => spec.range = value.parse().map_err(|_| "range".to_string())?,
+                "armed" => spec.armed = value != "0",
+                "attacking" => {
+                    spec.attacking = value != "0";
+                    spec.armed |= spec.attacking;
+                }
                 "limbs" => {
                     let b: Vec<bool> = value.chars().map(|c| c != '0').collect();
                     if b.len() != 4 {
@@ -303,6 +351,12 @@ pub struct Report {
     pub peak_speed: f32,
     pub topple: f32,
     pub decisions: Vec<String>,
+    pub arm_spin: f32,
+    pub ragdoll_arm_spin: f32,
+    pub aim_drift: f32,
+    pub flinch: f32,
+    pub armed: bool,
+    pub interrupted: bool,
     pub expect: Vec<(String, bool)>,
     pub log: Vec<String>,
 }
@@ -324,6 +378,8 @@ impl Report {
             "{{\"name\":{},\"ground\":{},\"upright\":{},\"fell\":{},\"fall\":{},\"steps\":{},\
              \"braced\":{},\"flinches\":{},\"hits\":{},\"distance_m\":{:.3},\"recovery_s\":{},\
              \"time_s\":{:.2},\"peak_speed_mps\":{:.3},\"topple_mps\":{:.3},\"decisions\":[{}],\
+             \"arm_spin\":{:.2},\"ragdoll_arm_spin\":{:.2},\"flinch_deg\":{:.2},\"armed\":{},\
+             \"aim_drift_deg\":{:.2},\"interrupted\":{},\
              \"expectations\":[{}],\"passed\":{},\"log\":[{}]}}",
             s(&self.name),
             s(self.ground),
@@ -340,6 +396,12 @@ impl Report {
             self.peak_speed,
             self.topple,
             list(&self.decisions),
+            self.arm_spin,
+            self.ragdoll_arm_spin,
+            self.flinch,
+            self.armed,
+            self.aim_drift,
+            self.interrupted,
             expect.join(","),
             self.passed(),
             list(&self.log)
@@ -361,6 +423,8 @@ pub fn prepare(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<(), String> {
     sim.armour = spec.armour.max(0.0);
     sim.range = spec.range.clamp(0.5, 200.0);
     sim.set_limbs(spec.limbs);
+    sim.armed = spec.armed;
+    sim.attacking = spec.attacking;
     if sim.ground.kind != spec.ground {
         sim.set_ground(spec.ground);
     } else {
@@ -463,6 +527,12 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
         peak_speed: st.peak_speed,
         topple: st.topple,
         decisions: st.decisions.clone(),
+        arm_spin: st.arm_spin,
+        ragdoll_arm_spin: st.ragdoll_arm_spin,
+        aim_drift: st.aim_drift,
+        flinch: st.flinch,
+        armed: spec.armed,
+        interrupted: st.interrupted,
         expect: Vec::new(),
         log: sim.log.iter().rev().take(60).rev().cloned().collect(),
     };
@@ -476,6 +546,18 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
                 "fell" => report.fell,
                 "braced" => report.braced,
                 "recovered" => report.recovery.is_some(),
+                "flinched" => report.flinch >= 2.0,
+                "interrupted" => report.interrupted,
+                "attacking" => !report.interrupted,
+                e if e.starts_with("aim<=") => {
+                    e[5..].parse::<f32>().is_ok_and(|d| report.aim_drift <= d)
+                }
+                e if e.starts_with("armspin<=") => {
+                    e[9..].parse::<f32>().is_ok_and(|w| report.arm_spin <= w)
+                }
+                e if e.starts_with("ragdollarmspin<=") => e[16..]
+                    .parse::<f32>()
+                    .is_ok_and(|w| report.ragdoll_arm_spin <= w),
                 e if e.starts_with("steps>=") => {
                     e[7..].parse::<u32>().is_ok_and(|n| report.steps >= n)
                 }

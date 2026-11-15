@@ -7,7 +7,7 @@
 //! repeats the third for a triangle). Kind 1: a capsule from (x1, y1) to (x2, y2) with radii x3
 //! and y3 (pixels). Kind 2: a line from (x1, y1) to (x2, y2), x3 pixels wide. Colours: 0 the
 //! ground, 1 its other checker, 2 a bone, 3 the struck bone, 4 a ragdoll bone, 5 the push's
-//! arrow, 6 a planted foot's mark.
+//! arrow, 6 a planted foot's mark, 7 the weapon in an armed body's hand.
 
 use crate::mannequin::{self as mq, COUNT};
 use crate::sim::Sim;
@@ -231,6 +231,30 @@ pub fn draw(sim: &Sim, cam: &Camera, marked: Option<usize>, arrow: Option<(V3, V
             shade,
             colour,
         ]);
+    }
+    // An armed body's weapon: along the right forearm, out of the hand.
+    if sim.armed && sim.has_bone(mq::R_HAND) {
+        let hand = sim.posed[mq::R_HAND].1;
+        let dir = unit(sub(hand, sim.posed[mq::R_FOREARM].1)).unwrap_or([0.0, 1.0, 0.0]);
+        let a = sub(hand, scale(dir, 6.0 * sim.scale));
+        let c = add(hand, scale(dir, 38.0 * sim.scale));
+        if let (Some(p), Some(q)) = (cam.project(a), cam.project(c)) {
+            let r = 2.2 * sim.scale;
+            body.push([
+                1.0,
+                (p.2 + q.2) / 2.0 - 1.0,
+                p.0,
+                p.1,
+                q.0,
+                q.1,
+                r * focal / p.2,
+                r * focal / q.2,
+                0.0,
+                0.0,
+                1.0,
+                7.0,
+            ]);
+        }
     }
     // The planted feet's marks while stepping.
     if let Some(s) = &sim.rig.balance {

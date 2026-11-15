@@ -81,6 +81,10 @@ pub struct Rig {
     pub brace: Option<Brace>,
     pub fall: Option<Fall>,
     pub active: bool,
+    /// The arms' shown pose offsets following the poses they are given (the host's
+    /// `Bone::follow`), and how much of its aim an armed body keeps now.
+    pub follow: [Follow; COUNT],
+    pub aim_hold: f32,
 }
 
 impl Rig {
@@ -96,6 +100,8 @@ impl Rig {
             brace: None,
             fall: None,
             active: false,
+            follow: [Follow::REST; COUNT],
+            aim_hold: 0.0,
         }
     }
 }
@@ -146,6 +152,14 @@ pub struct Stats {
     pub decisions: Vec<String>,
     pub recovered_at: Option<f64>,
     pub start: V3,
+    /// The fastest an arm bone turned while the body stood (rad/s), and in its ragdoll.
+    pub arm_spin: f32,
+    pub ragdoll_arm_spin: f32,
+    /// The most an armed body's weapon hand turned off its aim (degrees), the most any bone was
+    /// turned off its pose by the flinch (degrees), and whether an attack was interrupted.
+    pub aim_drift: f32,
+    pub flinch: f32,
+    pub interrupted: bool,
 }
 
 /// What a ray from a point along a direction hits on the body: the bone and the point.
@@ -161,6 +175,9 @@ pub struct Sim {
     pub armour: f32,
     pub weapon: Weapon,
     pub range: f32,
+    /// The body holds a weapon (aims it) and is attacking (an attack a big hit interrupts).
+    pub armed: bool,
+    pub attacking: bool,
     pub t: f64,
     pub pos: V3,
     pub rig: Rig,
@@ -191,6 +208,8 @@ impl Sim {
             armour: 0.0,
             weapon: Weapon::default(),
             range: 10.0,
+            armed: false,
+            attacking: false,
             t: 0.0,
             pos: [0.0; 3],
             rig: Rig::new(Limbs::WHOLE),
@@ -281,10 +300,42 @@ impl Sim {
     /// The animated pose: the rest pose at the reference (identity rotations).
     pub fn anim(&self) -> [Xf; COUNT] {
         let mut out = [IDENT_XF; COUNT];
-        for (b, o) in out.iter_mut().enumerate() {
-            *o = (IDENTITY, add(self.pos, scale(mq::JOINT[b], self.scale)));
+        for b in 0..COUNT {
+            let (prot, ppos) = match mq::PARENT[b] {
+                Some(p) => out[p],
+                None => (IDENTITY, self.pos),
+            };
+            out[b] = (
+                mul(&prot, &self.anim_local(b)),
+                add(ppos, apply_m(&prot, self.rest_local(b))),
+            );
         }
         out
+    }
+
+    /// A bone's animated local rotation: the rest pose, or (armed) the aim: the right arm out
+    /// along the view, the left supporting.
+    pub fn anim_local(&self, b: usize) -> M3 {
+        if !self.armed {
+            return IDENTITY;
+        }
+        match b {
+            mq::R_UPPERARM => rotation([1.3, 0.0, 0.25]),
+            mq::R_FOREARM => rotation([0.3, 0.0, 0.0]),
+            mq::L_UPPERARM => rotation([1.1, 0.0, -0.55]),
+            mq::L_FOREARM => rotation([0.75, 0.0, 0.0]),
+            mq::SPINE2 => rotation([0.0, 0.0, -0.12]),
+            _ => IDENTITY,
+        }
+    }
+
+    /// An attack interrupted by a big enough hit (the host's `active_ragdoll::interrupt_attack`).
+    fn interrupt_attack(&mut self, why: &str) {
+        if self.attacking {
+            self.attacking = false;
+            self.stats.interrupted = true;
+            self.note(format!("attack interrupted ({why})"));
+        }
     }
 
     /// The rest local translation of a bone (from its parent's joint, or the reference).
@@ -386,13 +437,19 @@ impl Sim {
                     self.note(format!("clamp: launch {speed:.1} m/s held to {max} m/s"));
                 }
                 self.stack = None;
-                self.flinch(p, mass, point, direction);
+                self.flinch(p, mass, point, direction, false);
+                self.interrupt_attack("knocked down");
                 if !self.fall(point, stacked.direction, speed) {
                     self.knock_down(stacked.direction, speed, "knockdown");
                 }
             }
-            Reaction::Stagger | Reaction::None => {
-                self.flinch(p, mass, point, direction);
+            Reaction::Stagger => {
+                self.flinch(p, mass, point, direction, false);
+                self.interrupt_attack("staggered");
+                self.push(p, mass, direction);
+            }
+            Reaction::None => {
+                self.flinch(p, mass, point, direction, true);
                 self.push(p, mass, direction);
             }
         }
@@ -410,18 +467,29 @@ impl Sim {
 
     // --- Stage 1 (the host's `active_ragdoll::hit`). ---------------------------------------------
 
-    fn flinch(&mut self, p: f32, mass: f32, point: V3, direction: V3) {
+    fn flinch(&mut self, p: f32, mass: f32, point: V3, direction: V3, keep_aim: bool) {
         let strength = self.tune.hit_reactions;
-        if strength <= 0.0 || !(p > 0.0 && mass > 0.0) {
+        if strength <= 0.0 {
+            self.note("no flinch: Hit Reactions is 0".into());
+            return;
+        }
+        if !(p > 0.0 && mass > 0.0) {
+            self.note(format!("no flinch: no momentum ({p:.2} N s)"));
             return;
         }
         let Some(direction) = unit(direction) else {
+            self.note("no flinch: the hit has no direction".into());
             return;
         };
         let t = self.tune;
         let v = p / mass * strength / 100.0;
         self.rig.since = self.t;
         self.rig.active = true;
+        self.rig.aim_hold = if self.armed && keep_aim {
+            t.aim_hold
+        } else {
+            0.0
+        };
         let spread = spread_of(v);
         let positions: Vec<V3> = self.posed.iter().map(|x| x.1).collect();
         let struck = self.nearest_bone(point);
@@ -477,8 +545,15 @@ impl Sim {
         self.stats.flinches += 1;
         self.note(format!(
             "flinch at {}: {p:.1} N s on {mass:.0} kg -> {v:.2} m/s (Hit Reactions {strength:.0}%), \
-             spread {spread:.2} m, {touched} of {COUNT} bones",
-            BONES[struck].0
+             spread {spread:.2} m, {touched} of {COUNT} bones{}",
+            BONES[struck].0,
+            match (self.armed, self.rig.aim_hold > 0.0, self.attacking) {
+                (true, true, true) => "; armed and attacking: keeps its aim",
+                (true, true, false) => "; armed: keeps its aim",
+                (true, false, _) => "; armed: the hit takes its aim",
+                (false, _, true) => "; attacking",
+                _ => "",
+            }
         ));
     }
 
@@ -508,6 +583,13 @@ impl Sim {
             return;
         }
         self.rig.active = true;
+        // Pushed past its feet: no aim kept, an attack interrupted.
+        self.rig.aim_hold = 0.0;
+        self.interrupt_attack(if one_leg {
+            "it falls"
+        } else {
+            "pushed past its feet"
+        });
         if one_leg {
             self.rig.fall = Some(Fall {
                 dir,
@@ -974,13 +1056,43 @@ impl Sim {
                 (-w0 * w0 * self.rig.drop - 2.0 * zeta * w0 * self.rig.drop_speed) * dt;
             self.rig.drop =
                 (self.rig.drop + self.rig.drop_speed * dt).clamp(-self.tune.pelvis_drop_max, 0.0);
+            // The arms follow the poses they are given (or their own) with a lag.
+            for (b, o) in overrides.iter().enumerate() {
+                if mq::role_side(b).0.is_arm() {
+                    let target = o.map_or([0.0; 3], |o| rotation_vector(&o));
+                    self.rig.follow[b].step(target, dt);
+                }
+            }
         }
         let resting = self.rig.springs.iter().all(|s| s.at_rest())
+            && self.rig.follow.iter().all(|f| f.at_rest())
             && self.rig.drop.abs() < 1e-3
             && self.rig.balance.is_none()
             && self.rig.brace.is_none()
             && self.rig.fall.is_none();
-        self.posed = self.pose(&overrides, resting);
+        // Each bone's world offset: its pose override (an arm's followed) on its spring's, the
+        // aim kept for an armed body (the host's `apply`).
+        let mut offsets: Vec<M3> = (0..COUNT)
+            .map(|b| {
+                let spring = rotation(self.rig.springs[b].angle);
+                let o = if mq::role_side(b).0.is_arm() {
+                    Some(rotation(self.rig.follow[b].angle))
+                } else {
+                    overrides[b]
+                };
+                match o {
+                    Some(o) => mul(&o, &spring),
+                    None => spring,
+                }
+            })
+            .collect();
+        if self.armed && self.rig.aim_hold > 0.0 {
+            let roles: Vec<Role> = (0..COUNT).map(|b| mq::role_side(b).0).collect();
+            hold_aim(&mut offsets, &mq::PARENT, &roles, self.rig.aim_hold);
+        }
+        let before = self.posed;
+        self.posed = self.pose(&offsets, resting);
+        self.measure(&before, dt);
         if self.rig.active && resting && self.t - self.rig.since > 0.2 {
             self.rig.active = false;
             self.rig.springs = [Spring::REST; COUNT];
@@ -991,21 +1103,17 @@ impl Sim {
     /// The pose layer's write and the update: each bone's local rotation `P^T (O S) P L` over the
     /// animated pose (`P` its parent's animated world rotation), the pelvis carried by the drop
     /// and the shift; the world transforms brought up from the locals.
-    fn pose(&self, overrides: &[Option<M3>], resting: bool) -> [Xf; COUNT] {
+    fn pose(&self, offsets: &[M3], resting: bool) -> [Xf; COUNT] {
         let anim = self.anim();
         let mut out = [IDENT_XF; COUNT];
         for b in 0..COUNT {
             let p_anim = mq::PARENT[b].map_or(IDENTITY, |p| anim[p].0);
-            let pose_rot = IDENTITY;
+            let pose_rot = self.anim_local(b);
             let mut t = self.rest_local(b);
             let rot = if resting {
                 pose_rot
             } else {
-                let spring = rotation(self.rig.springs[b].angle);
-                let r = match overrides[b] {
-                    Some(o) => mul(&o, &spring),
-                    None => spring,
-                };
+                let r = offsets[b];
                 if b == mq::PELVIS {
                     t = add(
                         t,
@@ -1024,6 +1132,43 @@ impl Sim {
             out[b] = (mul(&prot, &rot), add(ppos, apply_m(&prot, t)));
         }
         out
+    }
+
+    /// The run's measures for a standing frame: the arms' turning speed, the weapon hand's drift
+    /// off its aim, the flinch's largest turn.
+    fn measure(&mut self, before: &[Xf; COUNT], dt: f32) {
+        if self.stats.last_hit.is_none() || dt <= 0.0 {
+            return;
+        }
+        let anim = self.anim();
+        for b in 0..COUNT {
+            if mq::role_side(b).0.is_arm() {
+                let turn = mul(&transpose(&before[b].0), &self.posed[b].0);
+                let w = length(rotation_vector(&turn)) / dt;
+                // Only the arm's own turn: less its parent's.
+                let parent_turn = mq::PARENT[b].map_or(0.0, |p| {
+                    length(rotation_vector(&mul(
+                        &transpose(&before[p].0),
+                        &self.posed[p].0,
+                    ))) / dt
+                });
+                let own = (w - parent_turn).max(0.0);
+                self.stats.arm_spin = self.stats.arm_spin.max(own);
+            }
+            let off = length(rotation_vector(&mul(
+                &transpose(&anim[b].0),
+                &self.posed[b].0,
+            )));
+            self.stats.flinch = self.stats.flinch.max(off.to_degrees());
+        }
+        if self.armed {
+            let h = mq::R_HAND;
+            let off = length(rotation_vector(&mul(
+                &transpose(&anim[h].0),
+                &self.posed[h].0,
+            )));
+            self.stats.aim_drift = self.stats.aim_drift.max(off.to_degrees());
+        }
     }
 
     // --- The ragdoll (the host's `knockdown::knock_down`, the launch, the get-up). ---------------
@@ -1059,7 +1204,11 @@ impl Sim {
                 .pose(Pose::from_parts(to_m(pos), quat_of(&rot)))
                 .linvel(v)
                 .linear_damping(0.05)
-                .angular_damping(0.6)
+                .angular_damping(if mq::role_side(b).0.is_arm() {
+                    2.0
+                } else {
+                    0.6
+                })
                 .ccd_enabled(true)
                 .build();
             let h = self.world.insert_body(rb);
@@ -1150,6 +1299,8 @@ impl Sim {
             return;
         };
         let flying = self.t - since < FLIGHT;
+        let arm_spin = self.tune.arm_ragdoll_spin;
+        let mut ragdoll_arm_spin = self.stats.ragdoll_arm_spin;
         let mut fastest: f32 = 0.0;
         let (mut low, mut high) = (f32::MAX, f32::MIN);
         for (b, h) in bodies.iter().enumerate() {
@@ -1160,15 +1311,27 @@ impl Sim {
                 continue;
             };
             let v = from_m(rb.linvel());
-            if flying {
+            let arm = mq::role_side(b).0.is_arm();
+            if flying || arm {
+                // While it flies every bone is held; while it lies only an arm spinning past a
+                // person's flung arm (the host's `hold_bones`).
                 let l = length(v);
-                if l > MAX_BONE_SPEED {
+                if flying && l > MAX_BONE_SPEED {
                     rb.set_linvel(vec(scale(v, MAX_BONE_SPEED / l / UNITS_PER_METRE)), true);
                 }
                 let w = rb.angvel();
-                if w.length() > MAX_BONE_SPIN {
-                    rb.set_angvel(w * (MAX_BONE_SPIN / w.length()), true);
+                // The arms spin no faster than a person's flung arm (the host's `hold_bones`).
+                let most = if mq::role_side(b).0.is_arm() {
+                    arm_spin.min(MAX_BONE_SPIN)
+                } else {
+                    MAX_BONE_SPIN
+                };
+                if w.length() > most {
+                    rb.set_angvel(w * (most / w.length()), true);
                 }
+            }
+            if mq::role_side(b).0.is_arm() {
+                ragdoll_arm_spin = ragdoll_arm_spin.max(rb.angvel().length());
             }
             fastest = fastest.max(length(v));
             let pose = rb.position();
@@ -1177,6 +1340,7 @@ impl Sim {
             low = low.min(pos[2]);
             high = high.max(pos[2]);
         }
+        self.stats.ragdoll_arm_spin = ragdoll_arm_spin;
         if fastest < STILL_SPEED {
             *still += 1;
         } else {

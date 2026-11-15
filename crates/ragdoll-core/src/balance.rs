@@ -58,7 +58,7 @@ pub const STEP_DROP: f32 = 0.05;
 /// The arms out (radians at full), the blend in and out (s), the step's ground: how far across a
 /// navmesh point may be from the target (units), how far up or down a foot may land (units), a
 /// ledge's drop (units).
-pub const ARMS_OUT: f32 = 0.9;
+pub const ARMS_OUT: f32 = 0.6;
 pub const BLEND_IN: f32 = 0.08;
 pub const BLEND_OUT: f32 = 0.35;
 pub const GROUND_ACROSS: f32 = 30.0;

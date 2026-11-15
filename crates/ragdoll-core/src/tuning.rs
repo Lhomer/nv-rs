@@ -24,6 +24,7 @@ pub struct RoleTune {
     pub zeta: f32,
     pub gain: f32,
     pub limit: f32,
+    pub spin: f32,
 }
 
 /// What a tuning value is, for the lab's sliders and the text: its name, its group, its range and
@@ -96,6 +97,7 @@ const fn game_roles() -> [RoleTune; 11] {
         zeta: 0.0,
         gain: 0.0,
         limit: 0.0,
+        spin: 0.0,
     }; 11];
     let mut i = 0;
     while i < 11 {
@@ -104,6 +106,7 @@ const fn game_roles() -> [RoleTune; 11] {
             zeta: f::SPRINGS[i].1,
             gain: f::GAINS[i],
             limit: f::LIMITS[i],
+            spin: f::SPINS[i],
         };
         i += 1;
     }
@@ -168,6 +171,11 @@ tuning! {
         ground_brace_share = f::BRACE_GROUND_SHARE, 0, 1, 0.01, None, "The share a frame the hands and forearms are steered.";
         ground_brace_along = f::BRACE_GROUND_SPEED.0, 0, 6, 0.1, None, "The arms' speed along the fall (m/s).";
         ground_brace_down = f::BRACE_GROUND_SPEED.1, 0, 8, 0.1, None, "The arms' speed down (m/s).";
+        arm_ragdoll_spin = f::ARM_RAGDOLL_SPIN, 1, 30, 0.5, None, "The ragdoll's arm bones spin at most this fast (rad/s) while it flies and lands.";
+        arm_follow_hz = f::ARM_FOLLOW_HZ, 0.3, 8, 0.05, None, "The arms follow their poses (arms out, brace, windmill) with a spring of this frequency (Hz).";
+        arm_follow_zeta = f::ARM_FOLLOW_ZETA, 0.2, 1.5, 0.01, None, "... and this damping (under 1: a little follow-through).";
+        arm_follow_spin = f::ARM_FOLLOW_SPIN, 0.5, 20, 0.1, None, "... never faster than this (rad/s).";
+        aim_hold = f::AIM_HOLD, 0, 1, 0.01, None, "An armed body keeps this much of its aim through a flinch below the stagger.";
     }
     "Knockdown" {
         recovery = k::RECOVERY, 0.5, 10, 0.1, None, "How much faster than the bare tip-over speed a body can be pushed before it cannot step to catch itself.";
@@ -195,7 +203,7 @@ tuning! {
 }
 
 /// The roles' groups and the ranges of their values.
-const ROLE_RANGES: [(&str, f32, f32, f32, &str); 4] = [
+const ROLE_RANGES: [(&str, f32, f32, f32, &str); 5] = [
     ("hz", 0.3, 8.0, 0.05, "spring frequency (Hz)"),
     (
         "zeta",
@@ -206,6 +214,7 @@ const ROLE_RANGES: [(&str, f32, f32, f32, &str); 4] = [
     ),
     ("gain", 0.0, 2.0, 0.01, "share of a kick"),
     ("limit", 0.0, 1.5, 0.01, "most it turns (rad)"),
+    ("spin", 0.5, 30.0, 0.1, "fastest it turns (rad/s)"),
 ];
 
 impl Tuning {
@@ -237,6 +246,7 @@ impl Tuning {
             "zeta" => &mut r.zeta,
             "gain" => &mut r.gain,
             "limit" => &mut r.limit,
+            "spin" => &mut r.spin,
             _ => return None,
         })
     }

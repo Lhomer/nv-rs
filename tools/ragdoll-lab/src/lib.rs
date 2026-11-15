@@ -31,6 +31,9 @@ pub struct Lab {
     arrow: Option<(V3, V3)>,
     carry: f32,
     log_seen: usize,
+    /// The stance chosen on the page (a reset puts an interrupted attack back).
+    armed: bool,
+    attacking: bool,
 }
 
 impl Default for Lab {
@@ -54,6 +57,8 @@ impl Lab {
             arrow: None,
             carry: 0.0,
             log_seen: 0,
+            armed: false,
+            attacking: false,
         }
     }
 
@@ -114,6 +119,8 @@ impl Lab {
     // --- The scene. --------------------------------------------------------------------------
 
     pub fn reset(&mut self) {
+        self.sim.armed = self.armed;
+        self.sim.attacking = self.attacking;
         self.sim.reset();
         self.marked = None;
         self.arrow = None;
@@ -149,6 +156,13 @@ impl Lab {
         };
         self.sim.armour = armour.clamp(0.0, 100.0);
         self.sim.reset();
+    }
+
+    /// The body's stance: holding a weapon (aiming it), attacking (implies armed).
+    pub fn set_stance(&mut self, armed: bool, attacking: bool) {
+        self.armed = armed || attacking;
+        self.attacking = attacking;
+        self.reset();
     }
 
     pub fn set_limbs(&mut self, left_leg: bool, right_leg: bool, left_arm: bool, right_arm: bool) {
@@ -330,7 +344,8 @@ impl Lab {
         format!(
             "{{\"state\":{},\"time\":{:.2},\"hits\":{},\"fell\":{},\"fall\":{},\"steps\":{},\
              \"braced\":{},\"distance_m\":{distance:.3},\"recovery_s\":{},\"peak_speed\":{:.3},\
-             \"topple\":{:.3},\"mass\":{:.1},\"stack\":{stack:.2}}}",
+             \"topple\":{:.3},\"mass\":{:.1},\"stack\":{stack:.2},\"armed\":{},\"attacking\":{},\
+             \"interrupted\":{},\"aim_drift\":{:.2},\"arm_spin\":{:.2}}}",
             json_str(state),
             self.sim.t,
             st.hits,
@@ -345,6 +360,11 @@ impl Lab {
             st.peak_speed,
             self.sim.topple(),
             self.sim.mass(),
+            self.sim.armed,
+            self.sim.attacking,
+            st.interrupted,
+            st.aim_drift,
+            st.arm_spin.max(st.ragdoll_arm_spin),
         )
     }
 

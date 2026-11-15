@@ -45,18 +45,22 @@ pub const SPRINGS: [(f32, f32); 11] = [
     (3.0, 0.45),
     (2.6, 0.4),
     (2.2, 0.35),
-    (2.4, 0.4),
-    (1.6, 0.3),
-    (1.8, 0.3),
+    // The arms (Patrick, 2026-11-15: they snapped and flailed): softer and well damped, so they
+    // swing out and settle like a person's instead of whipping.
+    (2.0, 0.6),
+    (1.3, 0.65),
+    (1.5, 0.7),
     (3.0, 0.5),
     (3.2, 0.5),
     (3.4, 0.6),
-    (2.0, 0.35),
+    (1.7, 0.75),
 ];
 /// How much of a kick each role takes (its lightness).
-pub const GAINS: [f32; 11] = [0.35, 0.7, 0.8, 0.9, 1.0, 1.2, 1.1, 0.6, 0.7, 0.3, 1.0];
+pub const GAINS: [f32; 11] = [0.35, 0.7, 0.8, 0.9, 0.6, 0.75, 0.65, 0.6, 0.7, 0.3, 0.55];
 /// The most each role turns (radians).
 pub const LIMITS: [f32; 11] = [0.2, 0.35, 0.4, 0.5, 0.45, 0.9, 0.7, 0.45, 0.6, 0.4, 0.6];
+/// The fastest each role turns (rad/s): a person's joints, the arms the slowest (no whipping).
+pub const SPINS: [f32; 11] = [6.0, 7.0, 8.0, 9.0, 4.0, 5.0, 6.0, 6.0, 7.0, 6.0, 6.0];
 
 impl Role {
     /// The role's index in [`ROLES`] and the tables.
@@ -95,6 +99,20 @@ impl Role {
     /// The most the bone turns (radians).
     pub fn limit(self) -> f32 {
         tuning::get().roles[self.index()].limit
+    }
+
+    /// The fastest the bone turns (rad/s).
+    pub fn spin(self) -> f32 {
+        tuning::get().roles[self.index()].spin
+    }
+
+    /// An arm's bone (the clavicle to the hand): it follows its poses with a lag
+    /// ([`Follow`]) and is the part the aim keeps ([`hold_aim`]).
+    pub fn is_arm(self) -> bool {
+        matches!(
+            self,
+            Role::Clavicle | Role::UpperArm | Role::Forearm | Role::Hand
+        )
     }
 }
 
@@ -256,11 +274,23 @@ impl Spring {
         let k = w0 * w0 * muscle;
         let c = 2.0 * zeta * w0 * muscle.sqrt();
         let dt = dt.clamp(0.0, MAX_DT);
+        // No joint turns faster than a person's (the arms the slowest): a kick past it is held to
+        // it before it moves the bone.
+        let most = role.spin();
+        let cap = |v: V3| {
+            let w = length(v);
+            if w > most && w.is_finite() {
+                scale(v, most / w)
+            } else {
+                v
+            }
+        };
+        self.velocity = cap(self.velocity);
         // Semi-implicit Euler, in two halves for the stiff springs.
         for _ in 0..2 {
             let h = dt / 2.0;
             let acc = sub(scale(self.angle, -k), scale(self.velocity, c));
-            self.velocity = add(self.velocity, scale(acc, h));
+            self.velocity = cap(add(self.velocity, scale(acc, h)));
             self.angle = add(self.angle, scale(self.velocity, h));
         }
         let a = length(self.angle);
@@ -288,14 +318,14 @@ impl Spring {
 /// ledge (windmilling) and a fall at the end of the steps (s); the windmill's turns a second and
 /// swing (rad); how much the torso and the knees go over in a fall (rad), how far the pelvis goes
 /// (units); the push a wall brace holds (m/s), past it the body crumples against the wall.
-pub const BRACE_REACH: f32 = 0.12;
+pub const BRACE_REACH: f32 = 0.22;
 pub const BRACE_HOLD: f32 = 0.5;
-pub const BRACE_RELEASE: f32 = 0.4;
+pub const BRACE_RELEASE: f32 = 0.5;
 pub const FALL_LEAD: f32 = 0.12;
 pub const LEDGE_LEAD: f32 = 0.4;
 pub const OVERRUN_LEAD: f32 = 0.1;
-pub const WINDMILL_HZ: f32 = 2.2;
-pub const WINDMILL_SWING: f32 = 1.6;
+pub const WINDMILL_HZ: f32 = 1.1;
+pub const WINDMILL_SWING: f32 = 1.1;
 pub const FALL_LEAN: f32 = 0.4;
 pub const FALL_KNEES: f32 = 0.3;
 pub const FALL_SHIFT: f32 = 25.0;
@@ -307,8 +337,132 @@ pub const BRACE_HOLDS: f32 = 2.5;
 pub const BRACE_GROUND_SECONDS: f32 = 1.2;
 pub const BRACE_GROUND_HEIGHT: f32 = 25.0;
 pub const BRACE_GROUND_DROP: f32 = 35.0;
-pub const BRACE_GROUND_SHARE: f32 = 0.25;
+pub const BRACE_GROUND_SHARE: f32 = 0.12;
 pub const BRACE_GROUND_SPEED: (f32, f32) = (1.5, 2.5);
+/// The ragdoll's arm bones spin at most this fast (rad/s) while it flies and lands.
+pub const ARM_RAGDOLL_SPIN: f32 = 8.0;
+
+// --- The arms' lag and follow-through (Patrick, 2026-11-15). -------------------------------------
+
+/// How an arm follows the poses it is given (the steps' arms out, the wall brace's reach, the
+/// windmill): a spring of [`ARM_FOLLOW_HZ`] and damping [`ARM_FOLLOW_ZETA`] (a little under 1: a
+/// little follow-through past the pose), never faster than [`ARM_FOLLOW_SPIN`].
+pub const ARM_FOLLOW_HZ: f32 = 2.6;
+pub const ARM_FOLLOW_ZETA: f32 = 0.7;
+pub const ARM_FOLLOW_SPIN: f32 = 4.5;
+
+/// A bone's shown offset following a target offset (rotation vectors, world space).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Follow {
+    pub angle: V3,
+    pub velocity: V3,
+}
+
+impl Follow {
+    pub const REST: Follow = Follow {
+        angle: [0.0; 3],
+        velocity: [0.0; 3],
+    };
+
+    /// One step of `dt` toward `target` (module documentation).
+    pub fn step(&mut self, target: V3, dt: f32) {
+        let t = tuning::get();
+        let w0 = std::f32::consts::TAU * t.arm_follow_hz.max(0.1);
+        let c = 2.0 * t.arm_follow_zeta * w0;
+        let dt = dt.clamp(0.0, MAX_DT);
+        for _ in 0..2 {
+            let h = dt / 2.0;
+            let acc = sub(
+                scale(sub(target, self.angle), w0 * w0),
+                scale(self.velocity, c),
+            );
+            self.velocity = add(self.velocity, scale(acc, h));
+            let w = length(self.velocity);
+            if w > t.arm_follow_spin && w.is_finite() {
+                self.velocity = scale(self.velocity, t.arm_follow_spin / w);
+            }
+            self.angle = add(self.angle, scale(self.velocity, h));
+        }
+        if !self.angle.iter().all(|x| x.is_finite()) {
+            *self = Follow::REST;
+        }
+    }
+
+    pub fn at_rest(&self) -> bool {
+        length(self.angle) < REST && length(self.velocity) < REST * 10.0
+    }
+}
+
+/// The rotation vector of a rotation (its axis times its angle; the inverse of [`rotation`]).
+pub fn rotation_vector(m: &M3) -> V3 {
+    let c = ((m[0] + m[4] + m[8] - 1.0) / 2.0).clamp(-1.0, 1.0);
+    let angle = c.acos();
+    if !angle.is_finite() || angle < 1e-6 {
+        return [0.0; 3];
+    }
+    let axis = [m[7] - m[5], m[2] - m[6], m[3] - m[1]];
+    let s = angle.sin();
+    if s.abs() < 1e-4 {
+        // Near a half turn: the axis from the diagonal.
+        let x = ((m[0] + 1.0) / 2.0).max(0.0).sqrt();
+        let y = ((m[4] + 1.0) / 2.0).max(0.0).sqrt().copysign(m[1] + m[3]);
+        let z = ((m[8] + 1.0) / 2.0).max(0.0).sqrt().copysign(m[2] + m[6]);
+        return unit([x, y, z]).map_or([0.0; 3], |u| scale(u, angle));
+    }
+    scale(axis, angle / (2.0 * s))
+}
+
+// --- Keeping the aim (Patrick, 2026-11-15). ------------------------------------------------------
+
+/// How much an armed body keeps its arms on its aim through a flinch below the stagger: its arms'
+/// own kick is cut to `1 - AIM_HOLD` of it and the torso's turn under them taken back by
+/// `AIM_HOLD` (a person keeps the gun pointed). A stagger or more lets the aim go (0).
+pub const AIM_HOLD: f32 = 0.8;
+
+/// The world offsets `offsets` (each bone's `R`, its world rotation `R_root ... R_parent R anim`)
+/// with the aim kept by `hold` (0 to 1): each arm root (an arm bone whose parent is no arm bone)
+/// takes back `hold` of its parents' turn; every arm bone keeps `1 - hold` of its own.
+/// `parent[b]` is the rig bone `b` hangs from, `roles[b]` its role.
+pub fn hold_aim(offsets: &mut [M3], parent: &[Option<usize>], roles: &[Role], hold: f32) {
+    let hold = hold.clamp(0.0, 1.0);
+    if hold <= 0.0 || offsets.len() != parent.len() || offsets.len() != roles.len() {
+        return;
+    }
+    // The chain above each bone, root first.
+    let chain = |b: usize, offsets: &[M3]| {
+        let mut list = Vec::new();
+        let mut at = parent[b];
+        while let Some(p) = at {
+            list.push(p);
+            at = parent[p];
+            if list.len() > 64 {
+                break;
+            }
+        }
+        let mut m = IDENTITY;
+        for &p in list.iter().rev() {
+            m = mul(&m, &offsets[p]);
+        }
+        m
+    };
+    let original = offsets.to_vec();
+    for b in 0..offsets.len() {
+        if !roles[b].is_arm() {
+            continue;
+        }
+        let own = rotation(scale(rotation_vector(&original[b]), 1.0 - hold));
+        let root = parent[b].map_or(true, |p| !roles[p].is_arm());
+        offsets[b] = if root {
+            let back = rotation(scale(
+                rotation_vector(&transpose(&chain(b, &original))),
+                hold,
+            ));
+            mul(&back, &own)
+        } else {
+            own
+        };
+    }
+}
 
 /// The brace's weight `t` seconds in: up over the reach, held, down over the release; `None` when
 /// it is over.
@@ -370,8 +524,15 @@ mod tests {
             velocity: [100.0, 0.0, 0.0],
             ..Spring::REST
         };
-        s.step(Role::Head, 1.0 / 60.0);
-        assert!((length(s.angle) - Role::Head.limit()).abs() < 1e-5);
+        // Held to the joint's speed, it reaches the limit over a few frames and stops there.
+        let mut most = 0.0f32;
+        for _ in 0..10 {
+            s.velocity = [100.0, 0.0, 0.0];
+            s.step(Role::Head, 1.0 / 60.0);
+            most = most.max(length(s.angle));
+            assert!(length(s.angle) <= Role::Head.limit() + 1e-5);
+        }
+        assert!((most - Role::Head.limit()).abs() < 1e-5);
     }
 
     /// A pistol round's kick stays near the hit; a .50's or a sledgehammer's spreads through the body.
@@ -421,10 +582,108 @@ mod tests {
     #[test]
     fn the_role_tables() {
         assert_eq!(Role::Pelvis.spring(), (3.2, 0.5));
-        assert_eq!(Role::UpperArm.gain(), 1.2);
+        assert_eq!(Role::UpperArm.gain(), 0.75);
+        assert_eq!(Role::UpperArm.spin(), 5.0);
+        assert!(Role::Hand.is_arm() && !Role::Spine.is_arm());
         assert_eq!(Role::Forearm.limit(), 0.7);
         for (i, r) in ROLES.iter().enumerate() {
             assert_eq!(r.index(), i);
         }
+    }
+
+    /// No joint turns faster than its role allows; the arms are the slowest and settle without
+    /// a long ring.
+    #[test]
+    fn the_arms_move_like_a_persons() {
+        let mut s = Spring {
+            velocity: [0.0, 40.0, 0.0],
+            ..Spring::REST
+        };
+        s.step(Role::UpperArm, 1.0 / 60.0);
+        assert!(length(s.velocity) <= Role::UpperArm.spin() + 1e-4);
+        // Kicked, the arm swings out and is back near its pose within a second, with at most a
+        // small overshoot.
+        let mut s = Spring {
+            velocity: [0.0, 4.0, 0.0],
+            ..Spring::REST
+        };
+        let mut peak = 0.0f32;
+        let mut back = 0.0f32;
+        for i in 0..120 {
+            s.step(Role::UpperArm, 1.0 / 60.0);
+            peak = peak.max(s.angle[1]);
+            if i > 20 {
+                back = back.min(s.angle[1]);
+            }
+        }
+        assert!(peak > 0.2, "it swings: {peak}");
+        assert!(
+            back > -0.25 * peak,
+            "a small follow-through only: {back} of {peak}"
+        );
+        assert!(length(s.angle) < 0.02, "settled: {:?}", s.angle);
+    }
+
+    /// The arms follow a pose with a lag, a little past it, never faster than their bound.
+    #[test]
+    fn the_arms_follow_with_a_lag() {
+        let mut f = Follow::REST;
+        let target = [0.0, 0.0, 1.0];
+        let mut fastest = 0.0f32;
+        let mut most = 0.0f32;
+        for i in 0..120 {
+            f.step(target, 1.0 / 60.0);
+            fastest = fastest.max(length(f.velocity));
+            most = most.max(f.angle[2]);
+            if i == 2 {
+                assert!(f.angle[2] < 0.3, "no jump: {}", f.angle[2]);
+            }
+        }
+        assert!(fastest <= ARM_FOLLOW_SPIN + 1e-4);
+        assert!(most > 1.0 && most < 1.15, "a little follow-through: {most}");
+        assert!((f.angle[2] - 1.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn rotation_vectors_go_there_and_back() {
+        for w in [
+            [0.3, -0.2, 0.9],
+            [0.0, 0.0, 0.0],
+            [3.0, 0.1, 0.0],
+            [0.0, 1.2, -0.4],
+        ] {
+            let back = rotation_vector(&rotation(w));
+            let m1 = rotation(w);
+            let m2 = rotation(back);
+            for (a, b) in m1.iter().zip(m2.iter()) {
+                assert!((a - b).abs() < 1e-3, "{w:?} {back:?}");
+            }
+        }
+    }
+
+    /// Keeping the aim: the arm root takes back the torso's turn, every arm bone keeps a share of
+    /// its own; nothing else changes.
+    #[test]
+    fn the_aim_is_kept() {
+        // pelvis <- spine <- clavicle <- upper arm
+        let parent = [None, Some(0), Some(1), Some(2)];
+        let roles = [Role::Pelvis, Role::Spine, Role::Clavicle, Role::UpperArm];
+        let spine = rotation([0.0, 0.0, 0.4]);
+        let arm = rotation([0.5, 0.0, 0.0]);
+        let mut offsets = vec![IDENTITY, spine, IDENTITY, arm];
+        hold_aim(&mut offsets, &parent, &roles, 1.0);
+        assert_eq!(offsets[1], spine);
+        // The clavicle's world offset (spine x clavicle) is none.
+        let world = mul(&spine, &offsets[2]);
+        for (a, b) in world.iter().zip(IDENTITY.iter()) {
+            assert!((a - b).abs() < 1e-5);
+        }
+        assert_eq!(offsets[3], IDENTITY);
+        let mut half = vec![IDENTITY, spine, IDENTITY, arm];
+        hold_aim(&mut half, &parent, &roles, 0.5);
+        assert!((length(rotation_vector(&half[3])) - 0.25).abs() < 1e-4);
+        let mut none = vec![IDENTITY, spine, IDENTITY, arm];
+        hold_aim(&mut none, &parent, &roles, 0.0);
+        assert_eq!(none[3], arm);
     }
 }

@@ -16,6 +16,7 @@
   --ragdoll: #8fa9c2;
   --arrow: #d33a2c;
   --foot: #2f8a55;
+  --weapon: #3a3d42;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -37,6 +38,7 @@
     --ragdoll: #7f9cb8;
     --arrow: #ff5a48;
     --foot: #4cc07c;
+    --weapon: #15171a;
     color-scheme: dark;
   }
 }
@@ -58,6 +60,7 @@
   --ragdoll: #7f9cb8;
   --arrow: #ff5a48;
   --foot: #4cc07c;
+  --weapon: #15171a;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
