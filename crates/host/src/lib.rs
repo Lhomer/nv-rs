@@ -49,6 +49,7 @@ pub mod phys_blend;
 pub mod pickpocket_chance;
 pub mod player_move;
 pub mod quick_loot;
+pub mod quick_start;
 pub mod range_cells;
 mod range_floor;
 mod range_save;

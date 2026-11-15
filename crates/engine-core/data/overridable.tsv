@@ -94,6 +94,7 @@
 007adce0	0	nv-rs facial hair by race folder
 007b4b50	1	nv-rs facial hair by race folder
 007cc6e0	4	nv-rs field of view in the game's settings,nv-rs graphics in the game's settings,nv-rs weighty combat
+007cf9a0	1	nv-rs quick start
 007e8890	1	nv-rs weighty combat
 007f3e00	0	nv-rs V.A.T.S. waits only for the camera
 008300c0	0	nv-rs radio song lengths
@@ -237,6 +238,7 @@
 00d6aef0	1	nv-rs weighty combat
 00e6dc40	0	nv-rs texture files read before the renderer's lock
 00e90c70	0	fixes preset guard
+00ec16d0	0	nv-rs quick start
 00ec89e9	0	ImprovedConsole
 00ec9907	1	ModLimitFix,nv-rs direct file access
 00eccf5d	0	HeapReplacer

@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (quick start)
+
+- **Now (`crates/host/src/quick_start.rs`, the fixes row `bQuickStart`/`NV_QUICK_START`, on in the `fixes` preset; `overridable.tsv` rows `007cf9a0`, `00ec16d0`; docs/FIXES.md):** `MoviePlayer::StartSequence` with the text of `sIntroSequence` during the first load starts nothing; while `StartMenu` holds its buttons back for the first screens (flag `0x80000`), the loading menu's own key skip (`0078aa90`) is pressed for the player once per scheduled swap. The loading menu's own music/movie sequence and the main menu's background are left alone. Not run in game: which screens Patrick's start shows, and how long the last slide takes, is still to be seen.
+- **Patrick:** start straight at the main menu with its buttons, skipping the start-up logos and movies and the New Vegas intro animation; a setting, on by default, kept across launches; saves untouched; the main menu's music and background kept.
+
 ### Claude, 2026-11-15 (active ragdoll: our own controller)
 
 - **Now (the `00888970` wrapper removed: `active_ragdoll` `before_ragdoll_anim`, `POSES`, `WRAPPED`, the knockdown registration, the gunplay FIX entry, the `overridable.tsv` row; `active_ragdoll` `cast_world`, `ground_point`, `wall_between`, `wall_ahead`; `Brace::wall`; `jip::commands::world_ray_cast`; `flinch::brace_target(.., wall)`; the lab's `world::wall_ahead`/`wall_between` and `one_write_path_for_every_actor`):** every actor is written once, after its animation, the same way; floor, walls and ledges by the game's ray casts; the brace stops at the wall. Not run in game.
