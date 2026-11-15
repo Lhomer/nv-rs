@@ -15,7 +15,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
-use crate::{balance as b, flinch as f, knock as k, rounds as r};
+use crate::{active as a, balance as b, flinch as f, knock as k, rounds as r};
 
 /// One role's spring frequency (Hz) and damping ratio, its share of a kick and its limit (rad).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -121,6 +121,24 @@ tuning! {
         impact_stacking = 300, 100, 1000, 10, Some("iImpactStacking"), "Impact Stacking: the stack's half-life (ms).";
         hit_reactions = 100, 0, 200, 1, Some("iHitReactions"), "Hit Reactions (%): the flinch's strength; 0 = off.";
         balance = 100, 0, 200, 1, Some("iBalance"), "Balance (%): the push on the centre of mass for catch steps; 0 = off.";
+    }
+    "Active ragdoll" {
+        active_for = a::ACTIVE_FOR, 0.2, 4, 0.05, None, "How long the body stays physical after its last hit (s).";
+        blend_back = a::BLEND_BACK, 0.1, 2, 0.05, None, "How long it then blends back to the animation, eased (s).";
+        drive_soft = a::DRIVE_SOFT, 0.05, 1, 0.01, None, "The joint motors' strength right after a hit (a share of full).";
+        drive_ramp = a::DRIVE_RAMP, 0.05, 3, 0.05, None, "How long the motors take to ramp back to full (s).";
+        drive_scale = a::DRIVE_SCALE, 0.2, 4, 0.05, None, "The motors' frequency against each role's spring frequency.";
+        drive_zeta = a::DRIVE_ZETA, 0.2, 2, 0.01, None, "The motors' damping ratio (1: no overshoot).";
+        support_hz = a::SUPPORT_HZ, 0.2, 6, 0.05, None, "The pelvis's support toward its stance (Hz): what holds the body up.";
+        support_zeta = a::SUPPORT_ZETA, 0.2, 2, 0.01, None, "The support's damping ratio.";
+        foot_hz = a::FOOT_HZ, 0.5, 15, 0.1, None, "The feet's pins to where they stand or swing (Hz).";
+        foot_zeta = a::FOOT_ZETA, 0.2, 2, 0.01, None, "The pins' damping ratio.";
+        max_bend = a::MAX_BEND, 0.2, 3, 0.05, None, "A joint turns at most this far from its target (rad).";
+        bend_room = a::BEND_ROOM, 0.5, 5, 0.05, None, "... and at most this many times its role's limit.";
+        substeps = a::SUBSTEPS, 1, 32, 1, None, "Small steps of the simulation a frame.";
+        hit_time = a::HIT_TIME, 0.005, 0.3, 0.005, None, "A hit's momentum goes in over this long, eased (s).";
+        hit_wave = a::HIT_WAVE, 0.5, 30, 0.1, None, "A hit's push reaches each bone after its distance at this speed (m/s).";
+        spin_room = a::SPIN_ROOM, 0.5, 5, 0.05, None, "A joint turns against its parent at most this many times its role's spin.";
     }
     "Flinch" {
         kick = f::KICK, 0, 60, 0.5, None, "Kick: rad/s of a bone's spin per m/s of the body's speed.";

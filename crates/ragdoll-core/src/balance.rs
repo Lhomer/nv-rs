@@ -275,8 +275,9 @@ pub fn step_time(length: f32, scale: f32) -> f32 {
 pub fn swing(from: V3, to: V3, s: f32, scale: f32) -> V3 {
     let s = s.clamp(0.0, 1.0);
     let eased = s * s * (3.0 - 2.0 * s);
+    // The lift eased too: the foot leaves and meets the ground at rest (no jump in its speed).
     let lift =
-        tuning::get().swing_height * scale * UNITS_PER_METRE * (std::f32::consts::PI * s).sin();
+        tuning::get().swing_height * scale * UNITS_PER_METRE * (std::f32::consts::PI * eased).sin();
     add(lerp(from, to, eased), [0.0, 0.0, lift])
 }
 

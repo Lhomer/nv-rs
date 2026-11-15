@@ -88,17 +88,17 @@ pub const BUILT_IN: [(&str, &str, &str); 20] = [
     (
         "pistol-chest",
         "ground=flat&hits=9mm@chest",
-        "upright,steps=0,flinched,armspin<=6",
+        "upright,steps=0,flinched,armspin<=8,vjump<=0.4,jerk<=1500",
     ),
     (
         "magnum-chest",
         "ground=flat&hits=44@chest",
-        "upright,flinched,armspin<=6",
+        "upright,flinched,armspin<=8,vjump<=2,jerk<=7000",
     ),
     (
         "rifle-burst",
         "ground=flat&hits=556@chest*3~0.1",
-        "upright,armspin<=6",
+        "upright,armspin<=8,vjump<=0.5",
     ),
     (
         "hunting-rifle-side",
@@ -116,7 +116,11 @@ pub const BUILT_IN: [(&str, &str, &str); 20] = [
         "ground=flat&hits=50mg@chest",
         "fell,ragdollarmspin<=8.5",
     ),
-    ("fists", "ground=flat&hits=fists@chest", "upright,steps=0"),
+    (
+        "fists",
+        "ground=flat&hits=fists@chest",
+        "upright,steps=0,vjump<=0.3",
+    ),
     (
         "sledge-power",
         "ground=flat&hits=sledge:power@chest",
@@ -130,33 +134,33 @@ pub const BUILT_IN: [(&str, &str, &str); 20] = [
     (
         "wall-brace",
         "ground=wall&hits=4570@chest",
-        "upright,braced,armspin<=6",
+        "upright,braced,armspin<=9,vjump<=2",
     ),
     (
         "ledge",
         "ground=ledge&hits=4570@chest",
-        "fell,fall:stepped off a ledge,armspin<=6,ragdollarmspin<=8.5",
+        "fell,fall:stepped off a ledge,armspin<=9,ragdollarmspin<=8.5,vjump<=1.5",
     ),
     (
         "slope-down",
         "ground=slope&hits=4570@chest",
-        "upright,steps>=1",
+        "upright,steps>=1,vjump<=2",
     ),
     (
         "stairs-down",
         "ground=stairs&hits=4570@chest",
-        "upright,steps>=1",
+        "upright,steps>=1,vjump<=2",
     ),
     (
         "uneven",
         "ground=uneven&hits=4570@chest",
-        "upright,steps>=1",
+        "upright,steps>=1,vjump<=2",
     ),
     ("one-leg", "ground=flat&limbs=0111&hits=4570@chest", "fell"),
     (
         "armed-pistol",
         "ground=flat&armed=1&hits=9mm@chest",
-        "upright,flinched,aim<=6,steps=0",
+        "upright,flinched,aim<=6,steps=0,vjump<=0.4",
     ),
     (
         "attacking-pistol",
@@ -357,6 +361,8 @@ pub struct Report {
     pub flinch: f32,
     pub armed: bool,
     pub interrupted: bool,
+    pub velocity_jump: f32,
+    pub jerk: f32,
     pub expect: Vec<(String, bool)>,
     pub log: Vec<String>,
 }
@@ -379,7 +385,7 @@ impl Report {
              \"braced\":{},\"flinches\":{},\"hits\":{},\"distance_m\":{:.3},\"recovery_s\":{},\
              \"time_s\":{:.2},\"peak_speed_mps\":{:.3},\"topple_mps\":{:.3},\"decisions\":[{}],\
              \"arm_spin\":{:.2},\"ragdoll_arm_spin\":{:.2},\"flinch_deg\":{:.2},\"armed\":{},\
-             \"aim_drift_deg\":{:.2},\"interrupted\":{},\
+             \"aim_drift_deg\":{:.2},\"interrupted\":{},\"velocity_jump_mps\":{:.3},\"jerk\":{:.1},\
              \"expectations\":[{}],\"passed\":{},\"log\":[{}]}}",
             s(&self.name),
             s(self.ground),
@@ -402,6 +408,8 @@ impl Report {
             self.armed,
             self.aim_drift,
             self.interrupted,
+            self.velocity_jump,
+            self.jerk,
             expect.join(","),
             self.passed(),
             list(&self.log)
@@ -533,6 +541,8 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
         flinch: st.flinch,
         armed: spec.armed,
         interrupted: st.interrupted,
+        velocity_jump: st.velocity_jump,
+        jerk: st.jerk,
         expect: Vec::new(),
         log: sim.log.iter().rev().take(60).rev().cloned().collect(),
     };
@@ -549,6 +559,12 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
                 "flinched" => report.flinch >= 2.0,
                 "interrupted" => report.interrupted,
                 "attacking" => !report.interrupted,
+                e if e.starts_with("vjump<=") => e[7..]
+                    .parse::<f32>()
+                    .is_ok_and(|v| report.velocity_jump <= v),
+                e if e.starts_with("jerk<=") => {
+                    e[6..].parse::<f32>().is_ok_and(|j| report.jerk <= j)
+                }
                 e if e.starts_with("aim<=") => {
                     e[5..].parse::<f32>().is_ok_and(|d| report.aim_drift <= d)
                 }

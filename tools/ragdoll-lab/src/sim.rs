@@ -20,6 +20,7 @@ use crate::convert::{from_m, m3_of, quat_of, to_m, vec};
 use crate::mannequin::{self as mq, COUNT};
 use crate::weapons::{self, Weapon};
 use crate::world::{self, Ground, GroundKind};
+use ragdoll_core::active;
 use ragdoll_core::balance::{
     between, classify, plan, two_bone, Ground as Step, Limbs, Outcome, Stepping,
 };
@@ -42,6 +43,9 @@ pub const UP_COOLDOWN: f64 = 1.5;
 pub const MAX_BONE_SPEED: f32 = 1400.0;
 pub const MAX_BONE_SPIN: f32 = 20.0;
 pub const FLIGHT: f64 = 1.5;
+/// The feet go back from where the steps left them to the animation's over this long (s), eased
+/// (the host's `active_ragdoll::FEET_BACK`).
+pub const FEET_BACK: f32 = 0.4;
 /// The get-up's blend back to the rest pose (s).
 pub const GET_UP: f32 = 1.6;
 /// How far from the body the scripted and clicked shots come (m), and how wide a shotgun's
@@ -85,6 +89,12 @@ pub struct Rig {
     /// `Bone::follow`), and how much of its aim an armed body keeps now.
     pub follow: [Follow; COUNT],
     pub aim_hold: f32,
+    /// The physical body while it reacts (`ragdoll_core::active`), when it was last hit.
+    pub body: Option<active::Body>,
+    pub hit_at: f64,
+    /// Where the feet stand (the pins' targets between steps), the steps' last targets.
+    pub planted: Option<([V3; 2], f64)>,
+    pub held: Vec<Option<M3>>,
 }
 
 impl Rig {
@@ -102,6 +112,10 @@ impl Rig {
             active: false,
             follow: [Follow::REST; COUNT],
             aim_hold: 0.0,
+            body: None,
+            hit_at: 0.0,
+            planted: None,
+            held: Vec::new(),
         }
     }
 }
@@ -160,6 +174,10 @@ pub struct Stats {
     pub aim_drift: f32,
     pub flinch: f32,
     pub interrupted: bool,
+    /// Smoothness while it stands (the shown pose): the biggest change of a bone's velocity in one
+    /// frame (m/s) and the biggest jerk (m/s3).
+    pub velocity_jump: f32,
+    pub jerk: f32,
 }
 
 /// What a ray from a point along a direction hits on the body: the bone and the point.
@@ -186,6 +204,10 @@ pub struct Sim {
     pub last_knock: Option<f64>,
     pub last_up: Option<f64>,
     pub posed: [Xf; COUNT],
+    /// The pose a frame before (the body's starting motion; the smoothness measures).
+    pub posed_before: [Xf; COUNT],
+    velocity: Option<[V3; COUNT]>,
+    acceleration: Option<[V3; COUNT]>,
     pub stats: Stats,
     pub log: Vec<String>,
     rng: u64,
@@ -218,6 +240,9 @@ impl Sim {
             last_knock: None,
             last_up: None,
             posed: [IDENT_XF; COUNT],
+            posed_before: [IDENT_XF; COUNT],
+            velocity: None,
+            acceleration: None,
             stats: Stats::default(),
             log: Vec::new(),
             rng: 0x2545_f491_4f6c_dd1d,
@@ -264,6 +289,9 @@ impl Sim {
         };
         self.t = 0.0;
         self.posed = self.anim();
+        self.posed_before = self.posed;
+        self.velocity = None;
+        self.acceleration = None;
         self.note("reset: standing at the start".into());
     }
 
@@ -491,56 +519,45 @@ impl Sim {
             0.0
         };
         let spread = spread_of(v);
-        let positions: Vec<V3> = self.posed.iter().map(|x| x.1).collect();
         let struck = self.nearest_bone(point);
-        let (struck_role, _) = mq::role_side(struck);
-        let mut touched = 0;
-        let mut spine_kick: Option<V3> = None;
-        for (i, pos) in positions.iter().enumerate() {
-            let (role, _) = mq::role_side(i);
-            let distance = length(sub(*pos, point)) / UNITS_PER_METRE;
-            let w = weight(role, distance, spread);
-            if w < 0.02 {
-                continue;
-            }
-            let lever = sub(point, *pos);
-            let lever = if length(lever) < 5.0 {
-                [0.0, 0.0, 1.0]
-            } else {
-                lever
-            };
-            let Some(axis) = unit(cross(lever, direction)) else {
-                continue;
-            };
-            let mut kick = scale(axis, t.kick * v * w);
-            if role == Role::Head {
-                if let Some(s) = spine_kick {
-                    kick = add(kick, scale(s, -t.head_lag));
+        // The muscles near the hit go slack for a moment (the spread); an armed body's arms hold
+        // their aim (stronger) through a hit below the stagger.
+        let positions: Vec<V3> = self.posed.iter().map(|x| x.1).collect();
+        let dips: Vec<f32> = (0..COUNT)
+            .map(|b| {
+                let role = mq::role_side(b).0;
+                let d = length(sub(positions[b], point)) / UNITS_PER_METRE;
+                let dip = t.muscle_dip * weight(role, d, spread).min(1.0);
+                if role.is_arm() && self.rig.aim_hold > 0.0 {
+                    dip - 5.0 * self.rig.aim_hold
+                } else {
+                    dip
                 }
-            }
-            if role == Role::Spine {
-                spine_kick = Some(kick);
-            }
-            let s = &mut self.rig.springs[i];
-            s.velocity = add(s.velocity, kick);
-            s.dip = (s.dip + t.muscle_dip * w.min(1.0)).min(0.9);
-            touched += 1;
-        }
-        if matches!(struck_role, Role::Thigh | Role::Calf) {
-            let across = unit(cross([0.0, 0.0, 1.0], direction)).unwrap_or([1.0, 0.0, 0.0]);
-            for i in 0..COUNT {
-                let (role, _) = mq::role_side(i);
-                if !matches!(role, Role::Thigh | Role::Calf) {
-                    continue;
-                }
-                if !(length(sub(positions[i], positions[struck])) < 60.0 || i == struck) {
-                    continue;
-                }
-                let sign = if role == Role::Calf { -1.0 } else { 1.0 };
-                let s = &mut self.rig.springs[i];
-                s.velocity = add(s.velocity, scale(across, sign * t.knee_buckle * v));
-            }
-            self.rig.drop_speed -= t.pelvis_drop * v;
+            })
+            .collect();
+        let touched = dips.iter().filter(|d| **d > 0.02).count();
+        self.ensure_body();
+        self.rig.hit_at = self.t;
+        self.rig.since = self.t;
+        let m = 1.0 / UNITS_PER_METRE;
+        if let Some(body) = self.rig.body.as_mut() {
+            let takes: Vec<f32> = (0..COUNT)
+                .map(|b| {
+                    if self.rig.aim_hold > 0.0 && mq::role_side(b).0.is_arm() {
+                        0.0
+                    } else {
+                        1.0
+                    }
+                })
+                .collect();
+            body.hit(
+                p * strength / 100.0,
+                direction,
+                scale(point, m),
+                spread,
+                &dips,
+                &takes,
+            );
         }
         self.stats.flinches += 1;
         self.note(format!(
@@ -801,19 +818,10 @@ impl Sim {
         let t = self.tune;
         self.rig.balance = None;
         f.t += dt;
-        let k = (f.t / f.lead.max(1e-3)).clamp(0.0, 1.0);
+        // It goes over physically (the support fades over the lead, `pose_frame`); a windmill is
+        // the one pose it is given.
         let across = unit(cross([0.0, 0.0, 1.0], f.dir)).unwrap_or([1.0, 0.0, 0.0]);
-        let lean = if f.windmill { -0.3 } else { t.fall_lean * k };
-        if let Some(i) = mq::bone_of(Role::Spine, 2) {
-            out[i] = Some(rotation(scale(across, lean)));
-        }
         for side in 0..2u8 {
-            if let Some(b) = mq::bone_of(Role::Thigh, side) {
-                out[b] = Some(rotation(scale(across, t.fall_knees * k)));
-            }
-            if let Some(c) = mq::bone_of(Role::Calf, side) {
-                out[c] = Some(rotation(scale(across, -t.fall_knees * k)));
-            }
             if f.windmill && self.rig.limbs.arm(side as usize) {
                 if let Some(u) = mq::bone_of(Role::UpperArm, side) {
                     let phase = if side == 0 { 0.0 } else { std::f32::consts::PI };
@@ -967,23 +975,7 @@ impl Sim {
             out[c] = Some(m);
             out[f] = Some(level);
         }
-        let spine = anim[mq::SPINE].1;
-        for side in 0..2u8 {
-            if !self.rig.limbs.arm(side as usize) || s.arms <= 0.0 {
-                continue;
-            }
-            let (Some(u), Some(f)) = (
-                mq::bone_of(Role::UpperArm, side),
-                mq::bone_of(Role::Forearm, side),
-            ) else {
-                continue;
-            };
-            let (shoulder, elbow) = (anim[u].1, anim[f].1);
-            let outward = [shoulder[0] - spine[0], shoulder[1] - spine[1], 0.0];
-            if let Some(axis) = unit(cross(sub(elbow, shoulder), outward)) {
-                out[u] = Some(rotation(scale(axis, self.tune.arms_out * s.arms)));
-            }
-        }
+        // No scripted arms: the physical body's arms swing out of their own as it steps.
         self.rig.shift = shift;
         if s.recovering && s.outcome == Outcome::Overrun && self.rig.fall.is_none() {
             self.note(format!(
@@ -1020,6 +1012,7 @@ impl Sim {
         tuning::set(self.tune);
         let dt = STEP;
         self.t += dt as f64;
+        self.posed_before = self.posed;
         match self.state {
             State::Standing => self.pose_frame(dt),
             State::Ragdoll { .. } => self.ragdoll_frame(),
@@ -1040,98 +1033,154 @@ impl Sim {
     fn pose_frame(&mut self, dt: f32) {
         let mut overrides: Vec<Option<M3>> = vec![None; COUNT];
         if self.rig.active {
-            for b in 0..COUNT {
-                let (role, _) = mq::role_side(b);
-                self.rig.springs[b].step(role, dt);
-            }
             overrides = self.balance_frame(dt);
+            // The legs keep the steps' last targets while the body goes over (no jump in them).
+            if self.rig.balance.is_some() {
+                self.rig.held = overrides.clone();
+            } else if self.rig.fall.is_some() {
+                for (b, o) in overrides.iter_mut().enumerate() {
+                    if o.is_none() && !mq::role_side(b).0.is_arm() {
+                        *o = self.rig.held.get(b).copied().flatten();
+                    }
+                }
+            }
             let anim = self.anim();
             self.brace_frame(&anim, &mut overrides, dt);
             if self.fall_frame(&mut overrides, dt) {
                 return;
             }
-            let (f, zeta) = Role::Pelvis.spring();
-            let w0 = std::f32::consts::TAU * f;
-            self.rig.drop_speed +=
-                (-w0 * w0 * self.rig.drop - 2.0 * zeta * w0 * self.rig.drop_speed) * dt;
-            self.rig.drop =
-                (self.rig.drop + self.rig.drop_speed * dt).clamp(-self.tune.pelvis_drop_max, 0.0);
-            // The arms follow the poses they are given (or their own) with a lag.
-            for (b, o) in overrides.iter().enumerate() {
-                if mq::role_side(b).0.is_arm() {
-                    let target = o.map_or([0.0; 3], |o| rotation_vector(&o));
-                    self.rig.follow[b].step(target, dt);
-                }
-            }
         }
-        let resting = self.rig.springs.iter().all(|s| s.at_rest())
-            && self.rig.follow.iter().all(|f| f.at_rest())
-            && self.rig.drop.abs() < 1e-3
-            && self.rig.balance.is_none()
-            && self.rig.brace.is_none()
-            && self.rig.fall.is_none();
-        // Each bone's world offset: its pose override (an arm's followed) on its spring's, the
-        // aim kept for an armed body (the host's `apply`).
-        let mut offsets: Vec<M3> = (0..COUNT)
-            .map(|b| {
-                let spring = rotation(self.rig.springs[b].angle);
-                let o = if mq::role_side(b).0.is_arm() {
-                    Some(rotation(self.rig.follow[b].angle))
-                } else {
-                    overrides[b]
-                };
-                match o {
-                    Some(o) => mul(&o, &spring),
-                    None => spring,
-                }
-            })
-            .collect();
-        if self.armed && self.rig.aim_hold > 0.0 {
-            let roles: Vec<Role> = (0..COUNT).map(|b| mq::role_side(b).0).collect();
-            hold_aim(&mut offsets, &mq::PARENT, &roles, self.rig.aim_hold);
+        let anim = self.anim();
+        // The targets: the animation, with the steps' legs, the brace's arms, the windmill (each
+        // override a world turn carried down its chain).
+        let mut chain = [IDENTITY; COUNT];
+        let mut target = [IDENTITY; COUNT];
+        for b in 0..COUNT {
+            let up = mq::PARENT[b].map_or(IDENTITY, |p| chain[p]);
+            chain[b] = match overrides[b] {
+                Some(o) => mul(&up, &o),
+                None => up,
+            };
+            target[b] = mul(&chain[b], &anim[b].0);
         }
+        let pelvis_target = add(anim[mq::PELVIS].1, self.rig.shift);
         let before = self.posed;
-        self.posed = self.pose(&offsets, resting);
+        let busy =
+            self.rig.balance.is_some() || self.rig.brace.is_some() || self.rig.fall.is_some();
+        if busy {
+            self.rig.since = self.t;
+        }
+        let shown_w = match self.rig.body.as_mut() {
+            Some(body) => {
+                let m = 1.0 / UNITS_PER_METRE;
+                // The feet: where the steps put them (swinging, then planted); after the steps,
+                // eased back to the animation's.
+                let animated = [anim[mq::L_FOOT].1, anim[mq::R_FOOT].1];
+                let planted = match &self.rig.balance {
+                    Some(s) => {
+                        let f = s.feet(self.scale);
+                        self.rig.planted = Some((f, self.t));
+                        f
+                    }
+                    None => match self.rig.planted {
+                        // After the steps, eased back to the animation's (the host's `FEET_BACK`).
+                        Some((p, since)) => {
+                            let k = active::ease((self.t - since) as f32 / FEET_BACK);
+                            [0, 1].map(|i| add(p[i], scale(sub(animated[i], p[i]), k)))
+                        }
+                        None => animated,
+                    },
+                };
+                let feet: Vec<(usize, V3)> = vec![
+                    (mq::L_FOOT, scale(planted[0], m)),
+                    (mq::R_FOOT, scale(planted[1], m)),
+                ];
+                let support = match &self.rig.fall {
+                    Some(f) => 1.0 - active::ease(f.t / f.lead.max(1e-3)),
+                    None => 1.0,
+                };
+                let targets = active::Targets {
+                    rot: target.iter().map(active::qfrom_m).collect(),
+                    pelvis: scale(pelvis_target, m),
+                    feet,
+                    hands: Vec::new(),
+                    support,
+                    // An armed body keeps its aim: its arms track their world rotations (the
+                    // torso flinches under them).
+                    world: (0..COUNT)
+                        .map(|b| {
+                            if mq::role_side(b).0.is_arm() {
+                                (self.rig.aim_hold * 1.25).min(1.0)
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect(),
+                };
+                let since_hit = (self.t - self.rig.hit_at) as f32;
+                body.step(&targets, dt, active::strength(since_hit));
+                active::weight((self.t - self.rig.since) as f32)
+            }
+            None => 0.0,
+        };
+        // The shown pose: the targets and the body's, blended by the body's weight (eased).
+        let mut rots = target;
+        let mut pelvis = pelvis_target;
+        if let Some(body) = &self.rig.body {
+            let pose = body.pose();
+            for b in 0..COUNT {
+                let q = active::qslerp(active::qfrom_m(&target[b]), pose[b].0, shown_w);
+                rots[b] = active::m_from_q(q);
+            }
+            let sim = scale(pose[mq::PELVIS].1, UNITS_PER_METRE);
+            pelvis = add(pelvis_target, scale(sub(sim, pelvis_target), shown_w));
+        }
+        let mut out = [IDENT_XF; COUNT];
+        for b in 0..COUNT {
+            let pos = match mq::PARENT[b] {
+                Some(p) => add(out[p].1, apply_m(&out[p].0, self.rest_local(b))),
+                None => pelvis,
+            };
+            out[b] = (rots[b], pos);
+        }
+        self.posed = out;
         self.measure(&before, dt);
-        if self.rig.active && resting && self.t - self.rig.since > 0.2 {
+        if self.rig.body.is_some() && shown_w <= 0.0 && !busy {
+            self.rig.body = None;
             self.rig.active = false;
-            self.rig.springs = [Spring::REST; COUNT];
             self.rig.shift = [0.0; 3];
+            self.note("back in its animation".into());
         }
     }
 
-    /// The pose layer's write and the update: each bone's local rotation `P^T (O S) P L` over the
-    /// animated pose (`P` its parent's animated world rotation), the pelvis carried by the drop
-    /// and the shift; the world transforms brought up from the locals.
-    fn pose(&self, offsets: &[M3], resting: bool) -> [Xf; COUNT] {
-        let anim = self.anim();
-        let mut out = [IDENT_XF; COUNT];
-        for b in 0..COUNT {
-            let p_anim = mq::PARENT[b].map_or(IDENTITY, |p| anim[p].0);
-            let pose_rot = self.anim_local(b);
-            let mut t = self.rest_local(b);
-            let rot = if resting {
-                pose_rot
-            } else {
-                let r = offsets[b];
-                if b == mq::PELVIS {
-                    t = add(
-                        t,
-                        apply_m(
-                            &transpose(&p_anim),
-                            add([0.0, 0.0, self.rig.drop * UNITS_PER_METRE], self.rig.shift),
-                        ),
-                    );
-                }
-                mul(&mul(&mul(&transpose(&p_anim), &r), &p_anim), &pose_rot)
-            };
-            let (prot, ppos) = match mq::PARENT[b] {
-                Some(p) => out[p],
-                None => (IDENTITY, self.pos),
-            };
-            out[b] = (mul(&prot, &rot), add(ppos, apply_m(&prot, t)));
+    /// The physical body made from the pose shown now, moving as it moved (nothing jumps).
+    fn ensure_body(&mut self) {
+        if self.rig.body.is_some() {
+            return;
         }
-        out
+        let m = 1.0 / UNITS_PER_METRE;
+        let mass = self.mass();
+        let bones: Vec<active::Bone> = (0..COUNT)
+            .map(|b| {
+                let (rot, pos) = self.posed[b];
+                let end = add(
+                    pos,
+                    apply_m(&rot, scale(sub(mq::end(b), mq::JOINT[b]), self.scale)),
+                );
+                let (r0, p0) = self.posed_before[b];
+                active::Bone {
+                    parent: mq::PARENT[b],
+                    role: mq::role_side(b).0,
+                    q: active::qfrom_m(&rot),
+                    joint: scale(pos, m),
+                    end: scale(end, m),
+                    radius: mq::CAPSULE[b].2 * self.scale * m,
+                    mass: mass * mq::MASS_SHARE[b],
+                    before: Some((active::qfrom_m(&r0), scale(p0, m))),
+                }
+            })
+            .collect();
+        self.rig.body = Some(active::Body::from_pose(&bones, STEP));
     }
 
     /// The run's measures for a standing frame: the arms' turning speed, the weapon hand's drift
@@ -1140,6 +1189,29 @@ impl Sim {
         if self.stats.last_hit.is_none() || dt <= 0.0 {
             return;
         }
+        // Smoothness: each bone's velocity, acceleration and jerk from its shown position; the
+        // biggest change of velocity in a frame and the biggest jerk (m/s, m/s3).
+        let v: [V3; COUNT] = std::array::from_fn(|b| {
+            scale(
+                sub(self.posed[b].1, before[b].1),
+                1.0 / (dt * UNITS_PER_METRE),
+            )
+        });
+        if let Some(v0) = self.velocity {
+            let a: [V3; COUNT] = std::array::from_fn(|b| scale(sub(v[b], v0[b]), 1.0 / dt));
+            for b in 0..COUNT {
+                let jump = length(sub(v[b], v0[b]));
+                self.stats.velocity_jump = self.stats.velocity_jump.max(jump);
+            }
+            if let Some(a0) = self.acceleration {
+                for b in 0..COUNT {
+                    let j = length(sub(a[b], a0[b])) / dt;
+                    self.stats.jerk = self.stats.jerk.max(j);
+                }
+            }
+            self.acceleration = Some(a);
+        }
+        self.velocity = Some(v);
         let anim = self.anim();
         for b in 0..COUNT {
             if mq::role_side(b).0.is_arm() {
@@ -1200,9 +1272,14 @@ impl Sim {
                 continue;
             }
             let (rot, pos) = self.posed[b];
+            // The ragdoll goes on with the active body's motion (no jump), the launch on top.
+            let (bv, bw) = self.rig.body.as_ref().map_or(([0.0; 3], [0.0; 3]), |body| {
+                (body.state[b].v, body.state[b].w)
+            });
             let rb = RigidBodyBuilder::dynamic()
                 .pose(Pose::from_parts(to_m(pos), quat_of(&rot)))
-                .linvel(v)
+                .linvel(v + vec(bv))
+                .angvel(vec(bw))
                 .linear_damping(0.05)
                 .angular_damping(if mq::role_side(b).0.is_arm() {
                     2.0
@@ -1254,6 +1331,8 @@ impl Sim {
             self.world.insert_impulse_joint(hp, hb, joint.build());
         }
         self.rig = Rig::new(self.rig.limbs);
+        self.velocity = None;
+        self.acceleration = None;
         self.last_knock = Some(self.t);
         self.stats.fell = true;
         self.stats.fall.get_or_insert_with(|| why.to_string());
@@ -1460,7 +1539,7 @@ impl Sim {
         *t += dt;
         let from = **from;
         let k = (*t / GET_UP).clamp(0.0, 1.0);
-        let k = k * k * (3.0 - 2.0 * k);
+        let k = active::ease(k);
         let anim = self.anim();
         for b in 0..COUNT {
             let qa = quat_of(&from[b].0);

@@ -117,6 +117,29 @@ pub const MASS_SHARE: [f32; COUNT] = [
     0.100, 0.0465, 0.0465, 0.0145, 0.0145, 0.006, 0.006,
 ];
 
+/// Where a bone's body reaches at rest (scale 1): the next joint down its chain, or the far end of
+/// its capsule (the active ragdoll's segments, `ragdoll_core::active`).
+pub fn end(bone: usize) -> V3 {
+    match bone {
+        PELVIS => JOINT[SPINE],
+        SPINE => JOINT[SPINE1],
+        SPINE1 => JOINT[SPINE2],
+        SPINE2 => JOINT[NECK],
+        NECK => JOINT[HEAD],
+        L_CLAVICLE => JOINT[L_UPPERARM],
+        R_CLAVICLE => JOINT[R_UPPERARM],
+        L_UPPERARM => JOINT[L_FOREARM],
+        R_UPPERARM => JOINT[R_FOREARM],
+        L_FOREARM => JOINT[L_HAND],
+        R_FOREARM => JOINT[R_HAND],
+        L_THIGH => JOINT[L_CALF],
+        R_THIGH => JOINT[R_CALF],
+        L_CALF => JOINT[L_FOOT],
+        R_CALF => JOINT[R_FOOT],
+        _ => CAPSULE[bone].1,
+    }
+}
+
 /// The ragdoll joint's limits (radians) about the world axes at rest: X across the body (a knee
 /// or an elbow bends about it), Y forward, Z up. `[min, max]` per axis.
 pub fn ragdoll_limits(bone: usize) -> [[f32; 2]; 3] {

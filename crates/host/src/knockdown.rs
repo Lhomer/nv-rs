@@ -1214,9 +1214,16 @@ fn give_launch(e: &mut Engine, actor: u32, direction: [f32; 3], speed: f32) -> u
     let scale = hk_scale(e);
     let add = direction.map(|x| x * speed / scale);
     let bones = bodies(e, actor);
+    // The active ragdoll's body's motion, when it was reacting (`crate::active_ragdoll`): the
+    // ragdoll goes on with it (nothing jumps at the switch), the launch on top.
+    let going = crate::active_ragdoll::body_velocities(actor);
     let mut given = 0;
-    for &(_, body) in &bones {
+    for &(node, body) in &bones {
         if let Some(v) = linear(e, body) {
+            let v = going
+                .iter()
+                .find(|g| g.0 == node)
+                .map_or(v, |g| g.1.map(|x| x / scale));
             set_velocity(
                 e,
                 SET_LINEAR_VELOCITY,

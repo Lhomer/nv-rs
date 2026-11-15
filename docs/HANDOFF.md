@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (active ragdoll: a physical body)
+
+- **Now (`ragdoll_core::active` Body, Targets, ease/weight/strength; `active_ragdoll::apply` rewritten around it, `make_body`, `body_velocities`; `knockdown::give_launch` starts from them; the lab's `sim.rs` the same, with `velocity_jump` and `jerk`):** after a hit the rig is a physical articulated body (capsules, XPBD joints, PD motors tracking the animation, soft and ramping, gravity carried, impulse shared and travelling, support plus foot pins following the capture-point steps), blended back eased; written as offsets over the animation. All 20 lab scenarios pass natively and in Chromium with smoothness bounds. Not run in game.
+- **Patrick:** still far off Euphoria; true active ragdoll: PD motors on every joint tracking the animation, soft and well damped with ramping strength, impulses travelling along the chain, balance from motors and capture-point stepping, blend back over 0.5-1 s eased, no snaps or velocity discontinuities; tune in the lab with a smoothness measure; keep the scenarios passing.
+
 ### Claude, 2026-11-15 (knockdowns ragdoll again)
 
 - **Now (`knockdown::knock_down` task-queue check and knock-state verification, `knock_down_later`, `knock_down_next_update`, `pending_knock_downs` in `frame`; `active_ragdoll::fall_frame` asks for the switch, `fall_failed`):** the stage 3 fall no longer switches into the ragdoll at the draw's set-up, where the game's task queue was in use and `KnockExplosion` only queued it (knock state 0; the replay hit the duplicate guard). Failed switches keep nothing and are retried once. Not run in game.

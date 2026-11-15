@@ -21,6 +21,12 @@ runs on the constants).
 written after the host's functions with the game's bones replaced by the mannequin's and its
 navmesh by a ray down onto the ground.
 
+The standing body is the game's active ragdoll body (`ragdoll_core::active`): capsules with
+PD motors on every joint tracking the animation, soft right after a hit and ramping back, the
+hit's push travelling through the chain, balance from the motors, the pelvis's support and the
+capture-point steps, an eased blend back to the animation. Its sliders are under "Active
+ragdoll".
+
 ## What is not
 
 - **The ragdoll** is Rapier's, not Havok's. Its bone layout is the game's (the 20 Bip01 bones of
@@ -70,7 +76,7 @@ pushes toward the wall, the ledge and the stairs; 90 its right). Other keys: `gr
 left arm, right arm; `0111` has lost the left leg), `armed=1` (holding a weapon, aiming),
 `attacking=1` (attacking; armed too), `expect` (`upright`, `fell`, `braced`, `steps>=1`,
 `steps=0`, `fall:<kind>`, `flinched`, `aim<=D` degrees, `armspin<=W` and `ragdollarmspin<=W`
-rad/s, `interrupted`, `attacking`).
+rad/s, `interrupted`, `attacking`, `vjump<=V` m/s, `jerk<=J` m/s3).
 
 Each run goes until the body has recovered (or 12 s after the last hit). The report (JSON in
 `<pre id="results">`, in `window.ragdollLab.results`, and on the console;
@@ -80,7 +86,8 @@ Each run goes until the body has recovered (or 12 s after the last hit). The rep
 stood), `recovery_s` (from the first hit until it stood at rest again), `peak_speed_mps` against
 `topple_mps`, the decisions (`None`, `Stagger`, `Knockdown`), `arm_spin` and `ragdoll_arm_spin`
 (the fastest an arm bone turned standing, and in the ragdoll, rad/s), `flinch_deg`,
-`aim_drift_deg` (an armed body's weapon hand off its aim), `interrupted`, whether the
+`aim_drift_deg` (an armed body's weapon hand off its aim), `interrupted`, `velocity_jump_mps`
+(the biggest change of a bone's velocity in one frame while it stands) and `jerk` (m/s3), whether the
 expectations held, and the log's last lines.
 
 ## Building

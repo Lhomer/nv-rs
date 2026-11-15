@@ -2,6 +2,8 @@
 //! clock, so that the host (`crates/host`) and the browser lab (`tools/ragdoll-lab`) run the same
 //! code and a tuning tried in the lab carries over to the game.
 //!
+//! - [`active`]: the active ragdoll's physical body (PD motors on every joint tracking the
+//!   animation, the hit travelling through the chain, balance from the motors and the steps).
 //! - [`flinch`]: the active ragdoll's bone roles, springs, kick spread and stage 3 timings
 //!   (`crate::active_ragdoll` in the host re-exports it).
 //! - [`balance`]: stage 2's capture point, catch-step planning, ground classes, two-bone IK and the
@@ -14,6 +16,7 @@
 //!   process-wide override the lab sets from its sliders. The game never sets it, so in the game
 //!   [`tuning::get`] is always [`tuning::Tuning::GAME`], the constants as written.
 
+pub mod active;
 pub mod balance;
 pub mod flinch;
 pub mod knock;

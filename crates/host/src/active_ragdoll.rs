@@ -3,6 +3,22 @@
 //! into the ragdoll come later). Part of the weighty combat row; `[nv-rs Gunplay] iHitReactions`
 //! (percent, 0 = off; Settings > Gameplay "Hit Reactions"). **Not 1:1 with FalloutNV.exe.**
 //!
+//! **Now a physical body** (Patrick, 2026-11-15: toward Euphoria; it supersedes the springs
+//! described below, whose tables still give each joint its motor's frequency, its share of a kick
+//! and its room). A hit makes the actor's rig a physical articulated body for a second or two
+//! (`ragdoll_core::active`): each bone a capsule, every joint a PD motor tracking the animation's
+//! pose (soft right after the hit, eased back to full), the hit's momentum shared among the bones
+//! near it and reaching each after its distance (it travels up and down the chain), the limbs'
+//! weight carried, the pelvis held by a support that follows the capture-point steps
+//! ([`crate::balance`]), the feet pinned where they stand or swing; balance comes from those, not
+//! from scripted poses (no arms out, no scripted lean: going over is the support fading). The body
+//! is made the frame after the hit from two frames of the pose (its motion: nothing jumps), each
+//! frame its bones are written as offsets over the animation (`A(p) S(p)^T S(b) A(b)^T`, the
+//! same layer and the same ragdoll-controller seam as before), and after [`active::ACTIVE_FOR`]
+//! it blends back to the animation over [`active::BLEND_BACK`], eased. When it falls into its
+//! ragdoll, the ragdoll goes on with the body's motion ([`body_velocities`]). Tuned in
+//! `tools/ragdoll-lab`, which runs the same body.
+//!
 //! **What it does.** A hit on a living actor below the knockdown's topple speed
 //! ([`crate::knockdown`]) kicks its skeleton: the struck bone (the rig's bone nearest the impact
 //! point) along the hit's direction, and the kick spreads through the body, fading with distance
@@ -64,6 +80,7 @@ use engine::prelude::*;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use ragdoll_core::active;
 /// The pure parts (the roles, the springs, the spread, the vector helpers, stage 3's timings) live
 /// in `crates/ragdoll-core`, shared with `tools/ragdoll-lab`.
 pub use ragdoll_core::flinch::*;
@@ -92,6 +109,28 @@ pub struct Rig {
     /// Its weapon drawn at the last hit, and how much of its aim it keeps ([`hold_aim`]).
     pub armed: bool,
     pub aim_hold: f32,
+    /// The physical body while it reacts (`ragdoll_core::active`), the body's mass (kg), its last
+    /// hit, its hits waiting for the body (made the frame after, from two frames of the pose:
+    /// its motion), the pose the frame before, the feet's targets between steps (and since when
+    /// they go back to the animation's), the steps' last targets.
+    pub body: Option<active::Body>,
+    pub mass: f32,
+    pub hit_at: Instant,
+    pub pending: Vec<Hit>,
+    pub before: Option<Vec<(M3, V3)>>,
+    pub planted: Option<([V3; 2], Instant)>,
+    pub held: Vec<Option<M3>>,
+}
+
+/// A hit waiting for the physical body (`ragdoll_core::active::Body::hit`'s words; game units).
+#[derive(Clone, Debug)]
+pub struct Hit {
+    pub p: f32,
+    pub dir: V3,
+    pub at: V3,
+    pub spread: f32,
+    pub dips: Vec<f32>,
+    pub takes: Vec<f32>,
 }
 
 /// Hands reaching to a wall along `dir` (stage 3), `t` seconds in.
@@ -360,6 +399,13 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         fall: None,
         armed: false,
         aim_hold: 0.0,
+        body: None,
+        mass: 80.0,
+        hit_at: Instant::now(),
+        pending: Vec::new(),
+        before: None,
+        planted: None,
+        held: Vec::new(),
     });
     true
 }
@@ -445,65 +491,44 @@ pub fn hit(
         })
         .unwrap_or(0);
     let struck_role = rig.bones[struck].role;
-    let mut touched = 0;
-    let mut spine_kick: Option<V3> = None;
-    for (i, bone) in rig.bones.iter_mut().enumerate() {
-        let distance = length(sub(positions[i], point)) / UNITS_PER_METRE;
-        let w = weight(bone.role, distance, spread);
-        if w < 0.02 {
-            continue;
-        }
-        // The lever from the bone's joint to the impact: the kick turns the bone about the axis
-        // across it and the hit (a hit at the joint itself turns it about its own length).
-        let lever = sub(point, positions[i]);
-        let lever = if length(lever) < 5.0 {
-            [0.0, 0.0, 1.0]
-        } else {
-            lever
-        };
-        let Some(axis) = unit(cross(lever, direction)) else {
-            continue;
-        };
-        let mut kick = scale(axis, KICK * v * w);
-        if bone.role == Role::Head {
-            // The head lags the spine: kicked against it, it snaps after.
-            if let Some(s) = spine_kick {
-                kick = add(kick, scale(s, -HEAD_LAG));
+    // The muscles near the hit go slack for a moment (the spread); an armed body's arms hold their
+    // aim (stronger, and the torso takes the push).
+    let dips: Vec<f32> = rig
+        .bones
+        .iter()
+        .zip(&positions)
+        .map(|(b, at)| {
+            let d = length(sub(*at, point)) / UNITS_PER_METRE;
+            let dip = MUSCLE_DIP * weight(b.role, d, spread).min(1.0);
+            if b.role.is_arm() && aim_hold > 0.0 {
+                dip - 5.0 * aim_hold
+            } else {
+                dip
             }
-        }
-        if bone.role == Role::Spine {
-            spine_kick = Some(kick);
-        }
-        bone.spring.velocity = add(bone.spring.velocity, kick);
-        bone.spring.dip = (bone.spring.dip + MUSCLE_DIP * w.min(1.0)).min(0.9);
-        touched += 1;
-    }
-    // A leg hit: the knee buckles (the thigh and the calf of that side bend forward, the axis across
-    // the leg) and the pelvis drops.
-    if matches!(struck_role, Role::Thigh | Role::Calf) {
-        let side = rig.bones[struck].node;
-        let thigh_or_calf: Vec<usize> = rig
-            .bones
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| matches!(b.role, Role::Thigh | Role::Calf))
-            .filter(|(i, _)| {
-                length(sub(positions[*i], positions[struck])) < 60.0 || rig.bones[*i].node == side
-            })
-            .map(|(i, _)| i)
-            .collect();
-        let across = unit(cross([0.0, 0.0, 1.0], direction)).unwrap_or([1.0, 0.0, 0.0]);
-        for i in thigh_or_calf {
-            let sign = if rig.bones[i].role == Role::Calf {
-                -1.0
+        })
+        .collect();
+    let takes: Vec<f32> = rig
+        .bones
+        .iter()
+        .map(|b| {
+            if b.role.is_arm() && aim_hold > 0.0 {
+                0.0
             } else {
                 1.0
-            };
-            let b = &mut rig.bones[i];
-            b.spring.velocity = add(b.spring.velocity, scale(across, sign * KNEE_BUCKLE * v));
-        }
-        rig.drop_speed -= PELVIS_DROP * v;
-    }
+            }
+        })
+        .collect();
+    let touched = dips.iter().filter(|d| **d > 0.02).count();
+    rig.mass = mass;
+    rig.hit_at = Instant::now();
+    rig.pending.push(Hit {
+        p: p * strength as f32 / 100.0,
+        dir: direction,
+        at: point,
+        spread,
+        dips,
+        takes,
+    });
     let who = describe(e, actor);
     note(format!(
         "{who}: flinch at {}: {p:.1} N s on {mass:.0} kg -> {v:.2} m/s (Hit Reactions {strength}%), \
@@ -524,7 +549,8 @@ pub fn hit(
 }
 
 /// Once a frame, at the draw's set-up (from `crate::gunplay`'s `FIRST_PERSON_SETUP` wrapper): every
-/// flinching actor's springs stepped and its bones posed (module documentation).
+/// reacting actor's physical body stepped toward its animation and its bones posed (module
+/// documentation).
 pub fn apply(e: &mut Engine) {
     let dt = {
         let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
@@ -554,7 +580,9 @@ pub fn apply(e: &mut Engine) {
         {
             continue;
         }
-        let flinching = can_flinch(e, rig.actor);
+        if !can_flinch(e, rig.actor) {
+            continue; // nothing of it is written: the animation has it
+        }
         // The ragdoll controller pass writes this actor's bones (an armed or attacking actor):
         // the offsets go on there ([`before_ragdoll_anim`]); here they are only worked out.
         let wrapped = wrapped_recently(rig.actor);
@@ -571,72 +599,159 @@ pub fn apply(e: &mut Engine) {
             };
             bone.pose = Some(base);
         }
-        let mut overrides: Vec<Option<M3>> = vec![None; rig.bones.len()];
-        if flinching {
-            for bone in &mut rig.bones {
-                bone.spring.step(bone.role, dt);
-            }
-            overrides = balance_frame(e, &mut rig, dt);
-            brace_frame(e, &mut rig, &mut overrides, dt);
-            if fall_frame(e, &mut rig, &mut overrides, dt) {
-                continue; // in the ragdoll now: it owns the bones
-            }
-            let (f, zeta) = Role::Pelvis.spring();
-            let w0 = std::f32::consts::TAU * f;
-            rig.drop_speed += (-w0 * w0 * rig.drop - 2.0 * zeta * w0 * rig.drop_speed) * dt;
-            rig.drop = (rig.drop + rig.drop_speed * dt).clamp(-PELVIS_DROP_MAX, 0.0);
-            // The arms follow the poses they are given (or their own) with a lag.
-            for (index, bone) in rig.bones.iter_mut().enumerate() {
-                if bone.role.is_arm() {
-                    let target = overrides[index].map_or([0.0; 3], |o| rotation_vector(&o));
-                    bone.follow.step(target, dt);
+        // The animated pose in the world: the bones' as the game's update left them.
+        let anim: Vec<(M3, V3)> = rig
+            .bones
+            .iter()
+            .map(|b| {
+                (
+                    read9(e, b.node + WORLD_ROTATION),
+                    read3(e, b.node + WORLD_TRANSLATION),
+                )
+            })
+            .collect();
+        let Some(pi) = bone_of(&rig, Role::Pelvis, 2) else {
+            continue;
+        };
+        // The physical body: made the frame after the first hit, from this pose and the last
+        // (its motion), then the hits go in.
+        if rig.body.is_none() {
+            match rig.before.take() {
+                Some(before) if before.len() == anim.len() && dt > 0.0 => {
+                    rig.body = Some(make_body(e, &rig, &anim, &before, dt));
+                }
+                _ => {
+                    rig.before = Some(anim.clone());
+                    keep.push(rig);
+                    continue;
                 }
             }
-        } else {
-            for bone in &mut rig.bones {
-                bone.spring = Spring::REST;
-                bone.follow = Follow::REST;
-            }
-            rig.drop = 0.0;
-            rig.drop_speed = 0.0;
-            rig.balance = None;
-            rig.shift = [0.0; 3];
-            rig.brace = None;
-            rig.fall = None;
         }
-        let resting = rig
-            .bones
-            .iter()
-            .all(|b| b.spring.at_rest() && b.follow.at_rest())
-            && rig.drop.abs() < 1e-3
-            && rig.balance.is_none()
-            && rig.brace.is_none()
-            && rig.fall.is_none();
-        let shift = rig.shift;
-        // Each bone's world offset R: its pose override (an arm's followed) on its spring's.
-        let mut offsets: Vec<M3> = rig
-            .bones
-            .iter()
-            .enumerate()
-            .map(|(index, bone)| {
-                let spring = rotation(bone.spring.angle);
-                let o = if bone.role.is_arm() {
-                    Some(rotation(bone.follow.angle))
-                } else {
-                    overrides[index]
+        let pending = std::mem::take(&mut rig.pending);
+        if let Some(body) = rig.body.as_mut() {
+            let m = 1.0 / UNITS_PER_METRE;
+            for h in pending {
+                body.hit(h.p, h.dir, scale(h.at, m), h.spread, &h.dips, &h.takes);
+            }
+        }
+        let mut overrides = balance_frame(e, &mut rig, dt);
+        // The legs keep the steps' last targets while the body goes over (no jump in them).
+        if rig.balance.is_some() {
+            rig.held = overrides.clone();
+        } else if rig.fall.is_some() {
+            for (b, o) in overrides.iter_mut().enumerate() {
+                if o.is_none() && !rig.bones[b].role.is_arm() {
+                    *o = rig.held.get(b).copied().flatten();
+                }
+            }
+        }
+        brace_frame(e, &mut rig, &mut overrides, dt);
+        if fall_frame(e, &mut rig, &mut overrides, dt) {
+            continue; // in the ragdoll now: it owns the bones
+        }
+        // The targets: the animation, with the steps' legs, the brace's arms, the windmill (each
+        // override a world turn carried down its chain).
+        let n = rig.bones.len();
+        let mut chain = vec![IDENTITY; n];
+        let mut target = vec![IDENTITY; n];
+        for b in 0..n {
+            let up = rig.bones[b].parent.map_or(IDENTITY, |p| chain[p]);
+            chain[b] = match overrides[b] {
+                Some(o) => mul(&up, &o),
+                None => up,
+            };
+            target[b] = mul(&chain[b], &anim[b].0);
+        }
+        let pelvis_target = add(anim[pi].1, rig.shift);
+        let busy = rig.balance.is_some() || rig.brace.is_some() || rig.fall.is_some();
+        if busy {
+            rig.since = Instant::now();
+        }
+        // The feet: where the steps put them; after the steps, eased back to the animation's
+        // over [`FEET_BACK`] (no jump; an actor its AI walks on keeps its feet under it).
+        let feet_now = match (
+            &rig.balance,
+            bone_of(&rig, Role::Foot, 0),
+            bone_of(&rig, Role::Foot, 1),
+        ) {
+            (_, Some(l), Some(r)) => {
+                let animated = [anim[l].1, anim[r].1];
+                let scale_ = actor_scale(e, rig.actor);
+                let at = match &rig.balance {
+                    Some(s) => {
+                        let f = s.feet(scale_);
+                        rig.planted = Some((f, Instant::now()));
+                        f
+                    }
+                    None => match rig.planted {
+                        Some((p, since)) => {
+                            let k = active::ease(since.elapsed().as_secs_f32() / FEET_BACK);
+                            [0, 1].map(|i| add(p[i], scale(sub(animated[i], p[i]), k)))
+                        }
+                        None => animated,
+                    },
                 };
-                match o {
-                    Some(o) => mul(&o, &spring),
-                    None => spring,
+                vec![(l, at[0]), (r, at[1])]
+            }
+            _ => Vec::new(),
+        };
+        let support = match &rig.fall {
+            Some(f) => 1.0 - active::ease(f.t / f.lead.max(1e-3)),
+            None => 1.0,
+        };
+        let since = rig.since.elapsed().as_secs_f32();
+        let world: Vec<f32> = rig
+            .bones
+            .iter()
+            .map(|b| {
+                if b.role.is_arm() {
+                    (rig.aim_hold * 1.25).min(1.0)
+                } else {
+                    0.0
                 }
             })
             .collect();
-        if rig.armed && rig.aim_hold > 0.0 {
-            let parents: Vec<Option<usize>> = rig.bones.iter().map(|b| b.parent).collect();
-            let roles: Vec<Role> = rig.bones.iter().map(|b| b.role).collect();
-            hold_aim(&mut offsets, &parents, &roles, rig.aim_hold);
+        let m = 1.0 / UNITS_PER_METRE;
+        let mut shown: Vec<M3> = target.clone();
+        let mut pelvis_offset = rig.shift;
+        if let Some(body) = rig.body.as_mut() {
+            let targets = active::Targets {
+                rot: target.iter().map(active::qfrom_m).collect(),
+                pelvis: scale(pelvis_target, m),
+                feet: feet_now.iter().map(|&(i, at)| (i, scale(at, m))).collect(),
+                hands: Vec::new(),
+                support,
+                world,
+            };
+            body.step(
+                &targets,
+                dt,
+                active::strength(rig.hit_at.elapsed().as_secs_f32()),
+            );
+            let w = active::weight(since);
+            let pose = body.pose();
+            for b in 0..n {
+                let q = active::qslerp(active::qfrom_m(&target[b]), pose[b].0, w);
+                shown[b] = active::m_from_q(q);
+            }
+            let sim = scale(pose[pi].1, UNITS_PER_METRE);
+            pelvis_offset = add(rig.shift, scale(sub(sim, pelvis_target), w));
+            if w <= 0.0 && !busy {
+                rig.body = None;
+            }
         }
-        let pelvis_offset = add([0.0, 0.0, rig.drop * UNITS_PER_METRE], shift);
+        let resting = rig.body.is_none() && !busy;
+        // Each bone's world offset over its animation: its parent's shown and animated rotations
+        // taken back, its own shown one on (`A(p) S(p)^T S(b) A(b)^T`).
+        let offsets: Vec<M3> = (0..n)
+            .map(|b| {
+                let own = mul(&shown[b], &transpose(&anim[b].0));
+                match rig.bones[b].parent {
+                    Some(p) => mul(&mul(&anim[p].0, &transpose(&shown[p])), &own),
+                    None => own,
+                }
+            })
+            .collect();
         remember_pose(&rig, &offsets, pelvis_offset, resting);
         if wrapped {
             // Written by the ragdoll controller pass's wrapper this frame (or the next).
@@ -653,7 +768,7 @@ pub fn apply(e: &mut Engine) {
             } else {
                 let parent = e.mem.u32(bone.node + PARENT);
                 let p = if parent == 0 {
-                    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+                    IDENTITY
                 } else {
                     read9(e, parent + WORLD_ROTATION)
                 };
@@ -675,7 +790,8 @@ pub fn apply(e: &mut Engine) {
         }
         update(e, root);
         if resting && rig.since.elapsed().as_secs_f32() > 0.2 {
-            continue; // back in its pose: done
+            note(format!("{}: back in its animation", describe(e, rig.actor)));
+            continue;
         }
         keep.push(rig);
     }
@@ -692,6 +808,116 @@ pub fn apply(e: &mut Engine) {
         rigs.retain(|r| r.actor != f.actor);
         rigs.push(f);
     }
+}
+
+/// The feet go back from where the steps left them to the animation's over this long (s), eased.
+const FEET_BACK: f32 = 0.4;
+
+/// A leaf bone's body reaches this far (m) along its parent's direction (the rig has no bone
+/// past it), and each role's radius (m), at scale 1.
+fn leaf_length(role: Role) -> f32 {
+    match role {
+        Role::Head => 0.22,
+        Role::Hand => 0.12,
+        Role::Foot => 0.12,
+        _ => 0.1,
+    }
+}
+fn radius(role: Role) -> f32 {
+    match role {
+        Role::Pelvis => 0.12,
+        Role::Spine => 0.13,
+        Role::Neck => 0.05,
+        Role::Head => 0.1,
+        Role::Clavicle => 0.05,
+        Role::UpperArm => 0.06,
+        Role::Forearm => 0.05,
+        Role::Hand => 0.045,
+        Role::Thigh => 0.085,
+        Role::Calf => 0.065,
+        Role::Foot => 0.045,
+    }
+}
+
+/// The rig's physical body (`ragdoll_core::active`) in the pose `now`, moving as it moved from
+/// `before` over `dt`: each bone a capsule to the next rig bone down its chain (the middle one: the
+/// spine's, the neck's), its mass its share of the body's.
+fn make_body(
+    e: &mut Engine,
+    rig: &Rig,
+    now: &[(M3, V3)],
+    before: &[(M3, V3)],
+    dt: f32,
+) -> active::Body {
+    let m = 1.0 / UNITS_PER_METRE;
+    let scale_ = actor_scale(e, rig.actor);
+    let n = rig.bones.len();
+    let shares: Vec<f32> = rig
+        .bones
+        .iter()
+        .map(|b| {
+            let name = e.mem.u32(b.node + NODE_NAME);
+            if name == 0 {
+                0.01
+            } else {
+                let text = String::from_utf8_lossy(&e.mem.cstr(name)).to_string();
+                active::share(&text)
+            }
+        })
+        .collect();
+    let total: f32 = shares.iter().sum::<f32>().max(1e-3);
+    let bones: Vec<active::Bone> = (0..n)
+        .map(|b| {
+            let bone = &rig.bones[b];
+            let children: Vec<usize> = (0..n).filter(|&c| rig.bones[c].parent == Some(b)).collect();
+            let next = children
+                .iter()
+                .copied()
+                .find(|&c| matches!(rig.bones[c].role, Role::Spine | Role::Neck | Role::Head))
+                .or_else(|| children.first().copied());
+            let end = match next {
+                Some(c) => now[c].1,
+                None => {
+                    let from = bone
+                        .parent
+                        .map_or(add(now[b].1, [0.0, 0.0, -1.0]), |p| now[p].1);
+                    let dir = unit(sub(now[b].1, from)).unwrap_or([0.0, 0.0, 1.0]);
+                    add(
+                        now[b].1,
+                        scale(dir, leaf_length(bone.role) * scale_ * UNITS_PER_METRE),
+                    )
+                }
+            };
+            active::Bone {
+                parent: bone.parent,
+                role: bone.role,
+                q: active::qfrom_m(&now[b].0),
+                joint: scale(now[b].1, m),
+                end: scale(end, m),
+                radius: radius(bone.role) * scale_,
+                mass: rig.mass * shares[b] / total,
+                before: Some((active::qfrom_m(&before[b].0), scale(before[b].1, m))),
+            }
+        })
+        .collect();
+    active::Body::from_pose(&bones, dt)
+}
+
+/// The physical body's bones' velocities (game units a second) by node, for the ragdoll to go on
+/// with when it takes the body (`crate::knockdown`): nothing jumps at the switch.
+pub fn body_velocities(actor: u32) -> Vec<(u32, V3)> {
+    let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(rig) = rigs.iter().find(|r| r.actor == actor) else {
+        return Vec::new();
+    };
+    let Some(body) = &rig.body else {
+        return Vec::new();
+    };
+    rig.bones
+        .iter()
+        .zip(&body.state)
+        .map(|(b, s)| (b.node, scale(s.v, UNITS_PER_METRE)))
+        .collect()
 }
 
 // --- The ragdoll controller pass (armed and attacking actors; module documentation). ----------
@@ -961,28 +1187,7 @@ fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
         out[c] = Some(m);
         out[f] = Some(level);
     }
-    // The arms out, raised from the body.
-    let spine = bone_of(rig, Role::Spine, 2)
-        .map(|i| read3(e, rig.bones[i].node + WORLD_TRANSLATION))
-        .or(pelvis);
-    for side in 0..2u8 {
-        if !rig.limbs.arm(side as usize) || s.arms <= 0.0 {
-            continue;
-        }
-        let (Some(u), Some(f), Some(spine)) = (
-            bone_of(rig, Role::UpperArm, side),
-            bone_of(rig, Role::Forearm, side),
-            spine,
-        ) else {
-            continue;
-        };
-        let shoulder = read3(e, rig.bones[u].node + WORLD_TRANSLATION);
-        let elbow = read3(e, rig.bones[f].node + WORLD_TRANSLATION);
-        let outward = [shoulder[0] - spine[0], shoulder[1] - spine[1], 0.0];
-        if let Some(axis) = unit(cross(sub(elbow, shoulder), outward)) {
-            out[u] = Some(rotation(scale(axis, crate::balance::ARMS_OUT * s.arms)));
-        }
-    }
+    // No scripted arms: the physical body's arms swing out of their own as it steps.
     rig.shift = shift;
     if s.recovering && s.outcome == Outcome::Overrun && rig.fall.is_none() {
         // More than its steps could catch: it goes over at the end of them.
@@ -1329,20 +1534,10 @@ fn fall_frame(e: &mut Engine, rig: &mut Rig, out: &mut [Option<M3>], dt: f32) ->
     };
     rig.balance = None;
     f.t += dt;
-    let k = (f.t / f.lead.max(1e-3)).clamp(0.0, 1.0);
     let across = unit(cross([0.0, 0.0, 1.0], f.dir)).unwrap_or([1.0, 0.0, 0.0]);
-    // The torso goes over (a windmilling body leans back against it), the knees give.
-    let lean = if f.windmill { -0.3 } else { FALL_LEAN * k };
-    if let Some(i) = bone_of(rig, Role::Spine, 2) {
-        out[i] = Some(rotation(scale(across, lean)));
-    }
+    // It goes over physically (the support fades over the lead, [`apply`]); a windmill is the
+    // one pose it is given.
     for side in 0..2u8 {
-        if let Some(t) = bone_of(rig, Role::Thigh, side) {
-            out[t] = Some(rotation(scale(across, FALL_KNEES * k)));
-        }
-        if let Some(c) = bone_of(rig, Role::Calf, side) {
-            out[c] = Some(rotation(scale(across, -FALL_KNEES * k)));
-        }
         if f.windmill && rig.limbs.arm(side as usize) {
             if let Some(u) = bone_of(rig, Role::UpperArm, side) {
                 let phase = if side == 0 { 0.0 } else { std::f32::consts::PI };

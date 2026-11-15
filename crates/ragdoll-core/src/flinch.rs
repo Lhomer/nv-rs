@@ -42,9 +42,12 @@ pub const ROLES: [Role; 11] = [
 /// Each role's spring: frequency (Hz) and damping ratio (under 1: an overshoot).
 pub const SPRINGS: [(f32, f32); 11] = [
     (3.2, 0.5),
+    // The spine gives under a hit (the active body's torso sways, then comes back).
+    (2.2, 0.45),
+    // The neck and the head: firm enough that a light hit nods them, not whips them (the active
+    // body, `crate::active`).
+    (3.4, 0.5),
     (3.0, 0.45),
-    (2.6, 0.4),
-    (2.2, 0.35),
     // The arms (Patrick, 2026-11-15: they snapped and flailed): softer and well damped, so they
     // swing out and settle like a person's instead of whipping.
     (2.0, 0.6),
@@ -318,7 +321,7 @@ impl Spring {
 /// ledge (windmilling) and a fall at the end of the steps (s); the windmill's turns a second and
 /// swing (rad); how much the torso and the knees go over in a fall (rad), how far the pelvis goes
 /// (units); the push a wall brace holds (m/s), past it the body crumples against the wall.
-pub const BRACE_REACH: f32 = 0.22;
+pub const BRACE_REACH: f32 = 0.3;
 pub const BRACE_HOLD: f32 = 0.5;
 pub const BRACE_RELEASE: f32 = 0.5;
 pub const FALL_LEAD: f32 = 0.12;

@@ -443,6 +443,45 @@ Patrick, 2026-11-15. Rides on Hit Reactions and Balance (either on).
   falls`, `the steps could not catch it: falls`, `into its ragdoll after <t> s of going over`,
   `braces for the ground with its arms`.
 
+### Active ragdoll: a physical body (Patrick, 2026-11-15: toward Euphoria)
+
+The reactions were far off Euphoria's: the spring offsets per bone did not look smooth or fluid.
+Now, for a second or two after a hit, the struck actor's rig is a physical articulated body
+(`crates/ragdoll-core/src/active.rs`, the same code in the game and the lab):
+
+- **The body.** Each Bip01 bone a capsule (its mass a share of the body's), its joint held to its
+  parent by a positional constraint; small steps (8 a frame, XPBD); every velocity taken from the
+  moves, so nothing jumps.
+- **The motors.** Every joint a PD motor (a soft angular constraint plus implicit damping) tracking
+  the animation's pose with the steps' leg IK and the brace's arms as targets: frequency each
+  role's spring times `DRIVE_SCALE` 2.0, damping ratio 1.0, strength 0.45 right after a hit eased
+  back to full over 0.7 s, weakened near the hit (the muscle's dip); each joint carries the weight
+  of what hangs below it (gravity compensation), its turn against its parent held to the role's
+  speed (x1.3) and its bend from its target to the role's room (x1.5, at most 1.2 rad).
+- **The hit.** Its momentum (as the knockdowns measure it, times Hit Reactions) shared among the
+  bones by mass, fading with distance over the flinch's spread, going in over 60 ms (eased: no jump
+  in velocity or acceleration) and reaching each bone after its distance at 5 m/s: the struck part
+  moves first, the push travels up and down the chain.
+- **Balance.** The pelvis held by a support (1.4 Hz, critically damped, carrying the body's weight)
+  that follows the capture-point steps; the feet pinned (4 Hz) where they stand or along the steps'
+  arcs (now eased in lift too), eased back to the animation's feet over 0.4 s after the steps. No
+  scripted arms-out or lean: going over is the support fading over the fall's lead; the legs keep
+  the steps' last targets while it goes over. An armed body's arms track their world aim and are
+  stronger; the torso takes the push.
+- **Back to the animation.** 1.4 s after the last hit (or the last step, brace or fall) the body
+  blends back to the animation over 0.8 s with `6t^5 - 15t^4 + 10t^3` (no jump in speed or
+  acceleration). A fall into the ragdoll hands the body's bone velocities to Havok's bones (the
+  launch on top).
+- **The lab** measures smoothness while the body stands: the biggest change of a bone's velocity
+  in one frame and the biggest jerk. A pistol hit: 0.22 m/s and about 840 m/s3; a .44 with a catch
+  step: 1.35 m/s and about 6,100 m/s3. Its scenarios check them (`vjump<=`, `jerk<=`). Every
+  value is a slider ("Active ragdoll").
+- **Tuning found in the lab:** each motor's gain uses the inertia of everything it moves (a spine
+  tuned for its own bone let the upper body sway ±38° for two seconds); the spine at 2.2 Hz, the
+  neck and the head firmer (3.4 and 3.0 Hz) so a light hit nods them rather than whips them; a
+  pistol hit now turns no bone more than about 11 degrees, and the body settles in about 0.6 s
+  before its blend back.
+
 ### Knockdowns ragdoll again (779cd5b regression, Patrick, 2026-11-15)
 
 In 779cd5b no knockdown ragdolled: the decision was made, but `KnockExplosion` left knock state 0
