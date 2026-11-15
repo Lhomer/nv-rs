@@ -1364,17 +1364,55 @@ fn fall_frame(e: &mut Engine, rig: &mut Rig, out: &mut [Option<M3>], dt: f32) ->
         rig.fall = Some(f);
         return false;
     }
-    note(format!(
-        "{}: into its ragdoll after {:.2} s of going over{} ({:.2} m/s along ({:.2}, {:.2}))",
-        describe(e, rig.actor),
-        f.t,
-        if f.windmill { ", windmilling" } else { "" },
-        f.speed,
-        f.dir[0],
-        f.dir[1]
-    ));
-    crate::knockdown::knock_down(e, rig.actor, f.aggressor, f.point, f.dir, f.speed);
-    true
+    if f.t - dt < f.lead {
+        // The switch into the ragdoll is never made here, at the draw's set-up: the game's task
+        // queue is in use then and `KnockExplosion` would only queue it (779cd5b). It is made at
+        // the main thread's next update (`crate::knockdown::frame`); the body stays over until
+        // the knock state changes (this rig then goes) or the knock-down gives up.
+        note(format!(
+            "{}: into its ragdoll after {:.2} s of going over{} ({:.2} m/s along ({:.2}, {:.2})): \
+             the switch at the next update",
+            describe(e, rig.actor),
+            f.t,
+            if f.windmill { ", windmilling" } else { "" },
+            f.speed,
+            f.dir[0],
+            f.dir[1]
+        ));
+        crate::knockdown::knock_down_next_update(
+            rig.actor,
+            rig.id,
+            f.aggressor,
+            f.point,
+            f.dir,
+            f.speed,
+        );
+    }
+    if f.t > f.lead + FALL_WAIT {
+        note(format!(
+            "{}: the fall pose let go: still not in its ragdoll {FALL_WAIT} s after the switch \
+             was asked (knock state 0)",
+            describe(e, rig.actor)
+        ));
+        rig.shift = [0.0; 3];
+        return false;
+    }
+    rig.fall = Some(f);
+    false
+}
+
+/// How long a body stays going over waiting for the switch into its ragdoll (s).
+const FALL_WAIT: f32 = 1.0;
+
+/// The knock-down a fall asked for did not happen (`crate::knockdown`): the body stands back up
+/// from its fall pose.
+pub fn fall_failed(actor: u32) {
+    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    for r in rigs.iter_mut().filter(|r| r.actor == actor) {
+        if r.fall.take().is_some() {
+            r.shift = [0.0; 3];
+        }
+    }
 }
 
 /// Stage 3's entry for a knockdown (from `crate::knockdown`): instead of the hard switch, the

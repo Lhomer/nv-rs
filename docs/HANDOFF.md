@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (knockdowns ragdoll again)
+
+- **Now (`knockdown::knock_down` task-queue check and knock-state verification, `knock_down_later`, `knock_down_next_update`, `pending_knock_downs` in `frame`; `active_ragdoll::fall_frame` asks for the switch, `fall_failed`):** the stage 3 fall no longer switches into the ragdoll at the draw's set-up, where the game's task queue was in use and `KnockExplosion` only queued it (knock state 0; the replay hit the duplicate guard). Failed switches keep nothing and are retried once. Not run in game.
+- **Patrick:** 779cd5b: knockdowns no longer ragdoll (knock state 0, 0 bones, duplicate guard), and "getting up" blocked reactions; fix for armed and unarmed NPCs, keep the arm and armed-actor fixes, log the knock state after the switch, verify it on the fall path and fall back to the hard knock-down.
+
 ### Claude, 2026-11-15 (human arms; armed and attacking actors react)
 
 - **Now (`ragdoll_core::flinch` `SPINS`, `Follow`, `hold_aim`, `rotation_vector`; `active_ragdoll` `blocked`, `before_ragdoll_anim` over `00888970`, `interrupt_attack`, `weapon_drawn`; `knockdown::hold_bones` arms-only while lying; the lab's armed and attacking mannequin and four scenarios):** arms softer, speed-capped and lagging with follow-through; the windmill at a person's pace; armed and attacking actors flinch, step, brace and fall (their pose is written ahead of the game's ragdoll controller pass, whose grab IK used to write over it); small flinches keep the aim; a stagger or more interrupts an attack; every skipped reaction is logged with its reason. Not run in game; the lab's 20 scenarios pass natively and in Chromium.

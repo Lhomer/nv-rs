@@ -443,6 +443,28 @@ Patrick, 2026-11-15. Rides on Hit Reactions and Balance (either on).
   falls`, `the steps could not catch it: falls`, `into its ragdoll after <t> s of going over`,
   `braces for the ground with its arms`.
 
+### Knockdowns ragdoll again (779cd5b regression, Patrick, 2026-11-15)
+
+In 779cd5b no knockdown ragdolled: the decision was made, but `KnockExplosion` left knock state 0
+and no bone got the launch, then `duplicate guard: the game's KnockExplosion skipped`. Stage 3's
+fall made the switch from the pose layer, at the draw's set-up. There the game's "task queue in
+use" test (`008c7aa0`, which depends on how far the AI threads are in their frame; the new pass
+hook on the AI thread made them later) is true, so `KnockExplosion` only queued the request and
+returned. Its queued replay then met the knockdowns' own duplicate guard, and the failed
+knockdown was still registered as a get-up, which blocked the actor's reactions
+(`no flinch: getting up from a knockdown`).
+
+- The fall into the ragdoll is now made at the main thread's next update
+  (`knockdown::frame`, `knock_down_next_update`); the body stays going over until the knock state
+  changes, at most 1 s.
+- `knock_down` itself never calls `KnockExplosion` while the task queue is in use: it waits for
+  the next update (at most 0.6 s, `knock_down_later`).
+- After the switch the knock state is logged (`knock state after the switch: <n>`). At 0 nothing
+  of a knockdown is kept (no cooldown, no get-up), and a ragdoll actor is tried once more the hard
+  way; still 0, it is left standing and its fall pose lets go.
+- No `StopAttack` before the knock-down (the ragdoll ends the attack); the stagger and the catch
+  steps still interrupt attacks.
+
 ### Active ragdoll: human arms, armed and attacking actors (Patrick, 2026-11-15)
 
 - **The arms** (they snapped and flailed in the lab and the game): softer, well-damped arm springs

@@ -378,7 +378,8 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
             // Stage 3: the posed body goes over first (the flinch's kick on top), then falls into
             // its ragdoll; without the layer, the hard switch as before.
             crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction, false);
-            crate::active_ragdoll::interrupt_attack(e, target, "knocked down");
+            // No `StopAttack` here: the ragdoll ends the attack, and nothing is changed in the
+            // process before the game's `CanKnockDown` reads it.
             if !crate::active_ragdoll::fall(e, target, aggressor, point, direction, speed) {
                 knock_down(e, target, aggressor, point, direction, speed)
             }
@@ -753,6 +754,14 @@ pub fn knock_down(
         return;
     }
     let ragdoll = e.vcall(actor, 0x38c, &args![]).bool();
+    // While the game's task queue is in use (its AI threads mid-frame: at the draw's set-up, where
+    // the stage 3 fall used to call this) `KnockExplosion` only queues the request and returns
+    // with knock state 0, and the queued replay met the duplicate guard: no knockdown at all
+    // (779cd5b, Patrick, 2026-11-15). The switch is made on the main thread's own update instead.
+    if e.call(AI_THREAD, &[]).bool() {
+        knock_down_later(actor, id, aggressor, point, direction, body_speed, 0, &who);
+        return;
+    }
     // A push stored in the character controller (a script's, the game's knockback) would keep
     // moving it under the ragdoll.
     let _ = clear_stored_push(e, actor);
@@ -770,6 +779,51 @@ pub fn knock_down(
         strength,
     );
     let state = e.mem.u8(process + KNOCK_STATE) as i8;
+    note(format!(
+        "{who}: knock state after the switch: {state}{}",
+        if state == 2 {
+            " (in its ragdoll)"
+        } else if !ragdoll {
+            " (no ragdoll for this actor: the game only pushed it)"
+        } else {
+            " (the switch did not happen)"
+        }
+    ));
+    if state == 0 {
+        // Not down: nothing of a knockdown is kept (no cooldown, no get-up that would block its
+        // reactions), and a ragdoll actor is tried again, once, the hard way next frame.
+        KNOCKED
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|k| k.0 != actor);
+        if ragdoll {
+            let attempt = take_attempt(actor);
+            if attempt < HARD_RETRIES {
+                note(format!(
+                    "{who}: knock state 0 after KnockExplosion: tried again next frame (the hard \
+                     knock-down, attempt {})",
+                    attempt + 2
+                ));
+                knock_down_later(
+                    actor,
+                    id,
+                    aggressor,
+                    point,
+                    direction,
+                    body_speed,
+                    attempt + 1,
+                    &who,
+                );
+            } else {
+                note(format!(
+                    "{who}: knock state still 0 after {} tries: left standing",
+                    attempt + 1
+                ));
+                crate::active_ragdoll::fall_failed(actor);
+            }
+        }
+        return;
+    }
     if state == 2 {
         let scale = e.call(GET_SCALE, &args![actor]).f64() as f32;
         let body = body_of(e, actor);
@@ -844,9 +898,130 @@ pub fn knock_down(
     down.push((actor, id, aggressor, start, Instant::now()));
 }
 
+/// A knock-down waiting for the main thread's own update (the task queue in use, or a retry).
+#[derive(Clone, Copy, Debug)]
+struct Pending {
+    actor: u32,
+    id: u32,
+    aggressor: u32,
+    point: [f32; 3],
+    direction: [f32; 3],
+    speed: f32,
+    attempt: u8,
+    since: Instant,
+}
+
+static PENDING: Mutex<Vec<Pending>> = Mutex::new(Vec::new());
+/// The retries a knock-down that left knock state 0 gets, and how long one waits for the task
+/// queue to be free before it is given up.
+const HARD_RETRIES: u8 = 1;
+const PENDING_FOR: Duration = Duration::from_millis(600);
+/// The attempt a retried knock-down is at (taken by the knock-down that runs).
+static ATTEMPTS: Mutex<Vec<(u32, u8)>> = Mutex::new(Vec::new());
+
+/// `actor`'s knock-down done on the main thread's next update ([`frame`]).
+#[allow(clippy::too_many_arguments)]
+pub fn knock_down_later(
+    actor: u32,
+    id: u32,
+    aggressor: u32,
+    point: [f32; 3],
+    direction: [f32; 3],
+    speed: f32,
+    attempt: u8,
+    who: &str,
+) {
+    let mut list = PENDING.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(p) = list.iter_mut().find(|p| p.actor == actor) {
+        p.attempt = p.attempt.max(attempt);
+        return;
+    }
+    list.push(Pending {
+        actor,
+        id,
+        aggressor,
+        point,
+        direction,
+        speed,
+        attempt,
+        since: Instant::now(),
+    });
+    drop(list);
+    if attempt == 0 {
+        note(format!(
+            "{who}: the game's task queue is in use (its AI threads mid-frame): the knock-down \
+             waits for the main thread's update"
+        ));
+    }
+}
+
+/// A stage 3 fall's knock-down, made at the main thread's next update ([`frame`]): never at the
+/// draw's set-up, where the game's task queue is in use (`crate::active_ragdoll`'s fall).
+pub fn knock_down_next_update(
+    actor: u32,
+    id: u32,
+    aggressor: u32,
+    point: [f32; 3],
+    direction: [f32; 3],
+    speed: f32,
+) {
+    let mut list = PENDING.lock().unwrap_or_else(|p| p.into_inner());
+    if list.iter().any(|p| p.actor == actor) {
+        return;
+    }
+    list.push(Pending {
+        actor,
+        id,
+        aggressor,
+        point,
+        direction,
+        speed,
+        attempt: 0,
+        since: Instant::now(),
+    });
+}
+
+fn take_attempt(actor: u32) -> u8 {
+    let mut list = ATTEMPTS.lock().unwrap_or_else(|p| p.into_inner());
+    let a = list.iter().find(|a| a.0 == actor).map_or(0, |a| a.1);
+    list.retain(|a| a.0 != actor);
+    a
+}
+
+/// The knock-downs waiting ([`knock_down_later`]) done now, while the task queue is free.
+fn pending_knock_downs(e: &mut Engine) {
+    let list: Vec<Pending> =
+        std::mem::take(&mut *PENDING.lock().unwrap_or_else(|p| p.into_inner()));
+    for p in list {
+        if !live(e, p.actor, p.id) {
+            continue; // gone (a load, an unload): nothing of it is touched
+        }
+        let who = describe(e, p.actor);
+        if e.call(AI_THREAD, &[]).bool() {
+            if p.since.elapsed() < PENDING_FOR {
+                PENDING.lock().unwrap_or_else(|p| p.into_inner()).push(p);
+            } else {
+                note(format!(
+                    "{who}: the task queue stayed in use for {} ms: the knock-down is given up",
+                    PENDING_FOR.as_millis()
+                ));
+                crate::active_ragdoll::fall_failed(p.actor);
+            }
+            continue;
+        }
+        ATTEMPTS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((p.actor, p.attempt));
+        knock_down(e, p.actor, p.aggressor, p.point, p.direction, p.speed);
+        take_attempt(p.actor);
+    }
+}
+
 /// Once a frame (from the player's look hook): each followed actor's highest point, and when it
 /// is down, getting up or followed long enough, its fall's damage (module documentation).
 pub fn frame(e: &mut Engine) {
+    pending_knock_downs(e);
     let followed: Vec<Followed> = DOWN.lock().unwrap_or_else(|p| p.into_inner()).clone();
     launches(e);
     get_ups(e);
@@ -1794,6 +1969,8 @@ pub fn clear() {
     KNOCKED.lock().unwrap_or_else(|p| p.into_inner()).clear();
     STACKS.lock().unwrap_or_else(|p| p.into_inner()).clear();
     UP.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    PENDING.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    ATTEMPTS.lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
 
 /// A knocked-down actor's landing after a drop of `drop` units (module documentation).
