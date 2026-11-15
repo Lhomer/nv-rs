@@ -766,9 +766,26 @@ the square of the speed factor (load x mods x gun).
   by editor ID (long or heavy barrels, pistol rounds from rifles and unique variants higher, snub,
   sawed-off and integrally suppressed guns lower; 0.85 to 1.20). The game keeps no editor IDs in
   memory: the official masters' `WEAP` records are read on a host thread when the main menu is
-  made (each plugin's own records, form IDs in the load order). The table was written without the
-  game's files: at the first shot the log names its entries that matched no weapon and the
-  official calibre guns without an entry (`Per-gun velocity: ...`), to correct it from.
+  made (each plugin's own records, form IDs in the load order). At the first shot the log names
+  the entries that matched no weapon and the official calibre guns without an entry
+  (`Per-gun velocity: ...`).
+- **Editor IDs from the masters (2026-11-15).** The first table was written without the game's
+  files, and Patrick's log (game-20261115-095501) found that only 22 of 61 entries matched. It is
+  now made from every `WEAP` of the official masters (FalloutNV.esm, the DLC esms,
+  GunRunnersArsenal.esm and the packs, read on the maintainer's side; the fixture is
+  `crates/host/data/official_weapons.tsv`: plugin, editor ID, animation type, ammo name):
+  - the 39 wrong IDs were remapped to the guns they meant, keeping each gun's multiplier;
+  - the .32 revolver, the assault rifle and the railway rifle are not New Vegas weapons and were
+    dropped, and so was the .32 varmint rifle (that receiver is a weapon mod);
+  - the guns never covered were added (the Lever-Action Shotgun, K9000, FIDO, the Shoulder Mounted
+    Machine Gun, the Sturdy Caravan Shotgun, the GRA custom variants), and so were the NPC,
+    turret and test variants.
+
+  Every official calibre gun now has an entry (94 records). The tests check that every entry is
+  an official `WEAP` and that every official calibre gun has one, using the game's own calibre
+  test (`ragdoll_core::rounds::caliber_of`, a gun's animation type 3 to 9). Not in the table: the
+  Nail Gun (nails) and the Red Glare (rockets), which fire no calibre round, so a row would never
+  be read.
 - A gun without an entry (modded guns, or a wrong editor ID): its damage against its calibre's
   average loaded gun, `(damage / average)^0.25`, within 0.9 to 1.1.
 

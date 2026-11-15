@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (per-gun velocity: real editor IDs)
+
+- **Now (`crates/host/data/gun_velocity.tsv` rewritten; `data/official_weapons.tsv`; `gun_velocity` tests `every_entry_is_an_official_weapon`, `every_official_calibre_gun_has_an_entry`):** every entry is an official `WEAP`, and every official calibre gun (94 records) has one. Not run in game: the next log's `Per-gun velocity:` line should list none of either.
+- **Patrick (game-20261115-095501):** 22 of 61 entries matched; 39 matched no weapon and 68 calibre guns had no entry. The maintainer extracted the masters' `WEAP` records and the remap.
+
 ### Claude, 2026-11-15 (elbows and knees: one-way hinges)
 
 - **Now (`ragdoll_core::active` `hinge_limit`, `hinge_angles`, `Body::hinge`, `hinged`, `shown`, `stop_hinges`, `limit_hinges`, `Targets::anim`/`forward`; `flinch::hinge_ik`, `reach_arm_ik`, `leg_ik`, `human_reach`; host `reach_arm`, `facing`, the steps' legs, the shown blend; the lab's `back_bend`, `hinge_bend`, `past_stop`, `stop_ragdoll_hinges`, revolute ragdoll elbows and knees, the local get-up blend):** no elbow or knee bends backwards in any lab scenario. Not run in game.

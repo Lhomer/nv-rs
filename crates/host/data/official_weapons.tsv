@@ -1,0 +1,510 @@
+# The official masters' WEAP records (FalloutNV.esm, the DLC esms, GunRunnersArsenal.esm and the
+# packs; read 2026-11-15): plugin, editor ID, animation type (3 to 9: a gun), the default ammo's
+# name. Only crates/host/src/gun_velocity.rs's tests read it: every table editor ID is one of
+# these, and every calibre gun here has an entry.
+FalloutNV.esm	ARCHIMEDESI	6	Energy Cell
+FalloutNV.esm	BehemothFireHydrant	2	
+FalloutNV.esm	Bloatfly1HP	3	Dart
+FalloutNV.esm	BMWeapNailBoard	2	
+FalloutNV.esm	CentaurEvolvedSpitMissile	9	Missile
+FalloutNV.esm	CentaurSpitMissile	9	Missile
+FalloutNV.esm	CG02WeapBBGun	5	BB
+FalloutNV.esm	dlc04shovel	0	
+FalloutNV.esm	DLC05AlienBlasterClean	0	
+FalloutNV.esm	DLC05AlienPistol	0	
+FalloutNV.esm	DLC05AlienPowerCell	0	
+FalloutNV.esm	DLC05AlienRifle	0	
+FalloutNV.esm	DLC05ShockBaton	0	
+FalloutNV.esm	DLC05ShockBatonFX	0	
+FalloutNV.esm	EDEStunBaton	1	
+FalloutNV.esm	EDEStunBatonUpgrade	3	
+FalloutNV.esm	EDEZapGun	3	Energy Cell
+FalloutNV.esm	EDEZapGunUpgrade	3	Energy Cell
+FalloutNV.esm	EyeBot1HP	3	Energy Cell
+FalloutNV.esm	Fists	0	
+FalloutNV.esm	GasTrapDummy	0	
+FalloutNV.esm	HVBrokenWeapLaserRifle	7	Microfusion Cell
+FalloutNV.esm	HVBrokenWeapMinigun	8	5mm Round
+FalloutNV.esm	HVBrokenWeapSuperSledge	2	
+FalloutNV.esm	HVMissingLaserPistol	4	Energy Cell
+FalloutNV.esm	HVTurret03Laser	5	Energy Cell
+FalloutNV.esm	HVWeapPlasmaRifleWeak	6	Microfusion Cell
+FalloutNV.esm	LakelurkSonic2HL	9	Sonic Energy
+FalloutNV.esm	MisterGutsyFlamer2HL	9	Flamer Fuel
+FalloutNV.esm	MisterGutsyPlasma1HP	3	Energy Cell
+FalloutNV.esm	MisterHandyBuzzsaw	1	
+FalloutNV.esm	MisterHandyFlamer2HL	9	Flamer Fuel
+FalloutNV.esm	MS04FireAntGuardFlame2HL	9	Flamer Fuel
+FalloutNV.esm	MS04FireAntQueenFlame2HL	9	Flamer Fuel
+FalloutNV.esm	MS04FireAntSoldierFlame2HL	9	Flamer Fuel
+FalloutNV.esm	MS04FireAntWorkerFlame2HL	9	Flamer Fuel
+FalloutNV.esm	MS04QueenAnt2HL	9	Missile
+FalloutNV.esm	MysteriousStranger44Magnum	3	.44 Magnum Round
+FalloutNV.esm	NellisArtillery	9	Nellis Artillery Shell
+FalloutNV.esm	NVCamera	3	Energy Cell
+FalloutNV.esm	NVGojiraFlame2HL	9	Flamer Fuel
+FalloutNV.esm	NVRorschach01	0	
+FalloutNV.esm	NVSteelTurret03Laser2HR	5	Energy Cell
+FalloutNV.esm	NVWeapMS22Camera	3	Camera Film
+FalloutNV.esm	ProtectronHandLaser1HP	3	Energy Cell
+FalloutNV.esm	ProtectronHeadLaser2HL	9	Energy Cell
+FalloutNV.esm	QueenAnt2HL	9	Missile
+FalloutNV.esm	RexBite	0	
+FalloutNV.esm	RobobrainLaser1HPRight	3	Energy Cell
+FalloutNV.esm	RobobrainMesmetron	9	Energy Cell
+FalloutNV.esm	SatcomNuclearStrike	9	Missile
+FalloutNV.esm	SentryBotGatling2HH	8	Electron Charge Pack
+FalloutNV.esm	SentryBotMinigun2HR	5	5mm Round
+FalloutNV.esm	SentryBotMissileLauncher2HL	9	Missile
+FalloutNV.esm	SporePlantSpitMissile	5	Missile
+FalloutNV.esm	TrapBaseball	10	
+FalloutNV.esm	Turret01Laser2HR	6	Energy Cell
+FalloutNV.esm	Turret02Laser2HR	6	Energy Cell
+FalloutNV.esm	Turret03Laser2HR	5	Energy Cell
+FalloutNV.esm	TurretGunCeiling01	5	5.56mm Round
+FalloutNV.esm	TurretGunCeiling02	5	5.56mm Round
+FalloutNV.esm	TurretGunCeiling03	5	5.56mm Round
+FalloutNV.esm	VertibirdBombGun	9	Mini Nuke
+FalloutNV.esm	VertibirdGun	6	Microfusion Cell
+FalloutNV.esm	VFSWeapLaserRifleVanGraff	7	Microfusion Cell
+FalloutNV.esm	VFSWeapPlasmaRifleVanGraff	6	Microfusion Cell
+FalloutNV.esm	VHDOliverSniperAntiMaterielRifle	5	.50 MG
+FalloutNV.esm	Weap10mmPistol	3	10mm Round
+FalloutNV.esm	Weap10mmPistolVeronica	3	Magical Companion Ammo
+FalloutNV.esm	Weap10mmSubmachineGun	3	10mm Round
+FalloutNV.esm	WeapAlienBlaster	4	Alien Power Cell
+FalloutNV.esm	WeapBaseballBat	2	
+FalloutNV.esm	WeapBBGun	5	BB
+FalloutNV.esm	WeapBladedGauntlet	0	
+FalloutNV.esm	WeapBladedGauntletUnique	0	
+FalloutNV.esm	WeapBooneSniperRifle	5	Magical Companion Ammo
+FalloutNV.esm	WeapBrassKnuckles	0	
+FalloutNV.esm	WeapCattleProd	1	
+FalloutNV.esm	WeapDeathclawGauntlet	0	
+FalloutNV.esm	WeapFatman	9	Mini Nuke
+FalloutNV.esm	WeapFlamer	8	Flamer Fuel
+FalloutNV.esm	WeapGatlingLaser	8	Electron Charge Pack
+FalloutNV.esm	WeapGrenadeFrag	10	
+FalloutNV.esm	WeapGrenadeFragMisfits	10	
+FalloutNV.esm	WeapGrenadeGas	10	
+FalloutNV.esm	WeapGrenadePlasma	10	
+FalloutNV.esm	WeapGrenadePulse	10	
+FalloutNV.esm	WeapHeavyIncinerator	8	Flamer Fuel
+FalloutNV.esm	WeapHuntingRifle	5	.308 Round
+FalloutNV.esm	WeapKnife	1	
+FalloutNV.esm	WeapKnifeAssassin	1	
+FalloutNV.esm	WeapKnifeCombat	1	
+FalloutNV.esm	WeapKnifeCombatCass	1	
+FalloutNV.esm	WeapLaserPistol	4	Energy Cell
+FalloutNV.esm	WeapLaserRifle	7	Microfusion Cell
+FalloutNV.esm	WeapLaserRifleAlwaysCrits	7	Microfusion Cell
+FalloutNV.esm	WeapLaserRifleUnique	7	Microfusion Cell
+FalloutNV.esm	WeapLeadPipe	1	
+FalloutNV.esm	WeapLeadPipeRaul	1	
+FalloutNV.esm	WeapMineBottlecap	12	
+FalloutNV.esm	WeapMineFrag	11	
+FalloutNV.esm	WeapMineNellisMunition	12	
+FalloutNV.esm	WeapMinePlasma	11	
+FalloutNV.esm	WeapMinePulse	11	
+FalloutNV.esm	WeapMinigun	8	5mm Round
+FalloutNV.esm	WeapMissileLauncher	9	Missile
+FalloutNV.esm	WeapMissileLauncherBroken	9	Missile
+FalloutNV.esm	WeapNailBoard	2	
+FalloutNV.esm	WeapNV127mmPistol	3	12.7mm Round
+FalloutNV.esm	WeapNV127mmSubmachineGun	6	12.7mm Round
+FalloutNV.esm	WeapNV357Revolver	3	.357 Magnum Round
+FalloutNV.esm	WeapNV357RevolverUnique	3	.357 Magnum Round
+FalloutNV.esm	WeapNV44Revolver	3	.44 Magnum Round
+FalloutNV.esm	WeapNV44RevolverRaul	3	Magical Companion Ammo
+FalloutNV.esm	WeapNV44RevolverUnique	3	.44 Magnum Round
+FalloutNV.esm	WeapNV9iron	2	
+FalloutNV.esm	WeapNV9mmPistol	3	9mm Round
+FalloutNV.esm	WeapNV9mmPistolUnique	3	9mm Round
+FalloutNV.esm	WeapNV9mmSubmachineGun	3	9mm Round
+FalloutNV.esm	WeapNV9mmSubmachineGunUnique	3	9mm Round
+FalloutNV.esm	WeapNVAntiMaterielRifle	5	.50 MG
+FalloutNV.esm	WeapNVAssaultCarbine	6	5mm Round
+FalloutNV.esm	WeapNVAssaultCarbineLily	6	Magical Companion Ammo
+FalloutNV.esm	WeapNVBallisticFist	0	
+FalloutNV.esm	WeapNVBattleRifleUnique	5	.308 Round
+FalloutNV.esm	WeapNVBBGunUnique	5	BB
+FalloutNV.esm	WeapNVBinoculars	3	
+FalloutNV.esm	WeapNVBoxingGloves	0	
+FalloutNV.esm	WeapNVBoxingGoldenGloves	0	
+FalloutNV.esm	WeapNVBoxingTape	0	
+FalloutNV.esm	WeapNVBrushGun	5	.45-70 Gov't
+FalloutNV.esm	WeapNVBumperSword	2	
+FalloutNV.esm	WeapNVC4PlasticExplosive	12	
+FalloutNV.esm	WeapNVCaravanShotgun	5	20 Gauge Round
+FalloutNV.esm	WeapNVCaravanShotgunCass	5	Magical Companion Ammo
+FalloutNV.esm	WeapNVChainsaw	2	
+FalloutNV.esm	WeapNVCleaver	1	
+FalloutNV.esm	WeapNVCleaverUnique	1	
+FalloutNV.esm	WeapNVCowboyRepeater	5	.357 Magnum Round
+FalloutNV.esm	WeapNVCowboyRepeaterUnique	5	.357 Magnum Round
+FalloutNV.esm	WeapNVDebugMegaPistol	3	9mm Round
+FalloutNV.esm	WeapNVDetonator	3	
+FalloutNV.esm	WeapNVDetonatorLoyal	3	
+FalloutNV.esm	WeapNVDisplacerGlove	0	
+FalloutNV.esm	WeapNVDisplacerGloveUnique	0	
+FalloutNV.esm	WeapNVDogTagFist	0	
+FalloutNV.esm	WeapNVDogTagFistUnique	0	
+FalloutNV.esm	WeapNVDressCane	1	
+FalloutNV.esm	WeapNVDriverUnique	2	
+FalloutNV.esm	WeapNVDynamite	10	
+FalloutNV.esm	WeapNVDynamiteNoDrop	10	
+FalloutNV.esm	WeapNVEuclidsCFinder	4	ARCHIMEDES II Charge
+FalloutNV.esm	WeapNVFireaxe	2	
+FalloutNV.esm	WeapNVFireaxeUnique	2	
+FalloutNV.esm	WeapNVFireGeckoFlame	9	Flamer Fuel
+FalloutNV.esm	WeapNVFireGeckoYoungFlame	9	Flamer Fuel
+FalloutNV.esm	WeapNVGaussRifle	6	Microfusion Cell
+FalloutNV.esm	WeapNVGaussRifleUnique	6	Microfusion Cell
+FalloutNV.esm	WeapNVGrenadeFragHoly	10	
+FalloutNV.esm	WeapNVGrenadeIncendiary	10	
+FalloutNV.esm	WeapNVGrenadeLauncher	5	40mm Grenade
+FalloutNV.esm	WeapNVGrenadeMachinegun	8	25mm Grenade
+FalloutNV.esm	WeapNVGrenadeMachinegunUnique	8	40mm Grenade
+FalloutNV.esm	WeapNVGrenadeRifle	5	40mm Grenade
+FalloutNV.esm	WeapNVGrenadeRifleBroken	5	40mm Grenade
+FalloutNV.esm	WeapNVGrenadeRifleUnique	5	40mm Grenade
+FalloutNV.esm	WeapNVGrenadeStun	10	
+FalloutNV.esm	WeapNVHatchet	1	
+FalloutNV.esm	WeapNVHuntingRevolver	3	.45-70 Gov't
+FalloutNV.esm	WeapNVHuntingShotgun	5	12 Gauge Round
+FalloutNV.esm	WeapNVHuntingShotgunUnique	5	12 Gauge Round
+FalloutNV.esm	WeapNVIncinerator	8	Flamer Fuel
+FalloutNV.esm	WeapNVKnifeCombatUnique	1	
+FalloutNV.esm	WeapNVLaserPistolUnique	4	Energy Cell
+FalloutNV.esm	WeapNVLaserRCW	6	Electron Charge Pack
+FalloutNV.esm	WeapNVLeadPipeUnique	1	
+FalloutNV.esm	WeapNVLegateSword	2	
+FalloutNV.esm	WeapNVLegateSword2	2	
+FalloutNV.esm	WeapNVLeverActionShotgun	5	20 Gauge Round
+FalloutNV.esm	WeapNVLightMachineGun	6	5.56mm Round
+FalloutNV.esm	WeapNVLilyGauntlet	0	
+FalloutNV.esm	WeapNVLilySword	2	
+FalloutNV.esm	WeapNVLongFuseDynamite	10	
+FalloutNV.esm	WeapNVMachete	1	
+FalloutNV.esm	WeapNVMacheteBoone	1	
+FalloutNV.esm	WeapNVMacheteDeadSea	1	
+FalloutNV.esm	WeapNVMacheteGladiator	1	
+FalloutNV.esm	WeapNVMacheteGladius	1	
+FalloutNV.esm	WeapNVMantisGauntlet	0	
+FalloutNV.esm	WeapNVMarksmanCarbine	6	5.56mm Round
+FalloutNV.esm	WeapNVMarksmanCarbineUnique	6	5.56mm Round
+FalloutNV.esm	WeapNVMinePowderCharge	11	
+FalloutNV.esm	WeapNVMinigunUnique	8	5mm Round
+FalloutNV.esm	WeapNVMissFortuneGun	3	.44 Magnum Round
+FalloutNV.esm	WeapNVMissileLauncherUnique	9	Missile
+FalloutNV.esm	WeapNVMultiPlasRifle	6	Microfusion Cell
+FalloutNV.esm	WeapNVPlasmaCaster	8	Microfusion Cell
+FalloutNV.esm	WeapNVPlasmaDefender	4	Energy Cell
+FalloutNV.esm	WeapNVPlasmaDefenderArcade	4	Magical Companion Ammo
+FalloutNV.esm	WeapNVPlasmaRifleUnique	6	Microfusion Cell
+FalloutNV.esm	WeapNVPulseGun	4	Energy Cell
+FalloutNV.esm	WeapNVRangerSequoia	3	.45-70 Gov't
+FalloutNV.esm	WeapNVRebarClub	2	
+FalloutNV.esm	WeapNVRechargerPistol	4	Microfusion Breeder
+FalloutNV.esm	WeapNVRechargerRifle	6	Microfusion Breeder
+FalloutNV.esm	WeapNVRiotShotgun	6	12 Gauge Round
+FalloutNV.esm	WeapNVSecuritronLaser	7	Microfusion Cell
+FalloutNV.esm	WeapNVSecuritronLauncher	9	Missile
+FalloutNV.esm	WeapNVSecuritronMissile	8	Missile
+FalloutNV.esm	WeapNVSecuritronPowerFist	0	
+FalloutNV.esm	WeapNVSecuritronSubmachineGun	3	9mm Round
+FalloutNV.esm	WeapNVServiceRifle	6	5.56mm Round
+FalloutNV.esm	WeapNVSilenced22Pistol	3	.22LR Round
+FalloutNV.esm	WeapNVSilenced22SMG	6	.22LR Round
+FalloutNV.esm	WeapNVSingleShotgun	5	20 Gauge Round
+FalloutNV.esm	WeapNVSlaveBackPack	0	
+FalloutNV.esm	WeapNVSniperRifleUnique	6	.308 Round
+FalloutNV.esm	WeapNVSpikedKnucklesUnique	0	
+FalloutNV.esm	WeapNVStraightRazor	1	
+FalloutNV.esm	WeapNVStraightRazorUnique	1	
+FalloutNV.esm	WeapNVTeslaCannonUnique	9	Electron Charge Pack
+FalloutNV.esm	WeapNVThatGun	3	5.56mm Round
+FalloutNV.esm	WeapNVThrowingHatchet	13	
+FalloutNV.esm	WeapNVThrowingKnife	13	
+FalloutNV.esm	WeapNVThrowingSpear	13	
+FalloutNV.esm	WeapNVTimeBomb	12	
+FalloutNV.esm	WeapNVTrailCarbine	5	.44 Magnum Round
+FalloutNV.esm	WeapNVTriBeamLaserRifle	7	Microfusion Cell
+FalloutNV.esm	WeapNVVarmintRifle	5	5.56mm Round
+FalloutNV.esm	WeapNVVarmintRifleUnique	5	5.56mm Round
+FalloutNV.esm	WeapNVZapGlove	0	
+FalloutNV.esm	WeapNVZapGloveUnique	0	
+FalloutNV.esm	WeapPlasmaPistol	4	Energy Cell
+FalloutNV.esm	WeapPlasmaRifle	6	Microfusion Cell
+FalloutNV.esm	WeapPlasmaRifleAlwaysCrit	6	Microfusion Cell
+FalloutNV.esm	WeapPoliceBaton	1	
+FalloutNV.esm	WeapPoolCue	2	
+FalloutNV.esm	WeapPowerFist	0	
+FalloutNV.esm	WeapPowerFistVeronica	0	
+FalloutNV.esm	WeapRipper	1	
+FalloutNV.esm	WeapRipperArcade	1	
+FalloutNV.esm	WeapRollingPin	1	
+FalloutNV.esm	WeapShishkebab	1	
+FalloutNV.esm	WeapShotgunSawedOff	3	12 Gauge Round
+FalloutNV.esm	WeapShotgunSawedOffNPC	3	Magical Companion Ammo
+FalloutNV.esm	WeapShotgunSawedOffUnique	3	12 Gauge Round
+FalloutNV.esm	WeapShovel	2	
+FalloutNV.esm	WeapSledgehammer	2	
+FalloutNV.esm	WeapSniperRifle	6	.308 Round
+FalloutNV.esm	WeapSpikedKnuckles	0	
+FalloutNV.esm	WeapSuperSledge	2	
+FalloutNV.esm	WeapSuperSledgeMeanie	2	
+FalloutNV.esm	WeapSuperSledgeUnique	2	
+FalloutNV.esm	WeapSwitchBlade	1	
+FalloutNV.esm	WeapTeslaCannon	9	Electron Charge Pack
+FalloutNV.esm	WeapTeslaChainEffect	9	Electron Charge Pack
+FalloutNV.esm	WeapTeslaChainEffect02	9	Electron Charge Pack
+FalloutNV.esm	WeapTeslaChainEffect03	9	Electron Charge Pack
+FalloutNV.esm	WeapTeslaChainEffect04	9	Electron Charge Pack
+FalloutNV.esm	WeapThermicLance	2	
+FalloutNV.esm	WeapTireIron	1	
+DeadMoney.esm	NVDLC01HologramBeam	3	Energy Cell
+DeadMoney.esm	NVDLC01HologramBeamStarlet	3	Energy Cell
+DeadMoney.esm	NVDLC01VaultTurret01Laser	6	Energy Cell
+DeadMoney.esm	NVDLC01VaultTurret02Laser	6	Energy Cell
+DeadMoney.esm	NVDLC01VaultTurret03Laser	5	Energy Cell
+DeadMoney.esm	NVDLC01WeapAutomaticRifle	6	.308 Round
+DeadMoney.esm	NVDLC01WeapBearTrapFist	0	
+DeadMoney.esm	NVDLC01WeapBearTrapFistGhost1	0	
+DeadMoney.esm	NVDLC01WeapBearTrapFistGhost10	0	
+DeadMoney.esm	NVDLC01WeapBearTrapFistGhost20	0	
+DeadMoney.esm	NVDLC01WeapBearTrapFistGhost30	0	
+DeadMoney.esm	NVDLC01WeapBearTrapFistGhost40	0	
+DeadMoney.esm	NVDLC01WeapBearTrapFistGhost50	0	
+DeadMoney.esm	NVDLC01WeapDemoCharge	11	
+DeadMoney.esm	NVDLC01weapgasbomb	12	
+DeadMoney.esm	NVDLC01WeapGaussRifleElijah01	6	Microfusion Cell
+DeadMoney.esm	NVDLC01WeapGaussRifleElijah10	6	Microfusion Cell
+DeadMoney.esm	NVDLC01WeapGaussRifleElijah20	6	Microfusion Cell
+DeadMoney.esm	NVDLC01WeapGaussRifleElijah30	6	Microfusion Cell
+DeadMoney.esm	NVDLC01WeapGaussRifleElijah40	6	Microfusion Cell
+DeadMoney.esm	NVDLC01WeapGaussRifleElijah50	6	Microfusion Cell
+DeadMoney.esm	NVDLC01WeapGhostGasBomb	10	
+DeadMoney.esm	NVDLC01WeapHolorifle	5	Microfusion Cell
+DeadMoney.esm	NVDLC01WeapKnifeSpear	2	
+DeadMoney.esm	NVDLC01WeapKnifeSpearClean	2	
+DeadMoney.esm	NVDLC01WeapKnifeSpearGhost1	2	
+DeadMoney.esm	NVDLC01WeapKnifeSpearGhost10	2	
+DeadMoney.esm	NVDLC01WeapKnifeSpearGhost20	2	
+DeadMoney.esm	NVDLC01WeapKnifeSpearGhost30	2	
+DeadMoney.esm	NVDLC01WeapKnifeSpearGhost40	2	
+DeadMoney.esm	NVDLC01WeapKnifeSpearGhost50	2	
+DeadMoney.esm	NVDLC01WeapNV9mmPistolDean	3	Magical Companion Ammo
+DeadMoney.esm	NVDLC01WeapNV9mmPistolDean10plus	3	Magical Companion Ammo
+DeadMoney.esm	NVDLC01WeapNV9mmPistolDean20	3	Magical Companion Ammo
+DeadMoney.esm	NVDLC01WeapNV9mmPistolDean30	3	Magical Companion Ammo
+DeadMoney.esm	NVDLC01WeapNV9mmPistolDean40	3	Magical Companion Ammo
+DeadMoney.esm	NVDLC01WeapNV9mmPistolDean50	3	Magical Companion Ammo
+DeadMoney.esm	NVDLC01WeapPolicePistol	3	.357 Magnum Round
+DeadMoney.esm	NVDLC01WeapSpaceAgeKnife	1	
+DeadMoney.esm	NVDLC01WeapSpaceAgeKnifeClean	1	
+DeadMoney.esm	NVDLC01WeapSpaceAgeKnifeHeated	1	
+DeadMoney.esm	NVDLC01WeapStarletFists	0	
+DeadMoney.esm	NVDLC01WeapThrowingKnifeSpear	13	
+DeadMoney.esm	NVDLC01WeapThrowingSpearGhost1	13	
+DeadMoney.esm	NVDLC01WeapThrowingSpearGhost10	13	
+DeadMoney.esm	NVDLC01WeapThrowingSpearGhost20	13	
+DeadMoney.esm	NVDLC01WeapThrowingSpearGhost30	13	
+DeadMoney.esm	NVDLC01WeapThrowingSpearGhost40	13	
+DeadMoney.esm	NVDLC01WeapThrowingSpearGhost50	13	
+DeadMoney.esm	NVDLC1WeapShotgunChristine1	3	12 Gauge Round
+DeadMoney.esm	NVDLC1WeapShotgunChristine10	3	12 Gauge Round
+DeadMoney.esm	NVDLC1WeapShotgunChristine20	3	12 Gauge Round
+DeadMoney.esm	NVDLC1WeapShotgunChristine30	3	12 Gauge Round
+DeadMoney.esm	NVDLC1WeapShotgunChristine40	3	12 Gauge Round
+DeadMoney.esm	NVDLC1WeapShotgunChristine50	3	12 Gauge Round
+DeadMoney.esm	WeapNVDLC00Faderator	6	Microfusion Cell
+DeadMoney.esm	WeapNVGrenadeLauncher	5	40mm Grenade
+HonestHearts.esm	NVDLC02Weap45AutoPistol	3	.45 Auto
+HonestHearts.esm	NVDLC02Weap45AutoPistolFollowsChalk	3	Magical Companion Ammo
+HonestHearts.esm	NVDLC02Weap45AutoPistolUnique	3	.45 Auto
+HonestHearts.esm	NVDLC02Weap45AutoPistolUniqueMelee	1	
+HonestHearts.esm	NVDLC02Weap45AutoPistolUniqueNPC	3	.45 Auto
+HonestHearts.esm	NVDLC02Weap45AutoSubmachineGun	6	.45 Auto
+HonestHearts.esm	NVDLC02WeapBladedGauntletPoison	0	
+HonestHearts.esm	NVDLC02WeapComplianceRegulator	4	Energy Cell
+HonestHearts.esm	NVDLC02WeapEVMockCombat	1	
+HonestHearts.esm	NVDLC02WeapFireBomb	10	
+HonestHearts.esm	NVDLC02WeapGreenGeckoSpit	9	Missile
+HonestHearts.esm	NVDLC02WeapNPCCleaverPoison	1	
+HonestHearts.esm	NVDLC02WeapNPCFireaxePoison	2	
+HonestHearts.esm	NVDLC02WeapNPCHatchetPoison	1	
+HonestHearts.esm	NVDLC02WeapNPCMachetePoison	1	
+HonestHearts.esm	NVDLC02WeapNPCShishkebabPoison	1	
+HonestHearts.esm	NVDLC02WeapNVDetonatorMQ03	3	
+HonestHearts.esm	NVDLC02WeapNVDetonatorPineCreek	3	
+HonestHearts.esm	NVDLC02WeapNVMantisGauntletPoison	0	
+HonestHearts.esm	NVDLC02WeapPowerFistUnique	0	
+HonestHearts.esm	NVDLC02WeapServiceRifleUnique	6	12.7mm Round
+HonestHearts.esm	NVDLC02WeapSporePlantSpitMissile	5	Missile
+HonestHearts.esm	NVDLC02WeapSporePlantSpitMissileLvl2	5	Missile
+HonestHearts.esm	NVDLC02WeapThrowingSpearPoison	13	
+HonestHearts.esm	NVDLC02WeapThrowingSpearWakingCloud	13	
+HonestHearts.esm	NVDLC02WeapTomahawk	13	
+HonestHearts.esm	NVDLC02WeapWarClub	1	
+HonestHearts.esm	NVDLC02WeapWarClubFollowsChalk	1	
+HonestHearts.esm	NVDLC02WeapWarClubLvl1	1	
+HonestHearts.esm	NVDLC02WeapWarClubLvl2	1	
+HonestHearts.esm	NVDLC02WeapWarClubLvl3	1	
+HonestHearts.esm	NVDLC02WeapWarClubLvl4	1	
+HonestHearts.esm	NVDLC02WeapWarClubLvl5	1	
+HonestHearts.esm	NVDLC02WeapYaoGuaiGauntlet	0	
+HonestHearts.esm	NVDLC02WeapYaoGuaiGauntletUnique	0	
+HonestHearts.esm	NVDLC02WeapYaoGuaiGauntletWakingCloud	0	
+HonestHearts.esm	WeapNVDLC00Faderator	6	Microfusion Cell
+HonestHearts.esm	WeapNVMantisGauntlet	0	
+OldWorldBlues.esm	NVDLC03BrainBeam1HPRight	3	Energy Cell
+OldWorldBlues.esm	NVDLC03BrainMesmetron	5	Energy Cell
+OldWorldBlues.esm	NVDLC03GiantRoboscorpionClaw	0	
+OldWorldBlues.esm	NVDLC03HologramBeam	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LaserStinger	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LaserStinger10	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LaserStinger20	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LaserStinger30	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LaserStinger40	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LaserStinger50	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LaserStingerSmall	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LaserStingerSmall10	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LaserStingerSmall20	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LaserStingerSmall30	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LaserStingerSmall40	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LaserStingerSmall50	3	Energy Cell
+OldWorldBlues.esm	NVDLC03LegendaryBloatflyDart	3	Dart
+OldWorldBlues.esm	NVDLC03SonicBark	3	Energy Cell
+OldWorldBlues.esm	NVDLC03Turret02Laser2HR	6	Energy Cell
+OldWorldBlues.esm	NVDLC03WeapAntenna	2	
+OldWorldBlues.esm	NVDLC03WeapCyberdogGun	8	.357 Magnum Round
+OldWorldBlues.esm	NVDLC03WeapCyberdogGunFido	8	.44 Magnum Round
+OldWorldBlues.esm	NVDLC03WeapGlovesCorrosive	0	
+OldWorldBlues.esm	NVDLC03WeapGlovesDrKleinL	0	
+OldWorldBlues.esm	NVDLC03WeapGlovesDrMobiusL	0	
+OldWorldBlues.esm	NVDLC03WeapGlovesScientist	0	
+OldWorldBlues.esm	NVDLC03WeapGlovesSterilizer	0	
+OldWorldBlues.esm	NVDLC03WeapLaer	6	Microfusion Cell
+OldWorldBlues.esm	NVDLC03WeapLaerUniqueElijah	6	Microfusion Cell
+OldWorldBlues.esm	NVDLC03WeapLaserRifleNoDrop	7	Microfusion Cell
+OldWorldBlues.esm	NVDLC03WeapMeatMine	11	
+OldWorldBlues.esm	NVDLC03WeapProtonAxe	2	
+OldWorldBlues.esm	NVDLC03WeapProtonAxeInversal	2	
+OldWorldBlues.esm	NVDLC03WeapProtonAxeInversalThrown	13	
+OldWorldBlues.esm	NVDLC03WeapProtonAxeThrown	13	
+OldWorldBlues.esm	NVDLC03WeapSaturniteFist	0	
+OldWorldBlues.esm	NVDLC03WeapSaturniteFistHeat	0	
+OldWorldBlues.esm	NVDLC03WeapSniperRifleUniqueChristine	6	.308 Round
+OldWorldBlues.esm	NVDLC03WeapSonicGunGabrielsBark	4	Energy Cell
+OldWorldBlues.esm	NVDLC03WeapSonicGunOperaSinger	4	Energy Cell
+OldWorldBlues.esm	NVDLC03WeapSonicGunRevelation	4	Energy Cell
+OldWorldBlues.esm	NVDLC03WeapSonicGunRoboScorpion	4	Energy Cell
+OldWorldBlues.esm	NVDLC03WeapSonicGunTarantula	4	Energy Cell
+OldWorldBlues.esm	NVDLC03WeapTeleporter	3	
+OldWorldBlues.esm	NVDLC03WeapTeslaCannonUniqueElijah	9	Electron Charge Pack
+OldWorldBlues.esm	NVDLC03X13FieldGun	4	Microfusion Breeder
+OldWorldBlues.esm	SentryBotMinigun2HR	5	5mm Round
+OldWorldBlues.esm	WeapNVDLC00Faderator	6	Microfusion Cell
+OldWorldBlues.esm	WeapNVHatchet	1	
+OldWorldBlues.esm	WeapNVThrowingHatchet	13	
+LonesomeRoad.esm	HVWeapPlasmaRifleWeak	6	Microfusion Cell
+LonesomeRoad.esm	NVDLC04SentryBotGatling2HH20	8	Electron Charge Pack
+LonesomeRoad.esm	NVDLC04SentryBotGatling2HH30	8	Electron Charge Pack
+LonesomeRoad.esm	NVDLC04SentryBotGatling2HH40	8	Electron Charge Pack
+LonesomeRoad.esm	NVDLC04SentryBotGatling2HH50	8	Electron Charge Pack
+LonesomeRoad.esm	NVDLC04SentryBotMinigun2HR20	5	5mm Round
+LonesomeRoad.esm	NVDLC04SentryBotMinigun2HR30	5	5mm Round
+LonesomeRoad.esm	NVDLC04SentryBotMinigun2HR40	5	5mm Round
+LonesomeRoad.esm	NVDLC04SentryBotMinigun2HR50	5	5mm Round
+LonesomeRoad.esm	NVDLC04SentryBotMissileLauncher2HL20	9	Missile
+LonesomeRoad.esm	NVDLC04SentryBotMissileLauncher2HL30	9	Missile
+LonesomeRoad.esm	NVDLC04SentryBotMissileLauncher2HL40	9	Missile
+LonesomeRoad.esm	NVDLC04SentryBotMissileLauncher2HL50	9	Missile
+LonesomeRoad.esm	NVDLC04TurretMarkIILaser2HR20	6	Energy Cell
+LonesomeRoad.esm	NVDLC04TurretMarkIILaser2HR30	6	Energy Cell
+LonesomeRoad.esm	NVDLC04TurretMarkIILaser2HR40	6	Energy Cell
+LonesomeRoad.esm	NVDLC04TurretMarkIILaser2HR50	6	Energy Cell
+LonesomeRoad.esm	NVDLC04TurretMarkIVLaser2HR20	6	Energy Cell
+LonesomeRoad.esm	NVDLC04TurretMarkIVLaser2HR30	6	Energy Cell
+LonesomeRoad.esm	NVDLC04TurretMarkIVLaser2HR40	6	Energy Cell
+LonesomeRoad.esm	NVDLC04TurretMarkIVLaser2HR50	6	Energy Cell
+LonesomeRoad.esm	NVDLC04TurretMarkVILaser2HR20	5	Energy Cell
+LonesomeRoad.esm	NVDLC04TurretMarkVILaser2HR30	5	Energy Cell
+LonesomeRoad.esm	NVDLC04TurretMarkVILaser2HR40	5	Energy Cell
+LonesomeRoad.esm	NVDLC04TurretMarkVILaser2HR50	5	Energy Cell
+LonesomeRoad.esm	NVDLC04WeapArcWelder	8	Electron Charge Pack
+LonesomeRoad.esm	NVDLC04WeapBladeWest	2	
+LonesomeRoad.esm	NVDLC04WeapBowieKnife	1	
+LonesomeRoad.esm	NVDLC04WeapBowieKnifeUnique	1	
+LonesomeRoad.esm	NVDLC04WeapDeathclawGauntletUnique	0	
+LonesomeRoad.esm	NVDLC04WeapDeathclawGauntletUniqueWildWasteland	0	
+LonesomeRoad.esm	NVDLC04WeapEDEArcWelder	3	Energy Cell
+LonesomeRoad.esm	NVDLC04WeapEDEUnlockZapper	3	Energy Cell
+LonesomeRoad.esm	NVDLC04WeapFlagpole	2	
+LonesomeRoad.esm	NVDLC04WeapFlagpoleNPC20	2	
+LonesomeRoad.esm	NVDLC04WeapFlagpoleNPC30	2	
+LonesomeRoad.esm	NVDLC04WeapFlagpoleNPC40	2	
+LonesomeRoad.esm	NVDLC04WeapFlagpoleNPC50	2	
+LonesomeRoad.esm	NVDLC04weapflaregun	4	Flamer Fuel
+LonesomeRoad.esm	NVDLC04WeapGrenadeFlashBang	10	
+LonesomeRoad.esm	NVDLC04WeapGrenadeRifleBLUE	5	40mm Grenade
+LonesomeRoad.esm	NVDLC04WeapGrenadeRifleRED	5	40mm Grenade
+LonesomeRoad.esm	NVDLC04WeapIndustrialHand	0	
+LonesomeRoad.esm	NVDLC04WeapNailGun	3	Nails
+LonesomeRoad.esm	NVDLC04WeapRedGlare	9	Rocket
+LonesomeRoad.esm	NVDLC04WeapSatchelCharge	11	
+LonesomeRoad.esm	NVDLC04WeapSMMG	9	10mm Round
+LonesomeRoad.esm	NVDLC04WeapSonicDetonator	4	Microfusion Breeder
+LonesomeRoad.esm	NVDLC04WeapTrailCarbineNoDrop	5	.44 Magnum Round
+LonesomeRoad.esm	NVDLC04WeapUlyssesEyebotGun	3	Energy Cell
+LonesomeRoad.esm	NVDLC04WeapUlyssesEyebotHealGun	3	Healing Ammo
+LonesomeRoad.esm	WeapNVDLC00Faderator	6	Microfusion Cell
+LonesomeRoad.esm	WeapNVGrenadeMachinegun	8	25mm Grenade
+GunRunnersArsenal.esm	ModTest	5	.50 MG
+GunRunnersArsenal.esm	NVDLC05Weap10mmSubmachineGunUnique	3	10mm Round
+GunRunnersArsenal.esm	NVDLC05Weap25mmGrenadeAPWCustom	6	25mm Grenade
+GunRunnersArsenal.esm	NVDLC05WeapBaseballBatCustom	2	
+GunRunnersArsenal.esm	NVDLC05WeapFatmanCustom	9	Mini Nuke
+GunRunnersArsenal.esm	NVDLC05WeapFatmanUnique	9	Mini Nuke
+GunRunnersArsenal.esm	NVDLC05WeapFlamerUnique	8	Flamer Fuel
+GunRunnersArsenal.esm	NVDLC05WeapGatlingLaserUnique	8	Electron Charge Pack
+GunRunnersArsenal.esm	NVDLC05WeapGrenadeMFC	10	
+GunRunnersArsenal.esm	NVDLC05WeapGrenadeNuka	10	
+GunRunnersArsenal.esm	NVDLC05WeapGrenadeTin	10	
+GunRunnersArsenal.esm	NVDLC05WeapHuntingRifleUnique	5	.308 Round
+GunRunnersArsenal.esm	NVDLC05WeapKatanaCustom	1	
+GunRunnersArsenal.esm	NVDLC05WeapLaserPistolCustom	4	Energy Cell
+GunRunnersArsenal.esm	NVDLC05WeapMineFat	12	
+GunRunnersArsenal.esm	NVDLC05WeapMineMFCCluster	13	
+GunRunnersArsenal.esm	NVDLC05WeapNV127mmPistolUnique	3	12.7mm Round
+GunRunnersArsenal.esm	NVDLC05WeapNV127mmSubmachineGunCustom	6	12.7mm Round
+GunRunnersArsenal.esm	NVDLC05WeapNV556mmPistolCustom	3	5.56mm Round
+GunRunnersArsenal.esm	NVDLC05WeapNVAntiMaterielRifleCustom	5	.50 MG
+GunRunnersArsenal.esm	NVDLC05WeapNVAssaultCarbineCustom	6	5mm Round
+GunRunnersArsenal.esm	NVDLC05WeapNVBallisticFistUnique	0	
+GunRunnersArsenal.esm	NVDLC05WeapNVBattleRifleCustom	5	.308 Round
+GunRunnersArsenal.esm	NVDLC05WeapNVBrushGunUnique	5	.45-70 Gov't
+GunRunnersArsenal.esm	NVDLC05WeapNVChainsawCustom	2	
+GunRunnersArsenal.esm	NVDLC05WeapNVHuntingRevolverCustom	3	.45-70 Gov't
+GunRunnersArsenal.esm	NVDLC05WeapNVLightMachineGunUnique	6	5.56mm Round
+GunRunnersArsenal.esm	NVDLC05WeapNVMantisGauntletUnique	0	
+GunRunnersArsenal.esm	NVDLC05WeapNVPlasmaCasterUnique	8	Microfusion Cell
+GunRunnersArsenal.esm	NVDLC05WeapNVPlasmaDefenderCustom	4	Energy Cell
+GunRunnersArsenal.esm	NVDLC05WeapNVRebarClubUnique	2	
+GunRunnersArsenal.esm	NVDLC05WeapNVRechargerPistolUnique	4	Microfusion Breeder
+GunRunnersArsenal.esm	NVDLC05WeapNVTimeBombCustom	12	
+GunRunnersArsenal.esm	NVDLC05WeapNVTriBeamLaserRifleCustom	7	Microfusion Cell
+GunRunnersArsenal.esm	NVDLC05WeapPlasmaPistolCustom	4	Energy Cell
+GunRunnersArsenal.esm	NVDLC05WeapPowerFistCustom	0	
+GunRunnersArsenal.esm	NVDLC05WeapPowerFistUnique	0	
+GunRunnersArsenal.esm	NVDLC05WeapRipperCustom	1	
+GunRunnersArsenal.esm	NVDLC05WeapShishkebabUnique	1	
+GunRunnersArsenal.esm	Weap10mmPistol	3	10mm Round
+GunRunnersArsenal.esm	WeapGrenadeFrag	10	
+GunRunnersArsenal.esm	WeapNVDLC00Faderator	6	Microfusion Cell
+GunRunnersArsenal.esm	WeapNVRechargerRifle	6	Microfusion Breeder
+ClassicPack.esm	WeapPreord10mmPistol	3	10mm Round
+MercenaryPack.esm	WeapPreordGrenadeRifle	5	40mm Grenade
+TribalPack.esm	WeapPreordMachete	1	
+CaravanPack.esm	WeapPreordCaravanShotgun	5	20 Gauge Round

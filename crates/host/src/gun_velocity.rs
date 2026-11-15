@@ -16,7 +16,8 @@
 //!
 //! **The report** (once, at the first shot after the scan): the table's entries that matched no
 //! loaded weapon, and the calibre guns of the official masters without an entry (their editor
-//! IDs), so the table can be corrected from the game's log.
+//! IDs). The table's editor IDs were read from the official masters (`data/official_weapons.tsv`,
+//! which the tests check it against), so with the official masters alone both lists are empty.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -254,6 +255,60 @@ const LOOKUP_FORM: u32 = 0x0048_39c0;
 mod tests {
     use super::*;
 
+    /// The official masters' WEAP records: plugin, editor ID, animation type, ammo name.
+    const OFFICIAL: &str = include_str!("../data/official_weapons.tsv");
+
+    fn official() -> Vec<(&'static str, &'static str, i32, &'static str)> {
+        OFFICIAL
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .map(|l| {
+                let f: Vec<&str> = l.split('\t').collect();
+                (
+                    f[0],
+                    f[1],
+                    f[2].parse().unwrap_or(-1),
+                    f.get(3).copied().unwrap_or(""),
+                )
+            })
+            .collect()
+    }
+
+    /// Every table entry is a WEAP of the official masters (Patrick's log, 2026-11-15: 39 of 61
+    /// matched no weapon).
+    #[test]
+    fn every_entry_is_an_official_weapon() {
+        let known: std::collections::HashSet<String> = official()
+            .iter()
+            .map(|r| r.1.to_ascii_lowercase())
+            .collect();
+        let mut missing: Vec<&String> = table().keys().filter(|k| !known.contains(*k)).collect();
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "not in the official masters: {missing:?}"
+        );
+    }
+
+    /// Every official calibre gun (a gun's animation, 3 to 9, firing an ammo of a calibre, as
+    /// `crate::ballistics::gun_caliber` tells) has an entry.
+    #[test]
+    fn every_official_calibre_gun_has_an_entry() {
+        let mut without: Vec<String> = official()
+            .iter()
+            .filter(|r| (3..=9).contains(&r.2))
+            .filter(|r| ragdoll_core::rounds::caliber_of(r.3).is_some())
+            .filter(|r| !table().contains_key(&r.1.to_ascii_lowercase()))
+            .map(|r| format!("{} ({}, {})", r.1, r.0, r.3))
+            .collect();
+        without.sort();
+        without.dedup();
+        assert!(
+            without.is_empty(),
+            "calibre guns without an entry: {without:?}"
+        );
+    }
+
     /// The shipped table reads whole: every row a number within its range, editor IDs unique.
     #[test]
     fn the_table_reads() {
@@ -272,7 +327,7 @@ mod tests {
             assert!((0.8..=1.25).contains(&m), "{id} {m}");
         }
         assert_eq!(t.get("weapnvantimaterielrifle"), Some(&1.15));
-        assert!(t["weapnvsawedoffshotgun"] < t["weapnvhuntingshotgun"]);
+        assert!(t["weapshotgunsawedoff"] < t["weapnvhuntingshotgun"]);
         let p = parse("# c\nA\t1.5\twhy\nB\tx\nC\t9\n");
         assert_eq!(p.get("a"), Some(&1.5));
         assert!(!p.contains_key("b"));

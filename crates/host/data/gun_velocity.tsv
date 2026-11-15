@@ -1,85 +1,118 @@
 # Per-gun muzzle velocity multipliers (crates/host/src/gun_velocity.rs; Patrick, 2026-11-14).
-# Columns: the weapon's editor ID (as in FalloutNV.esm, the DLC and Gun Runners' Arsenal), the
-# multiplier of its calibre's muzzle velocity (1.0 = the calibre's own), and why.
+# Columns: the weapon's editor ID (as in FalloutNV.esm, the DLC, Gun Runners' Arsenal and the
+# packs), the multiplier of its calibre's muzzle velocity (1.0 = the calibre's own), and why.
 # Long or heavy barrels, rifles of a pistol calibre, unique and stronger variants higher; snub,
 # sawed-off and integrally suppressed guns lower. On top of it: the ammo load, barrel and
 # suppressor mods, and the game's projectile-speed multiplier.
-# Written without the game's files at hand: the game's log names (at the first shot after the
-# main menu) every entry that matched no weapon and every calibre gun without an entry, so the
-# editor IDs can be corrected. A gun without an entry gets its damage against its calibre's
-# average gun (gun_velocity.rs, within 0.9 to 1.1).
+# Every editor ID is a WEAP record of the official masters (read from FalloutNV.esm, the DLC
+# esms, GunRunnersArsenal.esm and the packs, 2026-11-15; the test data/official_weapons.tsv):
+# every official calibre gun (an ammo-firing gun whose ammo is a calibre of crate::ballistics),
+# NPC and turret variants included, has an entry. A gun without one (a mod's) gets its damage
+# against its calibre's average gun (gun_velocity.rs, within 0.9 to 1.1). Not here: the Nail Gun
+# (nails) and the Red Glare (rockets), which fire no calibre round.
 # --- 9mm
 WeapNV9mmPistol	1.00	service pistol, short barrel
-WeapNVMaria	1.05	Maria: unique, match-grade
+WeapNV9mmPistolUnique	1.05	Maria: unique, match-grade
 WeapNV9mmSubmachineGun	1.08	longer barrel than the pistol
-WeapNVVancesSMG	1.10	Vance's 9mm SMG: unique, longer barrel
+WeapNV9mmSubmachineGunUnique	1.10	Vance's 9mm SMG: unique, longer barrel
+WeapNVSecuritronSubmachineGun	1.08	a securitron's 9mm submachine gun
+WeapNVDebugMegaPistol	1.00	the developers' test pistol
 # --- 10mm
 Weap10mmPistol	1.00	pistol
-WeapNV10mmPistolUnique	1.05	Weathered 10mm pistol: unique
+WeapPreord10mmPistol	1.05	Weathered 10mm Pistol (Classic Pack): unique
 Weap10mmSubmachineGun	1.06	SMG barrel
-WeapNV10mmSMGUnique	1.08	unique 10mm SMG
+NVDLC05Weap10mmSubmachineGunUnique	1.08	Sleepytyme (GRA): unique 10mm SMG
+NVDLC04WeapSMMG	1.06	Shoulder Mounted Machine Gun (Lonesome Road): long barrel
 # --- .22LR
-WeapNV22Pistol	0.92	silenced .22 pistol: integral suppressor
-WeapNV22SMG	0.95	silenced .22 SMG: integral suppressor
-# --- .32
-WeapNV32Revolver	0.95	small revolver, short barrel
-WeapNVVarmintRifle32	1.10	.32 rifle barrel
+WeapNVSilenced22Pistol	0.92	silenced .22 pistol: integral suppressor
+WeapNVSilenced22SMG	0.95	silenced .22 SMG: integral suppressor
 # --- .357 Magnum
 WeapNV357Revolver	1.00	revolver
-WeapNVLucky	1.05	Lucky: unique
-WeapNVPolicePistol	0.92	police pistol: short barrel
+WeapNV357RevolverUnique	1.05	Lucky: unique
+NVDLC01WeapPolicePistol	0.92	police pistol (Dead Money): short barrel
 WeapNVCowboyRepeater	1.15	rifle barrel
-WeapNVLaLongueCarabine	1.20	La Longue Carabine: unique long barrel
+WeapNVCowboyRepeaterUnique	1.20	La Longue Carabine: unique long barrel
+NVDLC03WeapCyberdogGun	1.10	K9000 Cyberdog Gun (Old World Blues): rifle barrel
 # --- .44 Magnum
 WeapNV44Revolver	1.00	revolver
-WeapNVMysteriousMagnum	1.05	unique revolver
-WeapNVHuntingRevolver	0.95	.45-70 revolver: short for its round
-WeapNVRangerSequoia	1.00	Ranger Sequoia: unique, longer barrel
+WeapNV44RevolverUnique	1.05	Mysterious Magnum: unique revolver
+MysteriousStranger44Magnum	1.05	the Mysterious Stranger's magnum
+WeapNVMissFortuneGun	1.00	Miss Fortune's revolver
 WeapNVTrailCarbine	1.15	.44 carbine, rifle barrel
+NVDLC04WeapTrailCarbineNoDrop	1.15	Trail Carbine (Lonesome Road, not dropped)
+NVDLC03WeapCyberdogGunFido	1.10	FIDO (Old World Blues): rifle barrel
+# --- .45-70 Gov't
+WeapNVHuntingRevolver	0.95	.45-70 revolver: short for its round
+NVDLC05WeapNVHuntingRevolverCustom	0.95	Hunting Revolver (GRA)
+WeapNVRangerSequoia	1.00	Ranger Sequoia: unique, longer barrel
 WeapNVBrushGun	1.05	.45-70 lever action
-WeapNVMedicineStick	1.12	Medicine Stick: unique
+NVDLC05WeapNVBrushGunUnique	1.12	Medicine Stick (GRA): unique
 # --- .45 Auto
-WeapNV45AutoPistol	1.00	pistol
-WeapNVLightShiningInDarkness	1.05	unique pistol
-WeapNV45SMG	1.05	SMG barrel
-WeapNVSurvivalistsRifle	1.20	Survivalist's Rifle: rifle barrel for a pistol round
+NVDLC02Weap45AutoPistol	1.00	pistol
+NVDLC02Weap45AutoPistolUnique	1.05	A Light Shining in Darkness: unique pistol
+NVDLC02Weap45AutoPistolUniqueNPC	1.05	A Light Shining in Darkness (Joshua Graham's)
+NVDLC02Weap45AutoSubmachineGun	1.05	SMG barrel
 # --- 5mm
 WeapNVAssaultCarbine	1.00	carbine
-WeapNVMinigun	1.05	long barrels
-WeapNVCZ57AvengerMinigun	1.10	CZ57 Avenger: unique
+NVDLC05WeapNVAssaultCarbineCustom	1.00	Assault Carbine (GRA)
+WeapMinigun	1.05	long barrels
+WeapNVMinigunUnique	1.10	CZ57 Avenger: unique
+HVBrokenWeapMinigun	1.05	jammed minigun
+SentryBotMinigun2HR	1.05	a sentry bot's minigun
+NVDLC04SentryBotMinigun2HR20	1.05	a sentry bot's minigun (Lonesome Road)
+NVDLC04SentryBotMinigun2HR30	1.05	a sentry bot's minigun (Lonesome Road)
+NVDLC04SentryBotMinigun2HR40	1.05	a sentry bot's minigun (Lonesome Road)
+NVDLC04SentryBotMinigun2HR50	1.05	a sentry bot's minigun (Lonesome Road)
 # --- 5.56mm
-WeapNV556Pistol	0.85	That Gun: pistol barrel for a rifle round
+WeapNVThatGun	0.85	That Gun: pistol barrel for a rifle round
+NVDLC05WeapNV556mmPistolCustom	0.85	5.56mm Pistol (GRA): pistol barrel for a rifle round
 WeapNVServiceRifle	1.00	service rifle
 WeapNVMarksmanCarbine	1.05	marksman carbine
-WeapNVAllAmerican	1.10	All-American: unique
+WeapNVMarksmanCarbineUnique	1.10	All-American: unique
 WeapNVVarmintRifle	1.00	varmint rifle
-WeapNVRatslayer	1.10	Ratslayer: unique, suppressed but longer
+WeapNVVarmintRifleUnique	1.10	Ratslayer: unique, suppressed but longer
 WeapNVLightMachineGun	1.05	heavy barrel
-WeapNVBozar	1.10	Bozar: heavy barrel
-WeapNVAssaultRifle	1.00	assault rifle
-# --- .308 and 7.62
-WeapNVHuntingRifle	1.05	long barrel
-WeapNVPaciencia	1.10	Paciencia: unique
-WeapNVSniperRifle	1.10	sniper barrel
-WeapNVGobiCampaignScoutRifle	1.15	Gobi Campaign Scout Rifle: unique
-WeapNVAutomaticRifle	1.00	automatic rifle
-WeapNVBattleRifle	1.05	battle rifle
-WeapNVThisMachine	1.10	This Machine: unique
+NVDLC05WeapNVLightMachineGunUnique	1.10	Bozar (GRA): heavy barrel
+TurretGunCeiling01	1.00	ceiling turret
+TurretGunCeiling02	1.00	ceiling turret
+TurretGunCeiling03	1.00	ceiling turret
+# --- .308
+WeapHuntingRifle	1.05	long barrel
+NVDLC05WeapHuntingRifleUnique	1.10	Paciencia (GRA): unique
+WeapSniperRifle	1.10	sniper barrel
+WeapNVSniperRifleUnique	1.15	Gobi Campaign Scout Rifle: unique
+NVDLC03WeapSniperRifleUniqueChristine	1.05	Christine's COS Silencer Rifle: sniper barrel, integral suppressor
+NVDLC01WeapAutomaticRifle	1.00	automatic rifle (Dead Money)
+NVDLC05WeapNVBattleRifleCustom	1.05	Battle Rifle (GRA)
+WeapNVBattleRifleUnique	1.10	This Machine: unique
 # --- 12.7mm
 WeapNV127mmPistol	0.95	pistol barrel
-WeapNV127mmSMG	1.00	SMG barrel
-WeapNVLilDevil	1.00	unique 12.7mm pistol
+NVDLC05WeapNV127mmPistolUnique	1.00	Li'l Devil (GRA): unique 12.7mm pistol
+WeapNV127mmSubmachineGun	1.00	SMG barrel
+NVDLC05WeapNV127mmSubmachineGunCustom	1.00	12.7mm Submachine Gun (GRA)
+NVDLC02WeapServiceRifleUnique	1.20	Survivalist's Rifle: rifle barrel for a pistol round
 # --- .50 MG
 WeapNVAntiMaterielRifle	1.15	long heavy barrel
+NVDLC05WeapNVAntiMaterielRifleCustom	1.15	Anti-Materiel Rifle (GRA)
+VHDOliverSniperAntiMaterielRifle	1.15	General Oliver's sniper's anti-materiel rifle
+ModTest	1.15	Gun Runners' Arsenal's test anti-materiel rifle
 # --- 12 and 20 gauge
-WeapNVSawedOffShotgun	0.85	sawed-off
-WeapNVBigBoomer	0.88	Big Boomer: unique sawed-off
+WeapShotgunSawedOff	0.85	sawed-off
+WeapShotgunSawedOffUnique	0.88	Big Boomer: unique sawed-off
+NVDLC1WeapShotgunChristine1	0.85	a sawed-off shotgun (Dead Money)
+NVDLC1WeapShotgunChristine10	0.85	a sawed-off shotgun (Dead Money)
+NVDLC1WeapShotgunChristine20	0.85	a sawed-off shotgun (Dead Money)
+NVDLC1WeapShotgunChristine30	0.85	a sawed-off shotgun (Dead Money)
+NVDLC1WeapShotgunChristine40	0.85	a sawed-off shotgun (Dead Money)
+NVDLC1WeapShotgunChristine50	0.85	a sawed-off shotgun (Dead Money)
 WeapNVCaravanShotgun	1.00	caravan shotgun
+WeapPreordCaravanShotgun	1.02	Sturdy Caravan Shotgun (Caravan Pack): stronger variant
 WeapNVHuntingShotgun	1.05	long barrel
-WeapNVDinnerBell	1.08	Dinner Bell: unique
+WeapNVHuntingShotgunUnique	1.08	Dinner Bell: unique
 WeapNVRiotShotgun	0.95	short barrel
 WeapNVSingleShotgun	1.00	single shotgun
-# --- others
-WeapNVBBGun	1.00	BB gun
-WeapNVAbileneKid	1.10	Abilene Kid LE BB gun: unique
-WeapNVRailwayRifle	1.00	railway rifle
+WeapNVLeverActionShotgun	1.00	lever-action shotgun
+# --- BB
+WeapBBGun	1.00	BB gun
+WeapNVBBGunUnique	1.10	Abilene Kid LE BB Gun: unique
+CG02WeapBBGun	1.00	a BB gun (a quest's)
