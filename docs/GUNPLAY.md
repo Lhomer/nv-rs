@@ -443,6 +443,29 @@ Patrick, 2026-11-15. Rides on Hit Reactions and Balance (either on).
   falls`, `the steps could not catch it: falls`, `into its ragdoll after <t> s of going over`,
   `braces for the ground with its arms`.
 
+### The shared crate and the ragdoll lab (`crates/ragdoll-core`, `tools/ragdoll-lab`)
+
+Patrick, 2026-11-15: a light web app to try the active ragdoll quickly, on the game's own code so
+tuning carries over.
+- **`crates/ragdoll-core`** holds the pure parts the host used to keep in its modules (moved, not
+  changed): the bone roles, springs, spread and stage 3 timings (`active_ragdoll`), the whole of
+  `balance`, the bodies, momentum transfer, topple speed, stack fading and launch (`knockdown`,
+  and `hit_force`'s swing factors), the calibres and loads (`ballistics`). The host modules
+  re-export it (`pub use ragdoll_core::...::*`), so every path and value is as before. Two changes
+  of shape, not of behaviour: a stepping keeps its start on a clock the caller gives
+  (`active_ragdoll::clock`, a monotonic clock, where it read `Instant` itself), and the functions
+  read their constants through `ragdoll_core::tuning::get`, which is the constants unless
+  `tuning::set` is called (only the lab calls it).
+- **`tools/ragdoll-lab`** (its README): Rust to WebAssembly, Rapier for the ragdoll, a 2D canvas.
+  A capsule mannequin of the rig's 20 bones, the game's controller glue mirrored on it (`sim.rs`,
+  function by function after `active_ragdoll` and `knockdown`), guns by calibre and load, melee by
+  weight and reach, blasts by damage and distance, grounds (flat, slope, uneven, stairs, wall,
+  ledge), every tuning value a slider, the values as ini text (`[nv-rs Gunplay]` for the game's
+  settings, `[nv-rs Ragdoll Lab]` for the compiled constants), and URL-driven scenarios that
+  report upright or fell, steps, distance and recovery time as JSON for an automated browser.
+  Built and published by `.github/workflows/ragdoll-lab-pages.yml`; not part of the game or its
+  package.
+
 ### Ballistic bullets (`crates/host/src/ballistics.rs`)
 
 Patrick, 2026-11-14: Battlefield-style bullets. `bBallistics` (Settings > Gameplay "Ballistics":

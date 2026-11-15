@@ -1,0 +1,66 @@
+name: Ragdoll lab
+# Builds tools/ragdoll-lab (the browser lab for the active ragdoll: Rust to WebAssembly, the
+# game's controller from crates/ragdoll-core, Rapier for the ragdoll), runs its tests (every
+# built-in scenario's expectations), and publishes the page on GitHub Pages.
+#
+# The build and the tests run on every push that touches the lab or the shared crate. The deploy
+# needs the repository's Pages source set to "GitHub Actions" (Settings > Pages) and the
+# github-pages environment to let the pushing branch deploy (Settings > Environments >
+# github-pages > Deployment branches); until then that job fails with the reason, and the built
+# site is still attached to the run as the github-pages artifact.
+on:
+  push:
+    branches: [main, 'claude/**']
+    paths:
+      - 'tools/ragdoll-lab/**'
+      - 'crates/ragdoll-core/**'
+      - '.github/workflows/ragdoll-lab-pages.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ragdoll-lab-pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the pinned Rust tools (rust-toolchain.toml) and the WebAssembly target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: tools/ragdoll-lab
+      - name: Test (the shared crate and the lab's scenarios)
+        run: |
+          cargo test --locked --release --manifest-path tools/ragdoll-lab/Cargo.toml -p ragdoll-core -p ragdoll-lab
+      - name: Build the WebAssembly
+        run: cargo build --locked --release --target wasm32-unknown-unknown --manifest-path tools/ragdoll-lab/Cargo.toml
+      - name: Bind it for the page (wasm-bindgen, the version Cargo.lock pins)
+        run: |
+          cargo install --locked wasm-bindgen-cli --version 0.2.100
+          wasm-bindgen --target web --no-typescript --out-dir tools/ragdoll-lab/www/pkg \
+            tools/ragdoll-lab/target/wasm32-unknown-unknown/release/ragdoll_lab.wasm
+          ls -la tools/ragdoll-lab/www tools/ragdoll-lab/www/pkg
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: tools/ragdoll-lab/www
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

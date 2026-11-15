@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-15 (ragdoll lab)
+
+- **Now (`crates/ragdoll-core`, `tools/ragdoll-lab`, `.github/workflows/ragdoll-lab-pages.yml`):** the active ragdoll's pure parts moved into a shared crate the host re-exports (game behaviour unchanged: the same constants, `tuning::get` is them unless the lab sets it; a stepping's clock is passed in); a WebAssembly lab on GitHub Pages runs the game's controller on a capsule mannequin with Rapier (sliders, ini export/import, slow motion, frame step, grounds, `?scenario=all&headless=1` reports). Its 16 built-in scenarios pass natively and in Chromium. The Pages deploy needs the repository's Pages source set to GitHub Actions and the github-pages environment to allow this branch.
+- **Patrick:** a low-demand web app for testing the active ragdoll quickly: tools/ragdoll-lab, Rust to WASM, Rapier, capsule mannequins with the game's bone layout, masses, limits and tuning, the same controller code; hits by calibre/ammo, melee, explosion; sliders; slow motion, pause, step, reset; uneven ground and slopes; ini export/import; a headless mode for scripted scenarios; no change to the game's behaviour.
+
 ### Claude, 2026-11-15 (active ragdoll, stage 3: bracing and falling)
 
 - **Now (`active_ragdoll.rs` `Brace`, `Fall`, `brace_frame`, `fall_frame`, `fall`, `falling`, `reach_arm`; `knockdown::brace_ground`; `balance::limbs_of`/`set_limbs`/`clear`):** a knockdown goes through `active_ragdoll::fall` (0.12 s of the posed body going over, then `knock_down`); a rig whose actor is in its ragdoll or dead is dropped without writing (the ragdoll owns the bones); walls brace with the hands (or crumple past 2.5 m/s); ledges windmill 0.4 s then fall; overrun steps end in a fall; one leg falls; the ragdoll's arm bodies are steered to brace for the ground for 1.2 s. Hand bones added to the rig. Not run in game.

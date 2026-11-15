@@ -46,13 +46,14 @@
 
 use crate::gunplay::WeaponStats;
 use engine::prelude::*;
+/// The swing's factors live in `crates/ragdoll-core` (the knockdowns' transfer uses them too).
+pub use ragdoll_core::knock::{skill_factor, strength_factor, POWER_ATTACK};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// The tuning constants (reported to Patrick; module documentation).
 pub const MIN_THROUGH: f32 = 0.2;
 pub const WEIGHT_PER_DOUBLING: f32 = 10.0;
-pub const POWER_ATTACK: f32 = 1.5;
 pub const MAX_MOMENTUM: f32 = 160.0;
 /// The reach the weapon's reach is taken in (a spear's 1.3 pushes 1.3 times as far as a knife's 1).
 pub const REACH_RANGE: (f32, f32) = (0.5, 2.0);
@@ -82,16 +83,6 @@ pub enum Shot {
         threshold: f32,
         projectiles: u32,
     },
-}
-
-/// Strength's share of a swing: 0.68 at 1, 1.0 at 5, 1.4 at 10.
-pub fn strength_factor(strength: f32) -> f32 {
-    0.6 + 0.08 * strength.clamp(1.0, 10.0)
-}
-
-/// The attack skill's share of a swing: 0.8 at 0, 1.2 at 100.
-pub fn skill_factor(skill: f32) -> f32 {
-    0.8 + skill.clamp(0.0, 100.0) / 250.0
 }
 
 /// Damage less the target's threshold, never below [`MIN_THROUGH`] of it.

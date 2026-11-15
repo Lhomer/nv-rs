@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nv-rs Ragdoll Lab</title>
+<meta name="description" content="Test the nv-rs active ragdoll (flinch, balance steps, wall braces, falls, knockdowns) on a capsule mannequin, with the game's own controller code and tuning.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="app">
+  <section id="view">
+    <canvas id="canvas" aria-label="The mannequin. Click a body part to hit it; drag to turn the view; scroll to zoom."></canvas>
+    <div id="hud">
+      <div id="state">loading...</div>
+      <div id="hover"></div>
+    </div>
+    <div id="bar">
+      <button id="play" title="Pause or play (Space)">Pause</button>
+      <button id="step" title="One frame, 1/60 s (.)">Step</button>
+      <label>Speed
+        <select id="speed">
+          <option value="1">1x</option>
+          <option value="0.5">0.5x</option>
+          <option value="0.25">0.25x</option>
+          <option value="0.1">0.1x</option>
+        </select>
+      </label>
+      <button id="reset" title="Stand the body back up at the start (R)">Reset</button>
+    </div>
+  </section>
+  <aside id="panel">
+    <header>
+      <h1>nv-rs Ragdoll Lab</h1>
+      <p class="sub">The game's active ragdoll on a capsule mannequin. Click a body part to hit it.</p>
+    </header>
+
+    <details open>
+      <summary>Weapon</summary>
+      <div class="tabs" role="tablist">
+        <button data-kind="gun" class="on">Gun</button>
+        <button data-kind="melee">Melee</button>
+        <button data-kind="blast">Explosion</button>
+      </div>
+      <div class="row kind-gun"><label for="gun">Gun</label><select id="gun"></select></div>
+      <div class="row kind-gun"><label for="load">Ammo</label><select id="load"></select></div>
+      <div class="row kind-gun"><label for="range">Range <output id="range-out">10 m</output></label><input id="range" type="range" min="1" max="60" step="1" value="10"></div>
+      <div class="row kind-melee"><label for="melee">Weapon</label><select id="melee"></select></div>
+      <div class="row kind-melee"><label for="strength">Strength <output id="strength-out">5</output></label><input id="strength" type="range" min="1" max="10" step="1" value="5"></div>
+      <div class="row kind-melee"><label for="skill">Skill <output id="skill-out">50</output></label><input id="skill" type="range" min="0" max="100" step="5" value="50"></div>
+      <div class="row kind-melee check"><label><input id="power" type="checkbox"> Power attack</label></div>
+      <div class="row kind-blast"><label for="blast">Explosive</label><select id="blast"></select></div>
+      <p class="hint kind-blast">Click the ground (or the body: a metre in front of it) to set it off.</p>
+    </details>
+
+    <details open>
+      <summary>Target and ground</summary>
+      <div class="row"><label for="ground">Ground</label><select id="ground"></select></div>
+      <div class="row"><label for="body">Body</label><select id="body"><option value="human">Human (80 kg)</option><option value="mutant">Super mutant (250 kg)</option></select></div>
+      <div class="row"><label for="scale">Scale <output id="scale-out">1.00</output></label><input id="scale" type="range" min="0.5" max="2" step="0.05" value="1"></div>
+      <div class="row"><label for="armour">Armour DT <output id="armour-out">0</output></label><input id="armour" type="range" min="0" max="40" step="1" value="0"></div>
+      <div class="row check limbs">
+        <label><input type="checkbox" data-limb="0" checked> Left leg</label>
+        <label><input type="checkbox" data-limb="1" checked> Right leg</label>
+        <label><input type="checkbox" data-limb="2" checked> Left arm</label>
+        <label><input type="checkbox" data-limb="3" checked> Right arm</label>
+      </div>
+    </details>
+
+    <details open>
+      <summary>What happened</summary>
+      <dl id="status"></dl>
+    </details>
+
+    <details>
+      <summary>Scenarios</summary>
+      <div class="row"><select id="scenario"></select></div>
+      <div class="buttons">
+        <button id="run">Run</button>
+        <button id="run-all">Run all</button>
+      </div>
+      <div class="row"><label for="custom">Custom (URL syntax)</label><input id="custom" type="text" spellcheck="false" placeholder="ground=wall&amp;hits=44@chest*2~0.15"></div>
+      <div class="buttons"><button id="run-custom">Run custom</button><button id="link">Copy link</button></div>
+      <pre id="results" aria-live="polite"></pre>
+    </details>
+
+    <details open>
+      <summary>Tuning</summary>
+      <div class="row"><input id="filter" type="search" placeholder="Filter values" aria-label="Filter tuning values"></div>
+      <div id="fields"></div>
+      <div class="buttons">
+        <button id="game">Game values</button>
+        <button id="export">Export ini</button>
+        <button id="import">Import ini</button>
+      </div>
+      <textarea id="ini" rows="8" spellcheck="false" aria-label="Tuning as ini text"></textarea>
+      <p class="hint">The <code>[nv-rs Gunplay]</code> lines go in nv-rs.ini. The <code>[nv-rs Ragdoll Lab]</code> values are compiled into the game (crates/ragdoll-core).</p>
+    </details>
+
+    <details>
+      <summary>Log</summary>
+      <pre id="log"></pre>
+    </details>
+  </aside>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

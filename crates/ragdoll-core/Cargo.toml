@@ -1,0 +1,10 @@
+[package]
+name = "ragdoll-core"
+version = "0.1.0"
+description = "The living-body physics' pure parts (flinch springs, balance steps, knockdown momentum, calibres), shared by the host and tools/ragdoll-lab"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# No dependencies: the host links it, and the ragdoll lab builds it for WebAssembly.
+[dependencies]
