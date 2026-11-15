@@ -80,6 +80,7 @@
 //! and [`apply`] (the pose layer) are what balance and bracing drive too; [`hit`] is the stimulus
 //! entry, and stage 3's fall into the ragdoll goes through `crate::knockdown::knock_down`.
 
+use crate::room_events;
 use engine::prelude::*;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -1342,6 +1343,17 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
                 o.height,
                 o.kind.name()
             ));
+            room_event(
+                e,
+                actor,
+                "trip",
+                &format!(
+                    "\"speed\":{},\"height\":{},\"on\":{},\"falls\":true",
+                    room_events::num(v),
+                    room_events::num(o.height),
+                    room_events::text(o.kind.name())
+                ),
+            );
             return;
         }
         // Little push left: it stumbles, then steps over it.
@@ -1359,11 +1371,38 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
         }
         outcome = Outcome::Caught;
         said.push("it stumbles, then steps over it");
+        room_event(
+            e,
+            actor,
+            "trip",
+            &format!(
+                "\"speed\":{},\"height\":{},\"on\":{},\"falls\":false",
+                room_events::num(v),
+                room_events::num(o.height),
+                room_events::text(o.kind.name())
+            ),
+        );
     }
     let against_wall = outcome == Outcome::Wall;
     if against_wall {
         start_brace(e, actor, root, dir, v, aggressor);
     }
+    room_event(
+        e,
+        actor,
+        "steps",
+        &format!(
+            "\"speed\":{},\"need\":{},\"count\":{},\"outcome\":{},\"said\":[{}]",
+            room_events::num(v),
+            room_events::num(planned.need / UNITS_PER_METRE),
+            steps.len(),
+            room_events::text(&format!("{outcome:?}")),
+            said.iter()
+                .map(|s| room_events::text(s))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    );
     if steps.is_empty() {
         note(format!(
             "{who}: pushed {v:.2} m/s past its feet ({:.2} m): against a wall, it catches itself \
@@ -1660,6 +1699,21 @@ fn start_brace(e: &mut Engine, actor: u32, root: u32, dir: V3, v: f32, aggressor
         });
     }
     drop(rigs);
+    room_event(
+        e,
+        actor,
+        "brace",
+        &format!(
+            "\"on\":{},\"arms\":{arms},\"wall\":{},\"top\":{},\"speed\":{},\"limit\":{},\"falls\":{},\"fold\":{}",
+            room_events::text(kind.map_or("wall", |k| k.name())),
+            wall.map_or("null".into(), room_events::num),
+            top.map_or("null".into(), room_events::num),
+            room_events::num(v),
+            room_events::num(limit),
+            v > limit || !arms,
+            fold.is_some()
+        ),
+    );
     note(format!(
         "{}: braces against a {} with {}{}",
         describe(e, actor),
@@ -1904,6 +1958,17 @@ pub fn fall(
         fold,
     });
     rig.since = Instant::now();
+    drop(rigs);
+    room_event(
+        e,
+        actor,
+        "fall",
+        &format!(
+            "\"speed\":{},\"fold\":{}",
+            room_events::num(speed),
+            fold.is_some()
+        ),
+    );
     true
 }
 
@@ -1930,12 +1995,23 @@ pub fn clear() {
     *LAST.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
+/// A room event about `actor` ([`room_events`]: the Linux room's scripted runs), with its form id.
+fn room_event(e: &Engine, actor: u32, kind: &str, fields: &str) {
+    if room_events::on() {
+        room_events::record(
+            kind,
+            &format!("\"actor\":\"{:08X}\",{fields}", e.mem.u32(actor + FORM_ID)),
+        );
+    }
+}
+
 fn describe(e: &Engine, actor: u32) -> String {
     format!("Hit reaction: {:08X}", e.mem.u32(actor + FORM_ID))
 }
 
 /// The log lines, at most 20 a second.
 fn note(line: String) {
+    room_events::record("note", &format!("\"text\":{}", room_events::text(&line)));
     static N: Mutex<(Option<Instant>, u32)> = Mutex::new((None, 0));
     let mut n = N.lock().unwrap_or_else(|p| p.into_inner());
     if n.0.map_or(true, |t| t.elapsed().as_secs() >= 1) {

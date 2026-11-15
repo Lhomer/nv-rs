@@ -55,6 +55,8 @@ pub mod range_cells;
 mod range_floor;
 mod range_save;
 mod range_watch;
+pub mod room_events;
+pub mod room_script;
 pub mod save_out;
 pub mod test_range;
 pub mod thread_races;

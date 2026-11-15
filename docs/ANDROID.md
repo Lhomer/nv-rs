@@ -94,12 +94,12 @@ no game files (the log lists where it looked).
 ## How it is built
 
 - `android/`: the app (`nvrs_android`, a NativeActivity through `android-activity`), its own
-  workspace so the main workspace and the Windows play build are untouched. It starts the host on
-  the Data folder and runs main's frames on a thread of its own, as `viewer/src/main.rs` does;
-  the activity's thread hands over the native window and the touches.
-- `crates/engine-platform`: `cfg(wgpu_window)` (build.rs: Windows and Android) forwards the
+  workspace so the main workspace and the Windows play build are untouched. It runs the room's
+  game on a thread of its own (`host::phone_range::run`, shared with the Linux room,
+  docs/LINUX.md); the activity's thread hands over the native window and the touches.
+- `crates/engine-platform`: `cfg(wgpu_window)` (build.rs: Windows, Android and Linux) forwards the
   game's Direct3D 9 calls to wgpu (`d3d9real.rs`) on Android too, with the activity's native
-  window (`set_native_window`) and the touches (`touch_key`, `touch_button`, `touch_motion`) in
+  window (`set_native_window`) and the touches (`inject_key`, `inject_button`, `inject_motion`) in
   place of the Win32 window and its keyboard and mouse. The real Direct3D 9 parts stay Windows only.
 - `crates/d3d9-wgpu`: the surface on the native window (`surface_for`, `client_size`) and the
   touch controls drawn over the frame (`touch_overlay`).

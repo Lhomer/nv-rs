@@ -3846,7 +3846,8 @@ mod tests_kept_files {
         let incoming = file(&dir, "Incoming.bsa", &new);
         let h = open(&mut e, &path, GENERIC_READ);
         assert_eq!(read(&mut e, h, 100), old[..100].to_vec());
-        std::fs::rename(host(&incoming), host(&path)).expect("a rename over a file the game has open");
+        std::fs::rename(host(&incoming), host(&path))
+            .expect("a rename over a file the game has open");
         assert_eq!(std::fs::read(host(&path)).unwrap(), new);
         assert_eq!(read(&mut e, h, 100), old[100..200].to_vec());
         assert_eq!(size(&mut e, h), 6000);

@@ -26,6 +26,7 @@ function by function into Rust (`crates/engine*`), started on the player's own e
 | [SYSTEMS.md](SYSTEMS.md) | The systems and their state |
 | [SOUND.md](SOUND.md) | The platform's audio layers, measured against Windows |
 | [ANDROID.md](ANDROID.md) | The Android test build: the APK, the game files to copy, the touch controls |
+| [LINUX.md](LINUX.md) | The Linux test room: the tarball, keyboard and mouse, headless scripted runs with JSON results, lavapipe |
 | [MOVIES.md](MOVIES.md) | Bink movies |
 | [MOVEMENT.md](MOVEMENT.md) | Player movement and the character controller (exe traces) |
 | [FOS_SAVES.md](FOS_SAVES.md) | The original game's save format (`crates/fos`) |

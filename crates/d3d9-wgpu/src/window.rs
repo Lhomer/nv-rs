@@ -579,7 +579,13 @@ extern "C" {
     fn ANativeWindow_getHeight(window: *mut std::ffi::c_void) -> i32;
 }
 
-#[cfg(not(any(windows, target_os = "android")))]
+/// Linux: the app's window's size as it handed it over (`crate::native`).
+#[cfg(target_os = "linux")]
+pub(crate) fn client_size(_hwnd: isize) -> Option<(u32, u32)> {
+    crate::native::size()
+}
+
+#[cfg(not(any(windows, target_os = "android", target_os = "linux")))]
 pub(crate) fn client_size(_hwnd: isize) -> Option<(u32, u32)> {
     None
 }

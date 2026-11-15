@@ -24,9 +24,9 @@ d3dx-tex = { path = "../d3dx-tex" }
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D9", "Win32_Graphics_Gdi", "Foundation_Numerics", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_UI_HiDpi", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 # The Direct3D 9 calls on wgpu instead, or beside the real d3d9.dll for comparison (NV_D3D9=wgpu,
-# NV_D3D9=real,wgpu; d3d9real.rs): a backend of the same stream. On Android the only one (Vulkan,
-# the activity's native window; build.rs's cfg(wgpu_window)).
-[target.'cfg(any(windows, target_os = "android"))'.dependencies]
+# NV_D3D9=real,wgpu; d3d9real.rs): a backend of the same stream. On Android and Linux the only one
+# (Vulkan; build.rs's cfg(wgpu_window)).
+[target.'cfg(any(windows, target_os = "android", target_os = "linux"))'.dependencies]
 d3d9-wgpu = { path = "../d3d9-wgpu" }
 
 # The tests of the C runtime's stdio that moved here (crt_stdio_tests.rs) and of the process side

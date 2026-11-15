@@ -1160,9 +1160,9 @@ static PENDING_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 /// Home's press (its going down), on the real window's keyboard (Windows).
 fn home_pressed() -> bool {
-    #[cfg(any(windows, target_os = "android"))]
+    #[cfg(any(windows, target_os = "android", target_os = "linux"))]
     let down = engine_platform::d3d9real::held_keys()[DIK_HOME];
-    #[cfg(not(any(windows, target_os = "android")))]
+    #[cfg(not(any(windows, target_os = "android", target_os = "linux")))]
     let down = false;
     let was = KEY_DOWN.swap(down, Ordering::Relaxed);
     down && !was
@@ -1246,7 +1246,7 @@ const WEAPON_EMBEDDED: u8 = 0x20;
 const WEAPON_NOT_PLAYABLE: u8 = 0x80;
 const LIST_FIRST: u32 = 0x18;
 /// Game units in a metre (one unit is about 1.43 cm).
-const UNITS_PER_METRE: f32 = 70.0;
+pub const UNITS_PER_METRE: f32 = 70.0;
 
 // --- The console's way. ------------------------------------------------------------------------
 
@@ -2248,6 +2248,31 @@ fn phone_setup(e: &mut Engine, player: u32, heading: f32, weapons: &[u32]) {
             "the phone's range: {piece:?} {form_id:08X} placed as {r}"
         ));
     }
+}
+
+/// The phone's range set up and its target placed: the target's reference (its form id), where
+/// it first stood and the heading it faces (degrees, toward where the player stood).
+pub fn phone_target() -> Option<(u32, [f32; 3], f32)> {
+    if phase() != Phase::Ready {
+        return None;
+    }
+    let (_, at, angle) = (*PHONE_SPOT.lock().unwrap_or_else(|p| p.into_inner()))?;
+    let target = with_range(|r| r.targets.first().copied())?;
+    Some((target, at, angle))
+}
+
+/// The phone's guns given (form ids, in `phone_range::GUNS` order of those found).
+pub fn phone_guns() -> Vec<u32> {
+    PHONE_GUNS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .0
+        .clone()
+}
+
+/// A form id as the console takes it.
+pub(crate) fn console_id(form_id: u32) -> String {
+    id(form_id)
 }
 
 /// The phone's "weapon" button: the next gun in hand.

@@ -1618,13 +1618,13 @@ impl crate::Host {
         let frame = self.movement.main_frames;
         // The real game window's keyboard (`NV_D3D9=real`, Windows) holds keys too, unless a
         // script drives the run ([`real_input_reaches_game`]).
-        #[cfg(any(windows, target_os = "android"))]
+        #[cfg(any(windows, target_os = "android", target_os = "linux"))]
         let window_keys = if real_input_reaches_game() {
             engine_platform::d3d9real::held_keys()
         } else {
             [false; 256]
         };
-        #[cfg(not(any(windows, target_os = "android")))]
+        #[cfg(not(any(windows, target_os = "android", target_os = "linux")))]
         let window_keys = [false; 256];
         for code in 0..=255u8 {
             let scripted = script
@@ -1640,7 +1640,7 @@ impl crate::Host {
     pub fn mouse(&mut self, motion: [i32; 3], buttons: [bool; 8]) {
         self.join();
         // The real game window's mouse (`NV_D3D9=real`, Windows) moves and clicks too.
-        #[cfg(any(windows, target_os = "android"))]
+        #[cfg(any(windows, target_os = "android", target_os = "linux"))]
         let (motion, buttons) = {
             let w = engine_platform::d3d9real::take_input();
             let mut b = buttons;

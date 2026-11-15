@@ -1,0 +1,113 @@
+name: Linux test room
+# The Linux test room (docs/LINUX.md): the real engine natively for Linux x86_64, straight into the
+# same Test Range room as the Android test build, with keyboard and mouse, a window-less mode and
+# scripted headless runs. Built from linux/ (its own workspace; the Windows play build and the main
+# workspace are untouched). No game files are in it: it reads the player's own from a folder given
+# on the command line.
+#
+# On a claude/** branch a second job publishes the tarball at a stable link, the rolling prerelease
+# tagged linux-test (its file replaced by each successful build):
+# https://github.com/Lhomer/nv-rs/releases/download/linux-test/nv-rs-linux-room.tar.gz
+on:
+  push:
+    branches: ['claude/**']
+    paths:
+      - 'linux/**'
+      - 'crates/**'
+      - 'vendor/**'
+      - 'rust-toolchain.toml'
+      - 'docs/LINUX.md'
+      - '.github/workflows/linux-test.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: linux-test-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  tarball:
+    name: tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Room for the engine's build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: The toolchain (rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: linux
+          key: linux-test
+      - name: Build the room
+        working-directory: linux
+        run: cargo build --release --locked
+      - name: Smoke test (no game files)
+        working-directory: linux
+        run: |
+          ./target/release/nvrs-room --help
+          ./target/release/nvrs-room --print-script > /dev/null
+          # A folder without the game's files is refused with a reason, not a crash.
+          mkdir -p "$RUNNER_TEMP/empty"
+          if ./target/release/nvrs-room "$RUNNER_TEMP/empty" --headless --test; then exit 1; fi
+      - name: Pack the tarball
+        run: |
+          set -euo pipefail
+          dir="nv-rs-linux-room"
+          mkdir -p "$dir" release
+          cp linux/target/release/nvrs-room linux/target/release/sdp-convert "$dir/"
+          # The debug information out (the symbols stay, for backtraces).
+          strip --strip-debug "$dir/nvrs-room" "$dir/sdp-convert"
+          cp docs/LINUX.md "$dir/README.md"
+          "$dir/nvrs-room" --print-script > "$dir/default-script.txt"
+          printf 'commit=%s\n' "$GITHUB_SHA" > "$dir/BUILD.txt"
+          tar -czf release/nv-rs-linux-room.tar.gz "$dir"
+          (cd release && sha256sum nv-rs-linux-room.tar.gz > nv-rs-linux-room.tar.gz.sha256)
+          printf 'commit=%s\ntarball=nv-rs-linux-room.tar.gz\nbytes=%s\n' "$GITHUB_SHA" "$(stat -c %s release/nv-rs-linux-room.tar.gz)" > release/linux-latest.txt
+          cat release/linux-latest.txt
+      - name: Upload the tarball
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-room
+          path: release
+
+  publish:
+    name: publish
+    needs: tarball
+    if: ${{ startsWith(github.ref, 'refs/heads/claude/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-room
+          path: release
+      - name: Publish the rolling prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="linux-test"
+          short="${GITHUB_SHA:0:7}"
+          title="nv-rs Linux test room ($short)"
+          notes="$(printf '%s\n' \
+            "The Linux x86_64 test room of the branch \`$GITHUB_REF_NAME\` (Vulkan: a graphics card or Mesa's lavapipe), replaced by each successful build." \
+            "" \
+            "- Commit: $GITHUB_SHA ($short)" \
+            "- A test build: no game files are in it; it reads your own Fallout: New Vegas 1.4.0.525 files from a folder you name. README.md in the tarball (docs/LINUX.md) says how to run the room and the headless tests." \
+            "" \
+            "Files: nv-rs-linux-room.tar.gz (nvrs-room, sdp-convert, README.md, default-script.txt), its SHA-256, linux-latest.txt (the build's commit).")"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "$title" --notes "$notes" --prerelease
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$title" --notes "$notes" --prerelease
+          fi
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
+            release/nv-rs-linux-room.tar.gz release/nv-rs-linux-room.tar.gz.sha256
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber release/linux-latest.txt

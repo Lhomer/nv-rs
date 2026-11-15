@@ -75,12 +75,12 @@ pub fn hovered(e: &mut Engine, item: u32, display: u32) -> Option<Vec<u8>> {
 /// press opens the panel for the highlighted item.
 pub fn idle(e: &mut Engine) {
     let code = crate::gunplay::tuning().details_key;
-    #[cfg(any(windows, target_os = "android"))]
+    #[cfg(any(windows, target_os = "android", target_os = "linux"))]
     let down = usize::try_from(code)
         .ok()
         .and_then(|k| engine_platform::d3d9real::held_keys().get(k).copied())
         .unwrap_or(false);
-    #[cfg(not(any(windows, target_os = "android")))]
+    #[cfg(not(any(windows, target_os = "android", target_os = "linux")))]
     let down = {
         let _ = code;
         false

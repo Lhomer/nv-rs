@@ -3,7 +3,22 @@
 //! frame: `wgpu-frame-NNNNNN.bmp` in `NV_SHOT_WGPU`'s folder, or `NV_SHOT`'s. Diagnostic only.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+/// A capture asked for by the app ([`ask`]), taken at the next `Present` whatever the timing.
+static ASKED: AtomicBool = AtomicBool::new(false);
+
+/// The next frame captured (the Linux room's `shot` step), into the `NV_SHOT` folder: that
+/// folder, or `None` when the run has none (nothing is captured then).
+pub fn ask() -> Option<PathBuf> {
+    let value = std::env::var("NV_SHOT_WGPU")
+        .ok()
+        .or_else(|| std::env::var("NV_SHOT").ok())?;
+    let dir = parse(&value)?.dir;
+    ASKED.store(true, Ordering::Relaxed);
+    Some(dir)
+}
 
 /// Where and which frames to capture.
 #[derive(Debug, Clone)]
@@ -41,6 +56,9 @@ impl Shots {
 
     /// Whether present `frame` (counted from 1) is taken.
     pub fn take(&mut self, frame: u64) -> bool {
+        if ASKED.swap(false, Ordering::Relaxed) {
+            return true;
+        }
         if let Some(list) = &self.list {
             return list.contains(&frame);
         }

@@ -217,6 +217,86 @@ pub fn frame(e: &mut Engine, player: u32) {
     if FRAMES.fetch_add(1, Ordering::Relaxed) % KEEP_EVERY == KEEP_EVERY - 1 {
         crate::test_range::phone_keep(e);
     }
+    crate::room_script::frame(e, player);
+}
+
+/// The room's game, shared by the Android app and the Linux room (`android/`, `linux/`): the host
+/// started on `data` (the game's Data folder) with the phone's range on, then main's frames one
+/// after another on the calling thread, as the viewer runs them (`viewer/src/main.rs`). Never
+/// returns. `who` names the app in the log. With a script ([`crate::room_script::start`]) the run
+/// ends when it does, or with status 3 when the room is not set up within `NV_ROOM_TIMEOUT`
+/// seconds (900).
+pub fn run(data: std::path::PathBuf, who: &str) -> ! {
+    set_on(true);
+    // The game's relative paths (`Data\...`) from its own folder, as the Windows launcher starts it.
+    if let Some(folder) = data.parent() {
+        if let Err(e) = std::env::set_current_dir(folder) {
+            eprintln!("{who}: the game's folder {}: {e}", folder.display());
+        }
+    }
+    // wgpu draws; the fixes preset (the quick start among them); the player's Fallout.ini options
+    // read if the game has one.
+    if std::env::var_os("NV_D3D9").is_none() {
+        std::env::set_var("NV_D3D9", "wgpu");
+    }
+    let choice = crate::fixes::Choice::read_with(false)
+        .or_else(|e| {
+            eprintln!("{who}: the settings: {e}; the built-in defaults");
+            crate::fixes::Choice::read_with(true)
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            crate::end_process(1)
+        });
+    let mut game = match crate::Host::start_with(&data, &choice) {
+        Ok(host) => host,
+        Err(e) => {
+            eprintln!("error: {e}");
+            crate::end_process(1);
+        }
+    };
+    println!("{}", game.describe());
+    game.at_main_end = Some(Box::new(
+        |_game: &crate::Host, end: crate::player_move::MainEnd| {
+            crate::run_exit_hooks();
+            crate::end_process(end.status());
+        },
+    ));
+    game.end_if_main_ended();
+    let timeout = std::env::var("NV_ROOM_TIMEOUT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(900);
+    let began = std::time::Instant::now();
+    let mut last = began;
+    loop {
+        game.set_keys_down(&[]);
+        game.mouse([0; 3], crate::room_script::buttons());
+        if !game.main_frame() {
+            break;
+        }
+        if last.elapsed() >= std::time::Duration::from_secs(5) {
+            last = std::time::Instant::now();
+            println!("{}", game.movement.summary());
+            if crate::room_script::on()
+                && !crate::room_script::started()
+                && began.elapsed().as_secs() >= timeout
+            {
+                eprintln!(
+                    "error: {who}: the room was not set up within {timeout} s (NV_ROOM_TIMEOUT); \
+                     the range's phase: {:?}",
+                    crate::test_range::phase()
+                );
+                crate::run_exit_hooks();
+                crate::end_process(3);
+            }
+        }
+    }
+    eprintln!(
+        "error: the game's main is not running ({})",
+        game.movement.summary()
+    );
+    crate::end_process(1);
 }
 
 #[cfg(test)]

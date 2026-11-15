@@ -1182,7 +1182,7 @@ fn device_caps(e: &mut Engine, device: Ptr) -> d3dx_tex::Caps {
     #[cfg(wgpu_window)]
     {
         let on_wgpu = super::d3d9real::wgpu_draws();
-        #[cfg(test)]
+        #[cfg(all(test, windows))]
         let on_wgpu = on_wgpu || tests::WGPU_DRAWS.with(std::cell::Cell::get);
         if on_wgpu {
             leave_out_what_wgpu_lacks(&mut caps);

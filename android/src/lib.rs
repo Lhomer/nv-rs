@@ -168,7 +168,7 @@ impl Controls {
             }
             Finger::Look { last } => {
                 let (dx, dy) = (x - last[0], y - last[1]);
-                engine_platform::d3d9real::touch_motion(
+                engine_platform::d3d9real::inject_motion(
                     (dx * LOOK_GAIN).round() as i32,
                     (dy * LOOK_GAIN).round() as i32,
                 );
@@ -196,7 +196,7 @@ impl Controls {
         self.fingers.clear();
         self.stick = [0.0; 2];
         self.keys = [false; 4];
-        engine_platform::d3d9real::touch_release_all();
+        engine_platform::d3d9real::inject_release_all();
     }
 
     /// The stick leant toward `p` (fractions): W, A, S, D down past the dead zone.
@@ -222,7 +222,7 @@ impl Controls {
     fn set_keys(&mut self, keys: [bool; 4]) {
         for (i, &dik) in [DIK_W, DIK_A, DIK_S, DIK_D].iter().enumerate() {
             if keys[i] != self.keys[i] {
-                engine_platform::d3d9real::touch_key(dik, keys[i]);
+                engine_platform::d3d9real::inject_key(dik, keys[i]);
             }
         }
         self.keys = keys;
@@ -271,7 +271,7 @@ impl Controls {
 
 /// A button's action pressed (`down`) or let go.
 fn press(action: Action, down: bool) {
-    use engine_platform::d3d9real::{touch_button, touch_key};
+    use engine_platform::d3d9real::{inject_button as touch_button, inject_key as touch_key};
     match action {
         Action::Fire => touch_button(0, down),
         Action::Aim => touch_button(1, down),
@@ -350,60 +350,10 @@ fn log_to(dir: &Path) {
     std::mem::forget(file);
 }
 
-/// The game on its own thread: the host started on `data`, main's frames one after another, as
-/// the viewer runs them (`viewer/src/main.rs`).
+/// The game on its own thread: the room's game, shared with the Linux room
+/// (`host::phone_range::run`).
 fn run_game(data: PathBuf) {
-    host::phone_range::set_on(true);
-    // The game's relative paths (`Data\...`) from its own folder, as the Windows launcher starts it.
-    if let Some(folder) = data.parent() {
-        if let Err(e) = std::env::set_current_dir(folder) {
-            eprintln!("nv-rs Android: the game's folder {}: {e}", folder.display());
-        }
-    }
-    // wgpu on Vulkan in the activity's window; the fixes preset (the quick start among them); the
-    // player's Fallout.ini options read if the game has one.
-    std::env::set_var("NV_D3D9", "wgpu");
-    let choice = host::fixes::Choice::read_with(false)
-        .or_else(|e| {
-            eprintln!("nv-rs Android: the settings: {e}; the built-in defaults");
-            host::fixes::Choice::read_with(true)
-        })
-        .unwrap_or_else(|e| {
-            eprintln!("error: {e}");
-            host::end_process(1)
-        });
-    let mut game = match host::Host::start_with(&data, &choice) {
-        Ok(host) => host,
-        Err(e) => {
-            eprintln!("error: {e}");
-            host::end_process(1);
-        }
-    };
-    println!("{}", game.describe());
-    game.at_main_end = Some(Box::new(
-        |_game: &host::Host, end: host::player_move::MainEnd| {
-            host::run_exit_hooks();
-            host::end_process(end.status());
-        },
-    ));
-    game.end_if_main_ended();
-    let mut last = std::time::Instant::now();
-    loop {
-        game.set_keys_down(&[]);
-        game.mouse([0; 3], [false; 8]);
-        if !game.main_frame() {
-            break;
-        }
-        if last.elapsed() >= Duration::from_secs(5) {
-            last = std::time::Instant::now();
-            println!("{}", game.movement.summary());
-        }
-    }
-    eprintln!(
-        "error: the game's main is not running ({})",
-        game.movement.summary()
-    );
-    host::end_process(1);
+    host::phone_range::run(data, "nv-rs Android");
 }
 
 /// The window's handle and size handed to the platform layer (0: gone).

@@ -1,0 +1,40 @@
+# The Linux test room (docs/LINUX.md): the real engine natively on Linux x86_64, booting straight
+# into the same Test Range room as the Android test build (`host::phone_range`), with keyboard and
+# mouse, a window-less mode and scripted headless runs that log the active ragdoll's reactions as
+# JSON. Its own workspace, so the main workspace (and its Windows play build and lock file) is
+# untouched; built and published by .github/workflows/linux-test.yml.
+[package]
+name = "nvrs-linux"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "nvrs-room"
+path = "src/main.rs"
+
+# The shader check (`nvrs-room --check-shaders`): d3d9-wgpu's own converter tool, built here too so
+# it ships beside the room.
+[[bin]]
+name = "sdp-convert"
+path = "../crates/d3d9-wgpu/src/bin/sdp-convert.rs"
+
+[dependencies]
+host = { path = "../crates/host" }
+engine-platform = { path = "../crates/engine-platform" }
+d3d9-wgpu = { path = "../crates/d3d9-wgpu" }
+winit = "=0.30.12"
+raw-window-handle = "=0.6.2"
+# As d3d9-wgpu takes it (ADR-0007), for sdp-convert.
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan"] }
+
+[workspace]
+
+# As the main workspace: wgpu-hal with the repository's changes (vendor/README.md).
+[patch.crates-io]
+wgpu-hal = { path = "../vendor/wgpu-hal" }
+
+[profile.release]
+debug = 1
+panic = "unwind"

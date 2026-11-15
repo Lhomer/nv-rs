@@ -343,6 +343,29 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
     let own = p / mass * t.hit_force.max(0) as f32 / 100.0;
     let stage = crate::active_ragdoll::condition_hit(e, target, own / topple.max(0.1), point);
     let decision = ragdoll_core::condition::escalate(reaction(speed, topple), stage);
+    if crate::room_events::on() {
+        use crate::room_events::{num, text};
+        crate::room_events::record(
+            "hit",
+            &format!(
+                "\"actor\":\"{:08X}\",\"momentum\":{},\"stacked\":{},\"speed\":{},\"topple\":{},\"mass\":{},\"pain\":{},\"decision\":{},\"point\":[{},{},{}],\"direction\":[{},{},{}]",
+                e.mem.u32(target + FORM_ID),
+                num(p),
+                num(total),
+                num(speed),
+                num(topple),
+                num(mass),
+                text(&format!("{stage:?}")),
+                text(&format!("{decision:?}")),
+                num(point[0]),
+                num(point[1]),
+                num(point[2]),
+                num(hit_direction[0]),
+                num(hit_direction[1]),
+                num(hit_direction[2])
+            ),
+        );
+    }
     note(format!(
         "{who}: {} {p:.1} N s (DT {dt:.0}); stack {:.1} N s left of earlier hits + this = {total:.1} \
          N s over {} hits (half-life {half_life:.2} s), along ({:.2}, {:.2}, {:.2}) -> {speed:.2} \
@@ -601,6 +624,31 @@ fn measure(e: &mut Engine, actor: u32, body: Body, scale: f32) {
     }
 }
 
+/// `actor`'s state for the room's scripted runs (`crate::room_script`), as JSON fields: where it
+/// stands (game units), the process's knock state (0 standing, else knocked or getting up), its
+/// life state, health, and whether it is going over into its ragdoll or getting up.
+pub fn state_fields(e: &mut Engine, actor: u32) -> String {
+    use crate::room_events::num;
+    let at = read3(e, actor + REFR_POSITION);
+    let process = e.mem.u32(actor + PROCESS);
+    let knock = if process == 0 {
+        0
+    } else {
+        e.mem.u8(process + KNOCK_STATE) as i8
+    };
+    let life = e.mem.u32(actor + LIFE_STATE);
+    let health = actor_value(e, actor, AV_HEALTH);
+    format!(
+        "\"position\":[{},{},{}],\"knock_state\":{knock},\"life_state\":{life},\"health\":{},\"falling\":{},\"getting_up\":{}",
+        num(at[0]),
+        num(at[1]),
+        num(at[2]),
+        num(health),
+        crate::active_ragdoll::falling(actor),
+        in_get_up(actor)
+    )
+}
+
 /// An actor for the log: its form id and its base's name.
 fn describe(e: &Engine, actor: u32) -> String {
     let base = e.mem.u32(actor + BASE_FORM);
@@ -617,6 +665,10 @@ const NOTES_PER_SECOND: u32 = 20;
 static NOTES: Mutex<(Option<Instant>, u32, u32)> = Mutex::new((None, 0, 0));
 
 fn note(line: String) {
+    crate::room_events::record(
+        "knockdown_note",
+        &format!("\"text\":{}", crate::room_events::text(&line)),
+    );
     let mut n = NOTES.lock().unwrap_or_else(|p| p.into_inner());
     if n.0.map_or(true, |t| t.elapsed().as_secs() >= 1) {
         if n.2 > 0 {

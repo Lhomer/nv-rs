@@ -24,6 +24,8 @@ pub mod format;
 pub mod frame_rate;
 mod fxhash;
 pub mod loading;
+#[cfg(target_os = "linux")]
+pub mod native;
 mod prepare;
 pub mod shot;
 pub mod sm;

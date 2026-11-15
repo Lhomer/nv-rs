@@ -6916,7 +6916,26 @@ pub(crate) fn surface_for(
     }
 }
 
-#[cfg(not(any(windows, target_os = "android")))]
+/// Linux (the test room, docs/LINUX.md): the surface on the app's window, from the raw handles
+/// it handed over (`crate::native`).
+#[cfg(target_os = "linux")]
+pub(crate) fn surface_for(
+    instance: &wgpu::Instance,
+    _window: isize,
+) -> Result<wgpu::Surface<'static>, String> {
+    let (window, display) = crate::native::handles().ok_or("no window")?;
+    // SAFETY: the app keeps its window and display alive while the game draws in them.
+    unsafe {
+        instance
+            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(display),
+                raw_window_handle: window,
+            })
+            .map_err(|e| format!("create_surface: {e}"))
+    }
+}
+
+#[cfg(not(any(windows, target_os = "android", target_os = "linux")))]
 pub(crate) fn surface_for(
     _instance: &wgpu::Instance,
     _window: isize,

@@ -52,7 +52,9 @@ pub enum IDirect3DDevice9 {}
 type QueryBoard = super::d3d9backend::QueryBoard;
 #[cfg(not(windows))]
 #[derive(Default, Debug)]
-pub struct QueryBoard;
+pub struct QueryBoard {
+    _none: (),
+}
 use d3d9_stream::{Cmd, Data, Reply, Slot, Stream};
 use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
@@ -243,7 +245,7 @@ pub struct Real {
     /// Where wgpu keeps the driver's compiled pipelines between runs ([`want_wgpu_cache`]).
     wgpu_cache: Option<std::path::PathBuf>,
     /// Tests: the real backend behind the stream, to look at ([`real_texture`]).
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     test_backend: Option<std::sync::Arc<std::sync::Mutex<super::d3d9backend::RealBackend>>>,
 }
 
@@ -261,7 +263,7 @@ impl std::fmt::Debug for Real {
 impl Real {
     /// Tests: whether no answer of the real device has differed from the model's, once every
     /// command recorded is carried out.
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(crate) fn logged_is_empty(&mut self) -> bool {
         if let Some(s) = self.stream.as_mut() {
             s.finish();
@@ -280,7 +282,7 @@ fn real(e: &mut Engine) -> &mut Real {
 
 /// Tests: `stream` as the backend's for the modelled device `device`, as a made device has one, so its
 /// calls are recorded (the two-producer tests watch the order the backend sees).
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn test_stream(e: &mut Engine, device: u32, stream: Stream) {
     let r = real(e);
     r.stream = Some(stream);
@@ -289,7 +291,7 @@ pub(crate) fn test_stream(e: &mut Engine, device: u32, stream: Stream) {
 
 /// Tests: the modelled object `object` as one the backend was asked for (its calls are recorded;
 /// a surface reads back through [`read_surface`]).
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn test_forwarded(e: &mut Engine, object: u32) {
     real(e).forwarded.insert(object);
 }
@@ -903,19 +905,18 @@ pub fn held_keys() -> [bool; 256] {
     input().lock().map(|i| i.keys).unwrap_or([false; 256])
 }
 
-/// Android: a key (its DirectInput code) held down or let go by the touch controls (the app's
-/// virtual stick and buttons), as the window's keyboard holds them on Windows.
-#[cfg(target_os = "android")]
-pub fn touch_key(dik: u8, down: bool) {
+/// Android and Linux: a key (its DirectInput code) held down or let go by the app (Android's touch
+/// controls, the Linux room's keyboard or script), as the window's keyboard holds them on Windows.
+#[cfg(not(windows))]
+pub fn inject_key(dik: u8, down: bool) {
     if let Ok(mut i) = input().lock() {
         i.keys[usize::from(dik)] = down;
     }
 }
 
-/// Android: a mouse button (DirectInput's order: left, right, middle) held or let go by a touch
-/// button (fire, aim).
-#[cfg(target_os = "android")]
-pub fn touch_button(button: usize, down: bool) {
+/// Android and Linux: a mouse button (DirectInput's order: left, right, middle) held or let go.
+#[cfg(not(windows))]
+pub fn inject_button(button: usize, down: bool) {
     if let Ok(mut i) = input().lock() {
         if let Some(b) = i.buttons.get_mut(button) {
             *b = down;
@@ -923,22 +924,37 @@ pub fn touch_button(button: usize, down: bool) {
     }
 }
 
-/// Android: the look swipe's motion (mouse counts) since the last frame, added up until the host
-/// takes it ([`take_input`]).
-#[cfg(target_os = "android")]
-pub fn touch_motion(dx: i32, dy: i32) {
+/// Android and Linux: the look's motion (mouse counts) since the last frame, added up until the
+/// host takes it ([`take_input`]).
+#[cfg(not(windows))]
+pub fn inject_motion(dx: i32, dy: i32) {
     if let Ok(mut i) = input().lock() {
         i.motion[0] = i.motion[0].saturating_add(dx);
         i.motion[1] = i.motion[1].saturating_add(dy);
     }
 }
 
-/// Android: every touch let go (the activity paused, the window lost).
-#[cfg(target_os = "android")]
-pub fn touch_release_all() {
+/// Android and Linux: the mouse wheel turned (DirectInput's counts, 120 a notch), added up until
+/// the host takes it ([`take_input`]).
+#[cfg(not(windows))]
+pub fn inject_wheel(delta: i32) {
+    if let Ok(mut i) = input().lock() {
+        i.motion[2] = i.motion[2].saturating_add(delta);
+    }
+}
+
+/// Android and Linux: everything let go (the window lost or left).
+#[cfg(not(windows))]
+pub fn inject_release_all() {
     if let Ok(mut i) = input().lock() {
         *i = Input::default();
     }
+}
+
+/// The next frame captured into the `NV_SHOT` folder (the Linux room's `shot` step): that folder,
+/// or `None` when the run has none.
+pub fn ask_shot() -> Option<std::path::PathBuf> {
+    d3d9_wgpu::shot::ask()
 }
 
 /// The real window's input for this frame: the keys and buttons held, the motion since the last
@@ -1604,35 +1620,39 @@ pub fn window_moved(e: &mut Engine, handle: u32, rect: [i32; 4], flags: u32) {
     }
 }
 
-// The window on Android (the test build, docs/ANDROID.md): the activity's native window, handed
-// over by the app ([`set_native_window`]); the game's window draws into it, filling it. No window
-// thread, no styles: the activity owns the window.
+// The window on Android and Linux (the test builds, docs/ANDROID.md, docs/LINUX.md): the app's
+// native window, handed over by the app ([`set_native_window`]; on Linux its raw handles go to
+// `d3d9_wgpu::native`); the game's window draws into it, filling it. No window thread, no styles:
+// the app owns the window.
 
 /// The activity's native window (`ANativeWindow*`) and its size in pixels, 0 until the app hands it
 /// over ([`set_native_window`]).
-#[cfg(target_os = "android")]
+#[cfg(not(windows))]
 static NATIVE_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
-#[cfg(target_os = "android")]
+#[cfg(not(windows))]
 static NATIVE_SIZE: std::sync::Mutex<(u32, u32)> = std::sync::Mutex::new((0, 0));
 
-/// The app's native window (`ANativeWindow*`, 0 when it is gone) and its size: the game's window
-/// draws into it (`d3d9_wgpu` makes its surface on it).
-#[cfg(target_os = "android")]
+/// The app's native window (Android: `ANativeWindow*`; Linux: any nonzero token, its raw handles
+/// given to `d3d9_wgpu::native`; 0 when it is gone) and its size: the game's window draws into it
+/// (`d3d9_wgpu` makes its surface on it).
+#[cfg(not(windows))]
 pub fn set_native_window(window: isize, width: u32, height: u32) {
     NATIVE_WINDOW.store(window, std::sync::atomic::Ordering::Relaxed);
     *NATIVE_SIZE.lock().unwrap_or_else(|p| p.into_inner()) = (width, height);
+    #[cfg(target_os = "linux")]
+    d3d9_wgpu::native::set_size(width, height);
     d3d9_wgpu::window_changed();
 }
 
 /// The activity's window's size (the "monitor" the game fills).
-#[cfg(target_os = "android")]
+#[cfg(not(windows))]
 pub fn native_size() -> Option<(u32, u32)> {
     let size = *NATIVE_SIZE.lock().unwrap_or_else(|p| p.into_inner());
     (size.0 > 0 && size.1 > 0).then_some(size)
 }
 
 /// No switching on Android: the activity's window is the game's, always full screen.
-#[cfg(target_os = "android")]
+#[cfg(not(windows))]
 pub fn switch_window_mode(_on: bool) -> bool {
     false
 }
@@ -1640,7 +1660,7 @@ pub fn switch_window_mode(_on: bool) -> bool {
 /// `CreateWindowExA` made the modelled window `handle`: the game's top-level window is the
 /// activity's native window (waited for a little, the activity hands it over when it has one); a
 /// child of it draws there too.
-#[cfg(target_os = "android")]
+#[cfg(not(windows))]
 #[allow(clippy::too_many_arguments)]
 pub fn window_created(
     e: &mut Engine,
@@ -1653,6 +1673,10 @@ pub fn window_created(
 ) {
     if !wanted() {
         return;
+    }
+    // Off screen (headless): no window to wait for; a token stands for it.
+    if offscreen() && NATIVE_WINDOW.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        NATIVE_WINDOW.store(1, std::sync::atomic::Ordering::Relaxed);
     }
     let mut window = NATIVE_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
     let start = std::time::Instant::now();
@@ -1679,11 +1703,11 @@ pub fn window_created(
 }
 
 /// No title on Android.
-#[cfg(target_os = "android")]
+#[cfg(not(windows))]
 pub fn window_titled(_e: &mut Engine, _handle: u32, _title: &[u8]) {}
 
 /// The game's rectangles kept (as on Windows); the native window itself does not move.
-#[cfg(target_os = "android")]
+#[cfg(not(windows))]
 pub fn window_moved(e: &mut Engine, handle: u32, rect: [i32; 4], flags: u32) {
     let Some(window) = real_window(e, handle) else {
         return;
@@ -1745,8 +1769,8 @@ fn backend_of(
         Backends::Real => real(),
         Backends::Wgpu => Box::new(WgpuWithReport {
             wgpu: match answers {
-                Some(a) => wgpu(d3d9_wgpu::Output::Window).with_answers(a),
-                None => wgpu(d3d9_wgpu::Output::Window),
+                Some(a) => wgpu(window_output()).with_answers(a),
+                None => wgpu(window_output()),
             },
             back_buffer: 0,
         }),
@@ -1755,6 +1779,22 @@ fn backend_of(
             Box::new(wgpu(d3d9_wgpu::Output::Offscreen)),
         )),
     }
+}
+
+/// Where wgpu draws the game's frames: its window, or off screen with no window at all
+/// (`NV_WGPU_OFFSCREEN=1`, the Linux room's headless runs: the frames are still drawn and can be
+/// captured, `NV_SHOT`).
+fn window_output() -> d3d9_wgpu::Output {
+    if offscreen() {
+        d3d9_wgpu::Output::Offscreen
+    } else {
+        d3d9_wgpu::Output::Window
+    }
+}
+
+/// Whether wgpu draws off screen (`NV_WGPU_OFFSCREEN=1`).
+pub fn offscreen() -> bool {
+    std::env::var("NV_WGPU_OFFSCREEN").is_ok_and(|v| v == "1")
 }
 
 /// The wgpu backend on the game's window, with the F12 report (`shot::report_with`) at each
@@ -4065,10 +4105,10 @@ pub(super) fn face_check_draw(
 /// makes a real device or calls the real DLL takes its turn first and keeps it to its end (its
 /// device released before the turn), so those tests run one at a time while the rest stay
 /// parallel; [`test_real_device_on`] and the backend's own test device check the turn is held.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) struct RealTurn(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 thread_local! {
     /// Whether this test thread holds its [`RealTurn`].
     static HOLDS_REAL_TURN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -4076,7 +4116,7 @@ thread_local! {
 
 /// Test only: waits for and takes the test's [`RealTurn`] (a test that failed on its turn does
 /// not stop the others').
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn real_turn() -> RealTurn {
     static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let turn = TURN
@@ -4086,7 +4126,7 @@ pub(crate) fn real_turn() -> RealTurn {
     RealTurn(turn)
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 impl Drop for RealTurn {
     fn drop(&mut self) {
         HOLDS_REAL_TURN.with(|h| h.set(false));
@@ -4094,7 +4134,7 @@ impl Drop for RealTurn {
 }
 
 /// Test only: stops a test that makes a real device without its [`RealTurn`].
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn assert_real_turn() {
     assert!(
         HOLDS_REAL_TURN.with(|h| h.get()),
@@ -4104,7 +4144,7 @@ pub(crate) fn assert_real_turn() {
 
 /// Test only: a hidden window of the window thread (64 by 64), for a real device; `None` when it
 /// could not be made.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn test_window() -> Option<isize> {
     let (reply, answer) = std::sync::mpsc::channel();
     let sent = window_thread()
@@ -4127,7 +4167,7 @@ pub(crate) fn test_window() -> Option<isize> {
 
 /// Test only: the 64 by 64 windowed `D3DPRESENT_PARAMETERS` words a test device is made with
 /// (one back buffer, `D3DSWAPEFFECT_DISCARD`).
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn test_present() -> [u32; 14] {
     let mut p = [0u32; 14];
     p[0] = 64;
@@ -4143,13 +4183,13 @@ pub(crate) fn test_present() -> [u32; 14] {
 /// counterpart of the modelled device `at` through the engine's stream (a direct one, made here
 /// when the engine has none); `None` where Direct3D 9 has no device (no display adapter, as on
 /// CI).
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn test_real_device(e: &mut Engine, at: u32, behavior: u32) -> Option<IDirect3DDevice9> {
     test_real_device_on(e, at, behavior, false)
 }
 
 /// Test only: [`test_real_device`], the backend on the render thread with `threaded`.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn test_real_device_on(
     e: &mut Engine,
     at: u32,
@@ -4208,7 +4248,7 @@ pub(crate) fn test_real_device_on(
 /// Test only: `backend` as the engine's forwarding (carried out at once, or on a render thread
 /// with `threaded`), with the modelled `devices` and `objects` given counterparts there (the
 /// stand-ins of `d3d9backend::stub`).
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn test_forwarding(
     e: &mut Engine,
     backend: Box<dyn d3d9_stream::Backend>,
@@ -4227,7 +4267,7 @@ pub(crate) fn test_forwarding(
 }
 
 /// Test only: returns once every command recorded is carried out (the render thread's too).
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn test_finish(e: &mut Engine) {
     if let Some(s) = real(e).stream.as_mut() {
         s.finish();
@@ -4236,12 +4276,12 @@ pub(crate) fn test_finish(e: &mut Engine) {
 
 /// Test only: a backend shared with the test, which looks at it afterwards (its stand-ins' log,
 /// its real objects).
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) struct SharedBackend(
     pub(crate) std::sync::Arc<std::sync::Mutex<super::d3d9backend::RealBackend>>,
 );
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 impl d3d9_stream::Backend for SharedBackend {
     fn execute(&mut self, cmd: Cmd<Data<'_>>) -> Reply {
         self.0.lock().unwrap().execute(cmd)
@@ -4250,7 +4290,7 @@ impl d3d9_stream::Backend for SharedBackend {
 
 /// Test only: the real counterpart of the modelled texture or cube texture `texture`, after
 /// [`test_real_device`].
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn real_texture(e: &mut Engine, texture: u32) -> Option<IDirect3DBaseTexture9> {
     test_finish(e);
     let backend = real(e).test_backend.clone()?;
@@ -4258,7 +4298,7 @@ pub(crate) fn real_texture(e: &mut Engine, texture: u32) -> Option<IDirect3DBase
     b.test_texture(texture)
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
