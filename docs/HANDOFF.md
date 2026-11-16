@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (crash: a rigged terminal's shot)
+
+- **Now (`crate::ballistics::current_ammo`, its three callers; `knockdown::land`'s attacker; docs/GUNPLAY.md "Crash fix: a rigged terminal's shot"):** the ballistics' `CreateProjectile` hook asked `GetCurrentAmmo` with a terminal as the holder, which reads an actor's process; now no holder for a non-actor. Test passes; not run in the game.
+- **Patrick:** the Play game stopped as he activated a rigged terminal in REPCONN's basement (`00525980 < 009bca60 < 00523150 < ...`).
+
 ### Claude, 2026-11-17 (arms through the body; the posed fall's snap)
 
 - **Now (`knockdown::can_knock_now`, `fall_failed` on every refusal, `active_ragdoll::stand_back_up` / `fall_support` / `FALL_SUPPORT` / `FALL_BACK`, `Rig::support_back`, `shift_back` with its own time; `ragdoll_core::flinch::SHOULDER_RANGE` / `shoulder_range` / `shoulder_over` / `behind_the_back` / `held_turn`, `brace::held_goal` / `reaches`; `active::Body::keep_limbs_out` / `clear_arms` / `hold_shoulders` / `capsule_at` / `unarmed` / `free_arms`, `closest_points`, `NECK_SOFT`, `UNARMED_ARM_SPIN`, `HIT_TIME` 0.04, `HYPEREXTEND` 0.02, the targets' flex with the weight (`hinged_with`); lab `Sim::can_knock_now` / `fall_failed` / `support`, `mq::capsule_at`, `scenario::arms`; docs/GUNPLAY.md "Arms through the body"):** lab and core pass; not run in the game. The .44 head hit's chest bend is 14.6 degrees, not the 12 asked.

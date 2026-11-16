@@ -471,6 +471,20 @@ stretched and grew, and the game froze. Two causes, both fixed:
   poses (the pass writing back three times a frame, a hair off, the animation skipping frames)
   makes exactly the shown pose and never adds up.
 
+### Crash fix: a rigged terminal's shot (Patrick, 2026-11-17, REPCONN's basement)
+
+Activating a booby-trapped terminal stopped the game: `read of unmapped memory at 0048385c (in
+00525980 < 009bca60 < 00523150 < 0087b990 < 0087a790 < 0086e650)`: the main loop's task queue
+ran `TESObjectWEAP::Fire` (`00523150`) for the trap, which made its projectile
+(`CreateProjectile`, `009bca60`), and under it `TESObjectWEAP::GetCurrentAmmo` (`00525980`) read
+an actor's process (`+0x68`) of what was no actor. The game's own fire asks it only for an actor;
+the ballistics' hook over `CreateProjectile` (`crate::ballistics`, Projectile mode) asked it for
+every shot's shooter as it was: the terminal's reference. Now `ballistics::current_ammo` asks it
+with no holder (the weapon's default ammo) for anything but an actor (`jip::commands::is_actor`),
+for the shot, the hit's round and the breakdown; a knocked-down actor's fall damage names no
+attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
+patches (#624) and the knockdown's companion refusal were not on the path.
+
 ### Arms through the body, a folded body snapping upright (Patrick, 2026-11-17, 454ebb2's 10:47 clip)
 
 454ebb2 looked a lot better, but the arms flailed through the body, and a body folded over the

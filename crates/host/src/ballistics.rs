@@ -312,6 +312,22 @@ pub fn install(e: &mut Engine) {
     });
 }
 
+/// `TESObjectWEAP::GetCurrentAmmo` (`00525980`) for `weapon` as `holder` has it loaded, asked
+/// with no holder unless `holder` is an actor: the weapon's default ammo then. The game's function
+/// takes its second word for an actor and reads its process (`+0x68`); the game's own fire asks
+/// it only for an actor (`TESObjectWEAP::Fire` checks), but every shot's projectile came here
+/// with its shooter as it was: a booby-trapped terminal's, a mine's, a turret's reference.
+/// Patrick, 2026-11-17: a rigged terminal's blast in REPCONN's basement stopped the game (a read
+/// of unmapped memory at `0048385c` in `00525980` under `009bca60`).
+pub(crate) fn current_ammo(e: &mut Engine, weapon: u32, holder: u32) -> u32 {
+    let holder = if jip::commands::is_actor(e, holder) {
+        holder
+    } else {
+        0
+    };
+    e.call(GET_CURRENT_AMMO, &args![weapon, holder]).u32()
+}
+
 /// A new shot's projectile: its load's velocity, and the bullet remembered.
 fn shot(e: &mut Engine, form: u32, shooter: u32, weapon: u32, projectile: u32) {
     if projectile == 0 || weapon == 0 {
@@ -324,7 +340,7 @@ fn shot(e: &mut Engine, form: u32, shooter: u32, weapon: u32, projectile: u32) {
             None => return,
         }
     };
-    let ammo = e.call(GET_CURRENT_AMMO, &args![weapon, shooter]).u32();
+    let ammo = current_ammo(e, weapon, shooter);
     let ammo = ammo_form(e, ammo);
     let load = if ammo == 0 {
         Load::Standard
@@ -438,7 +454,7 @@ pub fn weapon_round(e: &mut Engine, weapon: u32, shooter: u32) -> Option<Round> 
     if weapon == 0 || e.mem.u8(weapon + 4) != WEAP {
         return None;
     }
-    let current = e.call(GET_CURRENT_AMMO, &args![weapon, shooter]).u32();
+    let current = current_ammo(e, weapon, shooter);
     let mut ammo = ammo_form(e, current);
     if ammo == 0 {
         ammo = ammo_form(e, e.mem.u32(weapon + WEAPON_AMMO));
@@ -510,7 +526,7 @@ pub struct Breakdown {
 /// `holder` has loaded (the player's, else its default): `None` for a weapon of no calibre.
 pub fn breakdown(e: &mut Engine, weapon: u32, item: u32, holder: u32) -> Option<Breakdown> {
     gun_caliber(e, weapon)?;
-    let current = e.call(GET_CURRENT_AMMO, &args![weapon, holder]).u32();
+    let current = current_ammo(e, weapon, holder);
     let mut ammo = ammo_form(e, current);
     if ammo == 0 {
         ammo = ammo_form(e, e.mem.u32(weapon + WEAPON_AMMO));
@@ -673,6 +689,33 @@ pub fn frame(e: &mut Engine) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The current ammo is asked for an actor as it is, and for anything else (a rigged terminal,
+    /// a mine, no shooter) with no holder: the game's function reads an actor's process from it.
+    #[test]
+    fn a_trap_shot_asks_for_no_holders_ammo() {
+        let mut e = Engine::new();
+        e.mem.map(0x3000, 0x1000);
+        let asked = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        e.register_double(GET_CURRENT_AMMO, move |_, a| {
+            seen.lock().unwrap().push(a[1]);
+            0x0a44u32.into_ret()
+        });
+        // An actor: its vtable's slot 0x100 is `Actor::IsActor` (`008d0360`).
+        let (actor, terminal) = (0x3000u32, 0x3100u32);
+        let (actor_vtable, ref_vtable) = (0x3800u32, 0x3900u32);
+        e.mem.set_u32(actor, actor_vtable);
+        e.mem.set_u32(actor_vtable + 0x100, 0x008d_0360);
+        // A terminal: a reference's vtable, its slot 0x100 another function.
+        e.mem.set_u32(terminal, ref_vtable);
+        e.mem.set_u32(ref_vtable + 0x100, 0x0040_1234);
+        let weapon = 0x5000u32;
+        assert_eq!(current_ammo(&mut e, weapon, actor), 0x0a44);
+        assert_eq!(current_ammo(&mut e, weapon, terminal), 0x0a44);
+        assert_eq!(current_ammo(&mut e, weapon, 0), 0x0a44);
+        assert_eq!(*asked.lock().unwrap(), vec![actor, 0, 0]);
+    }
 
     /// The forms fly at their calibre's speed (times the slider), drop by their calibre and reach
     /// at least as far as before; momentum is mass times speed.

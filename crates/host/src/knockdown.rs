@@ -2081,6 +2081,13 @@ fn land(e: &mut Engine, actor: u32, aggressor: u32, drop: f32) {
     if damage <= 0.0 {
         return;
     }
+    // The game's damage takes an attacker actor: a trap's or a mine's blast has none (its
+    // aggressor is the terminal's or the mine's reference).
+    let aggressor = if jip::commands::is_actor(e, aggressor) {
+        aggressor
+    } else {
+        0
+    };
     e.vcall(actor, SLOT_DAMAGE, &args![damage, 0.0f32, aggressor]);
     let limb = damage * setting_f(e, LIMB_MULT);
     let chance_at = e.call(SETTING_INT, &args![LIMB_CHANCE]).u32();
