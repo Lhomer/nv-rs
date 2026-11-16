@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-16 (Launch physics tester from Launcher.exe)
+
+- **Now (`scripts/updater`: `Choice::Tester` (`--room`, remembered as `tester`), a third button in `ask_choice`, `tester()` / `start_tester()` (reads `windows-test/windows-latest.txt`, installs or updates with the same all-or-nothing `update_to` into `update::tester_folder`, `<install's parent>\nv-rs-physics-tester`), `update::TESTER_TAG`, `TESTER_LATEST`, `TESTER_FOLDER`; READ ME and docs/WINDOWS-ROOM.md):** the Play package's Launcher.exe installs, updates and starts the physics tester apart from the Play install; Play's channel and `latest.txt` unchanged. Not run on Windows here.
+- **Patrick:** a "Launch physics tester" button in the Launcher that checks `windows-test/windows-latest.txt`, updates the room if newer and starts it, kept apart from the Play install and saves.
+
 ### Claude, 2026-11-16 (the Windows test room)
 
 - **Now (docs/WINDOWS-ROOM.md; `.github/workflows/windows-test.yml` (the Play package built with `NV_RS_ROOM=1`, published at the `windows-test` release as `nv-rs-windows-room.zip` + `windows-latest.txt`); `scripts/launcher` `--room` / `NV_RS_ROOM` (sets `NV_TEST_RANGE_PHONE=1`, `NV_ROOM_RECORD=1`); `scripts/updater` `NV_RS_UPDATE_LATEST`, `room()` (no Play/Mods question); `crates/d3d9-wgpu/src/capture.rs` (non-blocking back-buffer capture, `Device::copy_for_capture`, `collect_captures`) and its frame test; `crates/engine-platform/src/record.rs` (`fit`, `scale_bgra`, `bgra_to_nv12`, `Mp4` over Media Foundation, `cursor_on_window`, `local_stamp`), `d3d9real::capture`/`touch_overlay`/`game_window`; `crates/host/src/room_record.rs` (F9 / Record button, pre-roll, sidecar, F6/F7), called from the viewer's loop; F6/F7/F9 kept from the game in the room (`player_move`)):** builds; the capture is tested on lavapipe; the encoder compiles against Windows' Media Foundation but was never run (no Windows here). Not run with game files.

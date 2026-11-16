@@ -28,7 +28,12 @@ package). Unzip it anywhere outside `Program Files` (a short path, such as `C:\n
 
 ## Start it
 
-- **Launcher.exe** (recommended): looks for a newer build on the `windows-test` release. If there
+- **From the Play package**: its Launcher.exe has a **Launch physics tester** button. It reads
+  `windows-test`'s `windows-latest.txt`, installs or updates the room in a folder of its own beside
+  the Play install (`<Play's folder>\..\nv-rs-physics-tester`: its own programs, `userdata` and
+  saves; Play's are not touched), and starts it. Play's own updates (`latest.txt`) are as before.
+  Without internet it starts the installed room, if there is one.
+- **Launcher.exe** (in the room's own zip): looks for a newer build on the `windows-test` release. If there
   is one it offers to update: the download is checked against its SHA-256, and `userdata` is never
   touched. Then it starts the room. It updates the folder it is in.
 - **Play.exe** starts the room straight away, without the update check.

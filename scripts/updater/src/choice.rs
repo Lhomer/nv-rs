@@ -13,6 +13,9 @@ pub enum Choice {
     Play,
     /// Play.exe with the mods in the `mods` folder.
     Mods,
+    /// The physics tester (the Windows test room, installed and updated beside the Play install:
+    /// `update::tester_folder`), its Play.exe with `--room`.
+    Tester,
 }
 
 impl Choice {
@@ -21,6 +24,7 @@ impl Choice {
         match self {
             Choice::Play => &[],
             Choice::Mods => &["--mods"],
+            Choice::Tester => &["--room"],
         }
     }
 
@@ -29,6 +33,7 @@ impl Choice {
         match self {
             Choice::Play => "play",
             Choice::Mods => "mods",
+            Choice::Tester => "tester",
         }
     }
 
@@ -37,6 +42,7 @@ impl Choice {
     pub fn parse(text: &str) -> Choice {
         match text.trim().to_ascii_lowercase().as_str() {
             "mods" => Choice::Mods,
+            "tester" => Choice::Tester,
             _ => Choice::Play,
         }
     }
@@ -91,6 +97,9 @@ mod tests {
         std::fs::write(file(&dir), "garbage").unwrap();
         assert_eq!(remembered(&dir), Choice::Play);
         assert_eq!(Choice::parse(" MODS\r\n"), Choice::Mods);
+        remember(&dir, Choice::Tester);
+        assert_eq!(remembered(&dir), Choice::Tester);
+        assert_eq!(Choice::Tester.args(), ["--room"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

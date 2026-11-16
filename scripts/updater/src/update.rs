@@ -23,6 +23,24 @@ pub const STAGING: &str = "update.nv-rs";
 pub const NEW: &str = ".nv-rs-new";
 pub const OLD: &str = ".nv-rs-old";
 
+/// The physics tester (the Windows test room, docs/WINDOWS-ROOM.md), which the Play package's
+/// launcher installs, updates and starts on its own button: its release's tag and newest-build
+/// file, and the folder it lives in, beside the Play install ([`tester_folder`]).
+pub const TESTER_TAG: &str = "windows-test";
+pub const TESTER_LATEST: &str = "windows-latest.txt";
+pub const TESTER_FOLDER: &str = "nv-rs-physics-tester";
+
+/// Where the physics tester is installed for the Play install `install`: a folder of its own beside
+/// it (`<install's parent>\nv-rs-physics-tester`), so its programs, `userdata` and saves never mix
+/// with Play's, and the place passes the same checks as Play's (not in Documents or AppData).
+pub fn tester_folder(install: &Path) -> PathBuf {
+    install
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(install)
+        .join(TESTER_FOLDER)
+}
+
 /// The installed build's source commit: `BUILD.txt`'s `Source commit: <sha>` line.
 pub fn installed_commit(build_txt: &str) -> Option<String> {
     build_txt.lines().find_map(|line| {
@@ -516,5 +534,24 @@ mod tests {
             None,
             "only a plain asset name is fetched"
         );
+    }
+
+    /// The physics tester lives beside the Play install, never inside it (nor in its `userdata`),
+    /// and reads its own release's file.
+    #[test]
+    fn the_physics_tester_has_its_own_folder_and_release() {
+        let games = Path::new("games");
+        let play = games.join("nv-rs");
+        let tester = tester_folder(&play);
+        assert_eq!(tester, games.join("nv-rs-physics-tester"));
+        assert!(!tester.starts_with(&play));
+        assert_ne!(tester, play.join(USERDATA));
+        assert_eq!(
+            tester_folder(Path::new("nv-rs")),
+            Path::new("nv-rs").join("nv-rs-physics-tester")
+        );
+        assert_eq!(TESTER_TAG, "windows-test");
+        assert_eq!(TESTER_LATEST, "windows-latest.txt");
+        assert!(safe_asset_name(TESTER_LATEST));
     }
 }

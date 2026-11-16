@@ -364,6 +364,7 @@ fn unpack(zip: &Path, into: &Path) -> Result<(), String> {
 /// The choice window's buttons and what it answered (0: closed without a choice).
 const ID_PLAY: usize = 101;
 const ID_MODS: usize = 102;
+const ID_TESTER: usize = 103;
 const IDCANCEL: usize = 2;
 const WM_COMMAND: u32 = 0x111;
 const WM_SETFONT: u32 = 0x30;
@@ -381,7 +382,7 @@ unsafe extern "system" fn choice_procedure(
     match message {
         WM_COMMAND => {
             let id = w & 0xffff;
-            if id == ID_PLAY || id == ID_MODS {
+            if id == ID_PLAY || id == ID_MODS || id == ID_TESTER {
                 CHOSEN.store(id as isize, Ordering::Relaxed);
                 DestroyWindow(window);
             } else if id == IDCANCEL {
@@ -403,16 +404,23 @@ unsafe extern "system" fn choice_procedure(
     }
 }
 
-/// The window that asks what to start: `note` (what the update check found) above the two
-/// buttons, `default` the one Enter presses. `None` when it is closed without a choice.
+/// The window that asks what to start: `note` (what the update check found) above the buttons
+/// (Play, Play with mods, and Launch physics tester: the Windows test room, installed and updated
+/// beside this install), `default` the one Enter presses. `None` when it is closed without a
+/// choice.
 fn ask_choice(note: &str, default: Choice) -> Option<Choice> {
     let class_name = wide("nv-rs-launcher-choice");
     let (title, label, button) = (wide(TITLE), wide("STATIC"), wide("BUTTON"));
     let text = wide(&format!("{note}\n\nWhat do you want to start?"));
-    let (play, mods) = (wide("Play"), wide("Play with mods"));
+    let (play, mods, tester) = (
+        wide("Play"),
+        wide("Play with mods"),
+        wide("Launch physics tester"),
+    );
     let default_id = match default {
         Choice::Play => ID_PLAY,
         Choice::Mods => ID_MODS,
+        Choice::Tester => ID_TESTER,
     };
     CHOSEN.store(0, Ordering::Relaxed);
     DEFAULT_ID.store(default_id as isize, Ordering::Relaxed);
@@ -434,7 +442,7 @@ fn ask_choice(note: &str, default: Choice) -> Option<Choice> {
             class_name: class_name.as_ptr(),
         };
         RegisterClassW(&class);
-        let (width, height) = (480, 190);
+        let (width, height) = (600, 190);
         let (x, y) = (
             (GetSystemMetrics(0) - width) / 2,
             (GetSystemMetrics(1) - height) / 2,
@@ -474,7 +482,11 @@ fn ask_choice(note: &str, default: Choice) -> Option<Choice> {
             std::ptr::null_mut(),
         );
         let mut buttons = Vec::new();
-        for (id, caption, left) in [(ID_PLAY, &play, 16), (ID_MODS, &mods, 196)] {
+        for (id, caption, left) in [
+            (ID_PLAY, &play, 16),
+            (ID_MODS, &mods, 200),
+            (ID_TESTER, &tester, 384),
+        ] {
             // WS_CHILD | WS_VISIBLE | WS_TABSTOP, BS_DEFPUSHBUTTON for the default.
             let style = 0x5001_0000 | u32::from(id == default_id);
             let handle = CreateWindowExW(
@@ -513,6 +525,7 @@ fn ask_choice(note: &str, default: Choice) -> Option<Choice> {
     match CHOSEN.load(Ordering::Relaxed) as usize {
         ID_PLAY => Some(Choice::Play),
         ID_MODS => Some(Choice::Mods),
+        ID_TESTER => Some(Choice::Tester),
         _ => None,
     }
 }
@@ -528,7 +541,94 @@ fn choose_and_play(install: &Path, note: &str) {
         return;
     };
     choice::remember(install, choice);
+    if choice == Choice::Tester {
+        return tester(install);
+    }
     play(install, choice);
+}
+
+/// The physics tester (the Windows test room, docs/WINDOWS-ROOM.md): the newest build on the
+/// `windows-test` release (`windows-latest.txt`) installed or updated in its own folder beside this
+/// install (`update::tester_folder`: its own programs, `userdata` and saves; never this install's),
+/// then its Play.exe started with `--room`. Unreachable release: the installed tester starts, if
+/// there is one. Play's own release and its `latest.txt` are not touched.
+fn tester(play_install: &Path) {
+    let dir = update::tester_folder(play_install);
+    if let Err(why) = std::fs::create_dir_all(&dir) {
+        return error(&format!(
+            "The physics tester's folder could not be made ({why}):\n\n{}",
+            dir.display()
+        ));
+    }
+    update::clear_leftovers(&dir);
+    let installed = std::fs::read_to_string(dir.join("BUILD.txt"))
+        .ok()
+        .and_then(|text| update::installed_commit(&text));
+    let has_it = dir.join("Play.exe").is_file();
+    let (repo, _) = crate::channel();
+    let status = Status::show("Looking for the newest physics tester...");
+    let latest = fetch_text(&crate::asset_url(
+        repo,
+        update::TESTER_TAG,
+        update::TESTER_LATEST,
+    ))
+    .and_then(|text| {
+        update::parse_latest(&text)
+            .ok_or_else(|| format!("the release's {} is not readable", update::TESTER_LATEST))
+    });
+    let latest = match latest {
+        Ok(latest) => latest,
+        Err(why) => {
+            status.close();
+            if has_it {
+                return start_tester(&dir);
+            }
+            return error(&format!(
+                "The physics tester could not be downloaded ({why}).\n\nTry again later."
+            ));
+        }
+    };
+    if has_it && installed.as_deref() == Some(latest.commit.as_str()) {
+        status.close();
+        return start_tester(&dir);
+    }
+    if play_is_running() {
+        status.close();
+        warning("The game or the physics tester is running. Close it, then try again.");
+        return;
+    }
+    status.set(&format!(
+        "Downloading the physics tester ({})...",
+        short(&latest.commit)
+    ));
+    let result = update_to(&dir, repo, update::TESTER_TAG, &latest, &status);
+    status.close();
+    let _ = std::fs::remove_dir_all(dir.join(update::STAGING));
+    match result {
+        Ok(()) => start_tester(&dir),
+        Err(why) if has_it => {
+            warning(&format!(
+                "The physics tester was not updated: {why}\nThe installed one starts."
+            ));
+            start_tester(&dir);
+        }
+        Err(why) => error(&format!("The physics tester could not be installed: {why}")),
+    }
+}
+
+/// The physics tester's Play.exe started (`--room`: straight into the room).
+fn start_tester(dir: &Path) {
+    let play = dir.join("Play.exe");
+    if let Err(why) = Command::new(&play)
+        .args(Choice::Tester.args())
+        .current_dir(dir)
+        .spawn()
+    {
+        error(&format!(
+            "The physics tester could not be started ({why}).\n\n{}",
+            play.display()
+        ));
+    }
 }
 
 /// Starts Play.exe from the install, as a double-click would (with `--mods` for Play with mods,
