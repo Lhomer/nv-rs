@@ -512,15 +512,19 @@ fn vtable(e: &mut Engine, base: u32, slots: usize) -> u32 {
     table
 }
 
-/// A word of a call's arguments, as the real side (`super::d3d9real`) takes it.
+/// A word of a call's arguments, as the real side (`super::d3d9real`) takes it (wherever wgpu
+/// draws: Windows, and the Android and Linux rooms).
+#[cfg(wgpu_window)]
 pub(super) trait Word: Copy {
     fn word(self) -> u32;
 }
+#[cfg(wgpu_window)]
 impl Word for u32 {
     fn word(self) -> u32 {
         self
     }
 }
+#[cfg(wgpu_window)]
 impl Word for Ptr {
     fn word(self) -> u32 {
         self.addr()

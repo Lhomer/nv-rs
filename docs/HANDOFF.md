@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-16 (merge slaterain/nv-rs main up to 31a6e8d)
+
+- **Now:** a regular merge of #616, #620, #617, #628, #627, #624. Conflicts, both sides kept: `engine-core` `start_real_clock` (upstream's `host_tick_count` on every Unix, replacing the fork's `/proc/uptime` read with its one-hour floor: upstream's uptime test holds it), `engine-platform/Cargo.toml` (d3d9-wgpu on every system as upstream; the fork's Windows features for the clips' Media Foundation kept), `host/src/lib.rs` (`test_range` and `start_up_tests`), `d3d9real.rs` (the fork's window-mode switch and upstream's placement log both; the placement's Win32 parts `cfg(windows)`, since the fork builds `d3d9real` wherever wgpu draws), a files.rs test attribute (upstream's). Upstream's `cfg(windows)` on `d3d9device::Word` and its use in `d3d9resource` became `cfg(wgpu_window)` (the Linux and Android rooms forward to wgpu too). Linux, the Linux room (`--locked`) and Windows (`x86_64-pc-windows-gnu`, with tests) build; engine-platform's lib tests, host's room and ragdoll tests, the lab and ragdoll-core pass.
+- **Patrick:** approved the merge, keeping the fork's active ragdoll, tester and launcher button, preferring upstream's drawing-thread code.
+
 ### Claude, 2026-11-16 (the physics tester: a snapshot for a fast start, a short loadout)
 
 - **Now (`crate::range_save`: `fingerprint_for`, `room_key` (`ROOM_VERSION`, the build's `NV_RS_COMMIT`, the loadout), `RoomKept` in `Kept`, `cache_root` also from `NV_TEST_RANGE_CACHE`; `crate::test_range`: `resume` and the prepared save for the room too, `room_kept` / `restore_room`, `snapshot_pending` (the room's script waits for it), the room's set-up without the container, every ammo and the inventory of every item (the long black screen: thousands of console lines in one frame), `set up in N ms`; `crate::phone_range::GUNS` the short loadout (11 FalloutNV.esm editor IDs), `THROWN_STACK`, `weapon_index`, `restart_loadout`; `room_script`'s default script for it; the Linux room's and the Android app's `NV_TEST_RANGE_CACHE`; docs/WINDOWS-ROOM.md, LINUX.md, ANDROID.md):** builds; host tests pass; not run with game files (the snapshot's load is the Test Range's, which Patrick has used).
