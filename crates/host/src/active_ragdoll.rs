@@ -134,7 +134,35 @@ pub struct Rig {
     /// The grip hold ([`home_of`]): a two-handed weapon's support hand, back on its grip after a
     /// brace, kept there while the body is physical.
     pub grip_hold: bool,
+    /// The physical body's origin (world, game units: the animated pelvis where the body was
+    /// made). The body runs in metres from it, not from the world's origin thousands of metres
+    /// away, where f32 is coarse enough to shake it.
+    pub origin: V3,
+    /// A dropped body's way back to the animation (`ragdoll_core::active::Fade`), and the last
+    /// written pose's offsets over the animation it starts from (each bone's, the pelvis's).
+    pub fade: Option<active::Fade>,
+    pub last: Option<(Vec<active::Q>, V3)>,
+    /// The steps' pelvis offset when they ended, eased out from then ([`SHIFT_BACK`]).
+    pub shift_back: Option<(V3, Instant)>,
+    /// A step's move of the reference (`crate::knockdown::place`) not yet in the root's world:
+    /// the root's world before it, the move, since when.
+    pub placed: Option<(V3, V3, Instant)>,
+    /// The base reads since the body was made (`ragdoll_core::pose::read_base`): how many times a
+    /// later pass moved a held bone and the most it moved one (in tolerances), how many times an
+    /// animated local jumped and was eased in (`pose::capped`).
+    pub drift: u32,
+    pub drift_most: f32,
+    pub jumps: u32,
+    /// This frame's pelvis offset written (game units) and the body's most spread (a bone's
+    /// distance from the pelvis, m): for the clips' samples ([`sample_fields`]).
+    pub pelvis_now: f32,
+    pub spread_now: f32,
 }
+
+/// How long the steps' pelvis offset takes back to none once they are done (s).
+const SHIFT_BACK: f32 = 0.3;
+/// How long a step's move of the reference may wait for the root's world to show it (s).
+const PLACED_WAIT: f32 = 0.5;
 
 /// A hit waiting for the physical body (`ragdoll_core::active::Body::hit`'s words; game units).
 #[derive(Clone, Debug)]
@@ -460,6 +488,16 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         free_wrist: [None; 2],
         hand_lock: [None; 2],
         grip_hold: false,
+        origin: [0.0; 3],
+        fade: None,
+        last: None,
+        shift_back: None,
+        placed: None,
+        drift: 0,
+        drift_most: 0.0,
+        jumps: 0,
+        pelvis_now: 0.0,
+        spread_now: 0.0,
     });
     true
 }
@@ -640,64 +678,123 @@ pub fn apply(e: &mut Engine) {
         }
         // The pose under the offset: what the animation wrote, or (while the bone still holds
         // what was written, also after the game's ragdoll-controller pass wrote it back a hair
-        // off) the pose the last write was over (`ragdoll_core::pose::base_of`).
+        // off, or a later pass moved it) the pose the last write was over
+        // (`ragdoll_core::pose::read_base`): a move that is not the animation's is never taken
+        // for it (that put the offset on top of itself every frame: the body leaned away, then
+        // snapped back when the animation wrote the bone). While the body reacts or fades, an
+        // animated local's jump is eased in (`pose::capped`), said once.
+        let reacting = rig.body.is_some() || rig.fade.is_some();
+        let k = (dt * 60.0).clamp(0.5, 3.0);
+        let mut jumped: Option<(Role, f32)> = None;
+        let jumps_before = rig.jumps;
         for bone in &mut rig.bones {
             let now = (
                 read9(e, bone.node + LOCAL_ROTATION),
                 read3(e, bone.node + LOCAL_TRANSLATION),
             );
-            bone.pose = Some(pose::base_of(now, bone.pose, bone.written));
+            let before = bone.pose;
+            let (mut base, how) = pose::read_base(now, bone.pose, bone.written);
+            match (how, before) {
+                (pose::Read::Disturbed, _) => {
+                    rig.drift += 1;
+                    if let Some(w) = bone.written {
+                        rig.drift_most = rig.drift_most.max(pose::apart(&now, &w));
+                    }
+                }
+                (pose::Read::Animated, Some(before)) if reacting => {
+                    let (eased, cut) = pose::capped(&before, &base, k);
+                    if cut {
+                        rig.jumps += 1;
+                        jumped.get_or_insert((bone.role, pose::apart(&before, &base)));
+                        base = eased;
+                    }
+                }
+                _ => {}
+            }
+            bone.pose = Some(base);
+        }
+        if let (Some((role, by)), 0) = (jumped, jumps_before) {
+            note(format!(
+                "{}: its animation jumped under the reaction ({} {by:.0} tolerances in a frame): \
+                 eased in",
+                describe(e, rig.actor),
+                BONES
+                    .iter()
+                    .find(|(_, r)| *r == role)
+                    .map_or("a bone", |b| b.0),
+            ));
         }
         // The animated pose in the world, worked out from the animation's own locals down from
         // the actor's root (never read back from the bones, which may hold the last write), and
         // each bone's parent node's animated world.
-        let n = rig.bones.len();
-        let mut world: Vec<pose::Xf> = Vec::with_capacity(n);
-        let mut parents: Vec<pose::Xf> = Vec::with_capacity(n);
-        for b in 0..n {
-            let bone = &rig.bones[b];
-            let mut up = match bone.parent {
-                Some(p) => world[p],
-                None => read_world(e, bone.above),
-            };
-            for &node in &bone.between {
-                up = up.then(&read_local(e, node));
-            }
-            let base = bone.pose.unwrap_or_default();
-            let own = pose::Xf {
-                r: base.0,
-                t: base.1,
-                s: local_scale(e, bone.node),
-            };
-            parents.push(up);
-            world.push(up.then(&own));
-        }
-        let anim: Vec<(M3, V3)> = world.iter().map(|w| (w.r, w.t)).collect();
+        let (mut anim, mut parents) = animated(e, &rig);
         let Some(pi) = bone_of(&rig, Role::Pelvis, 2) else {
             continue;
         };
+        // A dropped body's way back to the animation goes on (`ragdoll_core::active::Fade`).
+        if let Some(fade) = rig.fade.as_mut() {
+            if !fade.advance(dt) {
+                rig.fade = None;
+            }
+        }
         // The physical body: made the frame after the first hit, from this pose and the last
-        // (its motion), then the hits go in.
-        if rig.body.is_none() {
+        // (its motion), then the hits go in. While a dropped body fades back, only a new hit
+        // makes one, and the fade is written while it waits for it.
+        if rig.body.is_none() && (rig.fade.is_none() || !rig.pending.is_empty()) {
             match rig.before.take() {
                 Some(before) if before.len() == anim.len() && dt > 0.0 => {
+                    rig.origin = anim[pi].1;
+                    rig.drift = 0;
+                    rig.drift_most = 0.0;
+                    rig.jumps = 0;
                     rig.body = Some(make_body(e, &rig, &anim, &before, dt));
                 }
                 _ => {
                     rig.before = Some(anim.clone());
-                    keep.push(rig);
-                    continue;
+                    if rig.fade.is_none() {
+                        keep.push(rig);
+                        continue;
+                    }
                 }
             }
         }
-        let pending = std::mem::take(&mut rig.pending);
+        // World (game units) to the body's metres from its origin.
+        let origin = rig.origin;
+        let to_body = move |p: V3| scale(sub(p, origin), 1.0 / UNITS_PER_METRE);
         if let Some(body) = rig.body.as_mut() {
-            let m = 1.0 / UNITS_PER_METRE;
-            for h in pending {
-                body.hit(h.p, h.dir, scale(h.at, m), h.spread, &h.dips, &h.takes);
+            for h in std::mem::take(&mut rig.pending) {
+                body.hit(h.p, h.dir, to_body(h.at), h.spread, &h.dips, &h.takes);
             }
         }
-        let mut overrides = balance_frame(e, &mut rig, dt);
+        // The steps read the animated pose (as the lab does), not the shown one, which holds the
+        // last write. A step's move of the reference that the root's world does not show yet is
+        // carried by the pelvis (no jump back for a frame).
+        let mut root_at = read3(e, root + WORLD_TRANSLATION);
+        let placed_before = rig.placed.map(|p| p.2);
+        let mut overrides = balance_frame(e, &mut rig, &anim, root_at, dt);
+        if rig.placed.map(|p| p.2) != placed_before {
+            // A step moved the reference: if the root's world shows it once brought up to date,
+            // the animated pose is worked out again from there (as the lab's is).
+            update(e, root);
+            let now = read3(e, root + WORLD_TRANSLATION);
+            if length(sub(now, root_at)) > 0.5 {
+                root_at = now;
+                (anim, parents) = animated(e, &rig);
+            }
+        }
+        let lag = match rig.placed {
+            Some((was, moved, since)) => {
+                let seen = sub(root_at, was);
+                let lag = sub(moved, seen);
+                if length(lag) < 1.0 || since.elapsed().as_secs_f32() > PLACED_WAIT {
+                    rig.placed = None;
+                    [0.0; 3]
+                } else {
+                    lag
+                }
+            }
+            None => [0.0; 3],
+        };
         // The legs keep the steps' last targets while the body goes over (no jump in them).
         if rig.balance.is_some() {
             rig.held = overrides.clone();
@@ -758,7 +855,24 @@ pub fn apply(e: &mut Engine) {
             };
             target[b] = mul(&chain[b], &anim[b].0);
         }
-        let pelvis_target = add(anim[pi].1, rig.shift);
+        // The steps' pelvis offset, eased out once they are done (or the fall that held it is
+        // over).
+        if rig.balance.is_none() && rig.fall.is_none() {
+            if rig.shift_back.is_none() && length(rig.shift) > 0.0 {
+                rig.shift_back = Some((rig.shift, Instant::now()));
+            }
+            rig.shift = match rig.shift_back {
+                Some((from, since)) => {
+                    let k = active::ease(since.elapsed().as_secs_f32() / SHIFT_BACK);
+                    if k >= 1.0 {
+                        rig.shift_back = None;
+                    }
+                    scale(from, 1.0 - k)
+                }
+                None => rig.shift,
+            };
+        }
+        let pelvis_target = add(add(anim[pi].1, rig.shift), lag);
         let busy = rig.balance.is_some() || rig.brace.is_some() || rig.fall.is_some();
         if busy {
             rig.since = Instant::now();
@@ -820,9 +934,8 @@ pub fn apply(e: &mut Engine) {
                 }
             })
             .collect();
-        let m = 1.0 / UNITS_PER_METRE;
         let mut shown: Vec<M3> = target.clone();
-        let mut pelvis_offset = rig.shift;
+        let mut pelvis_offset = add(rig.shift, lag);
         let mut failed: Option<String> = None;
         let forward = facing(e, &rig);
         let cond = condition_of(rig.actor);
@@ -838,7 +951,7 @@ pub fn apply(e: &mut Engine) {
                 let (at, share, normal) = h.pin()?;
                 Some((
                     bone_of(&rig, Role::Hand, h.side)?,
-                    scale(at, m),
+                    to_body(at),
                     share,
                     normal,
                 ))
@@ -850,8 +963,8 @@ pub fn apply(e: &mut Engine) {
         if let Some(body) = rig.body.as_mut() {
             let mut targets = active::Targets {
                 rot: target.iter().map(active::qfrom_m).collect(),
-                pelvis: scale(pelvis_target, m),
-                feet: feet_now.iter().map(|&(i, at)| (i, scale(at, m))).collect(),
+                pelvis: to_body(pelvis_target),
+                feet: feet_now.iter().map(|&(i, at)| (i, to_body(at))).collect(),
                 hands: pins.iter().map(|p| (p.0, p.1)).collect(),
                 hand_share: pins.iter().map(|p| p.2).collect(),
                 hand_normal: pins.iter().map(|p| p.3).collect(),
@@ -911,8 +1024,8 @@ pub fn apply(e: &mut Engine) {
             for (b, q) in body.shown(&wanted, w).into_iter().enumerate() {
                 shown[b] = active::m_from_q(q);
             }
-            let sim = scale(pose[pi].1, UNITS_PER_METRE);
-            pelvis_offset = add(rig.shift, scale(sub(sim, pelvis_target), w));
+            let sim = add(scale(pose[pi].1, UNITS_PER_METRE), origin);
+            pelvis_offset = add(add(rig.shift, lag), scale(sub(sim, pelvis_target), w));
             if w <= 0.0 && !busy {
                 rig.body = None;
             }
@@ -1052,17 +1165,11 @@ pub fn apply(e: &mut Engine) {
             };
             crate::one_hand::set(rig.actor, off);
         }
-        // Each bone's world offset over its animation: its parent's shown and animated rotations
-        // taken back, its own shown one on (`A(p) S(p)^T S(b) A(b)^T`), made orthonormal.
-        let offsets: Vec<M3> = (0..n)
-            .map(|b| {
-                let own = mul(&shown[b], &transpose(&anim[b].0));
-                pose::ortho(&match rig.bones[b].parent {
-                    Some(p) => mul(&mul(&anim[p].0, &transpose(&shown[p])), &own),
-                    None => own,
-                })
-            })
-            .collect();
+        // What is left of a dropped body's last pose, on top.
+        if let Some(fade) = &rig.fade {
+            fade.on(&mut shown, &mut pelvis_offset);
+        }
+        let mut offsets = offsets_of(&rig.bones, &anim, &shown);
         // Anything not believable (a body gone wrong, an offset that is no rotation, a pelvis
         // pushed far, an animated pose not where the actor is): the body goes and the animation
         // has the bones again, said once.
@@ -1074,27 +1181,66 @@ pub fn apply(e: &mut Engine) {
             }
         }
         if let Some(why) = failed {
+            // What it looked like (Patrick's 9:06 PM log: the snaps came right after the steps).
+            let spread = rig.body.as_ref().map_or(0.0, |b| spread_of_body(b, pi));
+            let last_pelvis = rig.last.as_ref().map_or(0.0, |l| length(l.1));
+            // Eased back from the pose last shown, unless a fade with no body under it went
+            // wrong (the animation itself is not believable): that is put back at once.
+            let fade_from = match (&rig.fade, &rig.body) {
+                (Some(_), None) => None,
+                _ => rig.last.take(),
+            };
             note(format!(
-                "{}: the active ragdoll is dropped back to the animation: {why}",
-                describe(e, rig.actor)
+                "{}: the active ragdoll is dropped back to the animation: {why} (pelvis offset \
+                 {:.1} units, {last_pelvis:.1} last shown; most spread {spread:.2} m; base drift: \
+                 {} reads moved by a later pass, the most {:.0} tolerances; {} animation jumps \
+                 eased in); {}",
+                describe(e, rig.actor),
+                length(pelvis_offset),
+                rig.drift,
+                rig.drift_most,
+                rig.jumps,
+                if fade_from.is_some() {
+                    format!("eased back over {} s", active::FADE_BACK)
+                } else {
+                    "put back at once".to_string()
+                }
             ));
             rig.body = None;
             rig.balance = None;
             rig.brace = None;
             rig.fall = None;
             rig.shift = [0.0; 3];
+            rig.shift_back = None;
+            rig.placed = None;
             rig.pending.clear();
-            // Its bones put back to the animation's pose, then it goes.
-            for bone in &mut rig.bones {
-                if let Some((rot, t)) = bone.pose {
-                    write9(e, bone.node + LOCAL_ROTATION, &rot);
-                    write3(e, bone.node + LOCAL_TRANSLATION, t);
+            rig.before = None;
+            rig.grip_hold = false;
+            let Some((off, p)) = fade_from else {
+                // Its bones put back to the animation's pose, then it goes.
+                for bone in &mut rig.bones {
+                    if let Some((rot, t)) = bone.pose {
+                        write9(e, bone.node + LOCAL_ROTATION, &rot);
+                        write3(e, bone.node + LOCAL_TRANSLATION, t);
+                    }
                 }
-            }
-            update(e, root);
-            continue;
+                update(e, root);
+                continue;
+            };
+            // Never in one frame: the pose last shown, eased out over the animation
+            // (`ragdoll_core::active::Fade`).
+            let fade = active::Fade::new(off, p);
+            shown = anim.iter().map(|a| a.0).collect();
+            pelvis_offset = [0.0; 3];
+            fade.on(&mut shown, &mut pelvis_offset);
+            offsets = offsets_of(&rig.bones, &anim, &shown);
+            rig.fade = Some(fade);
         }
-        let resting = rig.body.is_none() && !busy;
+        let resting = rig.body.is_none()
+            && !busy
+            && rig.fade.is_none()
+            && rig.shift_back.is_none()
+            && rig.placed.is_none();
         // What each bone is written with: the local its shown pose needs (absolute, the same
         // however often it is written; `ragdoll_core::pose::local_for`).
         let locals: Vec<(M3, V3)> = (0..n)
@@ -1117,6 +1263,13 @@ pub fn apply(e: &mut Engine) {
             }
         }
         update(e, root);
+        rig.pelvis_now = length(pelvis_offset);
+        rig.spread_now = rig.body.as_ref().map_or(0.0, |b| spread_of_body(b, pi));
+        // The pose shown, over the animation: where a fade starts if the body is dropped.
+        rig.last = (!resting).then(|| {
+            let anim_r: Vec<M3> = anim.iter().map(|a| a.0).collect();
+            (active::Fade::offsets(&shown, &anim_r), pelvis_offset)
+        });
         if resting && rig.since.elapsed().as_secs_f32() > 0.2 {
             note(format!("{}: back in its animation", describe(e, rig.actor)));
             continue;
@@ -1131,6 +1284,87 @@ pub fn apply(e: &mut Engine) {
         rigs.retain(|r| r.actor != f.actor);
         rigs.push(f);
     }
+}
+
+/// The body's most spread: the largest distance of a bone's centre from the pelvis's (m;
+/// `active::Body::check` drops the body past `active::MAX_SPREAD`).
+fn spread_of_body(b: &active::Body, pi: usize) -> f32 {
+    let pelvis = b.state.get(pi).map_or([0.0; 3], |s| s.com);
+    b.state
+        .iter()
+        .map(|s| length(sub(s.com, pelvis)))
+        .fold(0.0f32, f32::max)
+}
+
+/// The clips' sample of an actor's reaction (`crate::room_record`): `"body":{...}` with whether
+/// its physical body is on, the pelvis offset written (game units), the body's most spread (m),
+/// the base drift (reads a later pass moved, the most in tolerances), the animation jumps eased
+/// in, and how much of a dropped body's fade is left; `"body":null` when it is not reacting.
+pub fn sample_fields(actor: u32) -> String {
+    let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    match rigs.iter().find(|r| r.actor == actor) {
+        Some(r) => format!(
+            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{}}}",
+            r.body.is_some(),
+            room_events::num(r.pelvis_now),
+            room_events::num(r.spread_now),
+            r.drift,
+            room_events::num(r.drift_most),
+            r.jumps,
+            room_events::num(r.fade.as_ref().map_or(0.0, |f| f.left())),
+        ),
+        None => "\"body\":null".to_string(),
+    }
+}
+
+/// Whether an actor is reacting now (a rig the pose layer writes): the clips sample it every
+/// frame then.
+pub fn reacting(actor: u32) -> bool {
+    RIGS.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .any(|r| r.actor == actor)
+}
+
+/// Each bone's world offset over its animation: its parent's shown and animated rotations taken
+/// back, its own shown one on (`A(p) S(p)^T S(b) A(b)^T`), made orthonormal.
+fn offsets_of(bones: &[Bone], anim: &[(M3, V3)], shown: &[M3]) -> Vec<M3> {
+    (0..bones.len())
+        .map(|b| {
+            let own = mul(&shown[b], &transpose(&anim[b].0));
+            pose::ortho(&match bones[b].parent {
+                Some(p) => mul(&mul(&anim[p].0, &transpose(&shown[p])), &own),
+                None => own,
+            })
+        })
+        .collect()
+}
+
+/// The animated pose in the world (each bone's) and each bone's parent node's animated world,
+/// worked out from the animation's own locals (the bases) down from the actor's root, never read
+/// back from the bones, which may hold the last write.
+fn animated(e: &Engine, rig: &Rig) -> (Vec<(M3, V3)>, Vec<pose::Xf>) {
+    let n = rig.bones.len();
+    let mut world: Vec<pose::Xf> = Vec::with_capacity(n);
+    let mut parents: Vec<pose::Xf> = Vec::with_capacity(n);
+    for bone in &rig.bones {
+        let mut up = match bone.parent {
+            Some(p) => world[p],
+            None => read_world(e, bone.above),
+        };
+        for &node in &bone.between {
+            up = up.then(&read_local(e, node));
+        }
+        let base = bone.pose.unwrap_or_default();
+        let own = pose::Xf {
+            r: base.0,
+            t: base.1,
+            s: local_scale(e, bone.node),
+        };
+        parents.push(up);
+        world.push(up.then(&own));
+    }
+    (world.iter().map(|w| (w.r, w.t)).collect(), parents)
 }
 
 /// The shown pose's joints (world, game units): each bone's animated offset from its parent turned
@@ -1245,7 +1479,8 @@ fn radius(role: Role) -> f32 {
 
 /// The rig's physical body (`ragdoll_core::active`) in the pose `now`, moving as it moved from
 /// `before` over `dt`: each bone a capsule to the next rig bone down its chain (the middle one: the
-/// spine's, the neck's), its mass its share of the body's.
+/// spine's, the neck's), its mass its share of the body's. In metres from the rig's origin
+/// ([`Rig::origin`]).
 fn make_body(
     e: &mut Engine,
     rig: &Rig,
@@ -1296,11 +1531,14 @@ fn make_body(
                 parent: bone.parent,
                 role: bone.role,
                 q: active::qfrom_m(&now[b].0),
-                joint: scale(now[b].1, m),
-                end: scale(end, m),
+                joint: scale(sub(now[b].1, rig.origin), m),
+                end: scale(sub(end, rig.origin), m),
                 radius: radius(bone.role) * scale_,
                 mass: rig.mass * shares[b] / total,
-                before: Some((active::qfrom_m(&before[b].0), scale(before[b].1, m))),
+                before: Some((
+                    active::qfrom_m(&before[b].0),
+                    scale(sub(before[b].1, rig.origin), m),
+                )),
             }
         })
         .collect();
@@ -1377,13 +1615,24 @@ fn actor_scale(e: &mut Engine, actor: u32) -> f32 {
 /// (a landed foot moves the reference with the feet), the pelvis carried over the feet, the legs
 /// placed by two-bone IK on their targets, the arms out. Answers each bone's world-space rotation
 /// on top of its spring's.
-fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
+///
+/// It reads the animated pose `anim` (worked out with the root's world at `root_at`), never the
+/// shown one (which holds the last write: the steps chased their own output). A step's move of
+/// the reference is put in [`Rig::placed`] until the root's world shows it. When the steps are
+/// done their pelvis offset is eased out ([`Rig::shift_back`]), not dropped.
+fn balance_frame(
+    e: &mut Engine,
+    rig: &mut Rig,
+    anim: &[(M3, V3)],
+    root_at: V3,
+    dt: f32,
+) -> Vec<Option<M3>> {
     use crate::balance::Outcome;
     let mut out: Vec<Option<M3>> = vec![None; rig.bones.len()];
     let Some(mut s) = rig.balance.take() else {
-        rig.shift = [0.0; 3];
         return out;
     };
+    rig.shift_back = None;
     let actor = rig.actor;
     let scale_ = actor_scale(e, actor);
     let reference = read3(e, actor + REFR_POSITION);
@@ -1432,6 +1681,11 @@ fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
         ];
         let moved = sub(to, reference);
         crate::knockdown::place(e, actor, to);
+        // Any earlier move the root's world has not shown yet goes with this one.
+        let waiting = rig
+            .placed
+            .map_or([0.0; 3], |(was, m, _)| sub(m, sub(root_at, was)));
+        rig.placed = Some((root_at, add(waiting, moved), Instant::now()));
         s.reference = to;
         s.shift = sub(s.shift, moved);
         note(format!(
@@ -1447,8 +1701,12 @@ fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
             length(moved)
         ));
     }
-    let pelvis =
-        bone_of(rig, Role::Pelvis, 2).map(|i| read3(e, rig.bones[i].node + WORLD_TRANSLATION));
+    // The animated pose at the reference as moved (the root's world may not show it yet).
+    let ahead = rig
+        .placed
+        .map_or([0.0; 3], |(was, m, _)| sub(m, sub(root_at, was)));
+    let at = |i: usize| add(anim[i].1, ahead);
+    let pelvis = bone_of(rig, Role::Pelvis, 2).map(at);
     if let Some(pelvis) = pelvis {
         let target = s.shift_target(pelvis, scale_);
         s.follow(target, dt);
@@ -1463,9 +1721,7 @@ fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
         ) else {
             continue;
         };
-        let hip0 = read3(e, rig.bones[t].node + WORLD_TRANSLATION);
-        let knee0 = read3(e, rig.bones[c].node + WORLD_TRANSLATION);
-        let ankle0 = read3(e, rig.bones[f].node + WORLD_TRANSLATION);
+        let (hip0, knee0, ankle0) = (at(t), at(c), at(f));
         let (l1, l2) = (length(sub(knee0, hip0)), length(sub(ankle0, knee0)));
         if l1 < 1.0 || l2 < 1.0 {
             continue;
@@ -1505,11 +1761,12 @@ fn balance_frame(e: &mut Engine, rig: &mut Rig, dt: f32) -> Vec<Option<M3>> {
     }
     if s.done(clock()) {
         note(format!(
-            "{}: steps done ({:?}): back to its animation",
+            "{}: steps done ({:?}): back to its animation (the pelvis's {:.0} units eased out)",
             describe(e, actor),
-            s.outcome
+            s.outcome,
+            length(shift)
         ));
-        rig.shift = [0.0; 3];
+        rig.shift_back = Some((shift, Instant::now()));
     } else {
         rig.balance = Some(s);
     }

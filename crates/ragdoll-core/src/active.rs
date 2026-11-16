@@ -245,6 +245,71 @@ pub fn strength(since: f32) -> f32 {
     t.drive_soft + (1.0 - t.drive_soft) * ease(since / t.drive_ramp.max(0.05))
 }
 
+// --- The way back from a dropped body. --------------------------------------------------------------
+
+/// How long a body dropped as not believable takes back to the animation (s): the shown pose's
+/// last offsets over the animation eased out ([`Fade`]), never written in one frame.
+pub const FADE_BACK: f32 = 0.3;
+
+/// A dropped body's way back to its animation: each bone's last shown world rotation over its
+/// animated one and the pelvis's last offset (game units), eased out over [`FADE_BACK`]. Laid on
+/// whatever is shown after (the animation, or a new reaction's pose), so nothing jumps.
+#[derive(Clone, Debug)]
+pub struct Fade {
+    off: Vec<Q>,
+    pelvis: V3,
+    t: f32,
+}
+
+impl Fade {
+    /// From the last shown pose's offsets (`offsets`) and pelvis offset.
+    pub fn new(off: Vec<Q>, pelvis: V3) -> Fade {
+        Fade {
+            off,
+            pelvis,
+            t: 0.0,
+        }
+    }
+
+    /// Each bone's shown world rotation over its animated one (`S A^T`).
+    pub fn offsets(shown: &[M3], anim: &[M3]) -> Vec<Q> {
+        shown
+            .iter()
+            .zip(anim)
+            .map(|(s, a)| {
+                let q = qnorm(qmul(qfrom_m(s), qconj(qfrom_m(a))));
+                // The short way round.
+                if q[0] < 0.0 {
+                    q.map(|x| -x)
+                } else {
+                    q
+                }
+            })
+            .collect()
+    }
+
+    /// `dt` on; false once it is over.
+    pub fn advance(&mut self, dt: f32) -> bool {
+        self.t += dt.max(0.0);
+        self.t < FADE_BACK
+    }
+
+    /// How much of the last pose is left (1 at the drop, eased to 0).
+    pub fn left(&self) -> f32 {
+        1.0 - ease(self.t / FADE_BACK)
+    }
+
+    /// What is left laid on a shown pose (world rotations) and its pelvis offset.
+    pub fn on(&self, shown: &mut [M3], pelvis: &mut V3) {
+        let k = self.left();
+        for (s, off) in shown.iter_mut().zip(&self.off) {
+            let r = qslerp(Q_ID, *off, k);
+            *s = m_from_q(qnorm(qmul(r, qfrom_m(s))));
+        }
+        *pelvis = add(*pelvis, scale(self.pelvis, k));
+    }
+}
+
 // --- The body. -------------------------------------------------------------------------------------
 
 /// A bone as the body knows it: its parent bone, role, mass (kg), its segment from its joint
@@ -1584,6 +1649,54 @@ mod tests {
         assert_eq!(weight(ACTIVE_FOR + BLEND_BACK), 0.0);
         assert!((strength(0.0) - DRIVE_SOFT).abs() < 1e-6);
         assert_eq!(strength(DRIVE_RAMP), 1.0);
+    }
+
+    /// A dropped body's last pose eases out over [`FADE_BACK`]: all of it at the drop, none of it
+    /// after, never more than a small part of the way in one 60 Hz frame.
+    #[test]
+    fn a_dropped_body_fades_back() {
+        let anim = [
+            m_from_q(qexp([0.0, 0.0, 0.4])),
+            m_from_q(qexp([0.3, 0.0, 0.0])),
+        ];
+        let shown = [
+            m_from_q(qexp([0.0, 0.0, 1.9])),
+            m_from_q(qexp([-0.5, 0.2, 0.0])),
+        ];
+        let mut fade = Fade::new(Fade::offsets(&shown, &anim), [12.0, 0.0, -4.0]);
+        let angle = |a: &M3, b: &M3| {
+            2.0 * length(qlog(qmul(qfrom_m(a), qconj(qfrom_m(b))))).min(std::f32::consts::PI)
+        };
+        let mut now = anim;
+        let mut pelvis = [0.0; 3];
+        fade.on(&mut now, &mut pelvis);
+        for b in 0..2 {
+            assert!(angle(&now[b], &shown[b]) < 1e-3, "bone {b} at the drop");
+        }
+        assert!(length(sub(pelvis, [12.0, 0.0, -4.0])) < 1e-4);
+        let mut last = now;
+        let mut frames = 0;
+        while fade.advance(1.0 / 60.0) {
+            let mut now = anim;
+            let mut p = [0.0; 3];
+            fade.on(&mut now, &mut p);
+            for b in 0..2 {
+                // The quintic's steepest is 1.875 of the mean speed: 18 frames.
+                let most = angle(&shown[b], &anim[b]) * 1.9 / 18.0;
+                let step = angle(&now[b], &last[b]);
+                assert!(step < most, "bone {b} jumped {step} rad in one frame");
+            }
+            last = now;
+            frames += 1;
+        }
+        assert!((17..=19).contains(&frames), "{frames} frames");
+        let mut now = anim;
+        let mut p = [0.0; 3];
+        fade.on(&mut now, &mut p);
+        for b in 0..2 {
+            assert!(angle(&now[b], &anim[b]) < 1e-3, "bone {b} after the fade");
+        }
+        assert!(length(p) < 1e-4);
     }
 
     /// A hinge past straight or past its most flex is turned back to the nearer stop; within its

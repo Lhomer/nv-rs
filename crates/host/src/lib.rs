@@ -453,14 +453,10 @@ const WIN_MAIN: u32 = 0x0086_a850;
 
 /// Where the player's Direct3D 9 adapter table is: `NV_D3D9_ADAPTER`, else
 /// `%LOCALAPPDATA%\nv-rs\d3d9_adapter.tsv` (made on this machine by `scripts/d3d9-capture`;
-/// it describes the player's hardware and stays local).
+/// it describes the player's hardware and stays local); off Windows also beside the program and
+/// in `~/.local/share/nv-rs` (`engine_platform::machine_file`).
 pub fn adapter_table_path() -> Option<PathBuf> {
-    std::env::var_os("NV_D3D9_ADAPTER")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("LOCALAPPDATA")
-                .map(|d| PathBuf::from(d).join("nv-rs").join("d3d9_adapter.tsv"))
-        })
+    engine_platform::machine_file("NV_D3D9_ADAPTER", "d3d9_adapter.tsv")
 }
 
 /// Where the player's D3DX texture cache is: `NV_D3DX_CACHE`, else

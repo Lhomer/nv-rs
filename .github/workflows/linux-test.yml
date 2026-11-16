@@ -27,7 +27,9 @@ concurrency:
 jobs:
   tarball:
     name: tarball
-    runs-on: ubuntu-latest
+    # Built on an older glibc than the boxes it runs on (a binary needs the glibc it was linked
+    # against or newer: built on the latest image it asked for 2.43, and a Debian box has 2.41).
+    runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
       CARGO_INCREMENTAL: 0
@@ -46,6 +48,18 @@ jobs:
       - name: Build the room
         working-directory: linux
         run: cargo build --release --locked
+      - name: The glibc it needs (at most 2.39, Ubuntu 24.04's; Debian 13 has 2.41)
+        working-directory: linux
+        run: |
+          set -euo pipefail
+          for bin in nvrs-room sdp-convert; do
+            need=$(objdump -T "target/release/$bin" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
+            echo "$bin needs glibc $need"
+            if [ "$(printf '%s\n2.39\n' "$need" | sort -V | tail -1)" != "2.39" ]; then
+              echo "::error::$bin needs glibc $need, newer than 2.39"
+              exit 1
+            fi
+          done
       - name: Smoke test (no game files)
         working-directory: linux
         run: |

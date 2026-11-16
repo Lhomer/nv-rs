@@ -597,6 +597,10 @@ fn check_setting(line: &str, f: &[&str]) {
     }
 }
 
+/// The sound table of a machine with no sound device: `DirectSoundCreate8` answers
+/// `DSERR_NODRIVER` (the launcher writes the same when it cannot read the device).
+pub const NO_DEVICE_TABLE: &str = "DsCreate\t\t88780078\t\nDsEnd\n";
+
 /// Gives the layer the player's sound table (`scripts/dsound-capture`'s output).
 pub fn load_table(e: &mut Engine, text: &str) {
     state!(e).sound.table = Some(Table::parse(text));
@@ -606,16 +610,22 @@ pub fn load_table(e: &mut Engine, text: &str) {
 /// the first time it is needed. Without one the run stops and says how to capture it.
 fn table(e: &mut Engine) -> &Table {
     if state!(e).sound.table.is_none() {
-        let path = std::env::var_os("NV_DSOUND_TABLE")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("LOCALAPPDATA")
-                    .map(|d| std::path::PathBuf::from(d).join("nv-rs").join("dsound.tsv"))
-            });
-        let text = path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .unwrap_or_else(|| panic!("the sound table ({path:?}) is not there: {CAPTURE_HINT}"));
+        let path = crate::machine_file("NV_DSOUND_TABLE", "dsound.tsv");
+        let text = match path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()) {
+            Some(text) => text,
+            // Off Windows (the Linux room, which has no sound) a machine with no table answers as
+            // Windows does with no sound device: the game goes on without sound.
+            #[cfg(not(windows))]
+            None => {
+                eprintln!(
+                    "sound: no sound table ({path:?}): no sound device (DSERR_NODRIVER), as on a \
+                     machine without one"
+                );
+                NO_DEVICE_TABLE.to_string()
+            }
+            #[cfg(windows)]
+            None => panic!("the sound table ({path:?}) is not there: {CAPTURE_HINT}"),
+        };
         load_table(e, &text);
     }
     state!(e).sound.table.as_ref().expect("loaded")

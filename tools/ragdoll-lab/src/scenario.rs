@@ -1188,9 +1188,84 @@ mod robustness {
             "attacking=1&hits=357@lupperarm,44@chest+0.3",
         ] {
             for rewrites in [0, 3] {
-                write_path(spec, rewrites);
+                write_path(spec, rewrites, false, false);
+            }
+            // A later pass moving the written bones past the tolerance, and two seconds with no
+            // animation write (Patrick, 2026-11-16: the base was taken from the moved write each
+            // frame and the body drifted 168 units in 2 s, then snapped back).
+            write_path(spec, 1, true, false);
+            // At the game's scale: the actor's root a hundred thousand units from the world's
+            // origin, walking and turning under the reaction.
+            write_path(spec, 1, true, true);
+        }
+    }
+
+    /// A body dropped as not believable mid-flinch eases back to the animation over
+    /// `active::FADE_BACK` (Patrick, 2026-11-16: NPCs leaned away, then snapped into place in one
+    /// frame): no joint moves more in a frame than a small share of how far the shown pose was
+    /// off the animation, and after the fade the animation is shown.
+    #[test]
+    fn a_dropped_body_eases_back() {
+        let mut sim = Sim::new(GroundKind::Flat);
+        let spec = Spec::parse("hits=357@chest,44@lupperarm+0.2").unwrap();
+        prepare(&mut sim, &spec, Tuning::GAME).unwrap();
+        let mut next = 0;
+        let mut wait = 0.1f32;
+        let mut gap = 0.0f32;
+        let mut most = 0.0f32;
+        let mut dropped_at = None;
+        for frame in 0..200 {
+            if next < spec.hits.len() {
+                wait -= STEP;
+                if wait <= 0.0 {
+                    fire(&mut sim, &spec.hits[next]);
+                    next += 1;
+                    wait = spec.hits.get(next).map_or(0.0, |h| h.delay);
+                }
+            }
+            if frame == 40 {
+                // How far the shown pose is off the animation as it is dropped.
+                let anim = sim.anim();
+                gap = (0..COUNT)
+                    .map(|b| length(sub(sim.posed[b].1, anim[b].1)))
+                    .fold(0.0, f32::max);
+                sim.drop_body("the test drops it");
+                dropped_at = Some(frame);
+            }
+            let before = sim.posed;
+            let anim_before = sim.anim();
+            sim.step();
+            if let Some(at) = dropped_at {
+                if frame >= at && frame < at + 30 {
+                    // A joint's move in the frame beyond the animation's own.
+                    let anim = sim.anim();
+                    for b in 0..COUNT {
+                        let shown = length(sub(sim.posed[b].1, before[b].1));
+                        let own = length(sub(anim[b].1, anim_before[b].1));
+                        most = most.max(shown - own);
+                    }
+                }
+                if frame == at + 30 {
+                    let anim = sim.anim();
+                    for b in 0..COUNT {
+                        let off = length(sub(sim.posed[b].1, anim[b].1));
+                        assert!(
+                            off < 0.5,
+                            "bone {b} still {off:.2} units off after the fade"
+                        );
+                    }
+                }
             }
         }
+        assert_eq!(sim.stats.dropped, 1);
+        assert!(
+            gap > 3.0,
+            "the flinch was too small to tell: {gap:.2} units"
+        );
+        assert!(
+            most < 0.2 * gap,
+            "a joint moved {most:.2} units in one frame after the drop (the pose was {gap:.2} off)"
+        );
     }
 
     /// The write path on the lab's shown poses for `spec`: each frame the bones' locals are worked
@@ -1199,7 +1274,12 @@ mod robustness {
     /// reads them and writes them back a hair off; and some frames the animation does not write at
     /// all. The world pose the written locals make is the shown pose, every frame, and nothing
     /// adds up.
-    fn write_path(name: &str, rewrites: usize) {
+    ///
+    /// `far`: the lab's world is put under a root at the game's scale (about 1.2e5 units from the
+    /// origin, as the Mojave's cells are), moving at 150 units a second and turning at 0.7 rad a
+    /// second, so the animated world, the written locals and the pose they make are all in game
+    /// coordinates far from the origin.
+    fn write_path(name: &str, rewrites: usize, beyond: bool, far: bool) {
         let mut sim = Sim::new(GroundKind::Flat);
         let spec = Spec::parse(name).unwrap();
         prepare(&mut sim, &spec, Tuning::GAME).unwrap();
@@ -1216,6 +1296,19 @@ mod robustness {
                 })
                 .collect()
         };
+        // The game's root over the lab's world (`far`), and a lab transform carried into the game.
+        let root_at = |frame: usize| -> Xf {
+            if !far {
+                return Xf::IDENTITY;
+            }
+            let t = frame as f32 * STEP;
+            Xf {
+                r: rotation([0.0, 0.0, 0.4 + 0.7 * t]),
+                t: [118_000.0 + 150.0 * t, -86_500.0 + 40.0 * t, 3_150.0],
+                s: 1.0,
+            }
+        };
+        let game = |g: &Xf, r: M3, t: V3| g.then(&Xf { r, t, s: 1.0 });
         let mut locals = anim_locals(&sim);
         let mut bases: Vec<Option<(M3, V3)>> = vec![None; COUNT];
         let mut written: Vec<Option<(M3, V3)>> = vec![None; COUNT];
@@ -1232,22 +1325,21 @@ mod robustness {
                 }
             }
             sim.step();
-            // The animation writes the locals afresh on most frames, not on every one.
-            if frame % 7 != 3 {
+            // The animation writes the locals afresh on most frames, not on every one (and, past
+            // the tolerance, not at all for two seconds).
+            let still = beyond && (120..240).contains(&frame);
+            if frame % 7 != 3 && !still {
                 locals = anim_locals(&sim);
             }
             // The layer: each bone's base, the animated world from the bases, the locals.
+            let g = root_at(frame);
             let mut world: Vec<Xf> = Vec::with_capacity(COUNT);
             let mut parents: Vec<Xf> = Vec::with_capacity(COUNT);
             for b in 0..COUNT {
                 bases[b] = Some(pose::base_of(locals[b], bases[b], written[b]));
                 let up = match PARENT[b] {
                     Some(p) => world[p],
-                    None => Xf {
-                        r: IDENTITY,
-                        t: sim.pos,
-                        s: 1.0,
-                    },
+                    None => game(&g, IDENTITY, sim.pos),
                 };
                 let base = bases[b].unwrap();
                 parents.push(up);
@@ -1257,16 +1349,20 @@ mod robustness {
                     s: 1.0,
                 }));
             }
-            let anim = sim.anim();
+            let anim: Vec<Xf> = sim.anim().iter().map(|a| game(&g, a.0, a.1)).collect();
             for b in 0..COUNT {
+                // The foot IK's height under the animation's is the game's pose too.
+                let d = sub(world[b].t, anim[b].t);
+                let ik = beyond && length(sub(d, [0.0, 0.0, -4.0])) < 0.5;
                 assert!(
-                    length(sub(world[b].t, anim[b].1)) < 0.5,
+                    length(d) < 0.5 || ik,
                     "frame {frame}: bone {b}'s animated world went off: {:?} vs {:?}",
                     world[b].t,
-                    anim[b].1
+                    anim[b].t
                 );
             }
-            let shown: Vec<M3> = sim.posed.iter().map(|p| p.0).collect();
+            let posed: Vec<Xf> = sim.posed.iter().map(|p| game(&g, p.0, p.1)).collect();
+            let shown: Vec<M3> = posed.iter().map(|p| p.r).collect();
             let offsets: Vec<M3> = (0..COUNT)
                 .map(|b| {
                     let own = mul(&shown[b], &transpose(&world[b].r));
@@ -1276,7 +1372,7 @@ mod robustness {
                     })
                 })
                 .collect();
-            let shift = sub(sim.posed[mq::PELVIS].1, world[mq::PELVIS].t);
+            let shift = sub(posed[mq::PELVIS].t, world[mq::PELVIS].t);
             let out: Vec<(M3, V3)> = (0..COUNT)
                 .map(|b| {
                     let s = (b == mq::PELVIS).then_some(shift);
@@ -1284,14 +1380,46 @@ mod robustness {
                 })
                 .collect();
             // Written by the layer, then `rewrites` times by a later pass, read back a hair off.
+            let pelvis_animated_z = anim_locals(&sim)[mq::PELVIS].1[2];
             locals.clone_from(&out);
             for _ in 0..rewrites {
                 for b in 0..COUNT {
                     let mut back = out[b];
                     noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     let n = (noise >> 9) as f32 / (1u32 << 23) as f32 - 0.5;
-                    back.0[(noise % 9) as usize] += n * 6e-4;
-                    back.1[(noise % 3) as usize] += n * 0.01;
+                    if beyond {
+                        // Past both tolerances (0.004 and 0.15 units), one way or the other, on
+                        // a rotation or an axis the layer holds clearly off its animation (more
+                        // than 8 tolerances; with less, a moved write cannot be told from the
+                        // animation's, and what it moves is a wander of the size of the move, not
+                        // the offset stacked).
+                        let base = bases[b].unwrap();
+                        let s = if n < 0.0 { -1.0 } else { 1.0 };
+                        let rot_off = out[b]
+                            .0
+                            .iter()
+                            .zip(base.0.iter())
+                            .map(|(x, y)| (x - y).abs())
+                            .fold(0.0f32, f32::max);
+                        if rot_off > 8.0 * pose::ROT_TOL {
+                            back.0[(noise % 9) as usize] += s * 4e-3;
+                        }
+                        let axis = (noise % 3) as usize;
+                        if (out[b].1[axis] - base.1[axis]).abs() > 8.0 * pose::POS_TOL {
+                            back.1[axis] += s * 0.15;
+                        }
+                        // The game's foot IK: the pelvis's height set outright, 4 units under the
+                        // animation's, its other axes left as written (Patrick's 9mm clip: that
+                        // write was taken for the animation's whole translation, the pelvis's
+                        // sideways offset stacked every frame and the body was 2.5 m off in
+                        // 0.7 s).
+                        if b == mq::PELVIS {
+                            back.1[2] = pelvis_animated_z - 4.0;
+                        }
+                    } else {
+                        back.0[(noise % 9) as usize] += n * 6e-4;
+                        back.1[(noise % 3) as usize] += n * 0.01;
+                    }
                     locals[b] = back;
                 }
             }
@@ -1301,11 +1429,7 @@ mod robustness {
             for b in 0..COUNT {
                 let up = match PARENT[b] {
                     Some(p) => made[p],
-                    None => Xf {
-                        r: IDENTITY,
-                        t: sim.pos,
-                        s: 1.0,
-                    },
+                    None => game(&g, IDENTITY, sim.pos),
                 };
                 made.push(up.then(&Xf {
                     r: out[b].0,
@@ -1318,7 +1442,7 @@ mod robustness {
                     pose::is_rotation(&out[b].0, 1e-4),
                     "{name:?}, {rewrites} rewrites, frame {frame}: bone {b} written with no rotation"
                 );
-                let d = length(sub(made[b].t, sim.posed[b].1));
+                let d = length(sub(made[b].t, posed[b].t));
                 assert!(
                     d < 1.0,
                     "{name:?}, {rewrites} rewrites, frame {frame}: bone {b} written {d:.2} units \
@@ -1326,7 +1450,7 @@ mod robustness {
                 );
                 let turn = active::qlog(active::qmul(
                     active::qconj(active::qfrom_m(&made[b].r)),
-                    active::qfrom_m(&sim.posed[b].0),
+                    active::qfrom_m(&posed[b].r),
                 ));
                 assert!(
                     length(turn) < 0.02,

@@ -47,6 +47,8 @@ pub const FLIGHT: f64 = 1.5;
 /// The feet go back from where the steps left them to the animation's over this long (s), eased
 /// (the host's `active_ragdoll::FEET_BACK`).
 pub const FEET_BACK: f32 = 0.4;
+/// How long the steps' pelvis offset takes back to none once they are done (s; the host's).
+pub const SHIFT_BACK: f32 = 0.3;
 /// The get-up's blend back to the rest pose (s).
 pub const GET_UP: f32 = 1.6;
 /// How far from the body the scripted and clicked shots come (m), and how wide a shotgun's
@@ -135,6 +137,13 @@ pub struct Rig {
     /// Why the body was dropped back to the animation (the game's `active_ragdoll` does the same).
     pub failed: Option<String>,
     pub held: Vec<Option<M3>>,
+    /// The host's `Rig::origin`, `fade`, `last` and `shift_back`: the body runs in metres from
+    /// where it was made; a dropped body's last shown pose eases out over the animation
+    /// (`ragdoll_core::active::Fade`); the steps' pelvis offset eases out once they are done.
+    pub origin: V3,
+    pub fade: Option<active::Fade>,
+    pub last: Option<(Vec<active::Q>, V3)>,
+    pub shift_back: Option<(V3, f64)>,
 }
 
 impl Rig {
@@ -157,6 +166,10 @@ impl Rig {
             planted: None,
             failed: None,
             held: Vec::new(),
+            origin: [0.0; 3],
+            fade: None,
+            last: None,
+            shift_back: None,
         }
     }
 }
@@ -789,7 +802,7 @@ impl Sim {
             body.hit(
                 p * strength / 100.0,
                 direction,
-                scale(point, m),
+                scale(sub(point, self.rig.origin), m),
                 spread,
                 &dips,
                 &takes,
@@ -1358,9 +1371,9 @@ impl Sim {
     fn balance_frame(&mut self, dt: f32) -> Vec<Option<M3>> {
         let mut out: Vec<Option<M3>> = vec![None; COUNT];
         let Some(mut s) = self.rig.balance.take() else {
-            self.rig.shift = [0.0; 3];
             return out;
         };
+        self.rig.shift_back = None;
         let scale_ = self.scale;
         let anim = self.anim();
         if s.outcome == Outcome::Ledge
@@ -1461,10 +1474,11 @@ impl Sim {
         }
         if s.done(self.t) {
             self.note(format!(
-                "steps done ({:?}): back to its animation",
-                s.outcome
+                "steps done ({:?}): back to its animation (the pelvis's {:.0} units eased out)",
+                s.outcome,
+                length(self.rig.shift)
             ));
-            self.rig.shift = [0.0; 3];
+            self.rig.shift_back = Some((self.rig.shift, self.t));
         } else {
             self.rig.balance = Some(s);
         }
@@ -1510,12 +1524,25 @@ impl Sim {
         }
     }
 
+    /// The body dropped as not believable on the next frame (as `Body::check` or the host's
+    /// `pose::sane` do): for the tests of the way back.
+    pub fn drop_body(&mut self, why: &str) {
+        if self.rig.body.is_some() {
+            self.rig.failed = Some(why.to_string());
+        }
+    }
+
     /// Back on its feet and at rest.
     pub fn recovered(&self) -> bool {
         self.standing() && !self.rig.active
     }
 
     fn pose_frame(&mut self, dt: f32) {
+        if let Some(fade) = self.rig.fade.as_mut() {
+            if !fade.advance(dt) {
+                self.rig.fade = None;
+            }
+        }
         let mut overrides: Vec<Option<M3>> = vec![None; COUNT];
         if self.rig.active {
             overrides = self.balance_frame(dt);
@@ -1566,6 +1593,19 @@ impl Sim {
             };
             target[b] = mul(&chain[b], &anim[b].0);
         }
+        // The steps' pelvis offset, eased out once they are done (the host's `SHIFT_BACK`).
+        if self.rig.balance.is_none() && self.rig.fall.is_none() {
+            if self.rig.shift_back.is_none() && length(self.rig.shift) > 0.0 {
+                self.rig.shift_back = Some((self.rig.shift, self.t));
+            }
+            if let Some((from, since)) = self.rig.shift_back {
+                let k = active::ease((self.t - since) as f32 / SHIFT_BACK);
+                if k >= 1.0 {
+                    self.rig.shift_back = None;
+                }
+                self.rig.shift = scale(from, 1.0 - k);
+            }
+        }
         let pelvis_target = add(anim[mq::PELVIS].1, self.rig.shift);
         let before = self.posed;
         let busy =
@@ -1594,9 +1634,11 @@ impl Sim {
                         None => animated,
                     },
                 };
+                let origin = self.rig.origin;
+                let to_body = |p: V3| scale(sub(p, origin), m);
                 let feet: Vec<(usize, V3)> = vec![
-                    (mq::L_FOOT, scale(planted[0], m)),
-                    (mq::R_FOOT, scale(planted[1], m)),
+                    (mq::L_FOOT, to_body(planted[0])),
+                    (mq::R_FOOT, to_body(planted[1])),
                 ];
                 let support = match &self.rig.fall {
                     Some(f) => 1.0 - active::ease(f.t / f.lead.max(1e-3)),
@@ -1609,17 +1651,12 @@ impl Sim {
                     .flat_map(|br| br.hands.iter().flatten())
                     .filter_map(|h| {
                         let (at, share, normal) = h.pin()?;
-                        Some((
-                            mq::bone_of(Role::Hand, h.side)?,
-                            scale(at, m),
-                            share,
-                            normal,
-                        ))
+                        Some((mq::bone_of(Role::Hand, h.side)?, to_body(at), share, normal))
                     })
                     .collect();
                 let targets = active::Targets {
                     rot: target.iter().map(active::qfrom_m).collect(),
-                    pelvis: scale(pelvis_target, m),
+                    pelvis: to_body(pelvis_target),
                     feet,
                     // A brace hand's wrist pinned along its path and where it touched
                     // (`ragdoll_core::brace::Hand::pin`).
@@ -1703,9 +1740,13 @@ impl Sim {
             None => 0.0,
         };
         // A body gone wrong is dropped back to the animation, said once (the game's too).
+        // Never in one frame: the pose last shown eases out over the animation (the host's too),
+        // the animation's, not this frame's targets (the steps' legs went with the body).
+        let dropped = self.rig.failed.is_some();
         if let Some(why) = self.rig.failed.take() {
             self.note(format!(
-                "the active ragdoll is dropped back to the animation: {why}"
+                "the active ragdoll is dropped back to the animation: {why}; eased back over {} s",
+                active::FADE_BACK
             ));
             self.stats.dropped += 1;
             self.rig.body = None;
@@ -1713,10 +1754,20 @@ impl Sim {
             self.rig.brace = None;
             self.rig.fall = None;
             self.rig.shift = [0.0; 3];
+            self.rig.shift_back = None;
+            self.rig.fade = self
+                .rig
+                .last
+                .take()
+                .map(|(off, p)| active::Fade::new(off, p));
         }
         // The shown pose: the targets and the body's, blended by the body's weight (eased).
         let mut rots = target;
         let mut pelvis = pelvis_target;
+        if dropped {
+            rots = std::array::from_fn(|b| anim[b].0);
+            pelvis = anim[mq::PELVIS].1;
+        }
         if let Some(body) = &self.rig.body {
             let pose = body.pose();
             // The targets as the body tracks them (no elbow or knee past its human range) and the
@@ -1725,8 +1776,14 @@ impl Sim {
             for (b, q) in body.shown(&wanted, shown_w).into_iter().enumerate() {
                 rots[b] = active::m_from_q(q);
             }
-            let sim = scale(pose[mq::PELVIS].1, UNITS_PER_METRE);
+            let sim = add(scale(pose[mq::PELVIS].1, UNITS_PER_METRE), self.rig.origin);
             pelvis = add(pelvis_target, scale(sub(sim, pelvis_target), shown_w));
+        }
+        // What is left of a dropped body's last pose, on top.
+        if let Some(fade) = &self.rig.fade {
+            let mut off = sub(pelvis, anim[mq::PELVIS].1);
+            fade.on(&mut rots, &mut off);
+            pelvis = add(anim[mq::PELVIS].1, off);
         }
         let mut out = self.place(&rots, pelvis);
         // The free arms' wrists (before the brace's IK: where a released hand goes back to).
@@ -1838,6 +1895,13 @@ impl Sim {
             }
         }
         self.posed = out;
+        // The pose shown, over the animation: where a fade starts if the body is dropped.
+        let anim_r: Vec<M3> = anim.iter().map(|a| a.0).collect();
+        let out_r: Vec<M3> = out.iter().map(|a| a.0).collect();
+        self.rig.last = Some((
+            active::Fade::offsets(&out_r, &anim_r),
+            sub(out[mq::PELVIS].1, anim[mq::PELVIS].1),
+        ));
         self.watch_hands();
         self.watch_regrip();
         if self.stats.last_hit.is_some() {
@@ -2056,6 +2120,8 @@ impl Sim {
         }
         let m = 1.0 / UNITS_PER_METRE;
         let mass = self.mass();
+        let origin = self.posed[mq::PELVIS].1;
+        self.rig.origin = origin;
         let bones: Vec<active::Bone> = (0..COUNT)
             .map(|b| {
                 let (rot, pos) = self.posed[b];
@@ -2068,11 +2134,11 @@ impl Sim {
                     parent: mq::PARENT[b],
                     role: mq::role_side(b).0,
                     q: active::qfrom_m(&rot),
-                    joint: scale(pos, m),
-                    end: scale(end, m),
+                    joint: scale(sub(pos, origin), m),
+                    end: scale(sub(end, origin), m),
                     radius: mq::CAPSULE[b].2 * self.scale * m,
                     mass: mass * mq::MASS_SHARE[b],
-                    before: Some((active::qfrom_m(&r0), scale(p0, m))),
+                    before: Some((active::qfrom_m(&r0), scale(sub(p0, origin), m))),
                 }
             })
             .collect();

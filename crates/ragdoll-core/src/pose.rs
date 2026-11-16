@@ -26,6 +26,18 @@ pub const POS_TOL: f32 = 0.05;
 /// joint may be from the actor's root (game units) before the pose is not believed.
 pub const MAX_PELVIS_OFFSET: f32 = 80.0;
 pub const MAX_REACH: f32 = 600.0;
+/// The most a later pass's move of a written bone can be and still be taken for a disturbance
+/// ([`Read::Disturbed`]): rotation entries over [`ROT_TOL`] (50: about 6 degrees) and translation
+/// (game units: the game's foot IK moves the pelvis by several, and a pelvis move taken for the
+/// animation's stacked its offset every frame: Patrick's 9mm clip, the body 2.5 m off in 0.7 s
+/// after a 0.3 m/s flinch); farther, the animation wrote it. An animation moving a bone the way
+/// its offset goes is never held off by more than this.
+pub const DISTURBED_MOST: f32 = 50.0;
+pub const DISTURBED_MOVE: f32 = 12.0;
+/// The most an animated local moves under a reacting body in one frame ([`capped`]): rotation
+/// (radians), translation (game units). An animation's pop is eased in over frames.
+pub const MOST_BASE_TURN: f32 = 0.35;
+pub const MOST_BASE_MOVE: f32 = 15.0;
 
 /// A transform: rotation (row-major, as `NiMatrix3`), translation, uniform scale (as
 /// `NiTransform`).
@@ -93,14 +105,147 @@ pub fn holds(a: &(M3, V3), b: &(M3, V3)) -> bool {
         && length(sub(a.1, b.1)) <= POS_TOL
 }
 
-/// The animated local under the layer: the remembered pose while the bone still holds what was
-/// written (nothing wrote it again, or the game's pass wrote it back), else what it holds now
-/// (the animation wrote it); its rotation made orthonormal.
-pub fn base_of(now: (M3, V3), pose: Option<(M3, V3)>, written: Option<(M3, V3)>) -> (M3, V3) {
-    match (pose, written) {
-        (Some(p), Some(w)) if holds(&now, &w) => p,
-        _ => (ortho(&now.0), now.1),
+/// How a bone's local was read ([`read_base`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Read {
+    /// It still holds what was written: the remembered animated pose stays.
+    Held,
+    /// It holds what was written moved by a later pass (beyond [`ROT_TOL`] / [`POS_TOL`], but
+    /// nearer the write than the remembered pose): the remembered pose stays, the move is not taken
+    /// for the animation's.
+    Disturbed,
+    /// The animation wrote it: what it holds now is the animated pose.
+    Animated,
+}
+
+/// How far apart two locals are, in tolerances: the larger of the rotations' largest entry
+/// difference over [`ROT_TOL`] and the translations' distance over [`POS_TOL`].
+pub fn apart(a: &(M3, V3), b: &(M3, V3)) -> f32 {
+    let r =
+        a.0.iter()
+            .zip(b.0.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+    (r / ROT_TOL).max(length(sub(a.1, b.1)) / POS_TOL)
+}
+
+/// The animated local under the layer and how it was read ([`Read`]): the remembered pose while
+/// the bone still holds what was written (nothing wrote it again, or the game's pass wrote it back
+/// a hair off), and also while it holds what was written moved by a later pass (nearer the write
+/// than the remembered pose: taking that for the animation's pose put the offset on top
+/// of itself every frame, and the body drifted away until the animation wrote the bone again:
+/// Patrick, 2026-11-16); else what it holds now (the animation wrote it). Its rotation is made
+/// orthonormal.
+///
+/// The rotation is read whole; the translation axis by axis, so a pass that sets one axis outright
+/// (the game's foot IK puts the pelvis's height, leaving the rest as written) is taken on that
+/// axis alone: read whole, the write's other axes went into the base with it, and the pelvis's
+/// sideways offset stacked every frame (Patrick's 9mm clip: 2.5 m in 0.7 s).
+pub fn read_base(
+    now: (M3, V3),
+    pose: Option<(M3, V3)>,
+    written: Option<(M3, V3)>,
+) -> ((M3, V3), Read) {
+    let (Some(p), Some(w)) = (pose, written) else {
+        return ((ortho(&now.0), now.1), Read::Animated);
+    };
+    if holds(&now, &w) {
+        return (p, Read::Held);
     }
+    // The whole local moved a little off the write, nearer it than the remembered pose.
+    let whole = near_write(&now, &w) && apart(&now, &w) < apart(&now, &p);
+    let mut how = Read::Held;
+    let mut seen = |read: Read| {
+        how = match (how, read) {
+            (Read::Animated, _) | (_, Read::Animated) => Read::Animated,
+            (Read::Disturbed, _) | (_, Read::Disturbed) => Read::Disturbed,
+            _ => Read::Held,
+        }
+    };
+    let rot_off = |a: &M3, b: &M3| {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    };
+    let r = if rot_off(&now.0, &w.0) <= ROT_TOL {
+        seen(Read::Held);
+        p.0
+    } else if whole
+        || (rot_off(&now.0, &w.0) / ROT_TOL <= DISTURBED_MOST
+            && rot_off(&now.0, &w.0) < rot_off(&now.0, &p.0))
+    {
+        seen(Read::Disturbed);
+        p.0
+    } else {
+        seen(Read::Animated);
+        ortho(&now.0)
+    };
+    let mut t = now.1;
+    for (i, ti) in t.iter_mut().enumerate() {
+        let off = (now.1[i] - w.1[i]).abs();
+        if off <= POS_TOL {
+            seen(Read::Held);
+            *ti = p.1[i];
+        } else if whole || (off <= DISTURBED_MOVE && off < (now.1[i] - p.1[i]).abs()) {
+            seen(Read::Disturbed);
+            *ti = p.1[i];
+        } else {
+            seen(Read::Animated);
+        }
+    }
+    ((r, t), how)
+}
+
+/// Whether a read is within a later pass's move of the write ([`DISTURBED_MOST`],
+/// [`DISTURBED_MOVE`]).
+fn near_write(now: &(M3, V3), w: &(M3, V3)) -> bool {
+    let r = now
+        .0
+        .iter()
+        .zip(w.0.iter())
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max);
+    r / ROT_TOL <= DISTURBED_MOST && length(sub(now.1, w.1)) <= DISTURBED_MOVE
+}
+
+/// `next` (an animated local) from `prev` held to [`MOST_BASE_TURN`] and [`MOST_BASE_MOVE`]
+/// (`k` of them: a frame's share), and whether it was held back.
+pub fn capped(prev: &(M3, V3), next: &(M3, V3), k: f32) -> ((M3, V3), bool) {
+    use crate::active::{m_from_q, qconj, qexp, qfrom_m, qlog, qmul, qnorm};
+    let (qa, qb) = (qfrom_m(&prev.0), qfrom_m(&next.0));
+    let mut d = qnorm(qmul(qb, qconj(qa)));
+    if d[0] < 0.0 {
+        d = d.map(|x| -x);
+    }
+    let turn = qlog(d);
+    let angle = length(turn);
+    let move_ = sub(next.1, prev.1);
+    let (most_turn, most_move) = (MOST_BASE_TURN * k, MOST_BASE_MOVE * k);
+    let cut_turn = angle > most_turn;
+    let cut_move = length(move_) > most_move;
+    if !(cut_turn || cut_move) {
+        return (*next, false);
+    }
+    let r = if cut_turn {
+        ortho(&m_from_q(qnorm(qmul(
+            qexp(scale(turn, most_turn / angle)),
+            qa,
+        ))))
+    } else {
+        next.0
+    };
+    let t = if cut_move {
+        add(prev.1, scale(move_, most_move / length(move_)))
+    } else {
+        next.1
+    };
+    ((r, t), true)
+}
+
+/// [`read_base`]'s pose alone.
+pub fn base_of(now: (M3, V3), pose: Option<(M3, V3)>, written: Option<(M3, V3)>) -> (M3, V3) {
+    read_base(now, pose, written).0
 }
 
 /// The local to write for a bone: under it its parent node's animated world `parent`, its
@@ -241,5 +386,124 @@ mod tests {
             Some([1e6, 0.0, 0.0]),
         );
         assert!(is_rotation(&rot, 1e-5) && length(t) <= MAX_PELVIS_OFFSET + 1e-3);
+    }
+
+    /// A bone the animation stops writing, its write moved past the tolerance by a later pass each
+    /// frame (Patrick, 2026-11-16: the body drifted 168 units in 2 s, then snapped back): the
+    /// remembered pose stays, so the offset never goes on top of itself; a fresh animated pose (near
+    /// the remembered one, far from the write) is taken.
+    #[test]
+    fn a_disturbed_write_is_no_new_animation() {
+        use crate::flinch::rotation;
+        let base: (M3, V3) = (rotation([0.1, 0.2, 0.0]), [10.0, 0.0, 0.0]);
+        let offset = rotation([0.0, 0.0, 0.4]);
+        let shift = [6.0, 0.0, 0.0];
+        let parent = Xf::IDENTITY;
+        let mut pose = Some(base);
+        let mut written: Option<(M3, V3)> = None;
+        let mut now = base;
+        for frame in 0..120 {
+            let (b, how) = read_base(now, pose, written);
+            if frame > 0 {
+                assert_eq!(how, Read::Disturbed, "frame {frame}");
+                assert!(apart(&b, &base) < 1e-3, "frame {frame}: the base drifted");
+            }
+            pose = Some(b);
+            let w = local_for(&parent, b, &offset, Some(shift));
+            written = Some(w);
+            // A later pass moves the write by 0.2 units and 0.004 (past both tolerances); the
+            // animation writes nothing.
+            let mut moved = w;
+            moved.1[2] += 0.2;
+            moved.0[1] += 0.004;
+            now = moved;
+        }
+        // The animation writes again, near the remembered pose: taken.
+        let fresh = (base.0, [10.5, 0.0, 0.0]);
+        let (b, how) = read_base(fresh, pose, written);
+        assert_eq!(how, Read::Animated);
+        assert_eq!(b.1, fresh.1);
+        // A write held within the tolerance: the remembered pose.
+        assert_eq!(read_base(written.unwrap(), pose, written).1, Read::Held);
+        // No offset (the write is the base): a moved bone is the animation's.
+        let (_, how) = read_base(fresh, Some(base), Some(base));
+        assert_eq!(how, Read::Animated);
+    }
+
+    /// A pass that sets one axis outright (the game's foot IK: the pelvis's height) is taken on
+    /// that axis alone: the sideways offset written never goes into the base (read whole, it
+    /// stacked every frame: Patrick's 9mm clip, 2.5 m in 0.7 s).
+    #[test]
+    fn a_pass_setting_one_axis_takes_that_axis_alone() {
+        let base: (M3, V3) = (IDENTITY, [10.0, 0.0, 50.0]);
+        let shift = [2.0, 1.0, 1.0];
+        let mut pose = Some(base);
+        let mut written: Option<(M3, V3)> = None;
+        let mut now = base;
+        for frame in 0..120 {
+            let (b, _) = read_base(now, pose, written);
+            pose = Some(b);
+            assert!(
+                (b.1[0] - 10.0).abs() < 1e-3 && b.1[1].abs() < 1e-3,
+                "frame {frame}: the sideways offset went into the base: {:?}",
+                b.1
+            );
+            // The height: the animation's or the IK's, never drifting.
+            assert!(
+                (b.1[2] - 46.0).abs() < 1e-3 || (b.1[2] - 50.0).abs() < 1e-3,
+                "frame {frame}: the height drifted to {}",
+                b.1[2]
+            );
+            let w = local_for(&Xf::IDENTITY, b, &IDENTITY, Some(shift));
+            written = Some(w);
+            // No animation write; the foot IK sets the height 4 under the animation's.
+            now = (w.0, [w.1[0], w.1[1], 46.0]);
+        }
+    }
+
+    /// An animation moving a bone the way its offset goes is taken once it is past
+    /// [`DISTURBED_MOVE`] from the write: the base never stalls far behind it.
+    #[test]
+    fn an_animation_along_the_offset_is_taken() {
+        let base: (M3, V3) = (IDENTITY, [10.0, 0.0, 0.0]);
+        let shift = [2.0, 0.0, 0.0];
+        let mut pose = Some(base);
+        let mut written: Option<(M3, V3)> = None;
+        let mut anim = base;
+        for frame in 0..60 {
+            let (b, _) = read_base(anim, pose, written);
+            pose = Some(b);
+            // Behind by at most the bound, the shift and a frame's move.
+            let behind = length(sub(b.1, anim.1));
+            assert!(
+                behind <= DISTURBED_MOVE + 2.0 + 1.5 + 1e-3,
+                "frame {frame}: the base is {behind:.1} units behind the animation"
+            );
+            written = Some(local_for(&Xf::IDENTITY, b, &IDENTITY, Some(shift)));
+            // The animation runs the bone along the shift, 1.5 units a frame (past half the shift:
+            // each read is nearer the write than the base).
+            anim.1[0] += 1.5;
+        }
+    }
+
+    /// A pop in the animation under a reacting body is eased in: a frame's share at most, the
+    /// rest the frames after; a small move goes through as it is.
+    #[test]
+    fn an_animation_pop_is_capped() {
+        use crate::flinch::rotation;
+        let a: (M3, V3) = (IDENTITY, [0.0; 3]);
+        let b: (M3, V3) = (rotation([0.0, 0.0, 1.2]), [40.0, 0.0, 0.0]);
+        let (c, cut) = capped(&a, &b, 1.0);
+        assert!(cut);
+        assert!((length(c.1) - MOST_BASE_MOVE).abs() < 1e-3);
+        let turned = crate::active::qlog(crate::active::qfrom_m(&c.0));
+        assert!((length(turned) - MOST_BASE_TURN).abs() < 1e-3, "{turned:?}");
+        let mut now = a;
+        for _ in 0..4 {
+            now = capped(&now, &b, 1.0).0;
+        }
+        assert!(apart(&now, &b) < 1.0, "caught up: {}", apart(&now, &b));
+        let small = (rotation([0.0, 0.0, 0.05]), [1.0, 0.0, 0.0]);
+        assert_eq!(capped(&a, &small, 1.0), (small, false));
     }
 }

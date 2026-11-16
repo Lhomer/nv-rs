@@ -60,6 +60,29 @@ Nothing is written into the game folder, and nothing is ever saved: the room ref
 save, makes no prepared save of its own, and the game's own writes stay in memory. A folder of
 saves next to it is never read or changed.
 
+The add-ons (Dead Money and the rest, and the four packs) are not needed. With only some of their
+archives there, or an add-on's `.esm` without its archive, the room goes on: the search for one
+add-on's archives no longer stops on another's (`engine_platform::files`' short names); an
+add-on's things simply have no meshes or textures then.
+
+### The machine's tables
+
+The game asks Direct3D 9 about the graphics card, and the room answers from a table made on a
+Windows PC: the one the Windows Play package makes on its first start
+(`userdata\machine\d3d9_adapter.tsv`, or `%LOCALAPPDATA%\nv-rs\d3d9_adapter.tsv` from
+`scripts/d3d9-capture`). Copy it once beside `nvrs-room` (or into its `machine` folder, or into
+`~/.local/share/nv-rs/`); `NV_D3D9_ADAPTER` is only needed for a table elsewhere. Without one the
+room says where it looked and stops.
+
+The sound table is not needed: the room has no sound, and with no `dsound.tsv` in those places
+(or `NV_DSOUND_TABLE`) the game is told there is no sound device and goes on.
+
+### What it needs of the machine
+
+- Linux x86_64 with glibc 2.39 or newer (Ubuntu 24.04, Debian 13; CI builds it on Ubuntu 24.04
+  and checks this).
+- A Vulkan driver (above).
+
 ## Play it (keyboard and mouse)
 
 ```bash
@@ -67,8 +90,11 @@ saves next to it is never read or changed.
 ```
 
 The game starts by itself: the main menu (the start-up movies are skipped), then the room, which
-takes a minute or two to load (longer on lavapipe). The target stands 6 m ahead, the obstacles
+takes a minute or two to load (several on lavapipe). The target stands 6 m ahead, the obstacles
 behind it.
+
+It runs the fixes preset (the Windows play build's), scripted and filmed runs too;
+`NV_PRESET=vanilla` runs the original game's code instead.
 
 - Click in the window to take the mouse (the look); **F10** gives it back (so does leaving the
   window).
@@ -181,6 +207,13 @@ or the driver refused, and the first errors.
 The standard error is the log: it says the adapter it draws with, the game's start, the room's
 set-up (`Test Range:` lines, `Phone range:` for the obstacles), and the reactions. Save it with
 `2> room-log.txt`.
+
+While the room's cell loads, the log has a `Test Range:` line for each call of the load, and a
+watchdog writes where it stands every 10 s with nothing new. It ends the run after 90 s without a
+step inside the load (150 s after it), ten times that when the frames are drawn in software
+(lavapipe: every loading-screen frame and texture costs the processor). `NV_RANGE_STUCK=SECONDS`
+sets the load's limit by hand (the wait after it gets a minute more). The range's own timeout,
+which goes back to the main menu when play does not begin after the load, stretches with it.
 
 ## How it is built
 

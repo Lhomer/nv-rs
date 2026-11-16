@@ -1061,3 +1061,39 @@ mod tests {
         }
     }
 }
+
+/// Where a machine file of the player's (`d3d9_adapter.tsv`, `dsound.tsv`) is: the variable `var`
+/// names it; else on Windows `%LOCALAPPDATA%\nv-rs\<name>` (the launcher's tables). Off Windows
+/// (the Linux room) the first that exists of: beside the program, in `machine` beside it, in
+/// `$XDG_DATA_HOME/nv-rs` (`~/.local/share/nv-rs`), in `$LOCALAPPDATA/nv-rs`; none there, the
+/// `XDG_DATA_HOME` one (to say where it was looked for).
+pub fn machine_file(var: &str, name: &str) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Some(path) = std::env::var_os(var) {
+        return Some(PathBuf::from(path));
+    }
+    let local = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("nv-rs").join(name));
+    #[cfg(windows)]
+    {
+        local
+    }
+    #[cfg(not(windows))]
+    {
+        let beside = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.to_path_buf()));
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .map(|d| d.join("nv-rs").join(name));
+        let mut places: Vec<PathBuf> = Vec::new();
+        if let Some(dir) = &beside {
+            places.push(dir.join(name));
+            places.push(dir.join("machine").join(name));
+        }
+        places.extend(data.clone());
+        places.extend(local);
+        places.into_iter().find(|p| p.is_file()).or(data)
+    }
+}

@@ -319,6 +319,13 @@ pub fn full_path(e: &Engine, name: &[u8]) -> Vec<u8> {
     path
 }
 
+/// The host path the game's file calls open for `name` (a relative name in the current
+/// directory, [`full_path`]): off Windows its separators turned to `/` and each part found in any
+/// case, as the game's own opens find it.
+pub fn host_path(e: &Engine, name: &[u8]) -> std::path::PathBuf {
+    real_path(&full_path(e, name))
+}
+
 /// The host path of a path as the game's ANSI calls carry it. Each part between separators that
 /// reads as UTF-8 is taken as it is (the install folder's name, which the host gives as UTF-8,
 /// and every ASCII name), and any other part as bytes of the ANSI code page, turned to Unicode
@@ -1576,18 +1583,34 @@ fn search_finds(pattern: &[u8], name: &str, shown: &str) -> bool {
     if base_pattern == b"*" {
         return true;
     }
-    let known: Vec<u8> = name
+    // Windows' short base keeps the long name's first characters (spaces and dots left out): six
+    // of them before `~N`, or two before a hash once there are more than four alike, so the first
+    // two are known when they are plain letters or digits (else only the first).
+    let plain: Vec<u8> = name
         .bytes()
         .filter(|&b| b != b' ' && b != b'.')
-        .take(1)
-        .map(|b| b.to_ascii_uppercase())
+        .take(2)
         .collect();
+    let known: Vec<u8> = match plain.as_slice() {
+        [a, b] if a.is_ascii_alphanumeric() && b.is_ascii_alphanumeric() => vec![*a, *b],
+        _ => plain.iter().take(1).copied().collect(),
+    }
+    .iter()
+    .map(|b| b.to_ascii_uppercase())
+    .collect();
     let literal: Vec<u8> = base_pattern
         .iter()
         .take_while(|&&b| b != b'*' && b != b'?')
         .map(|b| b.to_ascii_uppercase())
         .collect();
     if literal.iter().zip(&known).any(|(a, b)| a != b) {
+        return false;
+    }
+    // A short base has its `~` within its first seven characters: a literal start of seven or
+    // more with none there is no short name's (`CaravanPack*.bsa` never finds
+    // `ClassicPack - Main.bsa` through `CLASSI~1.BSA`; Patrick's Linux room stopped on such a
+    // search of the DLC archives).
+    if literal.len() >= 7 && !literal[..7].contains(&b'~') {
         return false;
     }
     if !base_pattern.contains(&b'*') && base_pattern.len() < 3 {
@@ -3498,6 +3521,28 @@ mod tests_player_files {
         assert_eq!(short_extension("d.esmx").as_deref(), Some("ESM"));
         assert_eq!(short_extension("A.esm"), None);
         assert_eq!(short_extension("c.esm.bak").as_deref(), Some("BAK"));
+        // A DLC's archive search meets another DLC's archives: their short names (`CLASSI~1.BSA`,
+        // `CARAVA~1.BSA`) can never start with the pattern's eleven letters, nor with "CA" for
+        // `ClassicPack`, so neither is found and nothing stops.
+        let dlc = [
+            "ClassicPack - Main.bsa",
+            "CaravanPack - Main.bsa",
+            "MercenaryPack - Main.bsa",
+            "Fallout - Meshes.bsa",
+        ];
+        for (pattern, want) in [
+            (&b"CaravanPack*.bsa"[..], vec!["CaravanPack - Main.bsa"]),
+            (&b"ClassicPack*.bsa"[..], vec!["ClassicPack - Main.bsa"]),
+            (&b"MercenaryPack*.bsa"[..], vec!["MercenaryPack - Main.bsa"]),
+            (&b"TribalPack*.bsa"[..], vec![]),
+        ] {
+            let got: Vec<&str> = dlc
+                .iter()
+                .copied()
+                .filter(|n| search_finds(pattern, n, "test"))
+                .collect();
+            assert_eq!(got, want, "{}", String::from_utf8_lossy(pattern));
+        }
     }
 
     #[test]

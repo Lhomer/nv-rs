@@ -241,20 +241,24 @@ pub fn frame(e: &mut Engine) {
             clips_folder().display()
         );
     }
-    // The room's events, and the target's state ten times a second.
+    // The room's events, and the target's state ten times a second, every frame while it
+    // reacts (its pelvis offset, the body's spread and the base drift: a divergence shows).
     for line in crate::room_events::take() {
         c.events.push_back((now, line));
     }
     let due = c.last_sample.map_or(true, |t| {
         now.duration_since(t).as_secs_f32() >= SAMPLE_EVERY
     });
-    if let (true, Some((form, _, _))) = (due, target) {
-        c.last_sample = Some(now);
+    if let Some((form, _, _)) = target {
         let actor = e.call(LOOKUP_FORM, &args![form]).u32();
-        if actor != 0 {
+        if actor != 0 && (due || crate::active_ragdoll::reacting(actor)) {
+            c.last_sample = Some(now);
             let fields = crate::knockdown::state_fields(e, actor);
-            c.samples
-                .push_back((now, format!("{{\"target\":\"{form:08X}\",{fields}}}")));
+            let body = crate::active_ragdoll::sample_fields(actor);
+            c.samples.push_back((
+                now,
+                format!("{{\"target\":\"{form:08X}\",{fields},{body}}}"),
+            ));
         }
     }
     // Only the last moments kept while no clip is made.

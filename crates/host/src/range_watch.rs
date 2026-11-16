@@ -26,6 +26,32 @@ use std::time::{Duration, Instant};
 pub const STUCK_LOADING: u64 = 90;
 /// Seconds without a step after the `coc` returned before the run is ended.
 pub const STUCK_WAITING: u64 = 150;
+/// How many times longer the watchdog waits when the frames are drawn in software (Mesa's lavapipe
+/// on a machine with no graphics card: the Linux room): every loading-screen frame and every
+/// texture costs the processor there, and a cell's load takes minutes, not seconds.
+const SOFTWARE_SCALE: u64 = 10;
+
+/// The seconds without a step that end the run, for a phase whose limit is `base`:
+/// `NV_RANGE_STUCK` (seconds, for the load; the wait after it gets the same more) when set, else
+/// `base`, [`SOFTWARE_SCALE`] times longer with the software adapter (`NV_WGPU_BACKEND=software`).
+pub fn stuck_limit(base: u64) -> u64 {
+    let given = std::env::var("NV_RANGE_STUCK")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0);
+    let software = std::env::var("NV_WGPU_BACKEND").is_ok_and(|v| v.trim() == "software");
+    limit_for(base, given, software)
+}
+
+fn limit_for(base: u64, given: Option<u64>, software: bool) -> u64 {
+    match given {
+        Some(s) if base == STUCK_LOADING => s,
+        Some(s) => s + (base - STUCK_LOADING.min(base)),
+        None if software => base * SOFTWARE_SCALE,
+        None => base,
+    }
+}
+
 /// Seconds between the watchdog's lines while nothing moves on.
 const SAY_EVERY: u64 = 10;
 /// Calls of the chain kept (the innermost beyond are not shown).
@@ -251,6 +277,19 @@ fn show_and_wait(text: &str, limit: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The limits: as they are, ten times with lavapipe, or as `NV_RANGE_STUCK` says (the wait
+    /// after the load keeping its extra minute).
+    #[test]
+    fn the_limits_stretch_for_software_drawing() {
+        assert_eq!(limit_for(STUCK_LOADING, None, false), STUCK_LOADING);
+        assert_eq!(limit_for(STUCK_WAITING, None, true), STUCK_WAITING * 10);
+        assert_eq!(limit_for(STUCK_LOADING, Some(3600), true), 3600);
+        assert_eq!(
+            limit_for(STUCK_WAITING, Some(3600), false),
+            3600 + STUCK_WAITING - STUCK_LOADING
+        );
+    }
 
     fn trace() -> Trace {
         Trace {

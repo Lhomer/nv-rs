@@ -155,8 +155,17 @@ fn plugin_path(e: &Engine, file: Ptr) -> PathBuf {
         name.push(b'\\');
     }
     name.extend(e.mem.cstr(file.addr() + FILE_NAME));
-    let full = engine_platform::files::full_path(e, &name);
-    PathBuf::from(String::from_utf8_lossy(&full).into_owned())
+    #[cfg(windows)]
+    {
+        let full = engine_platform::files::full_path(e, &name);
+        PathBuf::from(String::from_utf8_lossy(&full).into_owned())
+    }
+    // Off Windows (the Linux and Android rooms) the path as the game's own opens find it: `/`
+    // between its parts, each found in any case (a `Data\FalloutNV.esm` is no file name there).
+    #[cfg(not(windows))]
+    {
+        engine_platform::files::host_path(e, &name)
+    }
 }
 
 /// The host paths of the load order's plugins, as the data handler holds them (none before it is

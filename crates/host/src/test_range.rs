@@ -260,9 +260,18 @@ fn enter(phase: Phase, what: &str) {
 /// step that end the run, or `None` when no start is under way.
 fn watch_state() -> Option<(&'static str, u64)> {
     match phase() {
-        Phase::Starting => Some(("starting", range_watch::STUCK_LOADING)),
-        Phase::Loading => Some(("loading", range_watch::STUCK_LOADING)),
-        Phase::WaitingForPlay => Some(("waiting for play", range_watch::STUCK_WAITING)),
+        Phase::Starting => Some((
+            "starting",
+            range_watch::stuck_limit(range_watch::STUCK_LOADING),
+        )),
+        Phase::Loading => Some((
+            "loading",
+            range_watch::stuck_limit(range_watch::STUCK_LOADING),
+        )),
+        Phase::WaitingForPlay => Some((
+            "waiting for play",
+            range_watch::stuck_limit(range_watch::STUCK_WAITING),
+        )),
         Phase::Off | Phase::Ready => None,
     }
 }
@@ -1129,7 +1138,7 @@ fn wait(frames: u32, playing: bool, waited: u64) -> Wait {
     let frames = if playing { frames + 1 } else { 0 };
     if frames >= SETUP_FRAMES {
         Wait::SetUp
-    } else if waited >= PLAY_TIMEOUT {
+    } else if waited >= play_timeout() {
         Wait::TimeOut
     } else {
         Wait::Keep(frames)
@@ -1143,11 +1152,20 @@ const PLAY_TIMEOUT: u64 = 90;
 // The watchdog gives the range's own timeout time to go back to the main menu first.
 const _: () = assert!(range_watch::STUCK_WAITING > PLAY_TIMEOUT);
 
+/// [`PLAY_TIMEOUT`] as the watchdog's wait is stretched (`range_watch::stuck_limit`: drawn in
+/// software, or `NV_RANGE_STUCK`), still a minute before the watchdog's.
+fn play_timeout() -> u64 {
+    range_watch::stuck_limit(range_watch::STUCK_WAITING)
+        .saturating_sub(range_watch::STUCK_WAITING - PLAY_TIMEOUT)
+        .max(PLAY_TIMEOUT)
+}
+
 /// Play never began: back to the main menu, the reason shown there ([`add_option`]).
 fn time_out(e: &mut Engine) {
     let place = with_range(|r| r.place.clone());
     let text = format!(
-        "Test Range: {place} did not finish loading within {PLAY_TIMEOUT} s, so the range went back to the main menu. The game's log says where it stopped."
+        "Test Range: {place} did not finish loading within {} s, so the range went back to the main menu. The game's log says where it stopped.",
+        play_timeout()
     );
     step(&text);
     with_range(|r| *r = Range::default());

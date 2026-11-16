@@ -471,6 +471,60 @@ stretched and grew, and the game froze. Two causes, both fixed:
   poses (the pass writing back three times a frame, a hair off, the animation skipping frames)
   makes exactly the shown pose and never adds up.
 
+### The reactions leaned away, then snapped back (Patrick, 2026-11-16, 9:06 PM log)
+
+In the game the NPCs slowly turned or leaned back, then snapped into place in one frame, nothing
+like the lab. In his log 13 of about 35 flinches ended right after `steps done (Caught)` with the
+body check failing (`bone N is 2.5x m from the pelvis`), and the drop wrote the animation pose in
+one frame: the snap. What changed (`ragdoll_core::pose`, `ragdoll_core::active::Fade`,
+`crates/host/src/active_ragdoll.rs`, mirrored in the lab):
+
+- **No more ratchet.** A bone a later game pass moved past the tolerances, and the animation did
+  not write again, was taken for a fresh animated pose with the offset already in it, so the
+  offset went on top of itself every frame (the lab's repro drifted 0 to 168 units in 2 s, then
+  snapped to 0 when the animation wrote). Now `pose::read_base` tells three reads apart: still
+  holding the write (`Held`), the write moved by a later pass (`Disturbed`: nearer the write than
+  the remembered pose, and at most `DISTURBED_MOST`, 20 tolerances, from it), and the animation's
+  (`Animated`). A disturbed read keeps the remembered pose. The rotation is read whole, the
+  translation axis by axis: the game's foot IK sets the pelvis's height outright and leaves the
+  rest as written, and read whole that took the write's sideways offset into the base, so the
+  pelvis offset stacked every frame. That is the likeliest reading of Patrick's first Windows
+  tester clip (cebde05, 9mm, 21 hits): 16 drops `bone N is 2.5x m from the pelvis` about 0.7 s
+  after even a 0.32 m/s flinch with no steps. A disturbance is at most 50 rotation tolerances
+  (`DISTURBED_MOST`) or 12 units (`DISTURBED_MOVE`) off the write. While the body reacts, an
+  animated local's jump is eased in over frames (`pose::capped`: 0.35 rad and 15 units a frame),
+  said once.
+- **Never a snap.** Any drop (the body's check, or the pose's sanity) eases the pose last shown
+  back to the animation over 0.3 s (`active::Fade`: each bone's last world rotation over its
+  animated one, and the pelvis's offset, eased out on top of whatever is shown after, so a new
+  hit during it starts from there too). Only a fade that goes wrong with no body under it (the
+  animation itself not believable) is put back at once.
+- **The steps read the animation.** `balance_frame` takes the pelvis, hips, knees and ankles from
+  the computed animated pose, as the lab does, not from the shown bones (which hold the last
+  write: the steps chased their own output).
+- **The steps' end and the reference's move.** When the steps are done their pelvis offset is
+  eased out over 0.3 s instead of dropped to nothing. When a landed step moves the actor
+  (`knockdown::place`), the root is brought up to date and the animated pose worked out again
+  from it; a move the root does not show yet is carried by the pelvis (`Rig::placed`), so the
+  pelvis's target no longer jumps back for a frame.
+- **The body near its own origin.** The physical body runs in metres from where it was made (the
+  animated pelvis then, `Rig::origin`), not from the world's origin a hundred thousand units away.
+- **The log.** A drop says the pelvis offset (now and as last shown), the body's most spread, the
+  base drift (reads a later pass moved, the most in tolerances) and the eased animation jumps.
+  The Windows tester's clip sidecars sample the target every frame while it reacts, with `body`:
+  the pelvis offset, the most spread, the drift, the jumps and the fade left
+  (docs/WINDOWS-ROOM.md), so a divergence shows frame by frame.
+- **Lab tests:** `one_write_path_for_every_actor` adds a later pass moving the written bones past
+  the tolerance with two seconds of no animation write, and the same at the game's scale (the
+  root 1.2e5 units out, walking and turning), with the foot IK setting the pelvis's height 4 units
+  under the animation's; with the old rule it fails ("bone 2's animated world went off"), and with
+  the translation read whole the pelvis drifts sideways from frame 31. `a_dropped_body_eases_back` drops the body mid-flinch: with the old drop a joint
+  jumped 7.7 units in one frame, now no joint moves more than a fifth of that in a frame and the
+  animation is shown after the fade. Core tests: `a_disturbed_write_is_no_new_animation`,
+  `a_pass_setting_one_axis_takes_that_axis_alone`,
+  `an_animation_along_the_offset_is_taken`, `an_animation_pop_is_capped`,
+  `a_dropped_body_fades_back`. Not seen in the game yet.
+
 ### Crash fix: the world probes took a scene block for a reference (Patrick, 2026-11-16, 022ac96)
 
 Patrick's Windows Play build (RTX 4090, Vulkan) stopped in the Test Range at the first bullet that

@@ -239,6 +239,28 @@ fn main() {
     }
     // wgpu draws (never the real Direct3D 9, which Linux has not).
     std::env::set_var("NV_D3D9", "wgpu");
+    // The fixes preset (the quick start, the Test Range's own rows among them), also for a
+    // scripted or filmed run, which would otherwise run vanilla; NV_PRESET picks another.
+    if std::env::var_os("NV_PRESET").is_none() {
+        std::env::set_var("NV_PRESET", "fixes");
+    }
+    // The machine's Direct3D 9 table (the game asks about the graphics card through it): looked
+    // for beside this program and in ~/.local/share/nv-rs (NV_D3D9_ADAPTER names another).
+    match host::adapter_table_path() {
+        Some(p) if p.is_file() => eprintln!("nvrs-room: the adapter table is {}", p.display()),
+        where_ => {
+            eprintln!(
+                "nvrs-room: no Direct3D 9 adapter table (d3d9_adapter.tsv{}): copy the one the \
+                 Windows Play package made (its userdata\\machine\\d3d9_adapter.tsv, or \
+                 %LOCALAPPDATA%\\nv-rs\\d3d9_adapter.tsv) beside nvrs-room or into \
+                 ~/.local/share/nv-rs/ (docs/LINUX.md)",
+                where_
+                    .map(|p| format!(", looked for at {}", p.display()))
+                    .unwrap_or_default()
+            );
+            std::process::exit(2);
+        }
+    }
     if let Some(dir) = &o.shots {
         let _ = std::fs::create_dir_all(dir);
         let every = o.frames_every.unwrap_or(0);
