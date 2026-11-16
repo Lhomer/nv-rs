@@ -3,9 +3,10 @@
 A native Linux x86_64 build of the real engine that boots straight into the same Test Range
 room as the Android test build (docs/ANDROID.md; the room's code is shared,
 `crates/host/src/phone_range.rs`): one invincible target, a railing, a half-wall, a table and a
-low obstacle behind it, five weapons (9mm pistol, hunting shotgun, hunting rifle, anti-materiel
-rifle, sledgehammer) with ammo kept topped up. It is for testing the active ragdoll's physics in
-the real engine on a Linux machine, by hand or by a script with no one at the keyboard.
+low obstacle behind it, a short loadout (9mm pistol, .44 Magnum revolver, 10mm pistol,
+anti-materiel rifle, 10mm SMG, assault carbine, light machine gun, minigun, frag grenades, grenade
+launcher, missile launcher) with ammo kept topped up. It is for testing the active ragdoll's
+physics in the real engine on a Linux machine, by hand or by a script with no one at the keyboard.
 
 It is a test build: there is no sound and no way to reach the rest of the game from it.
 
@@ -56,8 +57,11 @@ FalloutNV/
     Shaders/
 ```
 
-Nothing is written into the game folder, and nothing is ever saved: the room refuses every
-save, makes no prepared save of its own, and the game's own writes stay in memory. A folder of
+Nothing is written into the game folder, and no game is ever saved: the room refuses every
+save, and the game's own writes stay in memory. It keeps one snapshot of its own, for a fast
+start: the first run builds the room and saves it in `~/.local/share/nv-rs/testrange`
+(`NV_TEST_RANGE_CACHE` names another folder), later runs load it from the main menu; a new
+build, another loadout or another load order makes it again (`NV_TEST_RANGE_REBUILD=1` too). A folder of
 saves next to it is never read or changed.
 
 The add-ons (Dead Money and the rest, and the four packs) are not needed. With only some of their
@@ -100,7 +104,7 @@ It runs the fixes preset (the Windows play build's), scripted and filmed runs to
   window).
 - The game's own keys: W, A, S, D to move, the left button to fire, the right to aim, R to reload,
   Space to jump, 1 to 8 for the hotkeys, Tab for the Pip-Boy, Esc for the pause menu.
-- **F6**: the next weapon (the five in turn). **F7**: the target put back where it first stood.
+- **F6**: the next weapon (the loadout in turn). **F7**: the target put back where it first stood.
   **Home**: the range menu (weapons, ammo, hostile or passive targets, back to the main menu).
 - `--size 1600x900` sets the window's size (1280x720 when not given).
 
@@ -129,7 +133,7 @@ One step a line; `#` starts a comment.
 | Step | Does |
 | --- | --- |
 | `test NAME` | Starts a test: the results after it carry its name; its summary is written at the next `test` or at the end |
-| `weapon N` | The Nth gun in hand: 0 the 9mm pistol, 1 the hunting shotgun, 2 the hunting rifle, 3 the anti-materiel rifle, 4 the sledgehammer (or an editor ID, e.g. `weapon WeapNVHuntingShotgun`) |
+| `weapon N` | The Nth weapon of the loadout in hand: 0 the 9mm pistol, 1 the .44 Magnum revolver, 2 the 10mm pistol, 3 the anti-materiel rifle, 4 the 10mm SMG, 5 the assault carbine, 6 the light machine gun, 7 the minigun, 8 frag grenades, 9 the grenade launcher, 10 the missile launcher (or an editor ID, e.g. `weapon WeapMinigun`) |
 | `stand D [A] [H]` | The player D metres from where the target first stood, A degrees around it from where the player started (clockwise seen from above; the push goes away from the player: 0 into the railing 1 m behind the target, 68 the half-wall, -68 the table, 65 the low obstacle), aiming at H units above the target's feet (85, the chest, when not given; 70 the belly, 110 the head) |
 | `fire [N] [GAP] [HOLD]` | N shots (1), GAP frames apart (60), the trigger held HOLD frames each (4; longer for a melee swing) |
 | `wait F` | F frames |

@@ -8,7 +8,7 @@
 //! | Step | Does |
 //! | --- | --- |
 //! | `test NAME` | Starts a test: the lines after it carry its name, and its summary is written at the next `test` or the end |
-//! | `weapon N` | The Nth gun in hand (0 the 9mm pistol .. 4 the sledgehammer, `phone_range::GUNS`), or by editor ID |
+//! | `weapon N` | The Nth weapon of the loadout in hand (`phone_range::GUNS`: 0 the 9mm pistol, 1 the .44 Magnum revolver, 2 the 10mm pistol, 3 the anti-materiel rifle, 4 the 10mm SMG, 5 the assault carbine, 6 the light machine gun, 7 the minigun, 8 frag grenades, 9 the grenade launcher, 10 the missile launcher), or by editor ID |
 //! | `stand D [A] [H]` | The player D metres from where the target first stood, A degrees around it from where the player started (0: the obstacles behind the target), aiming at H units above the target's feet (85, the chest, when not given) |
 //! | `fire [N] [GAP] [HOLD]` | N shots (1), GAP frames apart (60), the trigger held HOLD frames (4) |
 //! | `wait F` | F frames |
@@ -44,10 +44,11 @@ pub enum Step {
     Quit,
 }
 
-/// The script run when none is given: each gun from the front at the target's chest (the railing
-/// behind it), the anti-materiel rifle into the half-wall and the table (the player 68 degrees
-/// around, so the push points at them: `phone_range::Piece::spot`), the shotgun toward the low
-/// obstacle, a burst of pistol shots (the pain's escalation), and the sledgehammer up close.
+/// The script run when none is given: the pistols and the .44 from the front at the target's chest
+/// (the railing behind it), the anti-materiel rifle into the railing, the half-wall and the table
+/// (the player 68 degrees around, so the push points at them: `phone_range::Piece::spot`), a 10mm
+/// SMG burst toward the low obstacle (the trigger held half a second), a burst of pistol shots (the
+/// pain's escalation), and a minigun burst (held two seconds: it spins up first).
 pub const DEFAULT_SCRIPT: &str = "\
 # The room's default run (crates/host/src/room_script.rs).
 test pistol-front
@@ -61,9 +62,9 @@ shot
 reset
 wait 120
 
-test shotgun-front
+test magnum-front
 weapon 1
-stand 5 0
+stand 6 0
 wait 60
 fire 1
 wait 300
@@ -72,11 +73,11 @@ shot
 reset
 wait 120
 
-test hunting-rifle-front
+test 10mm-front
 weapon 2
 stand 8 0
 wait 60
-fire 1
+fire 2 60
 wait 300
 state
 shot
@@ -116,11 +117,11 @@ shot
 reset
 wait 120
 
-test shotgun-low-obstacle
-weapon 1
-stand 4 65
+test smg-low-obstacle
+weapon 4
+stand 5 65
 wait 60
-fire 2 120
+fire 1 60 30
 wait 300
 state
 shot
@@ -138,11 +139,11 @@ shot
 reset
 wait 120
 
-test sledgehammer
-weapon 4
-stand 1.4 0 70
-wait 60
-fire 1 60 20
+test minigun-burst
+weapon 7
+stand 8 0
+wait 90
+fire 1 60 120
 wait 300
 state
 shot
@@ -406,6 +407,10 @@ pub fn frame(e: &mut Engine, player: u32) {
     let Some((target, at, angle)) = crate::test_range::phone_target() else {
         return;
     };
+    // The room's snapshot first (`crate::test_range`'s prepared save).
+    if crate::test_range::snapshot_pending() {
+        return;
+    }
     if r.settled < SETTLE_FRAMES {
         r.settled += 1;
         if r.settled == SETTLE_FRAMES {

@@ -47,10 +47,22 @@ fn fnv(bytes: &[u8], mut h: u64) -> u64 {
 }
 
 /// The cache's key: the loaded plugins (each `(name, size, modified seconds)` in load order), the
-/// configured place and [`GRANT_VERSION`], as 16 hex digits.
+/// configured place and [`GRANT_VERSION`], as 16 hex digits (the Test Range's: [`fingerprint_for`]
+/// with no room).
+#[cfg(test)]
 pub fn fingerprint(plugins: &[(String, u64, u64)], cell: &str) -> String {
+    fingerprint_for(plugins, cell, "")
+}
+
+/// [`fingerprint`] with `room` too: the physics room's build and contents ([`room_key`]); empty
+/// for the Test Range, whose keys stay as they were.
+pub fn fingerprint_for(plugins: &[(String, u64, u64)], cell: &str, room: &str) -> String {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     h = fnv(&GRANT_VERSION.to_le_bytes(), h);
+    if !room.is_empty() {
+        h = fnv(b"room ", h);
+        h = fnv(room.as_bytes(), h);
+    }
     h = fnv(cell.to_ascii_lowercase().as_bytes(), h);
     for (name, size, modified) in plugins {
         h = fnv(name.to_ascii_lowercase().as_bytes(), h);
@@ -82,20 +94,52 @@ pub fn plugin_facts(paths: &[PathBuf]) -> Vec<(String, u64, u64)> {
         .collect()
 }
 
-/// The cache's root: `testrange` beside the launcher's `settings.ini`; `None` outside a play run.
+/// The physics room's set-up as this build makes it: raised when `crate::phone_range`'s room
+/// changes in a way the build's commit would not say (a local build).
+pub const ROOM_VERSION: u32 = 1;
+
+/// The physics room's part of the key: [`ROOM_VERSION`], the build's commit (`NV_RS_COMMIT` at
+/// build time, CI's; else `local`) and the loadout, so a new build or a new loadout makes the
+/// snapshot again.
+pub fn room_key(commit: &str, loadout: &[&str]) -> String {
+    format!("v{ROOM_VERSION} {commit} {}", loadout.join(","))
+}
+
+/// The cache's root: `testrange` beside the launcher's `settings.ini` (a play run: the Play
+/// package's or the physics tester's own `userdata`, never the player's saves), else the folder
+/// `NV_TEST_RANGE_CACHE` names (the Linux room's, in `~/.local/share/nv-rs`); `None` otherwise.
 pub fn cache_root() -> Option<PathBuf> {
-    let settings = std::env::var_os("NV_SETTINGS")?;
-    let parent = Path::new(&settings).parent()?.to_path_buf();
-    Some(parent.join(CACHE_FOLDER))
+    if let Some(settings) = std::env::var_os("NV_SETTINGS") {
+        let parent = Path::new(&settings).parent()?.to_path_buf();
+        return Some(parent.join(CACHE_FOLDER));
+    }
+    std::env::var_os("NV_TEST_RANGE_CACHE")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
 }
 
 /// What the range keeps of itself beside the save.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Kept {
     pub place: String,
     pub container: u32,
     pub targets: Vec<u32>,
     pub ammo: Vec<u32>,
+    /// The physics room's own (`crate::phone_range`), when it made the save.
+    pub room: Option<RoomKept>,
+}
+
+/// What the physics room keeps beside its snapshot: the target's base (form id), where it first
+/// stood and its heading (degrees: the reset puts a fresh one there), the loadout's weapons, their
+/// ammo and the thrown ones (form ids).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct RoomKept {
+    pub base: u32,
+    pub at: [f32; 3],
+    pub angle: f32,
+    pub guns: Vec<u32>,
+    pub ammo: Vec<u32>,
+    pub thrown: Vec<u32>,
 }
 
 impl Kept {
@@ -106,13 +150,27 @@ impl Kept {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        format!(
+        let mut text = format!(
             "version={GRANT_VERSION}\nplace={}\ncontainer={:08X}\ntargets={}\nammo={}\n",
             self.place,
             self.container,
             list(&self.targets),
             list(&self.ammo)
-        )
+        );
+        if let Some(r) = &self.room {
+            text.push_str(&format!(
+                "room_spot={:08X} {} {} {} {}\nroom_guns={}\nroom_ammo={}\nroom_thrown={}\n",
+                r.base,
+                r.at[0],
+                r.at[1],
+                r.at[2],
+                r.angle,
+                list(&r.guns),
+                list(&r.ammo),
+                list(&r.thrown)
+            ));
+        }
+        text
     }
 
     /// The text [`Kept::to_text`] wrote; `None` when it is not one (another version included).
@@ -132,6 +190,22 @@ impl Kept {
                 "container" => kept.container = u32::from_str_radix(value, 16).ok()?,
                 "targets" => kept.targets = ids(value)?,
                 "ammo" => kept.ammo = ids(value)?,
+                "room_spot" => {
+                    let w: Vec<&str> = value.split_whitespace().collect();
+                    let [base, x, y, z, angle] = w.as_slice() else {
+                        return None;
+                    };
+                    let f = |v: &str| v.parse::<f32>().ok().filter(|x| x.is_finite());
+                    let room = kept.room.get_or_insert_with(RoomKept::default);
+                    room.base = u32::from_str_radix(base, 16).ok()?;
+                    room.at = [f(x)?, f(y)?, f(z)?];
+                    room.angle = f(angle)?;
+                }
+                "room_guns" => kept.room.get_or_insert_with(RoomKept::default).guns = ids(value)?,
+                "room_ammo" => kept.room.get_or_insert_with(RoomKept::default).ammo = ids(value)?,
+                "room_thrown" => {
+                    kept.room.get_or_insert_with(RoomKept::default).thrown = ids(value)?
+                }
                 _ => {}
             }
         }
@@ -140,7 +214,7 @@ impl Kept {
 }
 
 /// A prepared save: its bytes, its co-save's when there is one, and what the range kept.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Prepared {
     pub save: Vec<u8>,
     pub cosave: Option<Vec<u8>>,
@@ -225,6 +299,33 @@ mod tests {
         assert_ne!(a, fingerprint(&other, "auto"), "a plugin changed");
         assert_ne!(a, fingerprint(&plugins()[..1], "auto"), "a plugin left out");
         assert_ne!(a, fingerprint(&plugins(), "SomeCell"), "the place");
+        // The physics room's snapshot: its own key, made again for a new build or loadout; the
+        // Test Range's keys as they were.
+        assert_eq!(fingerprint_for(&plugins(), "auto", ""), a);
+        let room = fingerprint_for(
+            &plugins(),
+            "auto",
+            &room_key("7e1b3d4", &["WeapNV9mmPistol"]),
+        );
+        assert_ne!(room, a);
+        assert_ne!(
+            room,
+            fingerprint_for(
+                &plugins(),
+                "auto",
+                &room_key("c22a2ed", &["WeapNV9mmPistol"])
+            ),
+            "a new build"
+        );
+        assert_ne!(
+            room,
+            fingerprint_for(
+                &plugins(),
+                "auto",
+                &room_key("7e1b3d4", &["WeapNV9mmPistol", "WeapMinigun"])
+            ),
+            "a new loadout"
+        );
     }
 
     /// What the range keeps reads back as written; another version's is not used.
@@ -235,8 +336,21 @@ mod tests {
             container: 0xff00_0801,
             targets: vec![0xff00_0802, 0xff00_0803],
             ammo: vec![0x0004_241e, 0x0010_0000],
+            room: None,
         };
         assert_eq!(Kept::from_text(&kept.to_text()), Some(kept.clone()));
+        let room = Kept {
+            room: Some(RoomKept {
+                base: 0x0010_c1d0,
+                at: [1024.5, -88.25, 4.0],
+                angle: 270.0,
+                guns: vec![0x000e_3778, 0x0009_0b23],
+                ammo: vec![0x0008_ed03],
+                thrown: vec![0x0009_0b23],
+            }),
+            ..kept.clone()
+        };
+        assert_eq!(Kept::from_text(&room.to_text()), Some(room));
         let old = kept.to_text().replace("version=1", "version=0");
         assert_eq!(Kept::from_text(&old), None);
         assert_eq!(Kept::from_text("garbage"), None);

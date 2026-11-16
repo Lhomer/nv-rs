@@ -700,8 +700,9 @@ pub fn first_start<C>(
 /// start is said in the log and on the screen, with the menu's list enabled again.
 fn start(e: &mut Engine) {
     start_scan(e);
-    // The phone's range never saves, its prepared save neither (`crate::phone_range`).
-    if !crate::phone_range::on() && resume(e) {
+    // The physics room too starts from its snapshot when its cache has one (`resume`): the
+    // player's saves are never made or touched either way.
+    if resume(e) {
         return;
     }
     let configured = cell();
@@ -834,7 +835,13 @@ fn resume(e: &mut Engine) -> bool {
         return false;
     };
     let plugins = cache::plugin_facts(&crate::cell_offsets::loaded_plugin_paths(e));
-    let key = cache::fingerprint(&plugins, &cell());
+    // The physics room's snapshot follows the build and its loadout too.
+    let room = if crate::phone_range::on() {
+        cache::room_key(crate::room_record::commit(), &crate::phone_range::GUNS)
+    } else {
+        String::new()
+    };
+    let key = cache::fingerprint_for(&plugins, &cell(), &room);
     let dir = root.join(&key);
     *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = Some((root, dir.clone()));
     if cache::rebuild_asked() {
@@ -842,7 +849,9 @@ fn resume(e: &mut Engine) -> bool {
         step("NV_TEST_RANGE_REBUILD=1: the prepared save is made again");
         return false;
     }
-    let Some(prepared) = cache::read(&dir) else {
+    let Some(prepared) =
+        cache::read(&dir).filter(|p| p.kept.room.is_some() == crate::phone_range::on())
+    else {
         step(&format!(
             "no prepared save for this load order ({} plugins, {key}): setting up, then saving it",
             plugins.len()
@@ -866,6 +875,9 @@ fn resume(e: &mut Engine) -> bool {
             ..Range::default()
         }
     });
+    if let Some(room) = &kept.room {
+        restore_room(e, room);
+    }
     range_watch::watch(watch_state);
     enter(
         Phase::Starting,
@@ -927,11 +939,17 @@ fn save_prepared(e: &mut Engine) {
     };
     let nvse = virtual_path(e, "nvse");
     let cosave = engine_platform::files::read_whole(e, &nvse);
+    let room = crate::phone_range::on().then(|| room_kept(e)).flatten();
+    if crate::phone_range::on() && room.is_none() {
+        step("the room's snapshot was not kept: its target's place is not known");
+        return;
+    }
     let kept = with_range(|r| cache::Kept {
         place: r.place.clone(),
         container: r.container,
         targets: r.targets.clone(),
         ammo: r.ammo.clone(),
+        room,
     });
     let prepared = cache::Prepared { save, cosave, kept };
     match cache::write(&root, &dir, &prepared) {
@@ -1079,9 +1097,7 @@ pub fn frame(e: &mut Engine, player: u32) {
                     note(e, "Test Range: press Home for the range menu.");
                 } else {
                     setup(e, player);
-                    if !crate::phone_range::on()
-                        && CACHE.lock().unwrap_or_else(|p| p.into_inner()).is_some()
-                    {
+                    if CACHE.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
                         SAVE_COUNTDOWN.store(SAVE_AFTER_FRAMES, Ordering::Relaxed);
                     }
                 }
@@ -1472,6 +1488,7 @@ pub fn facing_back(heading: f32) -> f32 {
 
 /// The range's set-up: the weapons container, the ammo, the targets.
 fn setup(e: &mut Engine, player: u32) {
+    let began = std::time::Instant::now();
     // The place's lane, when the range chose it from the plugin: the player at its start.
     let spot = spot_named(&with_range(|r| r.place.clone())).filter(|s| s.has_lane());
     if let Some(s) = &spot {
@@ -1497,51 +1514,58 @@ fn setup(e: &mut Engine, player: u32) {
         weapons.len(),
         ammo.len()
     ));
-    // The container, behind the player (opened from the range menu).
-    let mut container_base = by_names(e, &forms, CONT, &CONTAINERS, 1);
-    if container_base.is_empty() {
-        container_base = forms
-            .iter()
-            .copied()
-            .filter(|&f| kind(e, f) == CONT && !name(e, f).is_empty())
-            .take(1)
-            .collect();
-    }
     let heading = match &spot {
         Some(s) => s.lane.heading,
         None => e.vcall(player, HEADING_SLOT, &args![0u32]).f64() as f32,
     };
-    let mut container = 0;
-    if let Some(&base) = container_base.first() {
-        let placed = e
-            .call(PLACE_AT_ME, &args![player, base, 1u32, 0u32, 0u32, 1.0f32])
-            .u32();
-        step(&format!(
-            "set-up: the container {:08X} placed as {placed:08X}",
-            e.mem.u32(base + FORM_ID)
-        ));
-        if placed != 0 {
-            container = e.mem.u32(placed + FORM_ID);
-            let (x, y) = offset(heading, -1.8, 0.0);
-            let c = id(container);
-            run_line(e, &format!("{c}.moveto player {x:.0} {y:.0} 0"));
-            run_line(e, &format!("{c}.removeallitems"));
-            for &weapon in &weapons {
-                let w = id(e.mem.u32(weapon + FORM_ID));
-                run_line(e, &format!("{c}.additem {w} 1 1"));
-            }
-            step(&format!("set-up: the weapons are in the container {c}"));
-        }
+    // The room (`crate::phone_range`) gives its short loadout only ([`phone_setup`]): no container,
+    // no ammo of every kind, no inventory of every item (thousands of console lines: the long
+    // black screen after its load, Patrick's tester).
+    if crate::phone_range::on() {
+        step("set-up: the room's short loadout only (no container, no inventory of every item)");
     } else {
-        step("set-up: no container in the loaded game");
+        // The container, behind the player (opened from the range menu).
+        let mut container_base = by_names(e, &forms, CONT, &CONTAINERS, 1);
+        if container_base.is_empty() {
+            container_base = forms
+                .iter()
+                .copied()
+                .filter(|&f| kind(e, f) == CONT && !name(e, f).is_empty())
+                .take(1)
+                .collect();
+        }
+        let mut container = 0;
+        if let Some(&base) = container_base.first() {
+            let placed = e
+                .call(PLACE_AT_ME, &args![player, base, 1u32, 0u32, 0u32, 1.0f32])
+                .u32();
+            step(&format!(
+                "set-up: the container {:08X} placed as {placed:08X}",
+                e.mem.u32(base + FORM_ID)
+            ));
+            if placed != 0 {
+                container = e.mem.u32(placed + FORM_ID);
+                let (x, y) = offset(heading, -1.8, 0.0);
+                let c = id(container);
+                run_line(e, &format!("{c}.moveto player {x:.0} {y:.0} 0"));
+                run_line(e, &format!("{c}.removeallitems"));
+                for &weapon in &weapons {
+                    let w = id(e.mem.u32(weapon + FORM_ID));
+                    run_line(e, &format!("{c}.additem {w} 1 1"));
+                }
+                step(&format!("set-up: the weapons are in the container {c}"));
+            }
+        } else {
+            step("set-up: no container in the loaded game");
+        }
+        with_range(|r| {
+            r.container = container;
+            r.ammo = ammo;
+        });
+        fill_ammo(e);
+        step("set-up: the ammo is in the player's inventory");
+        stock_inventory(e, &forms, &weapons);
     }
-    with_range(|r| {
-        r.container = container;
-        r.ammo = ammo;
-    });
-    fill_ammo(e);
-    step("set-up: the ammo is in the player's inventory");
-    stock_inventory(e, &forms, &weapons);
     // Down the place's lane, or else the longest clear line of the room: the player turned to
     // face it.
     let best = match &spot {
@@ -1569,8 +1593,10 @@ fn setup(e: &mut Engine, player: u32) {
         phone_setup(e, player, best, &weapons);
     }
     eprintln!(
-        "Test Range: {} weapons, a lane of targets; Home opens the range menu",
-        weapons.len()
+        "Test Range: {} weapons, a lane of targets; Home opens the range menu (set up in {} ms, \
+         one frame)",
+        weapons.len(),
+        began.elapsed().as_millis()
     );
     note(e, "Test Range: press Home for the range menu.");
 }
@@ -2205,35 +2231,73 @@ const QUIT_CHOOSE: u32 = 0x007d_0a10;
 /// The phone's target's base, where it first stood and its heading (degrees), for the reset.
 static PHONE_SPOT: Mutex<Option<(u32, [f32; 3], f32)>> = Mutex::new(None);
 
-/// The phone's guns (form ids) and their ammo (form ids), once set up.
-static PHONE_GUNS: Mutex<(Vec<u32>, Vec<u32>)> = Mutex::new((Vec::new(), Vec::new()));
+/// The phone's guns (form ids), their ammo (form ids) and the thrown ones among the guns (their
+/// own ammo: kept at `phone_range::THROWN_STACK`), once set up.
+static PHONE_GUNS: Mutex<(Vec<u32>, Vec<u32>, Vec<u32>)> =
+    Mutex::new((Vec::new(), Vec::new(), Vec::new()));
+
+/// What the physics room keeps beside its snapshot (`crate::range_save::RoomKept`).
+fn room_kept(e: &Engine) -> Option<crate::range_save::RoomKept> {
+    let (base, at, angle) = (*PHONE_SPOT.lock().unwrap_or_else(|p| p.into_inner()))?;
+    let (guns, ammo, thrown) = PHONE_GUNS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    Some(crate::range_save::RoomKept {
+        base: e.mem.u32(base + FORM_ID),
+        at,
+        angle,
+        guns,
+        ammo,
+        thrown,
+    })
+}
+
+/// The physics room's state back from its snapshot: the target's base (looked up again: its
+/// address is this run's), where it first stood, and the loadout, the first in hand.
+fn restore_room(e: &mut Engine, room: &crate::range_save::RoomKept) {
+    let base = e.call(LOOKUP_FORM, &args![room.base]).u32();
+    *PHONE_SPOT.lock().unwrap_or_else(|p| p.into_inner()) =
+        (base != 0).then_some((base, room.at, room.angle));
+    *PHONE_GUNS.lock().unwrap_or_else(|p| p.into_inner()) =
+        (room.guns.clone(), room.ammo.clone(), room.thrown.clone());
+    crate::phone_range::restart_loadout();
+    step(&format!(
+        "the room's snapshot: {} weapons, the target's base {:08X}",
+        room.guns.len(),
+        room.base
+    ));
+}
 
 /// The phone's set-up: the obstacles behind the target, the guns given and the first in hand.
 fn phone_setup(e: &mut Engine, player: u32, heading: f32, weapons: &[u32]) {
     let ids: Vec<u32> = weapons.iter().map(|&w| e.mem.u32(w + FORM_ID)).collect();
     let guns = crate::phone_range::gun_ids(&ids);
     let mut ammo: Vec<u32> = Vec::new();
+    let mut thrown: Vec<u32> = Vec::new();
     for &g in &guns {
         let form = e.call(LOOKUP_FORM, &args![g]).u32();
         if form != 0 {
-            if let Some(a) = ammo_of(e, form) {
-                ammo.push(e.mem.u32(a + FORM_ID));
+            match ammo_of(e, form) {
+                Some(a) => ammo.push(e.mem.u32(a + FORM_ID)),
+                // A grenade is its own ammo.
+                None => thrown.push(g),
             }
         }
     }
     for &g in &guns {
-        run_line(e, &format!("player.additem {} 1 1", id(g)));
+        if !thrown.contains(&g) {
+            run_line(e, &format!("player.additem {} 1 1", id(g)));
+        }
     }
     if let Some(&first) = guns.first() {
         run_line(e, &format!("player.equipitem {} 0 1", id(first)));
     }
     step(&format!(
-        "the phone's range: {} of {} guns found, {} ammo kinds",
+        "the phone's range: {} of {} weapons found, {} ammo kinds, {} thrown",
         guns.len(),
         crate::phone_range::GUNS.len(),
-        ammo.len()
+        ammo.len(),
+        thrown.len()
     ));
-    *PHONE_GUNS.lock().unwrap_or_else(|p| p.into_inner()) = (guns, ammo);
+    *PHONE_GUNS.lock().unwrap_or_else(|p| p.into_inner()) = (guns, ammo, thrown);
     phone_keep(e);
     // The obstacles, behind the target as the player sees it.
     let pieces = crate::phone_range::pieces();
@@ -2266,6 +2330,12 @@ fn phone_setup(e: &mut Engine, player: u32, heading: f32, weapons: &[u32]) {
             "the phone's range: {piece:?} {form_id:08X} placed as {r}"
         ));
     }
+}
+
+/// Whether the prepared save (the physics room's snapshot) is still to be made this start: the
+/// room's script waits for it, so the snapshot never holds a reaction under way.
+pub fn snapshot_pending() -> bool {
+    SAVE_COUNTDOWN.load(Ordering::Relaxed) > 0 || SAVE_ASKED.load(Ordering::Relaxed)
 }
 
 /// The phone's range set up and its target placed: the target's reference (its form id), where
@@ -2350,17 +2420,26 @@ pub(crate) fn phone_reset(e: &mut Engine, player: u32) {
     step(&format!("the phone's range: the target put back as {t}"));
 }
 
-/// The phone's keeping: the guns' ammo topped up (500 each) and the target healed.
+/// The phone's keeping: the guns' ammo topped up (500 each), the thrown weapons kept at
+/// `phone_range::THROWN_STACK` (the one in hand only added to, so it stays in hand), and the
+/// target healed.
 pub(crate) fn phone_keep(e: &mut Engine) {
-    let ammo = PHONE_GUNS
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .1
-        .clone();
+    let (guns, ammo, thrown) = PHONE_GUNS.lock().unwrap_or_else(|p| p.into_inner()).clone();
     for a in ammo {
         let a = id(a);
         run_line(e, &format!("player.removeitem {a} 99999 1"));
         run_line(e, &format!("player.additem {a} 500 1"));
+    }
+    let in_hand = guns.get(crate::phone_range::weapon_index()).copied();
+    for t in thrown {
+        let stack = crate::phone_range::THROWN_STACK;
+        let t_id = id(t);
+        if Some(t) == in_hand {
+            run_line(e, &format!("player.additem {t_id} 5 1"));
+        } else {
+            run_line(e, &format!("player.removeitem {t_id} 99999 1"));
+            run_line(e, &format!("player.additem {t_id} {stack} 1"));
+        }
     }
     for t in with_range(|r| r.targets.clone()) {
         run_line(

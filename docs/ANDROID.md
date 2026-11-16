@@ -3,8 +3,8 @@
 A barebones Android build of the real engine, for trying the active ragdoll's physics on a
 phone (Patrick, 2026-11-15: Samsung Galaxy Z TriFold, arm64 Snapdragon, Vulkan). It boots
 straight into the phone's Test Range (`crates/host/src/phone_range.rs`): one invincible target,
-a railing, a half-wall, a table and a low obstacle for the world interaction, five weapons with
-ammo kept topped up, and touch controls. It is a test build: the game draws, plays and reacts as
+a railing, a half-wall, a table and a low obstacle for the world interaction, a short loadout
+(docs/WINDOWS-ROOM.md) with ammo kept topped up, and touch controls. It is a test build: the game draws, plays and reacts as
 on Windows, but there is no sound, no text on the buttons, and no way to reach the rest of the
 game from it.
 
@@ -28,7 +28,8 @@ password `nvrs-test`), so it installs over the last one and keeps the files in t
 The app reads your own Fallout: New Vegas 1.4.0.525 files (the Windows install's, the same
 `FalloutNV.exe` the Windows play build uses). None are in the APK or the repository, and the
 app never writes to them, nor to any save: the game's own writes stay in memory, and the range
-refuses every save.
+refuses every save. The room keeps one snapshot of its own in the app's folder for a fast start
+(made on the first run, again for a new build or loadout).
 
 Make a folder named `FalloutNV` holding, from your Windows install (`...\steamapps\common\Fallout New Vegas`):
 
@@ -82,7 +83,7 @@ The controls (see-through shapes over the game; no text):
 | Right, blue | blue disc | Aim (hold) |
 | Right, yellow | yellow disc | Reload |
 | Bottom middle, white | white disc | Jump |
-| Right, green | green disc | Next weapon: 9mm pistol, hunting shotgun, hunting rifle, anti-materiel rifle, sledgehammer |
+| Right, green | green disc | Next weapon: the loadout in turn (9mm pistol, .44 Magnum, 10mm pistol, anti-materiel rifle, 10mm SMG, assault carbine, light machine gun, minigun, frag grenades, grenade launcher, missile launcher) |
 | Top right, purple | purple disc | Reset the target: a fresh one where the first stood, by the obstacles |
 | Top right, grey | grey disc | The range menu (Home): weapons, ammo, hostile or passive targets, back to the main menu |
 

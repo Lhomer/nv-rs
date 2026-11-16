@@ -1,7 +1,7 @@
 //! The phone's Test Range (the Android test build, docs/ANDROID.md; Patrick, 2026-11-15): the
 //! game starts straight into the Test Range ([`crate::test_range`]) with one invincible target,
 //! obstacles for the active ragdoll's world interaction (a railing, a half-wall, a table's edge, a
-//! low obstacle), five guns with ammo kept topped up, and the touch buttons' actions (the next
+//! low obstacle), a short loadout ([`GUNS`]) with ammo kept topped up, and the touch buttons' actions (the next
 //! weapon, the target put back). **Not 1:1 with FalloutNV.exe**; only the game's own content, placed
 //! the way the console does it. On only when the app turns it on ([`set_on`]) or
 //! `NV_TEST_RANGE_PHONE=1`. Nothing is saved: the range refuses every save, and on the phone it does
@@ -27,15 +27,27 @@ static RESET_ASKED: AtomicBool = AtomicBool::new(false);
 static WEAPON: AtomicU32 = AtomicU32::new(0);
 static FRAMES: AtomicU32 = AtomicU32::new(0);
 
-/// The guns (and a melee weapon) the phone's range gives, by editor ID: a pistol, a shotgun, a
-/// hunting rifle, an anti-materiel rifle, a sledgehammer.
-pub const GUNS: [&str; 5] = [
+/// The room's short loadout (Patrick, 2026-11-16: not every weapon of the game), by FalloutNV.esm
+/// editor ID, with ammo kept topped up: the 9mm pistol, the .44 Magnum revolver, the 10mm pistol,
+/// the anti-materiel rifle, three automatics (the 10mm SMG, the assault carbine, the light machine
+/// gun) and the minigun, and three explosives (frag grenades, the grenade launcher, the missile
+/// launcher). The 9mm pistol and the anti-materiel rifle keep their places (0 and 3) for the
+/// scripts.
+pub const GUNS: [&str; 11] = [
     "WeapNV9mmPistol",
-    "WeapNVHuntingShotgun",
-    "WeapHuntingRifle",
+    "WeapNV44Revolver",
+    "Weap10mmPistol",
     "WeapNVAntiMaterielRifle",
-    "WeapSledgehammer",
+    "Weap10mmSubmachineGun",
+    "WeapNVAssaultCarbine",
+    "WeapNVLightMachineGun",
+    "WeapMinigun",
+    "WeapGrenadeFrag",
+    "WeapNVGrenadeLauncher",
+    "WeapMissileLauncher",
 ];
+/// How many of a thrown weapon (its own ammo: the frag grenades) the room keeps in the inventory.
+pub const THROWN_STACK: u32 = 50;
 /// How far ahead of the player the target stands (m).
 pub const TARGET_METRES: f32 = 6.0;
 /// The target's health, kept up (it never dies: essential too).
@@ -83,6 +95,17 @@ pub fn on() -> bool {
 /// The touch "weapon" button: the next of [`GUNS`] in hand at the next frame.
 pub fn ask_next_weapon() {
     NEXT_WEAPON_ASKED.store(true, Ordering::Relaxed);
+}
+
+/// The loadout back at its first weapon (a snapshot loaded: the save has the first in hand).
+pub fn restart_loadout() {
+    WEAPON.store(0, Ordering::Relaxed);
+    FRAMES.store(0, Ordering::Relaxed);
+}
+
+/// The loadout's weapon in hand now (an index of the guns found, in [`GUNS`]' order).
+pub fn weapon_index() -> usize {
+    WEAPON.load(Ordering::Relaxed) as usize
 }
 
 /// The touch "reset" button: the target put back where it started, at the next frame.

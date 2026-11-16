@@ -244,6 +244,18 @@ fn main() {
     if std::env::var_os("NV_PRESET").is_none() {
         std::env::set_var("NV_PRESET", "fixes");
     }
+    // The room's snapshot (its prepared save, for a fast start: made on the first run, loaded on
+    // the next; made again for a new build or loadout) in ~/.local/share/nv-rs/testrange, never
+    // the game's folder or its saves (NV_TEST_RANGE_CACHE names another).
+    if std::env::var_os("NV_TEST_RANGE_CACHE").is_none() {
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+        if let Some(d) = data {
+            std::env::set_var("NV_TEST_RANGE_CACHE", d.join("nv-rs").join("testrange"));
+        }
+    }
     // The machine's Direct3D 9 table (the game asks about the graphics card through it): looked
     // for beside this program and in ~/.local/share/nv-rs (NV_D3D9_ADAPTER names another).
     match host::adapter_table_path() {

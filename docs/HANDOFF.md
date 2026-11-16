@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-16 (the physics tester: a snapshot for a fast start, a short loadout)
+
+- **Now (`crate::range_save`: `fingerprint_for`, `room_key` (`ROOM_VERSION`, the build's `NV_RS_COMMIT`, the loadout), `RoomKept` in `Kept`, `cache_root` also from `NV_TEST_RANGE_CACHE`; `crate::test_range`: `resume` and the prepared save for the room too, `room_kept` / `restore_room`, `snapshot_pending` (the room's script waits for it), the room's set-up without the container, every ammo and the inventory of every item (the long black screen: thousands of console lines in one frame), `set up in N ms`; `crate::phone_range::GUNS` the short loadout (11 FalloutNV.esm editor IDs), `THROWN_STACK`, `weapon_index`, `restart_loadout`; `room_script`'s default script for it; the Linux room's and the Android app's `NV_TEST_RANGE_CACHE`; docs/WINDOWS-ROOM.md, LINUX.md, ANDROID.md):** builds; host tests pass; not run with game files (the snapshot's load is the Test Range's, which Patrick has used).
+- **Patrick:** the tester starts slowly (a long loading screen, then a long black screen): build the room once and load a snapshot after, made again when the build or the room changes, kept in the tester's folder only; find the black screen; a short loadout with unlimited ammo (the anti-materiel rifle, the .44, the 9mm and 10mm pistols, automatics, explosives) by real editor IDs.
+
 ### Claude, 2026-11-16 (merge slaterain/nv-rs main up to ffc4927)
 
 - **Now:** a regular merge of #584, #611, #605, #609, #615, #613, #614, #618 (UI Organizer part 3; JIP game patches GA/GD/GS parts; JIP LN command packages C1 and C2; JIP's hooks on the AI and loader threads) with no conflicts. Nothing of it touches `crates/host` (the active ragdoll, bracing, the snap-back fix); #615's pushes and #618's get-hit effect are JIP-gated rows and commands (`jip::world_push::adjust_push_force` now `pub(crate)`). The fork's `jip::commands::world_ray_cast` (the refr fix) is as it was. Lab and core tests pass; jip's tests run.

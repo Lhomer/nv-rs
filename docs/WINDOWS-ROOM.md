@@ -3,14 +3,15 @@
 A Windows build of the barebones physics test room: the same room as the Android and Linux
 builds (`crates/host/src/phone_range.rs`), so the active ragdoll can be tried and filmed on a PC.
 The room has one invincible target, a railing, a half-wall, a table and a low obstacle behind it,
-and five weapons (9mm pistol, hunting shotgun, hunting rifle, anti-materiel rifle, sledgehammer)
-with ammo kept topped up. It uses the game's own mouse and keyboard, and has a Record button and F9
+and a short loadout (the 9mm pistol, the .44 Magnum revolver, the 10mm pistol, the anti-materiel
+rifle, the 10mm SMG, the assault carbine, the light machine gun, the minigun, frag grenades, the
+grenade launcher and the missile launcher) with ammo kept topped up. It uses the game's own mouse and keyboard, and has a Record button and F9
 for video clips.
 
 It is the Play package built as the room's (`NV_RS_ROOM=1`). It finds the game the same way, makes
 the same machine tables on its first start, keeps everything it writes in its own `userdata`
-folder, and shows the same window when the game stops. It never saves: the room refuses every
-save.
+folder, and shows the same window when the game stops. It never saves a game: the room refuses
+every save. It keeps one snapshot of its own (below), in its own folder.
 
 **Not run with game files yet.** CI builds it, but no game files or Windows PC exist where it was
 made. The first runs will tell what still stops it. Send the log (in `userdata\logs`) and, for a
@@ -47,6 +48,16 @@ installed; nothing is copied or changed there. The first start also makes the ma
 The game opens at the main menu (the intro movies are skipped), then goes into the room by itself.
 The target stands 6 m ahead and the obstacles are behind it, so shots push it into them.
 
+**The snapshot.** The first start builds the room (the cell's load, then the target, the
+obstacles and the loadout) and, a second and a half later, saves a snapshot of it: the Test
+Range's prepared save, in the tester's own `userdata\testrange` (never in your FalloutNV saves,
+and never in git or CI). Later starts load the snapshot straight from the main menu. A new build
+(its commit), another loadout or another load order makes it again; so does
+`NV_TEST_RANGE_REBUILD=1`. The room used to give every weapon, armour and aid item of the game too:
+thousands of console lines in one frame after the load, the long black screen before the room
+appeared. It gives only its loadout now, and the log says how long the set-up took
+(`set up in N ms`).
+
 In the regular Play package, `Play.exe --room` starts the same room.
 
 ## Controls
@@ -54,9 +65,9 @@ In the regular Play package, `Play.exe --room` starts the same room.
 The game's own: mouse to look, left button to fire, right button to aim, W A S D to move, R to
 reload, 1 to 8 for the hotkeys, Tab for the Pip-Boy, Esc for the pause menu. Home opens the range
 menu (weapons, ammo, hostile or passive targets, back to the main menu). The room's own keys, kept
-from the game: **F6** the next weapon (the five in turn), **F7** the target put back where it first
-stood, **F9** a clip (below). The five weapons are in the inventory, with 500 rounds each, topped
-up every five seconds. The target is essential and has 100,000 health.
+from the game: **F6** the next weapon (the loadout in turn), **F7** the target put back where it
+first stood, **F9** a clip (below). The loadout is in the inventory, with 500 rounds of each ammo
+and 50 frag grenades, topped up every five seconds. The target is essential and has 100,000 health.
 
 ## Clips
 

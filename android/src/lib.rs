@@ -458,6 +458,13 @@ fn android_main(app: AndroidApp) {
         });
     eprintln!("nv-rs Android test build {}", env!("CARGO_PKG_VERSION"));
     eprintln!("nv-rs Android: the log is {log_name}");
+    // The room's snapshot (its prepared save, for a fast start) in the app's own folder, never
+    // the player's saves (`host::range_save::cache_root`).
+    if std::env::var_os("NV_TEST_RANGE_CACHE").is_none() {
+        if let Some(dir) = app.internal_data_path() {
+            std::env::set_var("NV_TEST_RANGE_CACHE", dir.join("testrange"));
+        }
+    }
     let mut controls = Controls::default();
     let mut started = false;
     // The game's Data folder once found; else what was found where (looked again when the app
