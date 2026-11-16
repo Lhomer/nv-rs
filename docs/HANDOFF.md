@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-16 (merge slaterain/nv-rs main up to ffc4927)
+
+- **Now:** a regular merge of #584, #611, #605, #609, #615, #613, #614, #618 (UI Organizer part 3; JIP game patches GA/GD/GS parts; JIP LN command packages C1 and C2; JIP's hooks on the AI and loader threads) with no conflicts. Nothing of it touches `crates/host` (the active ragdoll, bracing, the snap-back fix); #615's pushes and #618's get-hit effect are JIP-gated rows and commands (`jip::world_push::adjust_push_force` now `pub(crate)`). The fork's `jip::commands::world_ray_cast` (the refr fix) is as it was. Lab and core tests pass; jip's tests run.
+- **Patrick:** approved the merge after the snap-back fix, keeping both sides, preferring upstream's drawing-thread code.
+
 ### Claude, 2026-11-16 (reactions: no ratchet, no snap; the Linux room on Patrick's box)
 
 - **Now (`ragdoll_core::pose::read_base` / `Read` / `apart` / `capped`, `DISTURBED_MOST`; `ragdoll_core::active::Fade`, `FADE_BACK`; host `active_ragdoll.rs`: `Rig::origin` / `fade` / `last` / `shift_back` / `placed` / `drift` / `jumps`, `animated()`, `offsets_of()`, `balance_frame` reading `anim`, the drop's fade and log; the lab's `Sim::drop_body`, `SHIFT_BACK`, origin and fade; docs/GUNPLAY.md "The reactions leaned away, then snapped back"):** lab and core tests pass; not run in the game. Linux room: `NV_PRESET=fixes` by default, plugin paths off Windows through `engine_platform::files::host_path` (the master found by name), `engine_platform::machine_file` (tables beside the program or in `~/.local/share/nv-rs`; no sound table: no sound device), the watchdog and play timeout ten times longer on lavapipe or `NV_RANGE_STUCK`, CI on Ubuntu 24.04 with a glibc 2.39 check, and the wildcard search's short-name rule no longer stopping on another DLC's archive (`files::search_finds`: two known letters, no `~` within a seven-letter literal; the likely "missing DLC archives" stop, not confirmed against his log).
