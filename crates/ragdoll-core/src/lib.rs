@@ -25,6 +25,7 @@ pub mod condition;
 pub mod flinch;
 pub mod knock;
 pub mod obstacle;
+pub mod one_hand;
 pub mod pose;
 pub mod rounds;
 pub mod tuning;

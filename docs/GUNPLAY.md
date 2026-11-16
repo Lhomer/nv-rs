@@ -471,6 +471,36 @@ stretched and grew, and the game froze. Two causes, both fixed:
   poses (the pass writing back three times a frame, a hair off, the animation skipping frames)
   makes exactly the shown pose and never adds up.
 
+### A two-handed weapon fired one-handed is far less accurate (Patrick, 2026-11-15)
+
+While an actor's support hand is off its two-handed weapon's grip (bracing, or on its way back),
+its shots go much wider. The penalty eases back to normal as the hand returns to the grip.
+Heavier weapons are worse one-handed, and stronger actors steady them better
+(`ragdoll_core::one_hand`, `crate::one_hand`):
+
+- **The share:** how far off the grip the support hand is, from its wrist's distance to the grip
+  in the shown pose. 0 within 1 unit, 1 from 12 units, eased between. The active ragdoll's frame
+  sets it for each actor holding a weapon two-handed (`brace::grips`); it lapses after 0.25 s
+  unsaid.
+- **The spread:** the weapon's effective spread (the game's own spread getter `0x524be0`, with the
+  spread mods: WMX and any other mod plugin) one-handed becomes `spread * (1 + k) + k * 1.8`
+  degrees. `k` is heaviness (`1 + weight / 8 lb`, the effective weight with the weight mods) times
+  unsteadiness (Strength 5: 1, each point 0.11 less, at least 0.45 for the strongest, at most
+  1.5). It is held to 0.75..6, so even the strongest actor with the lightest two-hander is
+  clearly worse one-handed. Strength is the actor value, which creatures have too.
+- **Applied at the shot:** `Projectile::Create`'s yaw and pitch (`crate::ballistics`'s hook) are
+  turned by a random amount within the extra cone, on top of the game's own spread. Each pellet is
+  turned separately.
+- **Examples** (the lab test): a 6 lb rifle (0.4 degrees) is 4.3 degrees one-handed at Strength 5,
+  5.5 at Strength 2 and 2.1 at Strength 10. A 20 lb one (0.6 degrees) is 9.0, 11.8 and 4.4.
+  After the regrip both are back to their own.
+- **The player** never braces (the active ragdoll leaves the player to the game), so the penalty
+  never applies to the player.
+- **Tests:** `ragdoll_core::one_hand` (one-handed far worse, heavier worse, stronger better, the
+  floor). The lab's `one_handed_fire_is_far_less_accurate_until_the_regrip` takes the share from
+  the `rifle-wall-regrip` scene: fully off during the brace, only coming down after, back on the
+  grip at the end, for a light and a heavy rifle and Strength 2, 5 and 10. Not run in game.
+
 ### Active ragdoll: the support hand regrips smoothly (Patrick, 2026-11-15, e2e5531 reel)
 
 After a brace, a two-handed weapon's support hand wobbled as it went back to the gun. It went

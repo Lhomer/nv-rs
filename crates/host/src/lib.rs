@@ -43,6 +43,7 @@ pub mod menu_tiles;
 pub mod mod_fit_worn;
 pub mod movement;
 pub mod native_inflate;
+pub mod one_hand;
 pub mod patch_data;
 pub mod perk_every_level;
 pub mod phone_range;

@@ -245,6 +245,10 @@ pub struct Stats {
     pub regrip_overshoot: f32,
     pub regrip_reversals: u32,
     pub regrip_drift: f32,
+    /// How far off a two-handed weapon's grip the support hand was each frame (0 on it, 1 fully
+    /// off: `ragdoll_core::one_hand::off_grip`), from the first hit on: the one-handed accuracy
+    /// penalty's share.
+    pub off_grip: Vec<f32>,
 }
 
 /// The support hand's way back to its grip, watched ([`Sim::watch_regrip`]).
@@ -1836,6 +1840,11 @@ impl Sim {
         self.posed = out;
         self.watch_hands();
         self.watch_regrip();
+        if self.stats.last_hit.is_some() {
+            if let Some(off) = self.support_off_grip() {
+                self.stats.off_grip.push(off);
+            }
+        }
         self.measure(&before, dt);
         if self.rig.body.is_some() && shown_w <= 0.0 && !busy {
             self.rig.body = None;
@@ -1936,6 +1945,14 @@ impl Sim {
             w.touching = touching && holding;
             w.last = Some(wrist);
         }
+    }
+
+    /// How far off its weapon's grip the support hand is in the shown pose (0 on it, 1 fully off:
+    /// `ragdoll_core::one_hand::off_grip`); none when the body holds no weapon two-handed.
+    pub fn support_off_grip(&self) -> Option<f32> {
+        let grip = self.grip(&self.posed)?;
+        let d = length(sub(self.posed[mq::L_HAND].1, grip.1));
+        Some(ragdoll_core::one_hand::off_grip(d))
     }
 
     /// The grip hold's weight now (none: no hold): once a two-handed weapon's support hand is back

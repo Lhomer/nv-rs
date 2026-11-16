@@ -947,6 +947,68 @@ mod tests {
         assert!(failed.is_empty(), "{failed:#?}");
     }
 
+    /// A two-handed weapon fired with one hand (Patrick, 2026-11-15): while the support hand is off
+    /// the grip (bracing, coming back) the spread is far worse, easing back to the weapon's own as
+    /// the hand regrips; heavier weapons worse, stronger actors better, never as good as two hands
+    /// (`ragdoll_core::one_hand`, the share from the lab's own regrip).
+    #[test]
+    fn one_handed_fire_is_far_less_accurate_until_the_regrip() {
+        use ragdoll_core::one_hand::spread;
+        let mut sim = Sim::new(GroundKind::Flat);
+        let spec = Spec::built_in("rifle-wall-regrip").unwrap();
+        let r = run(&mut sim, &spec, Tuning::GAME).unwrap();
+        assert!(r.regrip_watched, "the support hand braced and came back");
+        let off = sim.stats.off_grip.clone();
+        assert!(!off.is_empty());
+        let peak = off.iter().copied().fold(0.0f32, f32::max);
+        let last = *off.last().unwrap();
+        assert!(peak > 0.99, "the support hand fully off the grip: {peak}");
+        assert!(last < 0.01, "back on the grip at the end: {last}");
+        // From its peak to the end it only comes down (eased back, never off the grip again).
+        let at = off.iter().position(|&o| o >= peak - 1e-6).unwrap();
+        let mut least = peak;
+        for (i, &o) in off[at..].iter().enumerate() {
+            assert!(
+                o <= least + 0.02,
+                "back off the grip after the regrip: frame {i}, {o}"
+            );
+            least = least.min(o);
+        }
+        // A light and a heavy rifle (effective spread and weight), a weak and a strong actor.
+        let light = (0.4f32, 6.0f32);
+        let heavy = (0.6f32, 20.0f32);
+        for &(base, weight) in &[light, heavy] {
+            for strength in [2.0f32, 5.0, 10.0] {
+                let one = spread(base, weight, strength, peak);
+                let after = spread(base, weight, strength, last);
+                println!(
+                    "{weight} lb, Strength {strength}: {base:.2} deg two-handed, {one:.2} one-handed, \
+                     {after:.2} after the regrip"
+                );
+                assert!(
+                    one >= base * 2.5 && one - base >= 1.2,
+                    "much worse one-handed: {one}"
+                );
+                assert!(
+                    (after - base).abs() < 0.05,
+                    "recovered after the regrip: {after}"
+                );
+            }
+        }
+        let worst = |(b, w): (f32, f32), s: f32| spread(b, w, s, 1.0);
+        assert!(
+            worst(heavy, 5.0) > worst(light, 5.0) * 1.5,
+            "heavier is worse"
+        );
+        assert!(
+            worst(light, 2.0) > worst(light, 10.0) * 1.5,
+            "stronger is steadier"
+        );
+        assert!(worst(heavy, 10.0) < worst(heavy, 2.0));
+        // The strongest actor with the lightest two-hander: still clearly worse than two hands.
+        assert!(worst((light.0, 0.0), 10.0) > light.0 * 3.0);
+    }
+
     /// What a regrip may do: how far past the grip it may go (cm), how often its distance may grow
     /// again (never), how far it may come off the grip once on it (cm).
     const MOST_REGRIP_OVERSHOOT: f32 = 0.5;

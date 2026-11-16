@@ -283,7 +283,12 @@ pub fn install(e: &mut Engine) {
                 Ptr, u32, u32, u32, u32, u32, u32, f32, f32, u32, u32, u8, u8, f32, f32, u32
             ) -> Ptr<engine::units::fallout_ai::projectile::Projectile>
         );
-        let made = create(e, a);
+        // A two-handed weapon fired with one hand goes wider (`crate::one_hand`).
+        let mut args = a.to_vec();
+        if crate::gunplay::is_on() {
+            crate::one_hand::widen(e, &mut args);
+        }
+        let made = create(e, &args);
         if a.len() >= 4 && on() {
             shot(e, a[0], a[1], a[3], made.eax);
         }

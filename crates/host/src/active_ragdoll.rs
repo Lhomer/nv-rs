@@ -1037,6 +1037,21 @@ pub fn apply(e: &mut Engine) {
                 shown[h] = pose::ortho(&blend(shown[h], ih));
             }
         }
+        // A two-handed weapon's support hand off its grip (bracing, coming back): its shots go
+        // wider by how far (`crate::one_hand`).
+        if grips(&rig, &anim) {
+            let off = if rig.brace.is_some() || rig.grip_hold {
+                let at = shown_positions(&rig, &anim, &shown, pi, pelvis_offset);
+                let grip = home_of(&rig, &anim, 0, |i| Some((shown[i], at[i])));
+                match (bone_of(&rig, Role::Hand, 0), grip) {
+                    (Some(h), Some(g)) => ragdoll_core::one_hand::off_grip(length(sub(at[h], g.1))),
+                    _ => 0.0,
+                }
+            } else {
+                0.0
+            };
+            crate::one_hand::set(rig.actor, off);
+        }
         // Each bone's world offset over its animation: its parent's shown and animated rotations
         // taken back, its own shown one on (`A(p) S(p)^T S(b) A(b)^T`), made orthonormal.
         let offsets: Vec<M3> = (0..n)
@@ -2363,6 +2378,7 @@ fn update(e: &mut Engine, root: u32) {
 /// Everything dropped (a load, a new game, the main menu): the nodes go with the game.
 pub fn clear() {
     RIGS.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    crate::one_hand::clear();
     *LAST.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 

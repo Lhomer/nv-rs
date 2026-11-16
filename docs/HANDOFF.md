@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-16 (one-handed fire with a two-handed weapon)
+
+- **Now (`ragdoll_core::one_hand`: `off_grip`, `penalty`, `spread`, `extra`; host `crate::one_hand` (`set`, `off`, `widen`, `clear`), the share set in `active_ragdoll` each frame, the shot widened in `ballistics`' `Projectile::Create` hook; lab `Stats::off_grip`, `Sim::support_off_grip`, test `one_handed_fire_is_far_less_accurate_until_the_regrip`):** the effective (mod-applied) spread far wider while the support hand is off a two-handed grip, scaled up by effective weight and down by Strength, floored, easing back with the regrip. Not run in game; the player never braces, so never applies to the player.
+- **Patrick:** a large accuracy penalty for a two-handed weapon fired one-handed, easing back as the hand regrips, from WMX-applied stats; heavier worse, stronger better, never negligible; a test covering light/heavy and weak/strong.
+
 ### Claude, 2026-11-15 (the support hand regrips smoothly)
 
 - **Now (`ragdoll_core::brace`: `Phase::Released` an offset from the hand's home (`step_home`, critically damped, no overshoot, `RETURN_SWEEP`), `home_offset`, `home_share`, `on_home`, `grips`, `carried`, `GRIP_NEAR`, `REGRIP_LOCK`, `HANDOVER_NEAR`; the motors follow the way home (`motor_goal`); host `home_of`, `grips`, `world_of`, `PutArm`, `Rig::grip_hold`; lab `Sim::home`, `grip`, `grip_hold_weight`, `watch_regrip` and its stats, scenes `rifle-wall-regrip`, `rifle-railing-regrip`, the regrip check in every scene and the sweep):** no regrip overshoot, wobble or drift in the lab (35 regrips in the sweep). Merged slaterain main up to 4c812f7 just before (79963aac). Not run in game.
