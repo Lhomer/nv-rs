@@ -7,6 +7,25 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (merge slaterain/nv-rs main up to 04e62ba)
+
+- **Now:** merged #626, #622, #641, #635, #621, #625, #619, #623, #651 and #646. #635 split the
+  Direct3D 9 layer:
+  - The Win32 window moved to `d3d9real/win32.rs`, carrying the fork's versions of the moved code
+    (mouse look and raw mouse, the window mode switch, the borderless refit, placement reports).
+  - Shared bookkeeping stays in `d3d9real.rs` for every system: `GAME_TOP` and `GAME_*`,
+    `rect_after_move`, `is_borderless`, `want_vsync`, `Request`, `Showing`.
+  - `switch_window_mode` and `native_size` are re-exported from the Windows layer.
+  - Off Windows the fork's native window (Android, the Linux room) keeps `window_created`,
+    `window_titled` and `window_moved`. `elsewhere.rs` keeps only the refusing `window_thread`. The
+    real Direct3D 9 asked for off Windows still falls back to wgpu, not upstream's refusal.
+  - `d3d9real` stays `cfg(wgpu_window)` (Windows, Android, Linux), not every system: the fork's
+    off-Windows window code was never built for macOS.
+  - `overridable.tsv` keeps the fork's ballistics rows and takes upstream's JIP count (0).
+  - JIP stays off by default.
+  - Windows (host, launcher), Linux and Android check clean.
+- **Patrick:** approved the merge after the reaction fix was published.
+
 ### Claude, 2026-11-17 (a small flinch as the AI walks: the stale base, the spin, the snap)
 
 - **Now:**

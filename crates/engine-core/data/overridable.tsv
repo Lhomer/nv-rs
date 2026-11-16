@@ -146,7 +146,7 @@
 009a60e0	1	nv-rs weighty combat
 009ac5a0	1	fixes preset guard
 009b5170	1	nv-rs weighty combat
-009b5a30	5	JIP
+009b5a30	0	JIP
 009bca60	0	nv-rs weighty combat
 009c1b70	1	nv-rs weighty combat
 009da7c0	0	ITR
@@ -271,6 +271,7 @@
 #> 3.9 GH2
 
 #> 3.9 GF
+00601c30	0	JIP
 
 #> 3.9 GS
 
