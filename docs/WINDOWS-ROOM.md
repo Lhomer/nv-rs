@@ -106,10 +106,14 @@ Beside each clip a `.json` sidecar of the same name holds:
   (`position`, `knock_state`, `life_state`, `health`, `falling`, `getting_up`), each with `t`, and
   `body`: the reaction's `active` (the physical body on), `pelvis_offset` (game units written over
   the animation), `pelvis_jump` (the shown pelvis's move in the frame beyond the actor's own,
-  game units), `yaw_rate` (its turn against the animation, rad/s), `settling` (being handed back:
-  it only comes closer), `spread` (the body's farthest bone from the pelvis, m; the body is dropped
-  past 2.5), `drift` and `drift_most` (reads a later game pass moved, and the most, in tolerances),
-  `jumps` (animation jumps eased in) and `fade` (how much of a dropped body's way back is left);
+  game units), `yaw_rate` (its turn against the animation, rad/s), `spin` and `spin_bone` (the
+  fastest any bone's shown offset from its animation changed, rad/s, and which bone),
+  `settling` (being handed back: it only comes closer), `yielded` (it yields to its animation:
+  the AI moved or turned the actor, or its animation jumped), `limited` (how many offsets were
+  held to the push since the body was made), `ai_speed` (how fast the AI moves the actor,
+  units/s), `spread` (the body's farthest bone from the pelvis, m; the body is dropped past
+  2.5), `drift` and `drift_most` (reads a later game pass moved, and the most, in tolerances),
+  `jumps` (animation jumps the reaction yielded to) and `fade` (how much of a dropped body's way back is left);
   `null` when it is not reacting.
 
 The clips need the Vulkan renderer (the default; Settings.cmd's Renderer). With "Direct3D 9" the

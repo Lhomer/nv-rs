@@ -282,13 +282,188 @@ pub const REACTION_MOST: f32 = 2.0;
 /// The physics' weight in the shown pose (as [`weight`]) `since_busy` seconds after the reaction
 /// was last busy (steps, a brace, a fall) and `since_hit` after its last hit: a reaction that is not
 /// going over ([`REACTION_MOST`]) starts handing back by then, busy or not.
-pub fn reaction_weight(since_busy: f32, since_hit: f32, falling: bool) -> f32 {
+pub fn reaction_weight(
+    since_busy: f32,
+    since_hit: f32,
+    falling: bool,
+    since_yield: Option<f32>,
+) -> f32 {
     let since = if falling {
         since_busy
     } else {
         since_busy.max(since_hit - REACTION_MOST + tuning::get().active_for)
     };
-    weight(since)
+    let w = weight(since);
+    match since_yield {
+        Some(y) if !falling => w.min(1.0 - ease(y / YIELD_BACK)),
+        _ => w,
+    }
+}
+
+/// How fast a reaction yields to its animation once the animation moves on (the actor's AI
+/// walks or turns it, or its animation jumps: a new set after a cripple): its body handed back
+/// over this (s, eased), never fighting the animation's own motion (Patrick's 14-16-02 clip: a
+/// 0.53 m/s flinch on an actor starting to walk and turn went to 48 units off and spun).
+pub const YIELD_BACK: f32 = 0.35;
+/// The AI's move of the actor (game units) or turn (rad) since the last hit past which the
+/// reaction yields ([`YIELD_BACK`]).
+pub const YIELD_MOVE: f32 = 6.0;
+pub const YIELD_TURN: f32 = 0.25;
+
+/// How fast the AI moves (game units/s) or turns (rad/s) an actor walking or turning on its own:
+/// a push below a knock-down then takes no catch steps, its stride carries it (steps planned from
+/// a stride and followed while the AI walks it threw the pelvis 7 units sideways in the lab).
+pub const WALKING_SPEED: f32 = 15.0;
+pub const TURNING_SPEED: f32 = 0.6;
+
+/// Whether the AI is walking or turning the actor itself ([`WALKING_SPEED`], [`TURNING_SPEED`]).
+pub fn ai_walking(speed: f32, turn_rate: f32) -> bool {
+    speed >= WALKING_SPEED || turn_rate.abs() >= TURNING_SPEED
+}
+
+/// Whether a reaction yields now: the AI moved the actor `moved` units or turned it `turned` rad
+/// since the last hit (an animation jump yields at once: its caller's).
+pub fn yields(moved: f32, turned: f32) -> bool {
+    moved >= YIELD_MOVE || turned >= YIELD_TURN
+}
+
+/// The most a reaction's offset may be for its push `v` (m/s: the most of its hits'): each bone's
+/// world turn off its animation (rad), its yaw about the vertical (rad), and the pelvis's offset
+/// (game units; the body's, not the steps'). A 0.53 m/s flinch: 0.67 rad, 6.5 degrees of yaw, 6.2
+/// units.
+pub fn offset_most(v: f32) -> (f32, f32, f32) {
+    let v = v.clamp(0.0, 3.0);
+    (
+        (0.3 + 0.7 * v).min(1.3),
+        (0.06 + 0.1 * v).min(0.3),
+        2.0 + 8.0 * v,
+    )
+}
+
+/// The fastest a bone's shown offset from its animation may change (rad/s): the clip's upper
+/// body turned 3 to 4 times round in under a second.
+pub const SPIN_MOST: f32 = 20.0;
+/// How fast a bound pulls an offset beyond it back (rad/s, game units/s): an offset the bound
+/// meets out past it (a fall that did not happen ending) is brought in, never cut in a frame.
+pub const PULL_TURN: f32 = 3.0;
+pub const PULL_MOVE: f32 = 40.0;
+
+/// The yaw of a world turn `q` about the vertical (rad, -pi to pi): its swing-twist twist.
+pub fn yaw_of(q: Q) -> f32 {
+    let q = short(q);
+    2.0 * q[3].atan2(q[0])
+}
+
+/// A reaction's shown offsets held to what its push justifies ([`offset_most`]) and to
+/// [`SPIN_MOST`] a second, each bone's offset kept from the frame before on the hemisphere of
+/// its animation (the shorter way round).
+#[derive(Clone, Debug, Default)]
+pub struct Limit {
+    before: Vec<Q>,
+    pelvis: Option<V3>,
+}
+
+impl Limit {
+    /// Nothing kept (a new body).
+    pub fn open(&mut self) {
+        self.before.clear();
+        self.pelvis = None;
+    }
+
+    /// The shown offsets only followed, not held (a fall: the ragdoll's), so the bounds pull in
+    /// from where it was when they hold again.
+    pub fn follow(&mut self, shown: &[Q], anim: &[Q], pelvis: V3) {
+        self.before = shown
+            .iter()
+            .zip(anim)
+            .map(|(s, a)| short(qnorm(qmul(*s, qconj(*a)))))
+            .collect();
+        self.pelvis = Some(pelvis);
+    }
+
+    /// The shown world rotations `shown` over their animated `anim` and the pelvis's offset
+    /// `pelvis` (the body's, game units) held for a push `v` (m/s), `dt` on; not the bones `free`
+    /// says (their bounds, the spin's too). Answers how many were held.
+    pub fn hold(
+        &mut self,
+        shown: &mut [Q],
+        anim: &[Q],
+        pelvis: &mut V3,
+        v: f32,
+        dt: f32,
+        free: impl Fn(usize) -> bool,
+    ) -> u32 {
+        let (angle_most, yaw_most, pelvis_most) = offset_most(v);
+        let dt = dt.max(1e-4);
+        let step_most = SPIN_MOST * dt;
+        if self.before.len() != shown.len() {
+            self.before = shown
+                .iter()
+                .zip(anim)
+                .map(|(s, a)| short(qnorm(qmul(*s, qconj(*a)))))
+                .collect();
+        }
+        let mut held = 0;
+        for (i, (s, a)) in shown.iter_mut().zip(anim).enumerate() {
+            let mut off = short(qnorm(qmul(*s, qconj(*a))));
+            if free(i) {
+                self.before[i] = off;
+                continue;
+            }
+            let was = off;
+            // Its yaw about the vertical, then its whole turn.
+            let yaw = yaw_of(off);
+            if yaw.abs() > yaw_most {
+                let back = qexp([0.0, 0.0, yaw.signum() * yaw_most - yaw]);
+                off = qnorm(qmul(back, off));
+            }
+            let w = qlog(off);
+            let l = length(w);
+            if l > angle_most {
+                off = qexp(scale(w, angle_most / l));
+            }
+            // No faster than the spin bound from the frame before; a bound pulling it in, no
+            // faster than its pull.
+            let bound = length(qlog(qmul(off, qconj(was)))) > 1e-5;
+            let most = if bound { PULL_TURN * dt } else { step_most };
+            let d = qlog(qmul(off, qconj(self.before[i])));
+            let l = length(d);
+            if l > most {
+                off = qnorm(qmul(qexp(scale(d, most / l)), self.before[i]));
+            }
+            if length(qlog(qmul(off, qconj(was)))) > 1e-5 {
+                held += 1;
+                *s = qnorm(qmul(off, *a));
+            }
+            self.before[i] = short(off);
+        }
+        let l = length(*pelvis);
+        if l > pelvis_most {
+            let mut to = scale(*pelvis, pelvis_most / l);
+            // Pulled in from where it was, no faster than the pull.
+            if let Some(was) = self.pelvis {
+                let d = sub(to, was);
+                let dl = length(d);
+                let most = PULL_MOVE * dt;
+                if dl > most && length(was) > pelvis_most {
+                    to = add(was, scale(d, most / dl));
+                }
+            }
+            *pelvis = to;
+            held += 1;
+        }
+        self.pelvis = Some(*pelvis);
+        held
+    }
+}
+
+/// `q` on the hemisphere of the identity (the shorter way round).
+fn short(q: Q) -> Q {
+    if q[0] < 0.0 {
+        q.map(|x| -x)
+    } else {
+        q
+    }
 }
 
 /// A reaction being handed back only settles toward its animation: while the body's weight goes
@@ -326,6 +501,29 @@ impl Settle {
         pelvis: &mut V3,
         free: impl Fn(usize) -> bool,
     ) {
+        self.hold_down(shown, target, pelvis, 1.0, free)
+    }
+
+    /// As [`Settle::hold`], each ceiling first brought down by `keep` (the body's weight over the
+    /// frame before's): it settles with the hand-back, never frozen while it turns (Patrick's
+    /// 14-16-02 clip held the pelvis at 34.31 units for 0.25 s).
+    pub fn hold_down(
+        &mut self,
+        shown: &mut [Q],
+        target: &[Q],
+        pelvis: &mut V3,
+        keep: f32,
+        free: impl Fn(usize) -> bool,
+    ) {
+        let keep = keep.clamp(0.0, 1.0);
+        for most in self.angle.iter_mut() {
+            if most.is_finite() {
+                *most *= keep;
+            }
+        }
+        if let Some(p) = self.pelvis.as_mut() {
+            *p *= keep;
+        }
         if self.angle.len() != shown.len() {
             self.angle = vec![f32::INFINITY; shown.len()];
         }
@@ -1841,6 +2039,30 @@ impl Body {
     }
 
     /// The bones' world rotations and joints now (m).
+    /// The body carried along with its animation's own motion since the frame before: each bone
+    /// from where its animated frame was (`from`: world rotation and joint, m) to where it is now
+    /// (`to`), its motion turned with it. The body then works only its offset from the animation:
+    /// the actor's AI walking and turning it, a new animation set, never fought or left behind
+    /// (Patrick's 14-16-02 clip). The caller leaves out the reaction's own moves of the actor (the
+    /// steps' follow of the feet).
+    pub fn carry(&mut self, from: &[(Q, V3)], to: &[(Q, V3)]) {
+        let n = self.state.len().min(from.len()).min(to.len());
+        for i in 0..n {
+            let ((q0, p0), (q1, p1)) = (from[i], to[i]);
+            let d = qnorm(qmul(q1, qconj(q0)));
+            if !(d.iter().all(|x| x.is_finite())
+                && p0.iter().chain(p1.iter()).all(|x| x.is_finite()))
+            {
+                continue;
+            }
+            let s = &mut self.state[i];
+            s.com = add(p1, qrot(d, sub(s.com, p0)));
+            s.q = qnorm(qmul(d, s.q));
+            s.v = qrot(d, s.v);
+            s.w = qrot(d, s.w);
+        }
+    }
+
     pub fn pose(&self) -> Vec<(Q, V3)> {
         (0..self.state.len())
             .map(|i| (self.state[i].q, self.joint(i)))
@@ -1994,17 +2216,113 @@ mod tests {
         let t = tuning::get();
         // Busy all along (a brace held): full until its time, then eased out, gone after the
         // hand-back.
-        assert_eq!(reaction_weight(0.0, 1.0, false), 1.0);
-        assert_eq!(reaction_weight(0.0, REACTION_MOST, false), 1.0);
-        let mid = reaction_weight(0.0, REACTION_MOST + t.blend_back * 0.5, false);
+        assert_eq!(reaction_weight(0.0, 1.0, false, None), 1.0);
+        assert_eq!(reaction_weight(0.0, REACTION_MOST, false, None), 1.0);
+        let mid = reaction_weight(0.0, REACTION_MOST + t.blend_back * 0.5, false, None);
         assert!(mid > 0.2 && mid < 0.8, "{mid}");
-        assert!(reaction_weight(0.0, REACTION_MOST + t.blend_back + 1e-3, false) <= 1e-5);
+        assert!(reaction_weight(0.0, REACTION_MOST + t.blend_back + 1e-3, false, None) <= 1e-5);
         // Going over: its own.
-        assert_eq!(reaction_weight(0.0, 10.0, true), 1.0);
+        assert_eq!(reaction_weight(0.0, 10.0, true, None), 1.0);
         // Never more than its own weight.
         for s in [0.0, 1.0, 1.5, 2.0, 3.0] {
-            assert!(reaction_weight(s, 0.5, false) <= weight(s) + 1e-6);
+            assert!(reaction_weight(s, 0.5, false, None) <= weight(s) + 1e-6);
         }
+    }
+
+    /// A reaction yields to its animation fast: handed back over [`YIELD_BACK`] from when it
+    /// yielded, whatever else holds it; not a fall's. The AI's move or turn past its bounds yields.
+    #[test]
+    fn a_reaction_yields_to_a_moving_animation() {
+        assert_eq!(reaction_weight(0.0, 0.5, false, Some(0.0)), 1.0);
+        let mid = reaction_weight(0.0, 0.5, false, Some(YIELD_BACK * 0.5));
+        assert!(mid > 0.2 && mid < 0.8, "{mid}");
+        assert!(reaction_weight(0.0, 0.5, false, Some(YIELD_BACK + 1e-3)) <= 1e-5);
+        assert_eq!(reaction_weight(0.0, 0.5, true, Some(1.0)), 1.0);
+        assert!(!yields(YIELD_MOVE * 0.5, YIELD_TURN * 0.5));
+        assert!(yields(YIELD_MOVE, 0.0) && yields(0.0, YIELD_TURN));
+        assert!(ai_walking(WALKING_SPEED, 0.0) && ai_walking(0.0, -TURNING_SPEED));
+        assert!(!ai_walking(WALKING_SPEED * 0.5, TURNING_SPEED * 0.5));
+    }
+
+    /// A reaction's offsets are held to its push: a bone's yaw and turn, the pelvis's offset, and
+    /// how fast a bone's offset changes (a spin round the waist cannot happen); a free bone is
+    /// left alone; a turn past half way round is taken the short way.
+    #[test]
+    fn a_reactions_offsets_are_held_to_its_push() {
+        let anim = vec![Q_ID; 3];
+        let (angle, yaw, pelvis_most) = offset_most(0.53);
+        assert!((pelvis_most - 6.24).abs() < 1e-3 && angle < 0.7 && yaw < 0.12);
+        let mut limit = Limit::default();
+        let mut shown = vec![Q_ID; 3];
+        let mut p = [0.0; 3];
+        limit.hold(&mut shown, &anim, &mut p, 0.53, 1.0 / 60.0, |_| false);
+        // A yaw of a full half turn, a bend of a radian, a free bone; the pelvis 20 units off.
+        let mut shown = vec![
+            qexp([0.0, 0.0, 3.0]),
+            qexp([1.0, 0.0, 0.0]),
+            qexp([0.0, 0.0, 2.0]),
+        ];
+        let mut p = [20.0, 0.0, 0.0];
+        let held = limit.hold(&mut shown, &anim, &mut p, 0.53, 1.0 / 60.0, |b| b == 2);
+        assert_eq!(held, 3);
+        let step = PULL_TURN / 60.0 + 1e-4;
+        assert!(length(qlog(shown[0])) <= step, "{:?}", qlog(shown[0]));
+        assert!(length(qlog(shown[1])) <= step);
+        assert!((length(qlog(shown[2])) - 2.0).abs() < 1e-4);
+        assert!((length(p) - pelvis_most).abs() < 1e-3);
+        // Held there frame after frame: never past the bounds, the yaw never past its own.
+        for _ in 0..120 {
+            let mut s = vec![qexp([0.0, 0.0, 3.0]), qexp([1.0, 0.0, 0.0]), Q_ID];
+            let mut p = [0.0; 3];
+            limit.hold(&mut s, &anim, &mut p, 0.53, 1.0 / 60.0, |_| false);
+            assert!(yaw_of(s[0]).abs() <= yaw + 1e-4, "{}", yaw_of(s[0]));
+            assert!(length(qlog(s[1])) <= angle + 1e-4);
+        }
+    }
+
+    /// A settling body's ceilings come down with its weight: an offset that holds still is
+    /// brought down, never frozen.
+    #[test]
+    fn a_settling_body_never_freezes() {
+        let target = vec![Q_ID; 1];
+        let mut settle = Settle::default();
+        let mut s = vec![qexp([0.0, 0.4, 0.0])];
+        let mut p = [10.0, 0.0, 0.0];
+        settle.hold_down(&mut s, &target, &mut p, 1.0, |_| false);
+        let mut last = (0.4f32, 10.0f32);
+        for k in 0..10 {
+            let mut s = vec![qexp([0.0, 0.4, 0.0])];
+            let mut p = [10.0, 0.0, 0.0];
+            settle.hold_down(&mut s, &target, &mut p, 0.9, |_| false);
+            let now = (length(qlog(s[0])), length(p));
+            assert!(
+                now.0 < last.0 && now.1 < last.1,
+                "frame {k}: {now:?} after {last:?}"
+            );
+            last = now;
+        }
+    }
+
+    /// A body carried with its animation's motion keeps its offset from it: turned and moved
+    /// with each bone's frame, its motion turned too.
+    #[test]
+    fn a_body_rides_on_its_animation() {
+        let mut body = Body::from_pose(&figure(), 1.0 / 60.0);
+        let before: Vec<(Q, V3)> = body.pose();
+        let turn = qexp([0.0, 0.0, 1.0]);
+        let moved = [0.5, 0.0, 0.0];
+        let after: Vec<(Q, V3)> = before
+            .iter()
+            .map(|&(q, p)| (qnorm(qmul(turn, q)), add(qrot(turn, p), moved)))
+            .collect();
+        body.state[0].v = [1.0, 0.0, 0.0];
+        body.carry(&before, &after);
+        let now = body.pose();
+        for (a, n) in after.iter().zip(&now) {
+            assert!(length(sub(a.1, n.1)) < 1e-4, "{:?} {:?}", a.1, n.1);
+            assert!(length(qlog(qmul(a.0, qconj(n.0)))) < 1e-4);
+        }
+        assert!(length(sub(body.state[0].v, qrot(turn, [1.0, 0.0, 0.0]))) < 1e-5);
     }
 
     /// A settling body is never shown gaining on its targets: each bone's offset and the pelvis's

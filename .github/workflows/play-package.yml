@@ -26,6 +26,8 @@ jobs:
     timeout-minutes: 240
     env:
       CARGO_INCREMENTAL: 0
+      # The commit the Play clips are stamped with (crates/host/src/room_record.rs: else "local").
+      NV_RS_COMMIT: ${{ github.sha }}
     defaults:
       run:
         shell: pwsh

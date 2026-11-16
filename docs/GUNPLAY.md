@@ -486,6 +486,112 @@ for the shot, the hit's round and the breakdown; a knocked-down actor's fall dam
 attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
 patches (#624) and the knockdown's companion refusal were not on the path.
 
+### A small flinch as the AI starts to walk: a spin and a snap (Patrick, 2026-11-16, b44a964's 14-16-02 Play clip)
+
+A Powder Ganger in Goodsprings, a 10mm. Hit 1 (head, 0.53 m/s, one caught step) settled by 3.03
+s. Hit 2 at 4.58 s was the same small flinch (left clavicle, 0.53 m/s, decision None). From
+about 4.95 s its AI walked and turned it (41 units in 1.8 s), and the reaction went wild:
+- the pelvis offset went from 0.1 to 48 units by 5.28 s, up to 14 units a frame, and the yaw
+  rate reached 2 to 6.7 rad/s;
+- on the video, the upper body folded and spun round the waist 3 to 4 times in under a second,
+  the legs planted;
+- at 5.31 s: "its animation jumped under the reaction (L Foot, 253 tolerances in a frame): eased
+  in";
+- from 6.01 s the hand-back held the pelvis frozen at 34.31 units while the yaw kept changing;
+- at about 7 s it snapped from walking back to facing forward.
+
+The head had been crippled by hit 1, which changes its animation set.
+
+**The cause: the write left in the bones.** The host wrote the reaction over each bone's local,
+and the write stayed there into the game's next frame. Each frame it read the bone back and had
+to tell the animation's new pose from its own write (`pose::read_base`). A read near the write
+was taken for "a later pass moved our write" and the remembered pose was kept.
+- A walk moving a bone the way its offset went fell in that window. The animation was read stale
+  until it was 12 units off (`DISTURBED_MOVE`; 253 tolerances × 0.05 = 12.65), then it jumped.
+- The body chased a frozen animation while the actor walked and turned, and the stale pose
+  showed until the reaction ended (the snap).
+- A pass moving the write past that window was taken for the animation. The offset was put on
+  top of itself every frame, and the body chased a target running away by its own lag: the spin.
+
+The motors were not at fault: every error in the body is taken the short way (`qlog`).
+
+- **The write is put back after the draw** (`active_ragdoll::unwrite`, from `gunplay`'s
+  `FIRST_PERSON_SETUP` wrapper after the draw's set-up). Every bone written gets back the game's
+  own local as it was read. The draw shows the reaction: the world transforms the write updated
+  stay until the game updates them. Nothing of it is left for the game's next frame: its
+  animation and its later passes work on its own pose. The next read is the animation as it is,
+  never stale and never our write. The reaction is an offset over the current animation every
+  frame.
+- **The body rides on the animation** (`active::Body::carry`). Each frame each physical bone is
+  carried from where its animated frame was to where it is now (its AI's walk and turn, a gait,
+  a new set), its motion turned with it, so the physics works only the offset. The steps' own
+  moves of the actor are left out (`Rig::own_total`). The b44a964 origin shift went with it.
+- **It yields to a moving animation** (`active::yields`, `YIELD_BACK` 0.35 s). Past 6 units of
+  the AI's move or 0.25 rad of its turn since the last hit, or an animation jump (no longer eased
+  in under it), the body is handed back over 0.35 s, a brace's hands let go and the steps end
+  (logged `yields to its animation (...)`).
+- **No catch steps while the AI walks it** (`active::ai_walking`: 15 units/s or 0.6 rad/s): its
+  stride carries a small push. Steps planned from a stride and followed threw the lab's pelvis 7
+  units sideways.
+- **Held to the push** (`active::Limit`, `offset_most`).
+  - Each bone's offset from its target is held to 0.3 + 0.7 v rad, its yaw to 0.06 + 0.1 v rad,
+    and the pelvis's to 2 + 8 v units. For a 0.53 m/s flinch that is 0.67 rad, 6.5 degrees of yaw
+    and 6.2 units.
+  - No bone's offset changes faster than 20 rad/s (`SPIN_MOST`), kept on the animation's
+    hemisphere.
+  - A bound pulls an offset beyond it in at 3 rad/s and 40 units/s (`PULL_TURN`, `PULL_MOVE`),
+    never cutting in one frame.
+  - A fall's offsets are only followed.
+- **Settling never freezes** (`Settle::hold_down`). Its ceilings come down with the body's weight
+  each frame.
+- **A hit during the hand-back starts a fresh body** from the pose shown, which is eased out over
+  it. Its weight used to jump back to full over a body left behind: a hand turned 43 rad/s in one
+  frame in the lab.
+- **The pose log** adds `spin` and `spin_bone` (the fastest bone offset change, rad/s, and which
+  bone), `yielded`, `limited` and `ai_speed`. `drift` stays 0 now (no read is ever our write).
+  `jumps` counts the animation jumps it yielded to.
+- **Play clips carry the real commit.** The Play package's CI sets `NV_RS_COMMIT`; a clip said
+  `local` before.
+- **Lab** (`scenario::locomotion`):
+  - Its gait swings the legs, lifts the feet, bobs the pelvis and turns the spine into a turn.
+  - Its `move` starts the AI's walk and turn that long after the last hit; `turnby` stops the
+    turn.
+  - `readback=1` reads the animation back from the bones as the host does. `readback=written`
+    leaves the write in them, as b44a964 did. `aimpass=1` adds a later pass turning the upper
+    spine while the AI moves it.
+
+  48 runs: the 10mm hits (the clip's two, a clavicle, a chest, a head; pistol, unarmed, rifle) with
+  the AI walking and turning 90 to 180 degrees after or as they land, each with and without the
+  read-back and the pass. Worst run, b44a964 → now:
+
+  | Measure | b44a964 | Now |
+  |---|---|---|
+  | Pelvis turn against the animation (rad/s) | 5.27 | 0.95 |
+  | Runs turning faster than the animation turns | 9 | 0 |
+  | Fastest bone offset change (rad/s) | 45.7 (a hand) | 11.5 (a stepping foot) |
+  | Runs past 20 rad/s | 5 | 0 |
+  | Stale reads (the most in a run) | 363 | 0 |
+  | Pelvis offset (units) | 3.8 | 3.5 |
+  | Pelvis move per frame (units) | 0.96 | 0.79 |
+  | Back in the animation (s, slowest) | 4.8 | 3.0 |
+
+  An earlier probe, where the AI stopped at hit 2 and started again 0.37 s after it, had b44a964's
+  upper spine at 48 rad/s and the pelvis at 11.4 units (8.9 growth after release). That stop and
+  start is not a spec key, so it is not among the tests.
+
+  **The lab did not reach the clip's 48 units.** Its read-back is a model: the game's later
+  passes and the cripple's new set are not known from here.
+
+  The tests:
+  - `a_small_hit_rides_on_the_walk` checks every run: pelvis at most 4 units, at most 2 units a
+    frame, yaw rate under the animation's own turn rate, no bone past 20 rad/s, no stale read,
+    over within 3.5 s;
+  - `a_write_left_in_the_bones_reads_the_walk_stale`: hundreds of stale reads with the write left
+    in the bones, none put back.
+
+  The ragdoll-core tests cover the yield, the bounds, the settling and the carry. Not seen in the
+  game yet.
+
 ### One hit, then a 5.5 s runaway, a spin and a snap (Patrick, 2026-11-16, c2a53c0's .44 fold clip)
 
 A .44 into a Powder Ganger braced at a waist-high obstacle. The first reaction looked right (a

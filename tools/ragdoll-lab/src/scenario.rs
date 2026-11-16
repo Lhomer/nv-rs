@@ -56,6 +56,13 @@ pub struct Spec {
     /// the game's AI moves an actor while it reacts.
     pub turn: f32,
     pub walk: f32,
+    /// The AI's move starting this long after the last hit (s), the turn stopping after this many
+    /// degrees, and the host's read of the animation back from its bones (b44a964's; `Sim::read_back`).
+    pub move_after: Option<f32>,
+    pub turn_by: Option<f32>,
+    pub read_back: bool,
+    pub leave_written: bool,
+    pub aim_pass: bool,
     pub limbs: Limbs,
     pub armed: bool,
     /// The weapon is two-handed (`armed=rifle`, or `armed=1`) or one-handed (`armed=pistol`).
@@ -77,6 +84,11 @@ impl Default for Spec {
             range: 10.0,
             turn: 0.0,
             walk: 0.0,
+            move_after: None,
+            turn_by: None,
+            read_back: false,
+            leave_written: false,
+            aim_pass: false,
             limbs: Limbs::WHOLE,
             armed: false,
             two_handed: true,
@@ -381,6 +393,13 @@ impl Spec {
                 "range" => spec.range = value.parse().map_err(|_| "range".to_string())?,
                 "turn" => spec.turn = value.parse().map_err(|_| "turn".to_string())?,
                 "walk" => spec.walk = value.parse().map_err(|_| "walk".to_string())?,
+                "move" => spec.move_after = Some(value.parse().map_err(|_| "move".to_string())?),
+                "turnby" => spec.turn_by = Some(value.parse().map_err(|_| "turnby".to_string())?),
+                "readback" => {
+                    spec.read_back = value == "1" || value == "written";
+                    spec.leave_written = value == "written";
+                }
+                "aimpass" => spec.aim_pass = value == "1",
                 "armed" => {
                     spec.armed = value != "0";
                     spec.two_handed = value != "pistol";
@@ -476,6 +495,12 @@ pub struct Report {
     pub settle_jump: f32,
     pub release_rise: f32,
     pub handed_back: Option<f32>,
+    pub pelvis_most: f32,
+    pub pelvis_jump: f32,
+    pub bone_spin: f32,
+    pub spin_bone: &'static str,
+    pub base_stale: u32,
+    pub base_jumps: u32,
     pub yaw_rate: f32,
     pub yaw_off: f32,
     pub expect: Vec<(String, bool)>,
@@ -505,7 +530,7 @@ impl Report {
              \"brace_hands\":[{},{}],\"hand_losses\":{},\"hand_jitter_mps\":{:.3},\
              \"hand_slip_cm\":{:.2},\"elbow_reversals\":{},\"regrip_watched\":{},\
              \"regrip_overshoot_cm\":{:.2},\"regrip_reversals\":{},\"regrip_drift_cm\":{:.2},\
-             \"settle_rise\":{:.3},\"settle_jump\":{:.3},\"release_rise\":{:.3},\"yaw_rate\":{:.3},\"yaw_off\":{:.3},\
+             \"settle_rise\":{:.3},\"settle_jump\":{:.3},\"release_rise\":{:.3},\"pelvis_most\":{:.2},\"pelvis_jump\":{:.2},\"bone_spin\":{:.2},\"spin_bone\":{},\"base_stale\":{},\"base_jumps\":{},\"yaw_rate\":{:.3},\"yaw_off\":{:.3},\
              \"expectations\":[{}],\"passed\":{},\"log\":[{}]}}",
             s(&self.name),
             s(self.ground),
@@ -546,6 +571,12 @@ impl Report {
             self.settle_rise,
             self.settle_jump,
             self.release_rise,
+            self.pelvis_most,
+            self.pelvis_jump,
+            self.bone_spin,
+            s(self.spin_bone),
+            self.base_stale,
+            self.base_jumps,
             self.yaw_rate,
             self.yaw_off,
             expect.join(","),
@@ -570,6 +601,14 @@ pub fn prepare(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<(), String> {
     sim.range = spec.range.clamp(0.5, 200.0);
     sim.turn = spec.turn.to_radians();
     sim.walk = spec.walk;
+    // After the scenario's last hit (`run` fires the first 0.3 s in, each after its delay).
+    sim.move_after = spec
+        .move_after
+        .map(|m| 0.3 + spec.hits.iter().map(|h| h.delay).sum::<f32>() + m);
+    sim.turn_by = spec.turn_by.map(f32::to_radians);
+    sim.read_back = spec.read_back;
+    sim.leave_written = spec.leave_written;
+    sim.aim_pass = spec.aim_pass;
     sim.set_limbs(spec.limbs);
     sim.armed = spec.armed;
     sim.two_handed = spec.two_handed;
@@ -699,6 +738,12 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
         settle_rise: st.settle_rise,
         settle_jump: st.settle_jump,
         release_rise: st.release_rise,
+        pelvis_most: st.pelvis_most,
+        pelvis_jump: st.pelvis_jump,
+        bone_spin: st.bone_spin,
+        spin_bone: ragdoll_core::flinch::BONES[st.spin_bone].0,
+        base_stale: st.base_stale,
+        base_jumps: st.base_jumps,
         handed_back: match (st.handed_back_at, st.last_hit) {
             (Some(b), Some(h)) => Some((b - h) as f32),
             _ => None,
@@ -2211,5 +2256,125 @@ mod runaway {
                 r.yaw_off
             );
         }
+    }
+}
+
+#[cfg(test)]
+/// Patrick's 14-16-02 Play clip (b44a964, a Powder Ganger in Goodsprings, a 10mm): a second
+/// small flinch (0.53 m/s at the left clavicle), then its AI walks and turns it, and the reaction
+/// went wild: the pelvis 48 units off, 14 units a frame, the upper body spinning at the waist 3 to
+/// 4 times round, frozen at 34 units while it kept turning, a snap back to facing forward. The
+/// lab's `move` (s after the last hit), `walk`, `turn`, `turnby`; `readback=1` reads the animation
+/// back from the bones as the host does, `aimpass=1` with a later pass turning the upper spine
+/// while the AI moves it (`Sim::read_back`, `Sim::aim_pass`).
+mod locomotion {
+    use super::*;
+    use crate::sim::Sim;
+
+    fn specs() -> Vec<(String, f32)> {
+        let mut out = Vec::new();
+        for (hits, armed) in [
+            ("10mm@head,10mm@lclavicle+2.13", "pistol"),
+            ("10mm@lclavicle", "pistol"),
+            ("10mm@chest", "0"),
+            ("10mm@head", "rifle"),
+        ] {
+            for (after, walk, turn, by) in [
+                (0.37, 23.0, 120.0, 150.0),
+                (0.2, 40.0, 180.0, 180.0),
+                (0.2, 0.0, -150.0, 90.0),
+                (-1.0, 23.0, 120.0, 150.0),
+            ] {
+                for read in ["", "&readback=1", "&readback=1&aimpass=1"] {
+                    out.push((
+                        format!(
+                            "armed={armed}&hits={hits}&move={after}&walk={walk}&turn={turn}\
+                             &turnby={by}{read}"
+                        ),
+                        f32::abs(turn).to_radians(),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    fn runs() -> Vec<(String, f32, Report)> {
+        specs()
+            .into_iter()
+            .map(|(spec, turn)| {
+                let mut sim = Sim::new(GroundKind::Flat);
+                let r = run(&mut sim, &Spec::parse(&spec).unwrap(), Tuning::GAME).unwrap();
+                eprintln!(
+                    "{spec:96} pelvis {:.1} jump {:.2} spin {:.1} ({}) yaw {:.2} stale {} \
+                     recovery {:?}",
+                    r.pelvis_most,
+                    r.pelvis_jump,
+                    r.bone_spin,
+                    r.spin_bone,
+                    r.yaw_rate,
+                    r.base_stale,
+                    r.recovery
+                );
+                (spec, turn, r)
+            })
+            .collect()
+    }
+
+    /// A small hit, then the AI walks and turns the actor 90 to 180 degrees: the reaction stays
+    /// small (the pelvis at most 4 units off: the catch step of a hit while it stood), never turns
+    /// the body against its animation as fast as the animation turns, nor moves the pelvis 2
+    /// units in a frame, nor turns any bone off its animation faster than `active::SPIN_MOST`; the
+    /// animation is never read stale; it is over within 3.5 s of the first hit.
+    #[test]
+    fn a_small_hit_rides_on_the_walk() {
+        for (spec, turn, r) in runs() {
+            assert!(!r.fell, "{spec}: fell");
+            assert!(
+                r.pelvis_most <= 4.0,
+                "{spec}: pelvis {:.1} units off",
+                r.pelvis_most
+            );
+            assert!(
+                r.pelvis_jump <= 2.0,
+                "{spec}: pelvis {:.2} units in a frame",
+                r.pelvis_jump
+            );
+            assert!(
+                r.yaw_rate < turn,
+                "{spec}: turned {:.2} rad/s against the animation's {turn:.2}",
+                r.yaw_rate
+            );
+            assert!(
+                r.bone_spin <= ragdoll_core::active::SPIN_MOST + 0.5,
+                "{spec}: {} turned {:.1} rad/s off its animation",
+                r.spin_bone,
+                r.bone_spin
+            );
+            assert_eq!(r.base_stale, 0, "{spec}: the animation read stale");
+            assert!(
+                r.recovery.is_some_and(|t| t <= 3.5),
+                "{spec}: {:?}",
+                r.recovery
+            );
+        }
+    }
+
+    /// The cause: with the write left in the bones (b44a964), the animation's own walk is taken
+    /// for a later pass's move of the write and its pose kept stale, hundreds of reads; put back
+    /// after the draw, never.
+    #[test]
+    fn a_write_left_in_the_bones_reads_the_walk_stale() {
+        let spec =
+            "armed=pistol&hits=10mm@lclavicle&move=0.2&walk=40&turn=180&turnby=180&aimpass=1";
+        let read = |how: &str| {
+            let mut sim = Sim::new(GroundKind::Flat);
+            let spec = Spec::parse(&format!("{spec}&readback={how}")).unwrap();
+            run(&mut sim, &spec, Tuning::GAME).unwrap().base_stale
+        };
+        let (left, put_back) = (read("written"), read("1"));
+        eprintln!("stale reads: write left {left}, put back {put_back}");
+        assert!(left >= 50, "{left}");
+        assert_eq!(put_back, 0);
     }
 }

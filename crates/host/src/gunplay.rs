@@ -767,6 +767,10 @@ pub fn install(e: &mut Engine) {
         if let Some(placed) = placed {
             unplace_pose(e, &placed);
         }
+        // The flinches' write put back: the game's next frame starts from its own pose.
+        if on() {
+            crate::active_ragdoll::unwrite(e);
+        }
         Ret::default()
     });
     e.register(REACH_SEARCH, |e, a| {

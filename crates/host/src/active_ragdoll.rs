@@ -172,6 +172,32 @@ pub struct Rig {
     pub shown_before: Option<(V3, f32)>,
     pub yaw_rate_now: f32,
     pub jump_now: f32,
+    /// The steps' own moves of the actor since the body was made (left out of its carry), and
+    /// each bone's animated frame the frame before (world rotation, joint less those moves): the
+    /// body carried along with the animation's own motion (`active::Body::carry`).
+    pub own_total: V3,
+    pub carry_from: Option<Vec<(active::Q, V3)>>,
+    /// The shown offsets held to the push (`active::Limit`), the push (m/s, the most of the
+    /// body's hits'), the body's weight in the shown pose last frame.
+    pub limit: active::Limit,
+    pub react_v: f32,
+    pub shown_w: f32,
+    /// When the reaction yielded to its animation (`active::yields`), the AI's move (units) and
+    /// turn (rad) of the actor since the last hit, its facing the frame before, and how fast the
+    /// AI moves (units/s) and turns (rad/s) it now (eased).
+    pub yield_at: Option<Instant>,
+    pub moved_since_hit: f32,
+    pub turned_since_hit: f32,
+    pub facing_before: Option<V3>,
+    pub ai_speed: f32,
+    pub ai_turn: f32,
+    /// For the clips' samples: each bone's shown offset from its animation the frame before,
+    /// this frame's fastest change of one (rad/s) and which.
+    pub offsets_before: Vec<active::Q>,
+    pub spin_now: f32,
+    pub spin_bone: Role,
+    /// How many offsets `active::Limit` has held since the body was made (the pose log's).
+    pub limited: u32,
 }
 
 /// How much deeper than the animation (game units) a shown forearm or hand may be in the torso
@@ -250,6 +276,9 @@ pub struct Bone {
     /// The animated pose (local rotation, local translation) and what was written over it.
     pub pose: Option<(M3, V3)>,
     pub written: Option<(M3, V3)>,
+    /// What the bone held when it was read this frame (the game's own value: put back after the
+    /// draw, [`unwrite`]).
+    pub raw: Option<(M3, V3)>,
     /// The rig bone it hangs from, and (an arm's) its shown pose offset following the poses it is
     /// given ([`Follow`]).
     pub parent: Option<usize>,
@@ -363,6 +392,7 @@ fn find_bones(e: &mut Engine, root: u32) -> Vec<Bone> {
                     spring: Spring::REST,
                     pose: None,
                     written: None,
+                    raw: None,
                     parent: None,
                     follow: Follow::REST,
                     between: Vec::new(),
@@ -543,6 +573,21 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         shown_before: None,
         yaw_rate_now: 0.0,
         jump_now: 0.0,
+        own_total: [0.0; 3],
+        carry_from: None,
+        limit: active::Limit::default(),
+        react_v: 0.0,
+        shown_w: 0.0,
+        yield_at: None,
+        moved_since_hit: 0.0,
+        turned_since_hit: 0.0,
+        facing_before: None,
+        ai_speed: 0.0,
+        ai_turn: 0.0,
+        offsets_before: Vec::new(),
+        spin_now: 0.0,
+        spin_bone: Role::Pelvis,
+        limited: 0,
     });
     true
 }
@@ -610,6 +655,23 @@ pub fn hit(
         return;
     };
     let rig = &mut rigs[index];
+    // A hit while it is handed back: a fresh body from this pose, the pose shown eased out over
+    // it (its weight jumped back to full over a body left behind: a hand 43 rad/s in one frame
+    // in the lab).
+    if rig.body.is_some() && rig.shown_w < 0.999 {
+        rig.body = None;
+        if let Some((off, p)) = rig.last.take() {
+            rig.fade = Some(active::Fade::new(off, p));
+        }
+    }
+    rig.react_v = if rig.body.is_some() {
+        rig.react_v.max(v)
+    } else {
+        v
+    };
+    rig.yield_at = None;
+    rig.moved_since_hit = 0.0;
+    rig.turned_since_hit = 0.0;
     rig.since = Instant::now();
     rig.armed = armed;
     rig.aim_hold = aim_hold;
@@ -681,6 +743,51 @@ pub fn hit(
     ));
 }
 
+/// The bones written this frame and the game's own value of each (what it held when read).
+static WRITTEN: Mutex<Vec<(u32, (M3, V3))>> = Mutex::new(Vec::new());
+
+/// After the draw (from `crate::gunplay`'s `FIRST_PERSON_SETUP` wrapper): every bone written
+/// this frame given back the game's own local. The reaction is drawn (the world transforms the
+/// write updated stay until the game updates them), but nothing of it is left in the bones for
+/// the game's next frame: its animation writes over its own pose, a later pass moves its own
+/// pose, and the next read is the animation as it is, never our write taken for it (b44a964
+/// left the write in the bones: a walk moving a bone the way its offset went was read as a
+/// later pass's move of the write and kept stale until 12.65 units off, then jumped; a pass
+/// moving the write past that was taken for the animation, the offset put on itself: Patrick's
+/// 14-16-02 clip, the upper body spinning round the waist and a snap at the end).
+pub fn unwrite(e: &mut Engine) {
+    let written = std::mem::take(&mut *WRITTEN.lock().unwrap_or_else(|p| p.into_inner()));
+    for (node, (rot, t)) in written {
+        if node != 0 {
+            write9(e, node + LOCAL_ROTATION, &rot);
+            write3(e, node + LOCAL_TRANSLATION, t);
+        }
+    }
+    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    for rig in rigs.iter_mut() {
+        for bone in rig.bones.iter_mut() {
+            bone.written = None;
+        }
+    }
+}
+
+/// The reaction yields to its animation now (`active::YIELD_BACK`): its body handed back
+/// quickly, a brace's hands let go, the steps end. Once a hit.
+fn yield_now(rig: &mut Rig, why: &str) {
+    if rig.yield_at.is_some() || rig.body.is_none() || rig.fall.is_some() {
+        return;
+    }
+    rig.yield_at = Some(Instant::now());
+    if let Some(s) = rig.balance.as_mut() {
+        s.recovering = true;
+    }
+    note(format!(
+        "{:08X}: yields to its animation ({why}): handed back over {} s",
+        rig.id,
+        active::YIELD_BACK
+    ));
+}
+
 /// Once a frame, at the draw's set-up (from `crate::gunplay`'s `FIRST_PERSON_SETUP` wrapper): every
 /// reacting actor's physical body stepped toward its animation and its bones posed (module
 /// documentation).
@@ -696,6 +803,7 @@ pub fn apply(e: &mut Engine) {
         return;
     }
     let mut keep = Vec::new();
+    let mut written_now: Vec<(u32, (M3, V3))> = Vec::new();
     for mut rig in rigs {
         if !(rig.id != 0 && e.call(LOOKUP_FORM, &args![rig.id]).u32() == rig.actor) {
             continue; // gone (a load, an unload): nothing of it is touched
@@ -733,7 +841,10 @@ pub fn apply(e: &mut Engine) {
                 read3(e, bone.node + LOCAL_TRANSLATION),
             );
             let before = bone.pose;
-            let (mut base, how) = pose::read_base(now, bone.pose, bone.written);
+            bone.raw = Some(now);
+            // The write is put back after the draw ([`unwrite`]): what the bone holds is the
+            // game's own pose (never our write, never stale).
+            let (base, how) = pose::read_base(now, bone.pose, bone.written);
             match (how, before) {
                 (pose::Read::Disturbed, _) => {
                     rig.drift += 1;
@@ -742,11 +853,12 @@ pub fn apply(e: &mut Engine) {
                     }
                 }
                 (pose::Read::Animated, Some(before)) if reacting => {
-                    let (eased, cut) = pose::capped(&before, &base, k);
+                    // A jump of its animation (a new set: a cripple's): the reaction yields to it
+                    // (not eased in under the reaction).
+                    let (_, cut) = pose::capped(&before, &base, k);
                     if cut {
                         rig.jumps += 1;
                         jumped.get_or_insert((bone.role, pose::apart(&before, &base)));
-                        base = eased;
                     }
                 }
                 _ => {}
@@ -754,9 +866,10 @@ pub fn apply(e: &mut Engine) {
             bone.pose = Some(base);
         }
         if let (Some((role, by)), 0) = (jumped, jumps_before) {
+            yield_now(&mut rig, "its animation jumped");
             note(format!(
                 "{}: its animation jumped under the reaction ({} {by:.0} tolerances in a frame): \
-                 eased in",
+                 the reaction yields to it",
                 describe(e, rig.actor),
                 BONES
                     .iter()
@@ -791,6 +904,11 @@ pub fn apply(e: &mut Engine) {
                     let mut body = make_body(e, &rig, &anim, &before, dt);
                     body.unarmed(!rig.armed);
                     rig.body = Some(body);
+                    rig.own_total = [0.0; 3];
+                    rig.carry_from = None;
+                    rig.limit.open();
+                    rig.settle.open();
+                    rig.limited = 0;
                 }
                 _ => {
                     rig.before = Some(anim.clone());
@@ -803,7 +921,7 @@ pub fn apply(e: &mut Engine) {
         }
         // The game's own move of the actor this frame (its AI walking it), carried by the
         // reaction ([`carry`]).
-        let moved_by_game = carry(e, &mut rig);
+        let moved_by_game = carry(e, &mut rig, dt);
         // World (game units) to the body's metres from its origin.
         let origin = rig.origin;
         let to_body = move |p: V3| scale(sub(p, origin), 1.0 / UNITS_PER_METRE);
@@ -1060,6 +1178,20 @@ pub fn apply(e: &mut Engine) {
                     targets.pelvis[2] -= drop * 0.5;
                 }
             }
+            // Carried along with the animation's own motion (its AI's walk and turn, a new set),
+            // the steps' own moves of the actor left out (`Body::carry`); a fall's is physical.
+            let frames: Vec<(active::Q, V3)> = anim
+                .iter()
+                .map(|a| (active::qfrom_m(&a.0), sub(add(a.1, lag), rig.own_total)))
+                .collect();
+            if let (Some(from), None) = (rig.carry_from.as_ref(), rig.fall.as_ref()) {
+                if from.len() == frames.len() {
+                    let from: Vec<_> = from.iter().map(|&(q, p)| (q, to_body(p))).collect();
+                    let to: Vec<_> = frames.iter().map(|&(q, p)| (q, to_body(p))).collect();
+                    body.carry(&from, &to);
+                }
+            }
+            rig.carry_from = Some(frames);
             body.free_arms(brace_now.is_none() && rig.fall.is_none());
             body.step(
                 &targets,
@@ -1075,6 +1207,7 @@ pub fn apply(e: &mut Engine) {
                 since,
                 rig.hit_at.elapsed().as_secs_f32(),
                 rig.fall.is_some(),
+                rig.yield_at.map(|y| y.elapsed().as_secs_f32()),
             );
             phys_w = w;
             let pose = body.pose();
@@ -1086,15 +1219,33 @@ pub fn apply(e: &mut Engine) {
             let mut off = scale(sub(sim, pelvis_target), w);
             // Handed back, it only settles (`active::Settle`): never shown gaining on the
             // animation; a brace's arms go home their own way.
+            // Its ceilings come down with the weight (never frozen while it turns).
+            let bracing = brace_now.is_some();
+            let bones = &rig.bones;
+            let free = |b: usize| bracing && bones[b].role.is_arm();
             if w < 1.0 && rig.fall.is_none() {
-                let bracing = brace_now.is_some();
-                let bones = &rig.bones;
-                rig.settle.hold(&mut blended, &wanted, &mut off, |b| {
-                    bracing && bones[b].role.is_arm()
-                });
+                let keep = if rig.shown_w > 0.0 {
+                    w / rig.shown_w
+                } else {
+                    1.0
+                };
+                rig.settle
+                    .hold_down(&mut blended, &wanted, &mut off, keep, free);
             } else {
                 rig.settle.open();
             }
+            // Never more than the push justifies, nor a bone turning off its pose faster than a
+            // person (`active::Limit`: the clip's upper body spun round the waist); a fall is
+            // the ragdoll's, only followed.
+            if rig.fall.is_none() {
+                let held = rig
+                    .limit
+                    .hold(&mut blended, &wanted, &mut off, rig.react_v, dt, free);
+                rig.limited += held;
+            } else {
+                rig.limit.follow(&blended, &wanted, off);
+            }
+            rig.shown_w = w;
             for (b, q) in blended.into_iter().enumerate() {
                 shown[b] = active::m_from_q(q);
             }
@@ -1427,6 +1578,9 @@ pub fn apply(e: &mut Engine) {
                 write9(e, bone.node + LOCAL_ROTATION, &rot);
                 write3(e, bone.node + LOCAL_TRANSLATION, t);
                 bone.written = Some((rot, t));
+                if let Some(raw) = bone.raw {
+                    written_now.push((bone.node, raw));
+                }
             }
         }
         update(e, root);
@@ -1440,6 +1594,23 @@ pub fn apply(e: &mut Engine) {
             rig.jump_now = length(sub(sub(shown_pelvis, p0), moved_by_game));
         }
         rig.shown_before = Some((shown_pelvis, yaw));
+        // Each bone's shown offset from its animation, and the fastest it changed (a spin).
+        let offsets_now: Vec<active::Q> = shown
+            .iter()
+            .zip(anim.iter())
+            .map(|(s, a)| active::qmul(active::qfrom_m(s), active::qconj(active::qfrom_m(&a.0))))
+            .collect();
+        rig.spin_now = 0.0;
+        if rig.offsets_before.len() == offsets_now.len() {
+            for (b, (q, q0)) in offsets_now.iter().zip(&rig.offsets_before).enumerate() {
+                let w = length(active::qlog(active::qmul(*q, active::qconj(*q0)))) / dt.max(1e-4);
+                if w > rig.spin_now {
+                    rig.spin_now = w;
+                    rig.spin_bone = rig.bones[b].role;
+                }
+            }
+        }
+        rig.offsets_before = offsets_now;
         rig.spread_now = rig.body.as_ref().map_or(0.0, |b| spread_of_body(b, pi));
         // The pose shown, over the animation: where a fade starts if the body is dropped.
         rig.last = (!resting).then(|| {
@@ -1452,6 +1623,7 @@ pub fn apply(e: &mut Engine) {
         }
         keep.push(rig);
     }
+    *WRITTEN.lock().unwrap_or_else(|p| p.into_inner()) = written_now;
     let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     // Rigs a hit made while this ran come after.
     let fresh = std::mem::take(&mut *rigs);
@@ -1480,12 +1652,22 @@ pub fn sample_fields(actor: u32) -> String {
     let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     match rigs.iter().find(|r| r.actor == actor) {
         Some(r) => format!(
-            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"settling\":{},\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{}}}",
+            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"spin\":{},\"spin_bone\":{},\"settling\":{},\"yielded\":{},\"limited\":{},\"ai_speed\":{},\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{}}}",
             r.body.is_some(),
             room_events::num(r.pelvis_now),
             room_events::num(r.jump_now),
             room_events::num(r.yaw_rate_now),
+            room_events::num(r.spin_now),
+            room_events::text(
+                BONES
+                    .iter()
+                    .find(|(_, role)| *role == r.spin_bone)
+                    .map_or("a bone", |b| b.0)
+            ),
             r.settle.holding(),
+            r.yield_at.is_some(),
+            r.limited,
+            room_events::num(r.ai_speed),
             room_events::num(r.spread_now),
             r.drift,
             room_events::num(r.drift_most),
@@ -1871,6 +2053,7 @@ fn balance_frame(
         let moved = sub(to, reference);
         crate::knockdown::place(e, actor, to);
         rig.own_moved = add(rig.own_moved, moved);
+        rig.own_total = add(rig.own_total, moved);
         // Any earlier move the root's world has not shown yet goes with this one.
         let waiting = rig
             .placed
@@ -1993,6 +2176,17 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
     let Some(rig) = rigs.iter_mut().find(|r| r.actor == actor && r.root == root) else {
         return;
     };
+    // The AI walking or turning it: its stride carries it (steps planned from a stride and
+    // followed while the AI walks it threw the pelvis sideways).
+    if active::ai_walking(rig.ai_speed, rig.ai_turn) {
+        let (speed, turn) = (rig.ai_speed, rig.ai_turn);
+        drop(rigs);
+        note(format!(
+            "{}: no catch steps: its AI is walking it ({speed:.0} units/s, {turn:.2} rad/s)",
+            describe(e, actor)
+        ));
+        return;
+    }
     let one_leg = !rig.limbs.legs();
     let (Some(pi), Some(lf), Some(rf)) = (
         bone_of(rig, Role::Pelvis, 2),
@@ -2537,22 +2731,42 @@ fn start_brace(e: &mut Engine, actor: u32, root: u32, dir: V3, v: f32, aggressor
 }
 
 /// The game's own move of the actor since the frame before (its AI walking it: the reference's
-/// move less the steps' own, [`Rig::own_moved`]), carried by the reaction: the physical body's
-/// origin, the feet where they stand and step, a brace's count of it (its hands let go once the
-/// actor is walked away). Without it the body trailed the walking actor on its pelvis spring and
+/// move less the steps' own, [`Rig::own_moved`]), carried by the reaction: the feet where they
+/// stand and step, a brace's count of it (its hands let go once the actor is walked away); the
+/// physical body rides on the animation itself (`active::Body::carry`). How fast the AI moves and
+/// turns it, and past `active::yields` since the hit, the reaction yields to its animation. Without it the body trailed the walking actor on its pelvis spring and
 /// snapped back to it as it was handed back (Patrick's c2a53c0 fold clip: 18 to 1.3 units in 0.25
 /// s). Not a body going over (that is physical). Answers the move.
-fn carry(e: &Engine, rig: &mut Rig) -> V3 {
+fn carry(e: &Engine, rig: &mut Rig, dt: f32) -> V3 {
     let reference = read3(e, rig.actor + REFR_POSITION);
     let own = std::mem::take(&mut rig.own_moved);
     let moved = rig
         .carried
         .map_or([0.0; 3], |last| sub(sub(reference, last), own));
     rig.carried = Some(reference);
-    if rig.body.is_none() || rig.fall.is_some() || length(moved) <= 1e-4 {
+    // How fast the AI moves and turns it (eased over a few frames), and how far since the hit:
+    // past `active::yields` the reaction yields to the animation.
+    let now = facing(e, rig);
+    let turned = rig.facing_before.map_or(0.0, |f| hands::turned(f, now));
+    rig.facing_before = Some(now);
+    if dt > 0.0 {
+        let k = (dt / 0.15).min(1.0);
+        rig.ai_speed += (length([moved[0], moved[1], 0.0]) / dt - rig.ai_speed) * k;
+        rig.ai_turn += (turned / dt - rig.ai_turn) * k;
+    }
+    if rig.body.is_none() || rig.fall.is_some() {
         return moved;
     }
-    rig.origin = add(rig.origin, moved);
+    rig.moved_since_hit += length([moved[0], moved[1], 0.0]);
+    rig.turned_since_hit += turned;
+    if active::yields(rig.moved_since_hit, rig.turned_since_hit) {
+        yield_now(rig, "its AI moves it");
+    }
+    if length(moved) <= 1e-4 {
+        return moved;
+    }
+    // The body rides on the animation's own motion (`Body::carry`, in the frame's step); the
+    // feet where they stand and step, and a brace's count, go with the actor here.
     if let Some((feet, _)) = rig.planted.as_mut() {
         for f in feet.iter_mut() {
             *f = add(*f, moved);
@@ -2592,14 +2806,19 @@ fn brace_frame(e: &mut Engine, rig: &mut Rig, anim: &[(M3, V3)], out: &mut [Opti
     b.t += dt;
     let com = rig.body.as_ref().map_or(0.0, |body| body.com_speed());
     let forward = facing(e, rig);
-    let let_go = hands::let_go(
-        rig.balance.is_some(),
-        b.t,
-        com,
-        rig.hit_at.elapsed().as_secs_f32(),
-        hands::turned(b.facing, forward),
-        b.walked,
-    );
+    // Yielded to its animation: the hands let go.
+    let let_go = if rig.yield_at.is_some() {
+        Some("its animation moved on")
+    } else {
+        hands::let_go(
+            rig.balance.is_some(),
+            b.t,
+            com,
+            rig.hit_at.elapsed().as_secs_f32(),
+            hands::turned(b.facing, forward),
+            b.walked,
+        )
+    };
     let mut said = Vec::new();
     for side in 0..2u8 {
         let Some(hand) = b.hands[side as usize].as_mut() else {
@@ -2947,5 +3166,35 @@ fn note(line: String) {
     if n.1 < 20 {
         n.1 += 1;
         eprintln!("{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// After the draw every bone written gets back the game's own local (what it held when read),
+    /// so the game's next frame never starts from the reaction's write (Patrick's 14-16-02 clip:
+    /// a write left in the bones was read back stale, then taken for the animation).
+    #[test]
+    fn the_write_is_put_back_after_the_draw() {
+        let mut e = Engine::new();
+        e.mem.map(0x4000, 0x1000);
+        let node = 0x4000u32;
+        let game: (M3, V3) = (
+            ragdoll_core::flinch::rotation([0.0, 0.0, 0.3]),
+            [1.0, 2.0, 3.0],
+        );
+        let ours: (M3, V3) = (
+            ragdoll_core::flinch::rotation([0.4, 0.0, 0.0]),
+            [5.0, 6.0, 7.0],
+        );
+        write9(&mut e, node + LOCAL_ROTATION, &ours.0);
+        write3(&mut e, node + LOCAL_TRANSLATION, ours.1);
+        *WRITTEN.lock().unwrap() = vec![(node, game)];
+        unwrite(&mut e);
+        assert_eq!(read9(&e, node + LOCAL_ROTATION), game.0);
+        assert_eq!(read3(&e, node + LOCAL_TRANSLATION), game.1);
+        assert!(WRITTEN.lock().unwrap().is_empty());
     }
 }

@@ -401,7 +401,8 @@ recorder's: the game's own Quickload is no longer on it. A clip:
 
 - is an MP4 (H.264, 30 frames a second, the 1.5 s before the press included, at most 2 minutes)
   in `%USERPROFILE%\Videos\nv-rs-test-clips` (`NV_ROOM_CLIPS` picks another folder), named
-  `<date>_<time>_<commit>_PLAY-<weapon in hand>_<what happened>.mp4`;
+  `<date>_<time>_<commit>_PLAY-<weapon in hand>_<what happened>.mp4` (the commit the Play package
+  was built from: CI stamps it; a local build says `local`);
 - has a `.json` of the same name beside it: the commit, `"mode":"play"`, where the player was at
   the start and at the end (`place`, `place_end`: the cell's form id, editor ID and name, and the
   position), the game log's last 200 lines (`log`), the hit reactions' events during the clip and,

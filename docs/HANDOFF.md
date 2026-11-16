@@ -7,6 +7,31 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (a small flinch as the AI walks: the stale base, the spin, the snap)
+
+- **Now:**
+  - Host: `active_ragdoll::unwrite`, called from `gunplay` after the draw's set-up, puts the
+    game's own bone locals back after each draw. Also:
+    - `Body::carry` per bone, with `Rig::own_total`;
+    - `yield_now` from the AI's move or turn and from animation jumps;
+    - no catch steps while the AI walks the actor;
+    - `active::Limit`, `Settle::hold_down`, and a fresh body for a hit during the hand-back;
+    - `spin`, `spin_bone`, `yielded`, `limited` and `ai_speed` in the pose log.
+  - Play package CI sets `NV_RS_COMMIT`.
+  - Lab: gait, `move`, `turnby`, `readback`, `aimpass`, and `scenario::locomotion`.
+  - Docs: docs/GUNPLAY.md "A small flinch as the AI starts to walk".
+  - Lab, worst of 48 runs: spin 45.7 → 11.5 rad/s, yaw 5.27 → 0.95 rad/s, stale reads 363 → 0.
+    The lab did not reach the clip's 48 units. Host tests pass. Not run in the game.
+- **Patrick:** b44a964's 14-16-02 Play clip: a 0.53 m/s flinch, then the AI walked and turned the
+  actor. The pelvis went to 48 units off, the upper body spun round the waist, the offset froze
+  while it turned, and it snapped back to facing forward. Play clips said commit `local`. Asked:
+  - the reaction as an offset on the current animation;
+  - fade out quickly when the animation moves on or jumps;
+  - clamp it to the push and limit the yaw;
+  - settling never freezes;
+  - per-bone spin in the log;
+  - a lab walk-and-turn scenario with before/after numbers.
+
 ### Claude, 2026-11-17 (one hit, then a runaway, a spin and a snap; the double hit)
 
 - **Now:**
