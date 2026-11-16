@@ -237,6 +237,11 @@ pub struct Bone {
     /// (`ragdoll_core::pose`), never read back from what the layer wrote.
     pub between: Vec<u32>,
     pub above: u32,
+    /// Its parent in the physical body (`ragdoll_core::active::physics_parents`): its rig parent,
+    /// or the pelvis for a bone that reaches none (FNV's `Bip01 Spine`, under `Bip01 NonAccum`
+    /// beside the pelvis). The body, its targets and the shown joints follow it; the write follows
+    /// the node tree (`parent`, `above`, `between`), the bone's shown joint carried by a shift.
+    pub phys: Option<usize>,
 }
 
 static RIGS: Mutex<Vec<Rig>> = Mutex::new(Vec::new());
@@ -340,6 +345,7 @@ fn find_bones(e: &mut Engine, root: u32) -> Vec<Bone> {
                     follow: Follow::REST,
                     between: Vec::new(),
                     above: 0,
+                    phys: None,
                 });
             }
         }
@@ -372,6 +378,16 @@ fn find_bones(e: &mut Engine, root: u32) -> Vec<Bone> {
         if bone.parent.is_some() {
             between.reverse();
             bone.between = between;
+        }
+    }
+    if let Some(pelvis) = found.iter().position(|b| b.role == Role::Pelvis) {
+        let node: Vec<Option<usize>> = found.iter().map(|b| b.parent).collect();
+        for (bone, phys) in found.iter_mut().zip(active::physics_parents(&node, pelvis)) {
+            bone.phys = phys;
+        }
+    } else {
+        for bone in &mut found {
+            bone.phys = bone.parent;
         }
     }
     found
@@ -737,10 +753,11 @@ pub fn apply(e: &mut Engine) {
                 rig.fade = None;
             }
         }
-        // The physical body: made the frame after the first hit, from this pose and the last
-        // (its motion), then the hits go in. While a dropped body fades back, only a new hit
-        // makes one, and the fade is written while it waits for it.
-        if rig.body.is_none() && (rig.fade.is_none() || !rig.pending.is_empty()) {
+        // The physical body: made the frame after a hit, from this pose and the last (its
+        // motion), then the hits go in. Only a hit makes one: never the end of a fade, nor a rig
+        // left without one (a body made with no hit drifted and was dropped again, about 2 s a
+        // reaction: Patrick's 126915e clip). The fade is written while a hit's body waits.
+        if rig.body.is_none() && !rig.pending.is_empty() {
             match rig.before.take() {
                 Some(before) if before.len() == anim.len() && dt > 0.0 => {
                     rig.origin = anim[pi].1;
@@ -848,7 +865,7 @@ pub fn apply(e: &mut Engine) {
         let mut chain = vec![IDENTITY; n];
         let mut target = vec![IDENTITY; n];
         for b in 0..n {
-            let up = rig.bones[b].parent.map_or(IDENTITY, |p| chain[p]);
+            let up = rig.bones[b].phys.map_or(IDENTITY, |p| chain[p]);
             chain[b] = match overrides[b] {
                 Some(o) => mul(&up, &o),
                 None => up,
@@ -1183,6 +1200,47 @@ pub fn apply(e: &mut Engine) {
         if let Some(why) = failed {
             // What it looked like (Patrick's 9:06 PM log: the snaps came right after the steps).
             let spread = rig.body.as_ref().map_or(0.0, |b| spread_of_body(b, pi));
+            // The body's joints: the most gap and its bone, and the bones it holds as roots (the
+            // pelvis alone, unless a bone's physics parent is missing).
+            let (gap, gap_bone) = rig.body.as_ref().map_or((0.0, None), |b| b.joint_gap());
+            let roots = rig.body.as_ref().map_or_else(Vec::new, |b| b.roots());
+            let name = |i: usize| {
+                BONES
+                    .iter()
+                    .find(|(_, r)| *r == rig.bones[i].role)
+                    .map_or("a bone", |b| b.0)
+            };
+            let parents = rig
+                .bones
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.parent != b.phys)
+                .map(|(i, b)| {
+                    format!(
+                        "{} hangs from {} (node root)",
+                        name(i),
+                        b.phys.map_or("nothing", name)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let joints = format!(
+                "joint gap {:.3} m{}; roots {}{}",
+                gap,
+                gap_bone
+                    .map(|i| format!(" ({})", name(i)))
+                    .unwrap_or_default(),
+                roots
+                    .iter()
+                    .map(|&i| name(i))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if parents.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {parents}")
+                }
+            );
             let last_pelvis = rig.last.as_ref().map_or(0.0, |l| length(l.1));
             // Eased back from the pose last shown, unless a fade with no body under it went
             // wrong (the animation itself is not believable): that is put back at once.
@@ -1194,7 +1252,7 @@ pub fn apply(e: &mut Engine) {
                 "{}: the active ragdoll is dropped back to the animation: {why} (pelvis offset \
                  {:.1} units, {last_pelvis:.1} last shown; most spread {spread:.2} m; base drift: \
                  {} reads moved by a later pass, the most {:.0} tolerances; {} animation jumps \
-                 eased in); {}",
+                 eased in; {joints}); {}",
                 describe(e, rig.actor),
                 length(pelvis_offset),
                 rig.drift,
@@ -1243,6 +1301,10 @@ pub fn apply(e: &mut Engine) {
             && rig.placed.is_none();
         // What each bone is written with: the local its shown pose needs (absolute, the same
         // however often it is written; `ragdoll_core::pose::local_for`).
+        // A bone the node tree hangs elsewhere than its physics parent (FNV's spine, under
+        // `Bip01 NonAccum` beside the pelvis) is written at its shown joint: it follows the
+        // pelvis's move and turn as the body has it.
+        let shown_at = shown_positions(&rig, &anim, &shown, pi, pelvis_offset);
         let locals: Vec<(M3, V3)> = (0..n)
             .map(|b| {
                 let bone = &rig.bones[b];
@@ -1250,7 +1312,13 @@ pub fn apply(e: &mut Engine) {
                 if resting {
                     base
                 } else {
-                    let shift = (bone.role == Role::Pelvis).then_some(pelvis_offset);
+                    let shift = if bone.role == Role::Pelvis {
+                        Some(pelvis_offset)
+                    } else if bone.parent.is_none() && bone.phys.is_some() {
+                        Some(sub(shown_at[b], anim[b].1))
+                    } else {
+                        None
+                    };
                     pose::local_for(&parents[b], base, &offsets[b], shift)
                 }
             })
@@ -1380,7 +1448,7 @@ fn shown_positions(
     let n = rig.bones.len();
     let mut at: Vec<V3> = Vec::with_capacity(n);
     for b in 0..n {
-        let p = match rig.bones[b].parent {
+        let p = match rig.bones[b].phys {
             Some(p) => add(
                 at[p],
                 apply_m(
@@ -1508,7 +1576,7 @@ fn make_body(
     let bones: Vec<active::Bone> = (0..n)
         .map(|b| {
             let bone = &rig.bones[b];
-            let children: Vec<usize> = (0..n).filter(|&c| rig.bones[c].parent == Some(b)).collect();
+            let children: Vec<usize> = (0..n).filter(|&c| rig.bones[c].phys == Some(b)).collect();
             let next = children
                 .iter()
                 .copied()
@@ -1518,7 +1586,7 @@ fn make_body(
                 Some(c) => now[c].1,
                 None => {
                     let from = bone
-                        .parent
+                        .phys
                         .map_or(add(now[b].1, [0.0, 0.0, -1.0]), |p| now[p].1);
                     let dir = unit(sub(now[b].1, from)).unwrap_or([0.0, 0.0, 1.0]);
                     add(
@@ -1528,7 +1596,7 @@ fn make_body(
                 }
             };
             active::Bone {
-                parent: bone.parent,
+                parent: bone.phys,
                 role: bone.role,
                 q: active::qfrom_m(&now[b].0),
                 joint: scale(sub(now[b].1, rig.origin), m),

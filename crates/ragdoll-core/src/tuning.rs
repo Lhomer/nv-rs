@@ -126,6 +126,7 @@ tuning! {
         active_for = a::ACTIVE_FOR, 0.2, 4, 0.05, None, "How long the body stays physical after its last hit (s).";
         blend_back = a::BLEND_BACK, 0.1, 2, 0.05, None, "How long it then blends back to the animation, eased (s).";
         drive_soft = a::DRIVE_SOFT, 0.05, 1, 0.01, None, "The joint motors' strength right after a hit (a share of full).";
+        torso_soft = a::TORSO_SOFT, 0.05, 1, 0.01, None, "The spine's, neck's and head's motors right after a hit (a share of full).";
         drive_ramp = a::DRIVE_RAMP, 0.05, 3, 0.05, None, "How long the motors take to ramp back to full (s).";
         drive_scale = a::DRIVE_SCALE, 0.2, 4, 0.05, None, "The motors' frequency against each role's spring frequency.";
         drive_zeta = a::DRIVE_ZETA, 0.2, 2, 0.01, None, "The motors' damping ratio (1: no overshoot).";

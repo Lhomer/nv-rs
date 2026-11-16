@@ -36,6 +36,10 @@ pub const BLEND_BACK: f32 = 0.8;
 /// (s), their frequency against each role's spring frequency, their damping ratio (soft and well
 /// damped).
 pub const DRIVE_SOFT: f32 = 0.45;
+/// The chest's, the neck's and the head's motors right after a hit (a share of full; the waist and
+/// the limbs keep [`DRIVE_SOFT`]): the struck torso bends instead of the whole body tipping as one
+/// piece (Patrick's 126915e clip), ramped back with the rest.
+pub const TORSO_SOFT: f32 = 0.1;
 pub const DRIVE_RAMP: f32 = 0.7;
 pub const DRIVE_SCALE: f32 = 2.0;
 pub const DRIVE_ZETA: f32 = 1.0;
@@ -50,7 +54,7 @@ pub const MAX_BEND: f32 = 1.2;
 pub const BEND_ROOM: f32 = 1.5;
 /// A hit's momentum goes in over this long (s), eased in and out (no jump in any velocity or
 /// acceleration), while the joints carry it along the chain.
-pub const HIT_TIME: f32 = 0.06;
+pub const HIT_TIME: f32 = 0.045;
 /// A hit's push reaches each bone after its distance from the impact at this speed (m/s): it
 /// travels up and down the body.
 pub const HIT_WAVE: f32 = 5.0;
@@ -239,10 +243,39 @@ pub fn weight(since: f32) -> f32 {
     1.0 - ease((since - t.active_for) / t.blend_back.max(0.05))
 }
 
+/// The torso's motors at the limbs' `strength` ([`strength`]): from [`TORSO_SOFT`] instead of
+/// [`DRIVE_SOFT`], back to full as they come back.
+pub fn torso_strength(strength: f32) -> f32 {
+    let t = tuning::get();
+    let back = ((strength - t.drive_soft) / (1.0 - t.drive_soft).max(1e-3)).clamp(0.0, 1.0);
+    t.torso_soft + (1.0 - t.torso_soft) * back
+}
+
 /// The motors' strength `since` seconds after the last hit (soft, eased back to full).
 pub fn strength(since: f32) -> f32 {
     let t = tuning::get();
     t.drive_soft + (1.0 - t.drive_soft) * ease(since / t.drive_ramp.max(0.05))
+}
+
+// --- The rig's physics parents. --------------------------------------------------------------------
+
+/// Each rig bone's parent in the physical body, from its parent in the node tree (`node`: the rig
+/// bone above it, `None` when it reaches none) and the pelvis's index: a bone that reaches no rig
+/// bone hangs from the pelvis. FNV's `skeleton.nif` puts `Bip01 Spine` under `Bip01 NonAccum`, a
+/// sibling of `Bip01 Pelvis` (the thighs are under the pelvis): read as the node tree, the whole
+/// upper body (spine to head and the arms, about 55% of the mass) was a second free root with no
+/// joint, motor, carry or limit to the pelvis, and a hit spun it as one stiff plank until the body
+/// was dropped (Patrick's 126915e clip: the slow lean back). The node tree is still what the
+/// write follows; only the body uses this.
+pub fn physics_parents(node: &[Option<usize>], pelvis: usize) -> Vec<Option<usize>> {
+    node.iter()
+        .enumerate()
+        .map(|(b, p)| match p {
+            Some(p) => Some(*p),
+            None if b == pelvis => None,
+            None => Some(pelvis),
+        })
+        .collect()
 }
 
 // --- The way back from a dropped body. --------------------------------------------------------------
@@ -704,6 +737,34 @@ impl Body {
         sub(s.com, qrot(s.q, scale(self.segments[i].seg, 0.5)))
     }
 
+    /// How far each bone's joint is from where its parent holds it (m), the most of them, and
+    /// that bone: 0 for a body whose joints all hold (`hold_joints`).
+    pub fn joint_gap(&self) -> (f32, Option<usize>) {
+        let mut most = (0.0f32, None);
+        for i in 0..self.state.len() {
+            let Some(p) = self.segments[i].parent else {
+                continue;
+            };
+            let at = add(
+                self.joint(p),
+                qrot(self.state[p].q, self.segments[i].anchor),
+            );
+            let gap = length(sub(at, self.joint(i)));
+            if gap > most.0 {
+                most = (gap, Some(i));
+            }
+        }
+        most
+    }
+
+    /// The bones with no parent in the body (the pelvis alone in a whole rig: another is a free
+    /// piece no joint, motor or limit holds; `physics_parents` gives every bone one).
+    pub fn roots(&self) -> Vec<usize> {
+        (0..self.segments.len())
+            .filter(|&i| self.segments[i].parent.is_none())
+            .collect()
+    }
+
     fn inv_inertia_world(&self, i: usize) -> M3 {
         let r = m_from_q(self.state[i].q);
         let l = &self.segments[i].inv_inertia;
@@ -1022,6 +1083,20 @@ impl Body {
                     g.mass * (d * d + len * len / 12.0 + g.radius * g.radius / 4.0)
                 })
                 .sum();
+            // The chest's and the neck's joints (a spine bone on a spine bone, the neck, the head):
+            // the waist keeps the limbs' motor, so the torso bends without whirling the arms.
+            let upper = match self.segments[i].role {
+                Role::Neck | Role::Head => true,
+                Role::Spine => self.segments[i]
+                    .parent
+                    .is_some_and(|p| self.segments[p].role == Role::Spine),
+                _ => false,
+            };
+            let strength = if upper {
+                torso_strength(strength)
+            } else {
+                strength
+            };
             let s = (strength * (1.0 - self.dip[i])).max(0.02);
             *joint = (
                 inertia * w0 * w0 * s,

@@ -39,7 +39,8 @@ pub const L_HAND: usize = 18;
 pub const R_HAND: usize = 19;
 pub const COUNT: usize = 20;
 
-/// Each bone's parent (`None`: the pelvis, under the actor's root).
+/// Each bone's parent in the physical body (`None`: the pelvis, under the actor's root):
+/// `ragdoll_core::active::physics_parents` of the game's node tree ([`NODE_PARENT`]).
 pub const PARENT: [Option<usize>; COUNT] = [
     None,
     Some(PELVIS),
@@ -62,6 +63,17 @@ pub const PARENT: [Option<usize>; COUNT] = [
     Some(L_FOREARM),
     Some(R_FOREARM),
 ];
+
+/// Each bone's rig parent in the game's node tree (FNV's `skeleton.nif`): as [`PARENT`], except
+/// that `Bip01 Spine` hangs from `Bip01 NonAccum`, a sibling of `Bip01 Pelvis` (the thighs are
+/// under the pelvis), so it reaches no rig bone. The write follows this tree (the host's
+/// `active_ragdoll`); the body follows [`PARENT`], which is
+/// `ragdoll_core::active::physics_parents` of it.
+pub const NODE_PARENT: [Option<usize>; COUNT] = {
+    let mut t = PARENT;
+    t[SPINE] = None;
+    t
+};
 
 /// Each bone's joint (its node's position) at rest, scale 1, over the actor's reference.
 pub const JOINT: [V3; COUNT] = [

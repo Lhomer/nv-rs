@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (the slow plank lean: FNV's spine hangs from NonAccum)
+
+- **Now (`ragdoll_core::active::physics_parents`, `Body::joint_gap`, `Body::roots`, `TORSO_SOFT` / `torso_strength` (tuning `torso_soft`), `HIT_TIME` 0.045; host `Bone::phys`, `find_bones`, `shown_positions` / `make_body` / the target chain on `phys`, the node roots written at their shown joint, a body only for a pending hit, the drop note's roots and joint gap; lab `mannequin::NODE_PARENT`, `Sim::body_parents`, `scenario::plank`, the write path on FNV's tree; docs/GUNPLAY.md "The slow plank lean"):** lab and core pass; not run in the game.
+- **Patrick:** the snapping is fixed, but NPCs lean back slowly as a stiff plank on most shots.
+
 ### Claude, 2026-11-16 (merge slaterain/nv-rs main up to 31a6e8d)
 
 - **Now:** a regular merge of #616, #620, #617, #628, #627, #624. Conflicts, both sides kept: `engine-core` `start_real_clock` (upstream's `host_tick_count` on every Unix, replacing the fork's `/proc/uptime` read with its one-hour floor: upstream's uptime test holds it), `engine-platform/Cargo.toml` (d3d9-wgpu on every system as upstream; the fork's Windows features for the clips' Media Foundation kept), `host/src/lib.rs` (`test_range` and `start_up_tests`), `d3d9real.rs` (the fork's window-mode switch and upstream's placement log both; the placement's Win32 parts `cfg(windows)`, since the fork builds `d3d9real` wherever wgpu draws), a files.rs test attribute (upstream's). Upstream's `cfg(windows)` on `d3d9device::Word` and its use in `d3d9resource` became `cfg(wgpu_window)` (the Linux and Android rooms forward to wgpu too). Linux, the Linux room (`--locked`) and Windows (`x86_64-pc-windows-gnu`, with tests) build; engine-platform's lib tests, host's room and ragdoll tests, the lab and ragdoll-core pass.

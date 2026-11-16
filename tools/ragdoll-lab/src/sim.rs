@@ -408,6 +408,9 @@ pub struct Sim {
     pub attacking: bool,
     /// The standing body's frame time (s): [`STEP`], or the game's range in the tests.
     pub dt: f32,
+    /// The physical body's bone parents ([`mq::PARENT`], the game's node tree's physics parents);
+    /// a test sets the node tree itself to see what the game did before (the spine a free root).
+    pub body_parents: [Option<usize>; COUNT],
     pub t: f64,
     pub pos: V3,
     pub rig: Rig,
@@ -458,6 +461,7 @@ impl Sim {
             two_handed: true,
             attacking: false,
             dt: STEP,
+            body_parents: mq::PARENT,
             t: 0.0,
             pos: [0.0; 3],
             rig: Rig::new(Limbs::WHOLE),
@@ -2131,7 +2135,7 @@ impl Sim {
                 );
                 let (r0, p0) = self.posed_before[b];
                 active::Bone {
-                    parent: mq::PARENT[b],
+                    parent: self.body_parents[b],
                     role: mq::role_side(b).0,
                     q: active::qfrom_m(&rot),
                     joint: scale(sub(pos, origin), m),

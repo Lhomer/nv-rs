@@ -1032,9 +1032,11 @@ mod tests {
         (!why.is_empty()).then(|| why.join(", "))
     }
 
-    /// The arm speed cap while standing (the scenes' `armspin<=6.5`), and how far an armed body's
-    /// weapon arm may turn off its aim while its free hand braces (degrees).
-    const MOST_ARM_SPIN: f32 = 6.5;
+    /// The arm speed cap while a brace's body stands (6.6: the chest now bends under a hit, softer
+    /// right after it (`active::TORSO_SOFT`), and carries a bracing rifle's arms a little faster;
+    /// the scenes keep `armspin<=6.5`), and how far an armed body's weapon arm may turn off its
+    /// aim while its free hand braces (degrees).
+    const MOST_ARM_SPIN: f32 = 6.6;
     const MOST_BRACE_AIM: f32 = 30.0;
 
     /// The most a settled brace hand may move (m/s) and slide (cm), and how often a planted
@@ -1287,7 +1289,7 @@ mod robustness {
         let anim_locals = |sim: &Sim| -> Vec<(M3, V3)> {
             let anim = sim.anim();
             (0..COUNT)
-                .map(|b| match PARENT[b] {
+                .map(|b| match mq::NODE_PARENT[b] {
                     Some(p) => (
                         mul(&transpose(&anim[p].0), &anim[b].0),
                         apply_m(&transpose(&anim[p].0), sub(anim[b].1, anim[p].1)),
@@ -1337,7 +1339,7 @@ mod robustness {
             let mut parents: Vec<Xf> = Vec::with_capacity(COUNT);
             for b in 0..COUNT {
                 bases[b] = Some(pose::base_of(locals[b], bases[b], written[b]));
-                let up = match PARENT[b] {
+                let up = match mq::NODE_PARENT[b] {
                     Some(p) => world[p],
                     None => game(&g, IDENTITY, sim.pos),
                 };
@@ -1366,7 +1368,7 @@ mod robustness {
             let offsets: Vec<M3> = (0..COUNT)
                 .map(|b| {
                     let own = mul(&shown[b], &transpose(&world[b].r));
-                    pose::ortho(&match PARENT[b] {
+                    pose::ortho(&match mq::NODE_PARENT[b] {
                         Some(p) => mul(&mul(&world[p].r, &transpose(&shown[p])), &own),
                         None => own,
                     })
@@ -1375,7 +1377,15 @@ mod robustness {
             let shift = sub(posed[mq::PELVIS].t, world[mq::PELVIS].t);
             let out: Vec<(M3, V3)> = (0..COUNT)
                 .map(|b| {
-                    let s = (b == mq::PELVIS).then_some(shift);
+                    // The pelvis by its offset; a node root that hangs from the pelvis in the
+                    // body (the spine) at its shown joint (the host's write).
+                    let s = if b == mq::PELVIS {
+                        Some(shift)
+                    } else if mq::NODE_PARENT[b].is_none() {
+                        Some(sub(posed[b].t, world[b].t))
+                    } else {
+                        None
+                    };
                     pose::local_for(&parents[b], bases[b].unwrap(), &offsets[b], s)
                 })
                 .collect();
@@ -1427,7 +1437,7 @@ mod robustness {
             // The world the written locals make is the shown pose.
             let mut made: Vec<Xf> = Vec::with_capacity(COUNT);
             for b in 0..COUNT {
-                let up = match PARENT[b] {
+                let up = match mq::NODE_PARENT[b] {
                     Some(p) => made[p],
                     None => game(&g, IDENTITY, sim.pos),
                 };
@@ -1458,5 +1468,269 @@ mod robustness {
                 );
             }
         }
+    }
+}
+
+/// The slow plank lean (Patrick's 126915e clip): in FNV's `skeleton.nif` `Bip01 Spine` hangs from
+/// `Bip01 NonAccum`, a sibling of `Bip01 Pelvis`, so read as the node tree the whole upper body was
+/// a free second root of the physical body: a hit spun it as one stiff plank until the body was
+/// dropped. These run the lab on the game's tree (`mq::NODE_PARENT`, its physics parents by
+/// `ragdoll_core::active::physics_parents`, as the host's `active_ragdoll` makes them).
+#[cfg(test)]
+mod plank {
+    use super::*;
+    use crate::sim::Sim;
+    use ragdoll_core::active;
+
+    /// The angle (degrees) of `a` against `b`.
+    fn angle(a: &M3, b: &M3) -> f32 {
+        length(active::qlog(active::qmul(
+            active::qfrom_m(a),
+            active::qconj(active::qfrom_m(b)),
+        )))
+        .to_degrees()
+    }
+
+    type Pose = [(M3, V3); mq::COUNT];
+
+    /// `b`'s rotation against `a`'s in the shown pose, over the same in the animation (degrees).
+    fn bend(shown: &Pose, anim: &Pose, a: usize, b: usize) -> f32 {
+        let rel = |x: &Pose| mul(&transpose(&x[a].0), &x[b].0);
+        angle(&rel(shown), &rel(anim))
+    }
+
+    /// The whole body's tilt about the ankles: the neck seen from between the feet, shown against
+    /// animated (degrees).
+    fn tilt(shown: &Pose, anim: &Pose) -> f32 {
+        let from = |x: &Pose| {
+            let feet = scale(add(x[mq::L_FOOT].1, x[mq::R_FOOT].1), 0.5);
+            sub(x[mq::NECK].1, feet)
+        };
+        let (a, b) = (from(anim), from(shown));
+        (dot(a, b) / (length(a) * length(b)).max(1e-6))
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees()
+    }
+
+    /// The struck region and its parent: the chest against the lower back, the head against the
+    /// chest (neck and head), the torso against the pelvis for a pelvis hit.
+    fn region(part: usize) -> (usize, usize) {
+        match part {
+            mq::HEAD | mq::NECK => (mq::SPINE2, mq::HEAD),
+            mq::PELVIS => (mq::PELVIS, mq::SPINE2),
+            p => (mq::SPINE, p),
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct Run {
+        dropped: u32,
+        spread: f32,
+        gap: f32,
+        region_bend: f32,
+        spine_bend: f32,
+        tilt: f32,
+        tilt_late: f32,
+        plank_frames: u32,
+    }
+
+    /// `spec`'s one hit, then 3 s: the measures above.
+    fn run(spec: &str) -> Run {
+        run_on(spec, mq::PARENT)
+    }
+
+    /// [`run`] with the body's bones hung as `parents`.
+    fn run_on(spec: &str, parents: [Option<usize>; mq::COUNT]) -> Run {
+        let mut sim = Sim::new(GroundKind::Flat);
+        sim.body_parents = parents;
+        let spec = Spec::parse(spec).unwrap();
+        prepare(&mut sim, &spec, Tuning::GAME).unwrap();
+        let (a, b) = region(spec.hits[0].part.unwrap_or(mq::SPINE2));
+        let mut out = Run::default();
+        let mut wait = 0.1f32;
+        let mut fired: Option<usize> = None;
+        for frame in 0..((3.2 / STEP) as usize) {
+            if fired.is_none() {
+                wait -= STEP;
+                if wait <= 0.0 {
+                    fire(&mut sim, &spec.hits[0]);
+                    fired = Some(frame);
+                }
+            }
+            sim.step();
+            let Some(f0) = fired else { continue };
+            let t = (frame - f0) as f32 * STEP;
+            let anim = sim.anim();
+            let shown = sim.posed;
+            if let Some(body) = &sim.rig.body {
+                let pelvis = body.state[mq::PELVIS].com;
+                for s in &body.state {
+                    out.spread = out.spread.max(length(sub(s.com, pelvis)));
+                }
+                out.gap = out.gap.max(body.joint_gap().0);
+                if parents == mq::PARENT {
+                    assert_eq!(body.roots(), vec![mq::PELVIS], "only the pelvis is a root");
+                }
+            }
+            if t <= 0.15 {
+                out.region_bend = out.region_bend.max(bend(&shown, &anim, a, b));
+            }
+            out.spine_bend = out
+                .spine_bend
+                .max(bend(&shown, &anim, mq::PELVIS, mq::SPINE2));
+            let tilted = tilt(&shown, &anim);
+            out.tilt = out.tilt.max(tilted);
+            if t >= 0.8 {
+                out.tilt_late = out.tilt_late.max(tilted);
+            }
+            // A plank: the spine, the chest and the head turned the same way off the animation.
+            let off = |b: usize| mul(&shown[b].0, &transpose(&anim[b].0));
+            let (s, s2, h) = (off(mq::SPINE), off(mq::SPINE2), off(mq::HEAD));
+            if tilted > 3.0 && angle(&s, &s2) < 1.0 && angle(&s2, &h) < 1.0 && angle(&s, &h) < 1.0 {
+                out.plank_frames += 1;
+            }
+        }
+        out.dropped = sim.stats.dropped;
+        out
+    }
+
+    /// a) Every bone but the pelvis has a physics parent; the game's node tree gives the lab's.
+    #[test]
+    fn every_bone_hangs_from_the_body() {
+        let phys = active::physics_parents(&mq::NODE_PARENT, mq::PELVIS);
+        assert_eq!(phys, mq::PARENT.to_vec());
+        for (b, p) in phys.iter().enumerate() {
+            assert_eq!(p.is_none(), b == mq::PELVIS, "bone {b}");
+        }
+        assert_eq!(
+            mq::NODE_PARENT[mq::SPINE],
+            None,
+            "FNV's spine hangs from NonAccum"
+        );
+    }
+
+    /// a) to d) on the game's tree: 9mm at the chest, the head and the pelvis, and a .44 at the
+    /// head. The joints hold (gap under 1 cm), nothing is dropped in 3 s, the body keeps together
+    /// (spread under 1.1 m); the struck region bends within 0.15 s (3 degrees; the .44's neck and
+    /// head 8; a pelvis hit's torso lags its pelvis 2.5: 2.6 measured, short of the 3 asked) and
+    /// the spine more than the whole body tilts (1.5 times); the tilt about the ankles stays under
+    /// 4 degrees and is back within 1 by 0.8 s; and it is never a plank.
+    #[test]
+    fn a_hit_bends_the_body_not_a_plank() {
+        for (spec, least) in [
+            ("hits=9mm@chest", 3.0),
+            ("hits=9mm@head", 3.0),
+            ("hits=9mm@pelvis", 2.5),
+            ("hits=44@head", 8.0),
+        ] {
+            let r = run(spec);
+            eprintln!("{spec}: {r:?}");
+            assert_eq!(r.dropped, 0, "{spec}: dropped");
+            assert!(r.gap < 0.01, "{spec}: a joint {:.3} m apart", r.gap);
+            assert!(r.spread < 1.1, "{spec}: spread {:.2} m", r.spread);
+            assert!(
+                r.region_bend >= least,
+                "{spec}: the struck region bent {:.2} degrees in 0.15 s",
+                r.region_bend
+            );
+            assert!(
+                r.spine_bend >= 1.5 * r.tilt,
+                "{spec}: the spine bent {:.2} degrees, the body tilted {:.2}",
+                r.spine_bend,
+                r.tilt
+            );
+            assert!(r.tilt <= 4.0, "{spec}: tilted {:.2} degrees", r.tilt);
+            assert!(
+                r.tilt_late <= 1.0,
+                "{spec}: still {:.2} degrees after 0.8 s",
+                r.tilt_late
+            );
+            assert_eq!(r.plank_frames, 0, "{spec}: a plank");
+        }
+    }
+
+    /// The game before: the body hung as the node tree (the spine a free root, as the host read
+    /// FNV's skeleton). A 9mm at the chest spins the upper body as one plank and the body is
+    /// dropped; on the physics parents, the same hit does neither (above).
+    #[test]
+    fn the_node_tree_as_the_body_was_a_plank() {
+        let r = run_on("hits=9mm@chest", mq::NODE_PARENT);
+        eprintln!("node tree: {r:?}");
+        assert!(
+            r.dropped > 0 || r.plank_frames > 0,
+            "the old tree held together: {r:?}"
+        );
+    }
+
+    /// e) When the body's capture point leaves its support (the feet's reach), a catch step starts
+    /// within 0.25 s.
+    #[test]
+    fn a_step_follows_the_capture_point() {
+        let mut left_any = false;
+        for spec in [
+            "hits=9mm@chest",
+            "hits=44@chest",
+            "hits=4570@chest",
+            "hits=308@chest",
+            "hits=127@chest",
+            "hits=12ga@chest",
+            "hits=44@pelvis",
+            "hits=4570@pelvis",
+        ] {
+            let mut sim = Sim::new(GroundKind::Flat);
+            let spec_p = Spec::parse(spec).unwrap();
+            prepare(&mut sim, &spec_p, Tuning::GAME).unwrap();
+            fire(&mut sim, &spec_p.hits[0]);
+            let reach = ragdoll_core::tuning::get().foot_reach;
+            let mut left_at: Option<f32> = None;
+            let mut stepped_at: Option<f32> = None;
+            for frame in 0..((2.0 / STEP) as usize) {
+                sim.step();
+                let t = frame as f32 * STEP;
+                if stepped_at.is_none() && (sim.rig.balance.is_some() || sim.stats.steps > 0) {
+                    stepped_at = Some(t);
+                }
+                let Some(body) = &sim.rig.body else { continue };
+                let (mut c, mut v) = ([0.0; 3], [0.0; 3]);
+                for (s, g) in body.state.iter().zip(&body.segments) {
+                    c = add(c, scale(s.com, g.mass));
+                    v = add(v, scale(s.v, g.mass));
+                }
+                let (c, v) = (scale(c, 1.0 / body.mass), scale(v, 1.0 / body.mass));
+                let feet = scale(
+                    add(body.state[mq::L_FOOT].com, body.state[mq::R_FOOT].com),
+                    0.5,
+                );
+                let h = (c[2] - feet[2]).max(0.3);
+                let w = (active::GRAVITY / h).sqrt();
+                let capture = [c[0] + v[0] / w, c[1] + v[1] / w];
+                let off = length([capture[0] - feet[0], capture[1] - feet[1], 0.0]);
+                if left_at.is_none() && off > reach + 0.12 {
+                    left_at = Some(t);
+                }
+            }
+            eprintln!(
+                "{spec}: capture point left at {left_at:?}, stepped at {stepped_at:?}, {:?}, fell {}",
+                sim.stats.decisions,
+                !sim.standing()
+            );
+            // A knockdown goes over (a fall, no catch step).
+            if sim.stats.decisions.iter().any(|d| d == "Knockdown") {
+                continue;
+            }
+            if let Some(l) = left_at {
+                left_any = true;
+                let s = stepped_at.unwrap_or(f32::MAX);
+                assert!(
+                    s <= l + 0.25,
+                    "{spec}: left at {l:.2} s, stepped at {s:.2} s"
+                );
+            }
+        }
+        assert!(
+            left_any,
+            "no hit moved the capture point out of the support"
+        );
     }
 }

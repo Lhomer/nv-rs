@@ -471,6 +471,44 @@ stretched and grew, and the game froze. Two causes, both fixed:
   poses (the pass writing back three times a frame, a hair off, the animation skipping frames)
   makes exactly the shown pose and never adds up.
 
+### The slow plank lean (Patrick, 2026-11-17, the 126915e clip)
+
+The snapping was gone, but on most shots the NPC still leaned back slowly as one stiff plank, then
+was dropped. In FNV's `skeleton.nif` `Bip01 Spine` hangs from `Bip01 NonAccum`, a sibling of
+`Bip01 Pelvis` (the thighs are under the pelvis). The host's rig took its parents from the node
+tree, so the spine reached no rig bone and the whole upper body (spine to head and the arms,
+about 55% of the mass) was a second free root of the physical body: no joint to the pelvis, no
+motor, no carry, no limits. A hit spun it as one plank (spine, chest and head turned alike, no head
+snap) until a hand was 2.5 m from the pelvis (0.4 to 0.75 s), then the fade ran, and a body made
+again with no hit drifted and was dropped again: about 2 s a reaction. The lab's mannequin put the
+spine under the pelvis, so the lab never saw it. In his clip 8 of 9 flinches and all 6 staggers were
+dropped (the first at a median 0.5 s); in cebde05's, 12 of 12 at 0.70 to 0.90 s.
+
+- **Physics parents** (`ragdoll_core::active::physics_parents`): a rig bone that reaches no rig
+  bone hangs from the pelvis in the body. The host keeps the node tree for the write
+  (`Bone::parent`, `above`, `between`): the spine's animated pose comes from its own nodes, its
+  offset is a root's (`S A^T`), and its translation is written at its shown joint (carried by the
+  pelvis's move and turn), so the torso follows the pelvis. The body, its targets and the shown
+  joints use `Bone::phys`.
+- **A body only for a hit.** The end of a fade, or a rig left without one, never makes a body.
+- **The torso bends.** The chest's, the neck's and the head's motors go to 10% right after a hit
+  (`TORSO_SOFT`; the waist and the limbs keep 45%), and a hit's momentum goes in over 45 ms (was
+  60): the struck region bends, the body tilts little.
+- **The drop note** names the body's roots, any bone hung from another than its node parent, and
+  the most joint gap.
+- **The lab** runs on FNV's node tree (`mannequin::NODE_PARENT`; the body on its physics
+  parents) through the host's write. Tests (`scenario::plank`): every bone but the pelvis has a
+  physics parent and the joints stay within 1 cm; a 9mm at the chest, the head and the pelvis and
+  a .44 at the head are never dropped in 3 s, keep within 1.1 m; the struck region bends within
+  0.15 s (chest 3.0 degrees, 9mm head 25, .44 head 32; a pelvis hit's torso 2.6, short of the 3
+  asked, held to 2.5); the spine bends more than 1.5 times the whole body's tilt; the tilt about
+  the ankles stays under 4 degrees (3.5 at most) and is within 1 by 0.8 s; never a plank. When
+  the body's capture point leaves its support, the catch steps have started (the steps are planned
+  at the hit). The old tree (the spine a free root) in the same lab spreads to 2.46 m and is
+  dropped. The write path runs through FNV's tree too, and fails if the spine is not carried
+  by its shown joint. The brace scenes' arm speed cap is 6.6 rad/s (6.5: the chest's bend carries
+  a bracing rifle's arms a little faster). Not seen in the game yet.
+
 ### The reactions leaned away, then snapped back (Patrick, 2026-11-16, 9:06 PM log)
 
 In the game the NPCs slowly turned or leaned back, then snapped into place in one frame, nothing
