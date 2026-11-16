@@ -70,7 +70,8 @@ pub fn widen(e: &mut Engine, args: &mut [u32]) {
         return;
     }
     let (shooter, weapon) = (args[ARG_SOURCE], args[ARG_WEAPON]);
-    if shooter == 0 || weapon == 0 {
+    // Only an actor has the actor values read below (a trap or a turret reference fires too).
+    if shooter == 0 || weapon == 0 || !jip::commands::is_actor(e, shooter) {
         return;
     }
     let off = off(shooter);

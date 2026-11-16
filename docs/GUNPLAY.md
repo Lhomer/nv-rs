@@ -471,6 +471,31 @@ stretched and grew, and the game froze. Two causes, both fixed:
   poses (the pass writing back three times a frame, a hair off, the animation skipping frames)
   makes exactly the shown pose and never adds up.
 
+### Crash fix: the world probes took a scene block for a reference (Patrick, 2026-11-16, 022ac96)
+
+Patrick's Windows Play build (RTX 4090, Vulkan) stopped in the Test Range at the first bullet that
+staggered a Powder Ganger: `open function 56625f6d: not translated yet (in 0089a760 < 00899cb0 <
+009c1b70 ...)`, under `Actor::HitMe`. `56625f6d` is the bytes "m_bV": string data called as code.
+
+- **Cause:** `jip::commands::world_ray_cast` (the active ragdoll's floor, ledge, wall and obstacle
+  probes) answered the hit's scene block (an `NiAVObject`), and the host's `cast_world` made the
+  `IsActor` virtual call (slot `0x100`) on it as if it were a reference. A node's vtable is shorter,
+  so the slot read past it into other data. It came with the own controller (c87282a), where it ran
+  only for a rare wall brace. Since the world interaction (c6a857bb) every push scans for
+  obstacles, so the first staggering hit tripped it. Not the #604 merge, the regrip or the
+  one-handed accuracy.
+- **Fix:** `world_ray_cast` answers the hit block's reference (`block_parent_ref`, as JIP's own
+  readers find it; 0 for the land). `cast_world` tells an actor with `jip::commands::is_actor`,
+  which compares the vtable slot with the game's answer-true stub instead of calling it. The
+  one-handed accuracy's Strength read now checks the shooter is an actor first.
+- **Test:** `world_ray_cast_answers_the_hit_reference_not_its_block` (jip). The hit static's block
+  answers its reference, an actor answers true, the block itself is no actor, the land answers
+  none. It fails on the old code (checked by putting the block back).
+- **The crash dialog** (`Play.exe`, `plain_end`) blamed d3dx9_38.dll whenever the log named it
+  anywhere, and the log names it at every start. It now reads the cause from the stop line: an
+  untranslated function or a stray call says so (a bug in nv-rs, not the PC or DirectX). D3DX is
+  blamed only when the stop line names it.
+
 ### A two-handed weapon fired one-handed is far less accurate (Patrick, 2026-11-15)
 
 While an actor's support hand is off its two-handed weapon's grip (bracing, or on its way back),

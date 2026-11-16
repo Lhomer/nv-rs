@@ -1789,9 +1789,6 @@ const FLOOR_FROM: f32 = 50.0;
 const FLOOR_RANGE: f32 = 300.0;
 const BRACE_PROBE: f32 = 90.0;
 
-/// `TESObjectREFR::IsActor` (vtable slot `0x100`, as `crate::quick_loot` calls it).
-const IS_ACTOR_SLOT: u32 = 0x100;
-
 /// The game's ray cast (`jip::commands::world_ray_cast`) from `from` along `dir` (unit) within
 /// `range` (game units), the world only: a hit on an actor (the reacting actor's own limbs, which
 /// JIP's default layer meets, or anyone else's) is passed and the cast goes on beyond it, at most
@@ -1800,11 +1797,14 @@ fn cast_world(e: &mut Engine, from: V3, dir: V3, range: f32) -> Option<V3> {
     let mut at = from;
     let mut left = range;
     for _ in 0..4 {
-        let (hit, object) = jip::commands::world_ray_cast(e, at, dir, left)?;
+        let (hit, refr) = jip::commands::world_ray_cast(e, at, dir, left)?;
         if !hit.iter().all(|x| x.is_finite()) {
             return None;
         }
-        if object == 0 || !e.vcall(object, IS_ACTOR_SLOT, &args![]).bool() {
+        // The reference hit (never the scene block itself: taken for a reference, its vtable was
+        // read past its end and the game crashed, 022ac96), its `IsActor` slot compared with the
+        // game's answer-true stub, not called (`jip::commands::is_actor`).
+        if !jip::commands::is_actor(e, refr) {
             return Some(hit);
         }
         let gone = length(sub(hit, at)) + 2.0;

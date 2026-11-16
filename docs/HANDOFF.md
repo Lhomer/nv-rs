@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-16 (crash: the world probes took a scene block for a reference)
+
+- **Now (`jip::commands::world_ray_cast` answers the reference (`block_parent_ref`), host `cast_world` uses `jip::commands::is_actor`; test `world_ray_cast_answers_the_hit_reference_not_its_block`; `crate::one_hand::widen` checks the shooter is an actor; `scripts/launcher` `plain_end` reads the cause from the stop line):** fixed the Test Range crash at the first staggering hit (`56625f6d`, under `Actor::HitMe`). Not rerun in game: no game files here.
+- **Patrick (022ac96, RTX 4090, Vulkan):** crash right after the first bullet hit a Powder Ganger; the dialog said status 3 and blamed d3dx9_38.dll.
+
 ### Claude, 2026-11-16 (one-handed fire with a two-handed weapon)
 
 - **Now (`ragdoll_core::one_hand`: `off_grip`, `penalty`, `spread`, `extra`; host `crate::one_hand` (`set`, `off`, `widen`, `clear`), the share set in `active_ragdoll` each frame, the shot widened in `ballistics`' `Projectile::Create` hook; lab `Stats::off_grip`, `Sim::support_off_grip`, test `one_handed_fire_is_far_less_accurate_until_the_regrip`):** the effective (mod-applied) spread far wider while the support hand is off a two-handed grip, scaled up by effective weight and down by Strength, floored, easing back with the regrip. Not run in game; the player never braces, so never applies to the player.

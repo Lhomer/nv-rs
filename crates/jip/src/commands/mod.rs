@@ -698,9 +698,9 @@ pub(crate) mod test_support;
 /// The game's ray cast as JIP's `GetRayCastPos` makes it (`TES::Pick` along a direction, the
 /// player's controller's collision filter with JIP's default layer), for the host's own use (the
 /// active ragdoll's floor, ledge and wall probes, `crates/host/src/active_ragdoll.rs`): from
-/// `from` along `dir` (unit) at most `range`, all in game units; the hit point and the object hit
-/// (0 for none), or `None` when the game has no `TES` or player controller yet, or nothing was
-/// hit within the range.
+/// `from` along `dir` (unit) at most `range`, all in game units; the hit point and the reference
+/// hit (the hit block's parent reference; 0 for none, such as the land), or `None` when the game
+/// has no `TES` or player controller yet, or nothing was hit within the range.
 pub fn world_ray_cast(
     e: &mut Engine,
     from: [f32; 3],
@@ -714,7 +714,16 @@ pub fn world_ray_cast(
         return None;
     }
     let p = havok_refs::hit_point(&cast);
-    Some(([p[0], p[1], p[2]], cast.object))
+    // The cast answers the hit scene block (an `NiAVObject`), not a reference: its reference is
+    // its parent chain's (`block_parent_ref`, as JIP's own readers find it), 0 for none (the
+    // land). A block taken for a reference had its vtable read past its end: the Test Range's
+    // first staggering hit called `56625f6d`, string bytes (Patrick, 2026-11-16, 022ac96).
+    let refr = if cast.object == 0 {
+        0
+    } else {
+        havok_refs::block_parent_ref(e, cast.object, &mut havok_refs::Walk::new())
+    };
+    Some(([p[0], p[1], p[2]], refr))
 }
 
 #[cfg(test)]

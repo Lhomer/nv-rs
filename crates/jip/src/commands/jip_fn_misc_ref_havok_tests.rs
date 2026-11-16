@@ -972,6 +972,39 @@ fn logged_f32(e: &Engine, off: u32) -> f32 {
     e.mem.f32(PICK_LOG + 0x10 + off)
 }
 
+/// `world_ray_cast` (the host's active ragdoll probes: floors, ledges, obstacles) answers the hit
+/// block's reference, never the block itself: a block taken for a reference had its vtable read
+/// past its end, and the Test Range's first staggering hit called `56625f6d`, bytes of a string
+/// (Patrick, 2026-11-16, 022ac96). The land answers none; `is_actor` tells an actor without a call.
+#[test]
+fn world_ray_cast_answers_the_hit_reference_not_its_block() {
+    let mut e = setup();
+    world(&mut e, 0);
+    let target = placed(&mut e, 0x0100_0071, 0);
+    let part = e.mem.u32(
+        e.mem
+            .u32(e.mem.u32(e.mem.u32(target.refr + 0x64) + 0x14) + 0xa0),
+    );
+    e.mem.set_u32(PICK_ANSWER, part);
+    e.mem.set_f32(PICK_FRACTION, 0.5);
+    let (at, refr) =
+        crate::commands::world_ray_cast(&mut e, [0.0; 3], [0.0, 1.0, 0.0], 100.0).unwrap();
+    assert!(at.iter().all(|x| x.is_finite()));
+    assert_ne!(refr, part, "the block itself is never answered");
+    assert_eq!(refr, target.refr);
+    assert!(!crate::commands::is_actor(&e, refr), "a static");
+    assert!(!crate::commands::is_actor(&e, part), "a block is no actor");
+    e.mem.set_u32(target.refr, ACTOR_VTBL);
+    assert!(crate::commands::is_actor(&e, refr), "an actor");
+    // The land: a block without a reference.
+    let land = node(&mut e, b"Land", &[]);
+    e.mem.set_u32(PICK_ANSWER, land);
+    let (_, refr) =
+        crate::commands::world_ray_cast(&mut e, [0.0; 3], [0.0, 1.0, 0.0], 100.0).unwrap();
+    assert_eq!(refr, 0);
+    assert!(!crate::commands::is_actor(&e, 0));
+}
+
 #[test]
 fn ray_cast_ref_builds_jips_record_and_answers_the_hit_ref() {
     let mut e = setup();

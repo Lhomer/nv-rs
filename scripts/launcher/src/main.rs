@@ -927,9 +927,14 @@ fn plain_end(tail: &str, status: Option<i32>) -> String {
         .copied()
         .unwrap_or("(the log is empty)");
     let has = |what: &str| tail.contains(what);
+    // What stopped it is the stop line's: a DLL named elsewhere in the log (d3dx9_38.dll is named
+    // at every start) is not the cause (Patrick, 2026-11-16: an untranslated call blamed D3DX).
+    let stopped_at = |what: &str| last.contains(what);
     let what = if has("the sound table disagrees") || has("the sound table has") {
         "Sound on this PC answers differently from what nv-rs knows, and it stops rather than guess. Changing the sound output device, or setting it to stereo, may get past this."
-    } else if has("d3dx9_38.dll") {
+    } else if stopped_at("not translated yet") || stopped_at("open function") {
+        "The game reached a part of its own code that nv-rs hasn't translated yet (or a call that went somewhere it shouldn't), so it stopped. That is a bug in nv-rs, not your PC or your DirectX, and your report is what fixes it."
+    } else if stopped_at("d3dx9_38") {
         "DirectX 9's D3DX library (d3dx9_38.dll) was missing or did something unexpected. Installing Microsoft's \"DirectX End-User Runtimes (June 2010)\" may help."
     } else if has("was not captured in the adapter table")
         || has("is not in the machine table")
@@ -1529,6 +1534,18 @@ mod tests {
         )
         .contains("Settings.cmd"));
         assert!(plain_end("", None).contains("the log is empty"));
+        // An untranslated call is not blamed on D3DX, though the log names d3dx9_38.dll at the
+        // start (Patrick, 2026-11-16, 022ac96); a stop that names it still is.
+        let untranslated = "d3dx: d3dx9_38.dll loaded from C:\\Windows\\System32\nHit reaction: FF001322: flinch\nGame's main stopped in frame 901: open function 56625f6d: not translated yet (FalloutNV.exe 1.4.0.525, docs/LEDGER.md) (in 0089a760 < 00899cb0)\n";
+        let text = plain_end(untranslated, Some(3));
+        assert!(text.contains("hasn't translated yet"), "{text}");
+        assert!(!text.contains("D3DX"), "{text}");
+        assert!(text.contains("open function 56625f6d"));
+        assert!(plain_end(
+            "start\npanicked: d3dx9_38.dll (the DirectX June 2010 runtime) is not on this system: D3DXCompileShader is not provided",
+            Some(101)
+        )
+        .contains("D3DX"));
         // Drawn on Vulkan: the fallback renderer is named; on the real Direct3D 9 it is not.
         let vulkan =
             "NV_D3D9=wgpu: drawing with a card (Vulkan)\nGame's main stopped in frame 9: x\n";
