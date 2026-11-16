@@ -17,6 +17,8 @@
 
 #![cfg(target_os = "android")]
 
+mod notice;
+
 use android_activity::input::{InputEvent, MotionAction};
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use d3d9_wgpu::touch_overlay::{self, Shape};
@@ -284,16 +286,17 @@ fn press(action: Action, down: bool) {
     }
 }
 
-/// The folders the game's files may be in: the app's own (no permission needed) and
-/// `/sdcard/NVRS` (the "all files" access).
+/// The folders the game's files may be in: `/sdcard/NVRS` (needs "All files access") and the
+/// app's own (no permission needed, but hidden from many file managers).
 fn candidates(app: &AndroidApp) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+    let mut out = vec![
+        PathBuf::from("/storage/emulated/0/NVRS/FalloutNV"),
+        PathBuf::from("/storage/emulated/0/NVRS"),
+    ];
     if let Some(own) = app.external_data_path() {
         out.push(own.join("FalloutNV"));
         out.push(own);
     }
-    out.push(PathBuf::from("/storage/emulated/0/NVRS/FalloutNV"));
-    out.push(PathBuf::from("/storage/emulated/0/NVRS"));
     out
 }
 
@@ -309,45 +312,117 @@ fn child(dir: &Path, name: &str) -> Option<PathBuf> {
         })
 }
 
-/// The game's Data folder: the first candidate holding `FalloutNV.exe` and `Data/FalloutNV.esm`.
-fn find_game(app: &AndroidApp) -> Result<PathBuf, String> {
-    let tried = candidates(app);
-    for dir in &tried {
-        let (Some(_exe), Some(data)) = (child(dir, "FalloutNV.exe"), child(dir, "Data")) else {
-            continue;
-        };
-        if child(&data, "FalloutNV.esm").is_some() {
-            return Ok(data);
-        }
-    }
-    Err(format!(
-        "no game files: copy the folder holding FalloutNV.exe and Data (docs/ANDROID.md) to one of {}",
-        tried
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
+/// What a candidate folder holds: the game (its Data folder), or why not.
+#[derive(Debug)]
+enum Looked {
+    Game(PathBuf),
+    NotThere,
+    NotReadable,
+    Missing(Vec<&'static str>),
 }
 
-/// This run's log: the process's standard output and error (the engine's lines) written to
-/// `nvrs-log.txt` in `dir`.
-fn log_to(dir: &Path) {
+/// What `dir` holds (the folder with `FalloutNV.exe` and `Data/FalloutNV.esm`).
+fn look(dir: &Path) -> Looked {
+    match std::fs::read_dir(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Looked::NotReadable,
+        Err(_) => return Looked::NotThere,
+        Ok(_) => {}
+    }
+    let exe = child(dir, "FalloutNV.exe");
+    let data = child(dir, "Data");
+    let esm = data.as_deref().and_then(|d| child(d, "FalloutNV.esm"));
+    match (exe, data, esm) {
+        (Some(_), Some(data), Some(_)) => Looked::Game(data),
+        (exe, data, esm) => {
+            let mut missing = Vec::new();
+            if exe.is_none() {
+                missing.push("FalloutNV.exe");
+            }
+            if data.is_none() {
+                missing.push("Data");
+            } else if esm.is_none() {
+                missing.push("Data/FalloutNV.esm");
+            }
+            Looked::Missing(missing)
+        }
+    }
+}
+
+/// The game's Data folder (the first candidate holding the game), or what each candidate holds.
+fn find_game(app: &AndroidApp) -> Result<PathBuf, Vec<(PathBuf, Looked)>> {
+    let mut tried = Vec::new();
+    for dir in candidates(app) {
+        match look(&dir) {
+            Looked::Game(data) => return Ok(data),
+            other => tried.push((dir, other)),
+        }
+    }
+    Err(tried)
+}
+
+/// The message shown when the game cannot start: where the app looked and what each place lacks,
+/// the "All files access" state, what to copy where, and where the log is.
+fn not_found_message(tried: &[(PathBuf, Looked)], access: Option<bool>, log: &str) -> Vec<String> {
+    let mut out = vec![
+        "NV-RS Test: the game files were not found.".to_string(),
+        String::new(),
+        "Looked in:".to_string(),
+    ];
+    for (dir, looked) in tried {
+        let what = match looked {
+            Looked::Game(_) => "found".to_string(),
+            Looked::NotThere => "no such folder".to_string(),
+            Looked::NotReadable => "not readable (needs All files access)".to_string(),
+            Looked::Missing(m) => format!("missing {}", m.join(", ")),
+        };
+        out.push(format!("  {}: {what}", dir.display()));
+    }
+    out.push(String::new());
+    out.push(match access {
+        Some(true) => "All files access: allowed.".to_string(),
+        Some(false) => "All files access: NOT allowed. Tap the screen to open the setting \
+             (Settings > Apps > Special access > All files access > NV-RS Test), allow it, then \
+             come back."
+            .to_string(),
+        None => "All files access: could not be checked.".to_string(),
+    });
+    out.push(String::new());
+    out.push(
+        "Copy your FalloutNV folder (FalloutNV.exe, Fallout_default.ini and Data with \
+         FalloutNV.esm, the .bsa files and Shaders) to Internal storage/NVRS/FalloutNV."
+            .to_string(),
+    );
+    out.push(String::new());
+    out.push(format!("Log: {log}"));
+    out
+}
+
+/// This run's log (the process's standard output and error: the engine's lines) in
+/// `nvrs-log.txt`: in Download (which any file manager shows; Android lets an app make its own
+/// files there without a permission), else in `fallback` (the app's own folder). Where it went.
+fn log_to(fallback: Option<&Path>) -> Option<PathBuf> {
     use std::os::fd::AsRawFd;
-    let _ = std::fs::create_dir_all(dir);
-    let Ok(file) = std::fs::File::create(dir.join("nvrs-log.txt")) else {
-        return;
-    };
-    extern "C" {
-        fn dup2(old: i32, new: i32) -> i32;
+    let mut places = vec![PathBuf::from("/storage/emulated/0/Download")];
+    places.extend(fallback.map(Path::to_path_buf));
+    for dir in places {
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("nvrs-log.txt");
+        let Ok(file) = std::fs::File::create(&path) else {
+            continue;
+        };
+        extern "C" {
+            fn dup2(old: i32, new: i32) -> i32;
+        }
+        // SAFETY: the file stays open for the whole run (leaked below); 1 and 2 are the
+        // process's standard output and error.
+        unsafe {
+            dup2(file.as_raw_fd(), 1);
+            dup2(file.as_raw_fd(), 2);
+        }
+        std::mem::forget(file);
+        return Some(path);
     }
-    // SAFETY: the file stays open for the whole run (leaked below); 1 and 2 are the process's
-    // standard output and error.
-    unsafe {
-        dup2(file.as_raw_fd(), 1);
-        dup2(file.as_raw_fd(), 2);
-    }
-    std::mem::forget(file);
+    None
 }
 
 /// The game on its own thread: the room's game, shared with the Linux room
@@ -370,45 +445,115 @@ fn hand_over(app: &AndroidApp, controls: &mut Controls) {
     }
 }
 
+/// The app's package (its "All files access" page).
+const PACKAGE: &str = "io.github.lhomer.nvrs.test";
+
 #[no_mangle]
 fn android_main(app: AndroidApp) {
-    let game = find_game(&app);
-    let log_dir = match &game {
-        Ok(data) => data.parent().map(Path::to_path_buf),
-        Err(_) => app.external_data_path(),
-    };
-    if let Some(dir) = &log_dir {
-        log_to(dir);
-    }
+    let log = log_to(app.external_data_path().as_deref());
+    let log_name = log
+        .as_ref()
+        .map_or("(no log could be written)".to_string(), |p| {
+            p.display().to_string()
+        });
     eprintln!("nv-rs Android test build {}", env!("CARGO_PKG_VERSION"));
+    eprintln!("nv-rs Android: the log is {log_name}");
     let mut controls = Controls::default();
     let mut started = false;
-    let data = match game {
-        Ok(data) => {
-            eprintln!(
-                "nv-rs Android: the game's Data folder is {}",
-                data.display()
-            );
-            Some(data)
-        }
-        Err(why) => {
-            eprintln!("nv-rs Android: {why}");
-            None
-        }
-    };
+    // The game's Data folder once found; else what was found where (looked again when the app
+    // comes back, after the settings page).
+    let mut data: Option<PathBuf> = None;
+    let mut asked = false;
+    // The current window was drawn by the CPU (the message): the game waits for the next one.
+    let mut drawn = false;
+    let look_again =
+        |app: &AndroidApp, data: &mut Option<PathBuf>, asked: &mut bool| -> Option<Vec<String>> {
+            if data.is_some() {
+                return None;
+            }
+            match find_game(app) {
+                Ok(found) => {
+                    eprintln!(
+                        "nv-rs Android: the game's Data folder is {}",
+                        found.display()
+                    );
+                    *data = Some(found);
+                    None
+                }
+                Err(tried) => {
+                    let access = notice::all_files_access(app);
+                    for (dir, looked) in &tried {
+                        eprintln!("nv-rs Android: {}: {looked:?}", dir.display());
+                    }
+                    eprintln!("nv-rs Android: All files access: {access:?}");
+                    // Not allowed: its settings page, once by itself (then on a tap).
+                    if access == Some(false) && !*asked {
+                        *asked = true;
+                        let opened = notice::open_all_files_access(app, PACKAGE);
+                        eprintln!("nv-rs Android: the All files access page opened: {opened}");
+                    }
+                    Some(not_found_message(&tried, access, &log_name))
+                }
+            }
+        };
+    let mut message = look_again(&app, &mut data, &mut asked);
     loop {
         let mut quit = false;
         app.poll_events(Some(Duration::from_millis(8)), |event| match event {
             PollEvent::Main(MainEvent::InitWindow { .. }) => {
-                hand_over(&app, &mut controls);
+                drawn = false;
                 if !started {
-                    if let Some(data) = data.clone() {
+                    message = look_again(&app, &mut data, &mut asked);
+                }
+                if let (false, Some(found)) = (started, data.clone()) {
+                    hand_over(&app, &mut controls);
+                    started = true;
+                    let _ = std::thread::Builder::new()
+                        .name("nv-rs game".into())
+                        .stack_size(64 << 20)
+                        .spawn(move || run_game(found));
+                } else if started {
+                    hand_over(&app, &mut controls);
+                } else if let Some(lines) = &message {
+                    drawn = notice::draw_message(&app, lines);
+                }
+            }
+            // Back from the settings page (or the file manager): looked again.
+            PollEvent::Main(MainEvent::Resume { .. }) | PollEvent::Main(MainEvent::GainedFocus)
+                if !started =>
+            {
+                message = look_again(&app, &mut data, &mut asked);
+                match (&data, &message) {
+                    // Found, but this window was drawn by the CPU: the game starts in the next
+                    // one (closing and opening the app makes it at once).
+                    (Some(_), _) if drawn => {
+                        let lines = vec![
+                            "NV-RS Test: found the game files.".to_string(),
+                            String::new(),
+                            "Close NV-RS Test and open it again to start the game.".to_string(),
+                            String::new(),
+                            format!("Log: {log_name}"),
+                        ];
+                        notice::draw_message(&app, &lines);
+                    }
+                    (Some(found), _) if app.native_window().is_some() => {
+                        hand_over(&app, &mut controls);
                         started = true;
+                        let found = found.clone();
                         let _ = std::thread::Builder::new()
                             .name("nv-rs game".into())
                             .stack_size(64 << 20)
-                            .spawn(move || run_game(data));
+                            .spawn(move || run_game(found));
                     }
+                    (None, Some(lines)) => {
+                        drawn |= notice::draw_message(&app, lines);
+                    }
+                    _ => {}
+                }
+            }
+            PollEvent::Main(MainEvent::WindowResized { .. }) if !started => {
+                if let Some(lines) = &message {
+                    drawn |= notice::draw_message(&app, lines);
                 }
             }
             PollEvent::Main(MainEvent::WindowResized { .. }) => hand_over(&app, &mut controls),
@@ -427,6 +572,20 @@ fn android_main(app: AndroidApp) {
         }
         if let Ok(mut events) = app.input_events_iter() {
             while events.next(|event| {
+                // No game yet: a tap opens the All files access page again.
+                if !started {
+                    if let InputEvent::MotionEvent(m) = event {
+                        if m.action() == MotionAction::Up
+                            && notice::all_files_access(&app) == Some(false)
+                        {
+                            let opened = notice::open_all_files_access(&app, PACKAGE);
+                            eprintln!(
+                                "nv-rs Android: tap: the All files access page opened: {opened}"
+                            );
+                        }
+                    }
+                    return InputStatus::Handled;
+                }
                 if let InputEvent::MotionEvent(m) = event {
                     let index = m.pointer_index();
                     let pointer = m.pointer_at_index(index);
@@ -448,7 +607,7 @@ fn android_main(app: AndroidApp) {
                 }
             }) {}
         }
-        touch_overlay::set(if data.is_some() {
+        touch_overlay::set(if started {
             controls.shapes()
         } else {
             Vec::new()

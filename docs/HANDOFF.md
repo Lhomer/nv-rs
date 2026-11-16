@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-16 (Android: All files access, a message instead of a black screen)
+
+- **Now (`android/src/notice.rs`: JNI from the native thread: `Environment.isExternalStorageManager`, the `MANAGE_APP_ALL_FILES_ACCESS_PERMISSION` page for the package (or the list page), a message drawn with `android.graphics` into a bitmap and copied into the window; `android/src/lib.rs`: `look`/`find_game` say what each place lacks, `/sdcard/NVRS` first, the log in `Download/nvrs-log.txt` (else the app's folder), looked again on resume, a tap reopens the page; `READ_EXTERNAL_STORAGE` `maxSdkVersion` 32):** builds for aarch64; not run on a phone. The manifest already had `MANAGE_EXTERNAL_STORAGE` (checked in the published APK): All files access is a special access, so the Permissions page rightly says "No permissions required"; the app now opens its page itself. Same test key (the publish job's), so it updates over the install.
+- **Patrick (Galaxy Z TriFold):** a black screen; no way to grant All files access from the Permissions page; Android/data hidden from his file manager.
+
 ### Claude, 2026-11-16 (crash: the world probes took a scene block for a reference)
 
 - **Now (`jip::commands::world_ray_cast` answers the reference (`block_parent_ref`), host `cast_world` uses `jip::commands::is_actor`; test `world_ray_cast_answers_the_hit_reference_not_its_block`; `crate::one_hand::widen` checks the shooter is an actor; `scripts/launcher` `plain_end` reads the cause from the stop line):** fixed the Test Range crash at the first staggering hit (`56625f6d`, under `Actor::HitMe`). Not rerun in game: no game files here.

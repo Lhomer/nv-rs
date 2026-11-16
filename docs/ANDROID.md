@@ -51,18 +51,24 @@ Optional, not used yet (no sound): `Data/Fallout - Sound.bsa`, `Data/Fallout - V
 
 Put the folder in one of these places (the first found is used):
 
-1. **The app's own folder**, no permission needed:
-   `Internal storage/Android/data/io.github.lhomer.nvrs.test/files/FalloutNV`.
-   From a PC: connect the phone by USB (File transfer), open the phone in Explorer and copy the
-   folder there. Install and open the app once first, so the folder exists. Uninstalling the app
-   deletes it (an update does not).
-2. **`/sdcard/NVRS/FalloutNV`** (`Internal storage/NVRS/FalloutNV`): kept when the app is
-   uninstalled, but the app needs the "all files" access: Settings, Apps, NV-RS Test,
-   Permissions, Files and media (or "All files access"), Allow management of all files.
+1. **`/sdcard/NVRS/FalloutNV`** (`Internal storage/NVRS/FalloutNV`, the easy one to reach from a
+   PC or a file manager). The app needs **All files access** for it. This is a special access,
+   not a permission: the app's Permissions page says "No permissions required", which is right.
+   The app asks by itself: on its first start without the game it opens the All files access
+   page for NV-RS Test. Switch it on and go back. To find it by hand: Settings, Apps, Special
+   access (Samsung: the menu at the top right of Apps), All files access, NV-RS Test.
+2. **The app's own folder**, no access needed:
+   `Internal storage/Android/data/io.github.lhomer.nvrs.test/files/FalloutNV`. Many file managers
+   hide `Android/data` (a PC over USB still shows it). Install and open the app once first, so the
+   folder exists. Uninstalling the app deletes it (an update does not).
 
 ## Play
 
-Open NV-RS Test (landscape). The game starts by itself: the main menu (the start-up movies and
+Open NV-RS Test (landscape). Without the game files it shows what it looked for instead of
+starting: each place it checked and what is missing there, whether All files access is on (tap
+the screen to open its page again), what to copy, and where the log is. Once it finds the files
+it starts by itself. If it says it found them but does not start, close and open it again. The
+game: the main menu (the start-up movies and
 logos are skipped), then the Test Range, which takes a minute or two to load on first start.
 The target stands 6 m ahead; the obstacles are behind it, so shots push it into them.
 
@@ -86,10 +92,11 @@ seconds.
 
 ## When it does not work
 
-The app writes its log to `nvrs-log.txt` beside the `FalloutNV` folder it used (or in
-`Android/data/io.github.lhomer.nvrs.test/files` when it found no game files). Copy it to a PC
-and send it: it names what stopped the run. A black screen with no controls means the app found
-no game files (the log lists where it looked).
+The app writes its log to `nvrs-log.txt` in **Download** (`Internal storage/Download`, which any
+file manager shows; Android lets an app make its own files there without a permission). If it
+cannot, the log goes in the app's own folder, and the screen names where it is. Send it: it names
+what stopped the run. With no game files the screen itself says where the app looked and what is
+missing.
 
 ## How it is built
 

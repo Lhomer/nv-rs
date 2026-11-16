@@ -767,6 +767,7 @@ dependencies = [
  "log",
  "ndk-sys",
  "num_enum",
+ "raw-window-handle",
  "thiserror 1.0.69",
 ]
 
@@ -825,6 +826,8 @@ dependencies = [
  "d3d9-wgpu",
  "engine-platform",
  "host",
+ "jni-sys 0.3.1",
+ "ndk",
 ]
 
 [[package]]
