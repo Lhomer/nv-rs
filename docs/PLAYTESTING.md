@@ -127,6 +127,7 @@ and the host's tests check one against the other. The fix lines are written with
 | `NV_FRAME_LIMIT=n` (`iFrameLimit`; `FrameLimit=`) | Frames a second at most in play (0: none) | none under `fixes`; the original's own pacing under `vanilla` |
 | `NV_MENU_FRAME_LIMIT=n` (`iMenuFrameLimit`; `MenuFrameLimit=`) | Frames a second at most in menus (0: none) | 120 |
 | `NV_SHOW_FPS=1` or `0` (`bShowFrameRate`; `NV_SHOW_FPS=`; Settings.cmd's frame rate counter) | The frame-rate counter in the window's top-right corner from the start: frames a second over about half a second and the slowest frame of about the last second. F11 in the game shows or hides it either way; while wgpu draws, the key is the counter's and never reaches the game (on the real Direct3D 9 it is the game's). Drawn by wgpu into the window's frame after its capture, so never in an F12 report or an `NV_SHOT` capture; the real Direct3D 9 has none (`crates/d3d9-wgpu/src/frame_rate.rs`) | off (hidden until F11) |
+| `NV_RECORD_BUTTON=1` or `0` (`bRecordButton`) | The small Record button in the window's top-right corner, under the frame-rate counter (clickable while the cursor shows, as in the pause menu). F9 starts and stops a clip either way (below, "Record a bug"); 0 only hides the button. The button is drawn after the recorder's copy of the frame, so it is never in a clip | on |
 | `NV_THREADS=stepped` (`bSteppedThreads=1`; `NV_THREADS=`; Settings.cmd's threads option) | The game's threads one at a time (the fallback, and the reference mode) instead of side by side on their own cores | side by side in play; a scripted or measured run is stepped whatever the default |
 | `NV_RENDER_THREAD=0` (`bRenderThread=0`; `NV_RENDER_THREAD=`; Settings.cmd's drawing thread option) | The real Direct3D 9 calls on the game's own threads, as the original makes them, instead of a render thread of their own | render thread in play; a scripted or measured run draws on the game's threads |
 | `NV_DRAW_THREAD=1`, `0` or `poison` (`bWorldDrawThread`, 0 or 1; no Settings.cmd line) | EXPERIMENTAL: the world's draw on a thread of its own beside the end of the frame (docs/FIXES.md, "World drawn on a second thread"); `poison` (the variable only) adds the value packet's POISON check, for stepped threads. Needs real threads with the render thread; for now every frame still draws on main by default (the geometry family it needs is off until its gate; NV_TYPED=geometry). The variable alone makes a run a test (vanilla, stepped threads) unless NV_PRESET and NV_THREADS say otherwise | off in every preset |
@@ -390,6 +391,26 @@ Japanese or Korean Windows, the package's folder must have a plain-letter path (
 one); `Play.exe` says so. That setup has not been run.
 
 ## Reporting
+
+### Record a bug
+
+In the Play package (a launcher's play run, the Vulkan renderer), **F9** starts and stops a clip,
+and so does the small red Record button in the window's top-right corner while the cursor shows
+(`[nv-rs Display] bRecordButton=0` hides the button; F9 still records). F9 is then the
+recorder's: the game's own Quickload is no longer on it. A clip:
+
+- is an MP4 (H.264, 30 frames a second, the 1.5 s before the press included, at most 2 minutes)
+  in `%USERPROFILE%\Videos\nv-rs-test-clips` (`NV_ROOM_CLIPS` picks another folder), named
+  `<date>_<time>_<commit>_PLAY-<weapon in hand>_<what happened>.mp4`;
+- has a `.json` of the same name beside it: the commit, `"mode":"play"`, where the player was at
+  the start and at the end (`place`, `place_end`: the cell's form id, editor ID and name, and the
+  position), the game log's last 200 lines (`log`), the hit reactions' events during the clip and,
+  each frame while an actor reacts, its state and its body's (`samples`: docs/WINDOWS-ROOM.md
+  describes them).
+
+Nothing is written into the saves or the game's folders; the recorder is the physics tester's
+(`crates/host/src/room_record.rs`), and the Record button is never in the video.
+
 
 A screenshot or a launch alone does not establish that something works. Record the starting
 state (the save), the steps, the result, the log's last lines and a comparison with the original

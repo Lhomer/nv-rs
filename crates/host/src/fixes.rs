@@ -548,6 +548,11 @@ pub const PLAY_RENDERER: Renderer = Renderer::Vulkan;
 /// test.
 pub const PLAY_SHOW_FRAME_RATE: bool = false;
 
+/// Whether a play run's Record button shows (`crate::room_record`; F9 records either way) when
+/// neither `NV_RECORD_BUTTON` nor `Fallout.ini`'s `bRecordButton` says ([`Choice::record_button`]):
+/// on. `crates/host/data/game_ini.tsv`'s `bRecordButton` row is held to it by a test.
+pub const PLAY_RECORD_BUTTON: bool = true;
+
 /// Who draws the game ([`Choice::renderer`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Renderer {
@@ -645,6 +650,12 @@ pub struct Choice {
     /// else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Display] bShowFrameRate`; else
     /// [`PLAY_SHOW_FRAME_RATE`], off. Not part of any preset.
     pub show_frame_rate: bool,
+    /// Whether this run's clips are the regular game's (`crate::room_record::want_play`): a
+    /// launcher's play run that is no test. Not part of any preset.
+    pub play_clips: bool,
+    /// Whether their Record button shows: `NV_RECORD_BUTTON` when set (`1` on, else off); else
+    /// `Fallout.ini`'s `[nv-rs Display] bRecordButton`; else [`PLAY_RECORD_BUTTON`], on.
+    pub record_button: bool,
     /// The weighty combat tuning ([`crate::gunplay::Tuning`]): its `NV_GUNPLAY_*` variables when
     /// set; else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Gunplay]`; else the built-in
     /// feel. Read by the weighty combat row only, so a preset without it never feels it.
@@ -683,6 +694,8 @@ impl Choice {
             borderless: None,
             renderer: None,
             show_frame_rate: PLAY_SHOW_FRAME_RATE,
+            play_clips: false,
+            record_button: PLAY_RECORD_BUTTON,
             gunplay: crate::gunplay::Tuning::PLAY,
             movement: crate::movement::Tuning::PLAY,
             test_range_cell: crate::test_range::DEFAULT_CELL.to_string(),
@@ -842,6 +855,8 @@ impl Choice {
             // The same: play's renderer, the file's choice over it; none for any other run.
             renderer: ini.renderer.or(play.then_some(PLAY_RENDERER)),
             show_frame_rate: ini.show_frame_rate.unwrap_or(PLAY_SHOW_FRAME_RATE),
+            play_clips: play,
+            record_button: ini.record_button.unwrap_or(PLAY_RECORD_BUTTON),
             gunplay: crate::gunplay::Tuning::from_parts(&ini.gunplay, &env)?,
             movement: crate::movement::Tuning::from_parts(&ini.movement, &env)?,
             test_range_cell: match env("NV_TEST_RANGE_CELL").filter(|v| !v.trim().is_empty()) {
@@ -932,6 +947,9 @@ impl Choice {
         }
         if let Some(value) = env("NV_SHOW_FPS").filter(|v| !v.trim().is_empty()) {
             choice.show_frame_rate = value.trim() == "1";
+        }
+        if let Some(value) = env("NV_RECORD_BUTTON").filter(|v| !v.trim().is_empty()) {
+            choice.record_button = value.trim() == "1";
         }
         if test {
             choice.preset = Preset::Vanilla;
@@ -1994,16 +2012,38 @@ mod tests {
         let plain = with_ini(None, "[General]\nbUseThreadedAI=1\n", &[]);
         assert_eq!(plain.borderless, Some(PLAY_BORDERLESS));
         assert_eq!(plain.renderer, Some(PLAY_RENDERER));
+        assert!(plain.play_clips && plain.record_button);
         assert_eq!(
             Choice {
                 borderless: None,
                 renderer: None,
+                play_clips: false,
                 ..plain
             },
             Choice::from_parts(None, no_env).unwrap()
         );
         let real = with_ini(None, "[nv-rs Threads]\nbSteppedThreads=0\n", &[]);
         assert_eq!(real.threads, PLAY_THREADS);
+    }
+
+    /// The regular game's clips: a launcher's play run only (never a test); the Record button
+    /// shown unless `bRecordButton=0` or `NV_RECORD_BUTTON=0` (which wins) says not.
+    #[test]
+    fn a_play_run_records_with_a_button_unless_hidden() {
+        let on = with_ini(None, "[General]\nx=1\n", &[]);
+        assert!(on.play_clips && on.record_button);
+        let hidden = with_ini(None, "[nv-rs Display]\nbRecordButton=0\n", &[]);
+        assert!(hidden.play_clips && !hidden.record_button);
+        let asked = with_ini(
+            None,
+            "[nv-rs Display]\nbRecordButton=0\n",
+            &[("NV_RECORD_BUTTON", "1")],
+        );
+        assert!(asked.record_button);
+        // A test or a run no launcher started: no play clips.
+        assert!(!with_ini(None, "[General]\nx=1\n", &[("NV_SHOT", "x")]).play_clips);
+        assert!(!Choice::from_parts(None, no_env).unwrap().play_clips);
+        assert!(!Choice::vanilla().play_clips);
     }
 
     /// The frame-rate counter is off from the start in every run and preset unless asked for:

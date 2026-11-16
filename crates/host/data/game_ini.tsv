@@ -11,6 +11,7 @@ nv-rs Display	sRenderer	NV_D3D9	vulkan	vulkan = the game drawn on Vulkan (the de
 nv-rs Display	iFrameLimit	NV_FRAME_LIMIT	0	Most frames a second in play, with the fixes' uncapped frame rate; 0 = no limit.
 nv-rs Display	iMenuFrameLimit	NV_MENU_FRAME_LIMIT	120	Most frames a second in menus (main menu, Pip-Boy, dialogue, inventory, pause); 0 = no limit of their own.
 nv-rs Display	bShowFrameRate	NV_SHOW_FPS	0	1 = the frame rate shown in the top-right corner from the start; 0 = hidden until F11 (the default). F11 in the game shows or hides it (Vulkan only; F11 is then the counter's and cannot be bound in the game or by mods).
+nv-rs Display	bRecordButton	NV_RECORD_BUTTON	1	1 = a small Record button in the top-right corner (click it while the cursor shows, as in the pause menu); 0 = hidden. F9 records a clip either way (Vulkan only; F9 is then the recorder's, not Quickload): the video and a log to Videos\nv-rs-test-clips, never into the saves.
 nv-rs Threads	bSteppedThreads	NV_THREADS	0	1 = the game's threads take turns, one at a time (the fallback); 0 = side by side on their own cores.
 nv-rs Threads	bRenderThread	NV_RENDER_THREAD	1	1 = the Direct3D 9 calls go to a drawing thread of their own; 0 = on the game's threads, as the original makes them.
 nv-rs Gunplay	iRecoil	NV_GUNPLAY_RECOIL	100	Weighty combat (bWeightyCombat in [nv-rs Fixes]): how hard a gun's shot kicks the view, in percent of the built-in feel (from its calibre: damage and pellets); 0 = no kick. The Settings menu's Recoil row sets it.

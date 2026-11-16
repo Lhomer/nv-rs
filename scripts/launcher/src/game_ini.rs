@@ -625,6 +625,7 @@ pub fn switches(
             ),
             "bRenderThread" => Some(flag.unwrap_or(default).to_string()),
             "bShowFrameRate" => Some(flag.unwrap_or(default).to_string()),
+            "bRecordButton" => Some(flag.unwrap_or(default).to_string()),
             // A fix line: only one that is there and not commented out.
             _ => flag.map(str::to_string),
         };
@@ -1110,6 +1111,7 @@ mod tests {
                     ("NV_FRAME_LIMIT", "60"),
                     ("NV_MENU_FRAME_LIMIT", "120"),
                     ("NV_SHOW_FPS", "0"),
+                    ("NV_RECORD_BUTTON", "1"),
                     ("NV_THREADS", "stepped"),
                     ("NV_RENDER_THREAD", "1"),
                 ]),
@@ -1127,6 +1129,7 @@ mod tests {
                 ("NV_FRAME_LIMIT", "0"),
                 ("NV_MENU_FRAME_LIMIT", "120"),
                 ("NV_SHOW_FPS", "0"),
+                ("NV_RECORD_BUTTON", "1"),
                 ("NV_THREADS", "real"),
                 ("NV_RENDER_THREAD", "1"),
             ])
@@ -1184,6 +1187,7 @@ mod tests {
             "NV_FRAME_LIMIT",
             "NV_MENU_FRAME_LIMIT",
             "NV_SHOW_FPS",
+            "NV_RECORD_BUTTON",
             "NV_THREADS",
             "NV_RENDER_THREAD",
         ];
@@ -1221,6 +1225,7 @@ mod tests {
                 ("NV_FRAME_LIMIT", "90"),
                 ("NV_MENU_FRAME_LIMIT", "120"),
                 ("NV_SHOW_FPS", "0"),
+                ("NV_RECORD_BUTTON", "1"),
                 ("NV_THREADS", "stepped"),
                 ("NV_RENDER_THREAD", "1"),
                 ("NV_GRAB_PUSH", "0"),
@@ -1237,6 +1242,7 @@ mod tests {
                 ("NV_FRAME_LIMIT", "0"),
                 ("NV_MENU_FRAME_LIMIT", "120"),
                 ("NV_SHOW_FPS", "0"),
+                ("NV_RECORD_BUTTON", "1"),
                 ("NV_THREADS", "real"),
                 ("NV_RENDER_THREAD", "1"),
             ])
@@ -1256,6 +1262,7 @@ mod tests {
                 ("NV_FRAME_LIMIT", "90"),
                 ("NV_MENU_FRAME_LIMIT", "120"),
                 ("NV_SHOW_FPS", "0"),
+                ("NV_RECORD_BUTTON", "1"),
                 ("NV_RENDER_THREAD", "1"),
             ])
         );

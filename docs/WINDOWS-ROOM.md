@@ -73,9 +73,11 @@ and 50 frag grenades, topped up every five seconds. The target is essential and 
 
 - **F9** starts and stops a clip, anywhere in the room. The game never sees F9 there (nor F6 and
   F7); outside the room F9 is its Quickload.
-- **The Record button** is the red disc in the window's top right corner. It shows faintly while
-  idle and blinks while recording. Clicking it does the same as F9 whenever the mouse cursor shows
-  (in the range menu or the pause menu; in play the game holds the mouse for the look).
+- **The Record button** is the small red dot in the window's top right corner, under the
+  frame-rate counter. It shows faintly while idle and blinks while recording. Clicking it does the
+  same as F9 whenever the mouse cursor shows (in the range menu or the pause menu; in play the game
+  holds the mouse for the look). It is never in the clip. The regular Play package has the same
+  recorder (docs/PLAYTESTING.md, "Record a bug").
 
 A clip:
 

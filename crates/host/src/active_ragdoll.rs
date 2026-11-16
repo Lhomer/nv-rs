@@ -1454,6 +1454,16 @@ pub fn reacting(actor: u32) -> bool {
         .any(|r| r.actor == actor)
 }
 
+/// The actors reacting now (a rig the pose layer writes): the regular game's clips sample each
+/// every frame (`crate::room_record`).
+pub fn reacting_actors() -> Vec<u32> {
+    RIGS.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .map(|r| r.actor)
+        .collect()
+}
+
 /// Each bone's world offset over its animation: its parent's shown and animated rotations taken
 /// back, its own shown one on (`A(p) S(p)^T S(b) A(b)^T`), made orthonormal.
 fn offsets_of(bones: &[Bone], anim: &[(M3, V3)], shown: &[M3]) -> Vec<M3> {

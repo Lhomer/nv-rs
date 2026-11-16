@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (a Record button in the regular game)
+
+- **Now (`crate::room_record`: `want_play`, `taken_keys`, `play_weapon`, `place_fields`, `recent_log` (`NV_REPORT_LOG`), the button small (`BUTTON`) and hideable; `active_ragdoll::reacting_actors`; `[nv-rs Display] bRecordButton` / `NV_RECORD_BUTTON` (game_ini.tsv, `game_ini::Keys::record_button`, `fixes::Choice::play_clips` / `record_button`, `PLAY_RECORD_BUTTON`, the launcher's `switches`), `player_move` taking F9 from the game in play; docs/PLAYTESTING.md "Record a bug", WINDOWS-ROOM.md):** host tests pass; the launcher type-checks for Windows; not run on Windows.
+- **Patrick:** a Record button in the regular Play game (F9 too) to record bugs: mp4 plus a JSON log (commit, place, recent log, the pose log while actors react) named as Play's; a much smaller button, the tester's too, out of the video; a setting to hide it; never into the saves.
+
 ### Claude, 2026-11-17 (crash: a rigged terminal's shot)
 
 - **Now (`crate::ballistics::current_ammo`, its three callers; `knockdown::land`'s attacker; docs/GUNPLAY.md "Crash fix: a rigged terminal's shot"):** the ballistics' `CreateProjectile` hook asked `GetCurrentAmmo` with a terminal as the holder, which reads an actor's process; now no holder for a non-actor. Test passes; not run in the game.

@@ -7,6 +7,14 @@
 //! steps, trips, braces and their hands, falls: `crate::room_events`) and the target's state ten
 //! times a second, each at its time in the clip.
 //!
+//! **In the regular game too** (Patrick, 2026-11-17: to record bugs): in a launcher's play run
+//! ([`want_play`], from the host's start) F9 and a small Record button do the same, the clip named
+//! `..._PLAY-<weapon>_...` and its sidecar holding the place (the player's cell and position), the
+//! log's last lines (`NV_REPORT_LOG`, the file the launcher gives the game's output) and every
+//! reacting actor's state while it reacts. `[nv-rs Display] bRecordButton=0` hides the button (F9
+//! still records). F9 is then the recorder's, not the game's Quickload. Nothing is written but the
+//! clips: never a save.
+//!
 //! **How:** on in the room (`NV_ROOM_RECORD=1`, which Play.exe's room sets). Once the room is set up
 //! the wgpu backend hands over the frames (`d3d9_wgpu::capture`, without waiting for the GPU); a
 //! thread of its own sizes them, turns them into NV12, keeps the last [`PREROLL`] seconds and,
@@ -17,6 +25,7 @@
 
 use engine::prelude::*;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -38,8 +47,10 @@ pub const NEXT_WEAPON_KEY: usize = 0x40;
 pub const RESET_KEY: usize = 0x41;
 /// The keys the room takes from the game.
 pub const ROOM_KEYS: [usize; 3] = [RECORD_KEY, NEXT_WEAPON_KEY, RESET_KEY];
-/// The Record button: its centre (the window's fractions) and radius (a share of its height).
-const BUTTON: ([f32; 2], f32) = ([0.955, 0.075], 0.035);
+/// The Record button: its centre (the window's fractions) and radius (a share of its height):
+/// small, in the top-right corner under the frame-rate counter (Patrick: the first one was huge).
+/// The clips never show it: the recorder copies the game's frame before the overlay is drawn.
+const BUTTON: ([f32; 2], f32) = ([0.985, 0.075], 0.011);
 /// How often the target's state is kept (s).
 const SAMPLE_EVERY: f32 = 0.1;
 
@@ -48,15 +59,49 @@ pub fn commit() -> &'static str {
     option_env!("NV_RS_COMMIT").unwrap_or("local")
 }
 
-/// Whether clips can be made in this run: the room with `NV_ROOM_RECORD=1`.
+/// Whether clips can be made in this run: the room with `NV_ROOM_RECORD=1`, or a play run
+/// ([`want_play`]).
 pub fn on() -> bool {
+    room_on() || PLAY.load(Ordering::Relaxed)
+}
+
+/// The test room's clips (`NV_ROOM_RECORD=1`).
+fn room_on() -> bool {
     crate::phone_range::on() && std::env::var("NV_ROOM_RECORD").is_ok_and(|v| v == "1")
 }
 
-/// A clip being made.
+/// Clips in the regular game (a launcher's play run on Windows), and whether the Record button
+/// shows (`[nv-rs Display] bRecordButton`, `NV_RECORD_BUTTON`): from the host's start.
+static PLAY: AtomicBool = AtomicBool::new(false);
+static BUTTON_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// The regular game's clips on (`on`) or off, the button shown or hidden (F9 records either way).
+pub fn want_play(on: bool, button: bool) {
+    PLAY.store(on, Ordering::Relaxed);
+    BUTTON_HIDDEN.store(!button, Ordering::Relaxed);
+}
+
+/// The keys the clips take from the game: the room's F9, F6 and F7; in play F9 alone.
+pub fn taken_keys() -> &'static [usize] {
+    if room_on() {
+        &ROOM_KEYS
+    } else if PLAY.load(Ordering::Relaxed) {
+        &[RECORD_KEY]
+    } else {
+        &[]
+    }
+}
+
+/// The name mark of a play run's clip (in place of the room's weapon alone).
+pub fn play_weapon(weapon: &str) -> String {
+    format!("PLAY-{weapon}")
+}
+
+/// A clip being made: when, its stamp and weapon, and (in play) where it began (JSON fields).
 struct Clip {
     started: Instant,
     stem: String,
+    place: String,
 }
 
 /// The game thread's side.
@@ -155,6 +200,7 @@ pub fn scenario_of<'a>(events: impl IntoIterator<Item = &'a str>) -> String {
 
 /// A clip's sidecar: what it is, its video's outcome, and its events and samples (each object
 /// with `t`, seconds from the clip's first frame, and the room event's own fields).
+#[allow(clippy::too_many_arguments)]
 pub fn sidecar(
     stem: &str,
     weapon: &str,
@@ -163,6 +209,7 @@ pub fn sidecar(
     start: Instant,
     events: &[(Instant, String)],
     samples: &[(Instant, String)],
+    extra: &str,
 ) -> String {
     use crate::room_events::{num, text};
     let at = |t: Instant| num(t.saturating_duration_since(start).as_secs_f32());
@@ -171,7 +218,7 @@ pub fn sidecar(
         format!("{{\"t\":{},{body}", at(*t))
     };
     format!(
-        "{{\n\"clip\":{},\n\"commit\":{},\n\"weapon\":{},\n\"scenario\":{},\n\"fps\":{FPS},\n\"preroll_s\":{},\n\"video\":{video},\n\"events\":[\n{}\n],\n\"samples\":[\n{}\n]\n}}\n",
+        "{{\n\"clip\":{},\n\"commit\":{},\n\"weapon\":{},\n\"scenario\":{},\n\"fps\":{FPS},\n\"preroll_s\":{},\n\"video\":{video},\n{extra}\"events\":[\n{}\n],\n\"samples\":[\n{}\n]\n}}\n",
         text(stem),
         text(commit()),
         text(weapon),
@@ -212,6 +259,13 @@ fn weapon_in_hand(e: &mut Engine) -> String {
 const PLAYER: u32 = 0x011d_ea3c;
 const ITEM_FORM: u32 = 8;
 const FORM_ID: u32 = 0x0c;
+/// A reference's position (`+0x30`) and parent cell (`+0x40`); `TESForm::GetEditorID` (vtable
+/// `+0x130`).
+const REFR_POSITION: u32 = 0x30;
+const PARENT_CELL: u32 = 0x40;
+const EDITOR_ID_SLOT: u32 = 0x130;
+/// The log lines a play run's clip keeps.
+const LOG_LINES: usize = 200;
 /// `LookupFormByID`, for the target's reference.
 const LOOKUP_FORM: u32 = 0x0048_39c0;
 
@@ -224,9 +278,20 @@ pub fn frame(e: &mut Engine) {
     let mut guard = CONTROL.lock().unwrap_or_else(|p| p.into_inner());
     let c = guard.get_or_insert_with(Control::default);
     let now = Instant::now();
-    let target = crate::test_range::phone_target();
+    let room = room_on();
+    let target = if room {
+        crate::test_range::phone_target()
+    } else {
+        None
+    };
     if !c.ready {
-        if target.is_none() {
+        // The room once it is set up; the regular game once there is a player.
+        let ready = if room {
+            target.is_some()
+        } else {
+            e.global::<u32>(PLAYER) != 0
+        };
+        if !ready {
             return;
         }
         c.ready = true;
@@ -237,7 +302,13 @@ pub fn frame(e: &mut Engine) {
             engine_platform::on_exit(at_exit);
         }
         println!(
-            "Test room clips: F9 or the Record button; saved in {}",
+            "{}: F9{}; saved in {}",
+            who(),
+            if BUTTON_HIDDEN.load(Ordering::Relaxed) {
+                " (the Record button hidden: bRecordButton=0)"
+            } else {
+                " or the Record button"
+            },
             clips_folder().display()
         );
     }
@@ -259,6 +330,15 @@ pub fn frame(e: &mut Engine) {
                 now,
                 format!("{{\"target\":\"{form:08X}\",{fields},{body}}}"),
             ));
+        }
+    } else if !room {
+        // In play: every actor reacting now, each frame while it reacts.
+        for actor in crate::active_ragdoll::reacting_actors() {
+            let form = e.mem.u32(actor + FORM_ID);
+            let fields = crate::knockdown::state_fields(e, actor);
+            let body = crate::active_ragdoll::sample_fields(actor);
+            c.samples
+                .push_back((now, format!("{{\"actor\":\"{form:08X}\",{fields},{body}}}")));
         }
     }
     // Only the last moments kept while no clip is made.
@@ -284,29 +364,98 @@ pub fn frame(e: &mut Engine) {
     let f9 = keys[RECORD_KEY];
     let pressed = f9 && !c.f9_was;
     c.f9_was = f9;
-    // F6 the next weapon, F7 the target put back (the phone's buttons).
+    // F6 the next weapon, F7 the target put back (the phone's buttons): the room's only.
     let (f6, f7) = (keys[NEXT_WEAPON_KEY], keys[RESET_KEY]);
-    if f6 && !c.f6_was {
+    if room && f6 && !c.f6_was {
         crate::phone_range::ask_next_weapon();
     }
-    if f7 && !c.f7_was {
+    if room && f7 && !c.f7_was {
         crate::phone_range::ask_reset();
     }
     (c.f6_was, c.f7_was) = (f6, f7);
-    let clicked = button_clicked(c);
+    let clicked = !BUTTON_HIDDEN.load(Ordering::Relaxed) && button_clicked(c);
     let too_long = c
         .clip
         .as_ref()
         .is_some_and(|k| now.duration_since(k.started).as_secs_f32() >= MOST_SECONDS);
     if pressed || clicked || too_long {
         if c.clip.is_some() {
-            stop(c);
+            let place = place_fields(e, "place_end");
+            stop(c, &place);
         } else {
             let weapon = weapon_in_hand(e);
-            begin(c, &weapon);
+            let weapon = if room { weapon } else { play_weapon(&weapon) };
+            let place = if room {
+                String::new()
+            } else {
+                place_fields(e, "place")
+            };
+            begin(c, &weapon, place);
         }
     }
     show_button(c, now);
+}
+
+/// The log's name in this run's lines.
+fn who() -> &'static str {
+    if room_on() {
+        "Test room clips"
+    } else {
+        "Clips"
+    }
+}
+
+/// `"<key>":{...},` with where the player is: its cell (form id, editor ID, name) and position.
+fn place_fields(e: &mut Engine, key: &str) -> String {
+    use crate::room_events::{num, text};
+    let player = e.global::<u32>(PLAYER);
+    if player == 0 {
+        return String::new();
+    }
+    let at = [0u32, 4, 8].map(|o| e.mem.f32(player + REFR_POSITION + o));
+    let cell = e.mem.u32(player + PARENT_CELL);
+    let (id, editor, name) = if cell == 0 {
+        (0, String::new(), String::new())
+    } else {
+        let editor_text = e.vcall(cell, EDITOR_ID_SLOT, &args![]).u32();
+        let editor = if editor_text == 0 {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&e.mem.cstr(editor_text)).into_owned()
+        };
+        let name = String::from_utf8_lossy(&jip::commands::the_name(e, cell)).into_owned();
+        (e.mem.u32(cell + FORM_ID), editor, name)
+    };
+    format!(
+        "\"{key}\":{{\"cell\":\"{id:08X}\",\"editor_id\":{},\"name\":{},\"position\":[{},{},{}]}},\n",
+        text(&editor),
+        text(&name),
+        num(at[0]),
+        num(at[1]),
+        num(at[2])
+    )
+}
+
+/// The last `most` lines of the game's log (`NV_REPORT_LOG`, the file the launcher gives the game's
+/// output), as a JSON array; none without it.
+pub fn recent_log(most: usize) -> String {
+    use crate::room_events::text;
+    let Some(path) = std::env::var_os("NV_REPORT_LOG") else {
+        return "[]".into();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return "[]".into();
+    };
+    let tail = &bytes[bytes.len().saturating_sub(256 * 1024)..];
+    let lines: Vec<&[u8]> = tail.split(|&b| b == b'\n').collect();
+    let from = lines.len().saturating_sub(most + 1);
+    let shown: Vec<String> = lines[from..]
+        .iter()
+        .map(|l| String::from_utf8_lossy(l).trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .map(|l| text(&l))
+        .collect();
+    format!("[\n{}\n]", shown.join(",\n"))
 }
 
 /// Whether the Record button was clicked this frame (the cursor shown over it, the left button
@@ -342,6 +491,10 @@ fn show_button(c: &Control, now: Instant) {
     #[cfg(any(windows, target_os = "android", target_os = "linux"))]
     {
         use engine_platform::d3d9real::touch_overlay::{set, Shape};
+        if BUTTON_HIDDEN.load(Ordering::Relaxed) {
+            set(Vec::new());
+            return;
+        }
         let (centre, radius) = BUTTON;
         let alpha = match &c.clip {
             Some(k) => {
@@ -375,28 +528,29 @@ fn show_button(c: &Control, now: Instant) {
 }
 
 /// A clip begun: named, the recorder told (it starts with the pre-roll's frames).
-fn begin(c: &mut Control, weapon: &str) {
+fn begin(c: &mut Control, weapon: &str, place: String) {
     let stamp = engine_platform::record::local_stamp();
     // The scenario is known at the end; the clip's name is given then (the file renamed).
     let stem = clip_stem(&stamp, commit(), weapon, "rec");
     let folder = clips_folder();
     if let Err(e) = std::fs::create_dir_all(&folder) {
-        eprintln!("Test room clips: {}: {e}", folder.display());
+        eprintln!("{}: {}: {e}", who(), folder.display());
         return;
     }
     #[cfg(windows)]
     if let Some(r) = &c.recorder {
         r.begin(folder.join(format!("{stem}.mp4")));
     }
-    println!("Test room clips: recording {stem}");
+    println!("{}: recording {stem}", who());
     c.clip = Some(Clip {
         started: Instant::now(),
         stem: format!("{stamp}|{weapon}"),
+        place,
     });
 }
 
 /// The clip stopped: the video finished, named for its scenario, and its sidecar written.
-fn stop(c: &mut Control) {
+fn stop(c: &mut Control, place_end: &str) {
     let Some(clip) = c.clip.take() else {
         return;
     };
@@ -418,11 +572,24 @@ fn stop(c: &mut Control) {
     let stem = clip_stem(stamp, commit(), weapon, &scenario);
     let folder = clips_folder();
     let video = finish_video(c, &folder, stamp, weapon, &stem);
-    let json = sidecar(&stem, weapon, &scenario, &video, first, &events, &samples);
+    // In play: where it was, and the log's last lines.
+    let extra = if room_on() {
+        String::new()
+    } else {
+        format!(
+            "\"mode\":\"play\",\n{}{}\"log\":{},\n",
+            clip.place,
+            place_end,
+            recent_log(LOG_LINES)
+        )
+    };
+    let json = sidecar(
+        &stem, weapon, &scenario, &video, first, &events, &samples, &extra,
+    );
     let path = folder.join(format!("{stem}.json"));
     match std::fs::write(&path, json) {
-        Ok(()) => println!("Test room clips: saved {}", path.display()),
-        Err(e) => eprintln!("Test room clips: {}: {e}", path.display()),
+        Ok(()) => println!("{}: saved {}", who(), path.display()),
+        Err(e) => eprintln!("{}: {}: {e}", who(), path.display()),
     }
 }
 
@@ -474,7 +641,7 @@ fn at_exit() {
     let mut guard = CONTROL.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(c) = guard.as_mut() {
         if c.clip.is_some() {
-            stop(c);
+            stop(c, "");
         }
     }
 }
@@ -692,6 +859,7 @@ mod tests {
             t0,
             &[(later, "{\"event\":\"hit\",\"momentum\":21.000}".into())],
             &[(t0, "{\"target\":\"FF000001\",\"knock_state\":0}".into())],
+            "",
         );
         assert!(
             json.contains("{\"t\":0.500,\"event\":\"hit\",\"momentum\":21.000}"),
@@ -704,5 +872,59 @@ mod tests {
             clips_folder().ends_with("Videos/nv-rs-test-clips")
                 || std::env::var_os("NV_ROOM_CLIPS").is_some()
         );
+    }
+
+    /// A play run's clip: named as Play's, its sidecar with where it was and the log's last lines
+    /// (the file the launcher gives the game's output), and still valid JSON.
+    #[test]
+    fn a_play_clip_says_where_and_what_the_log_said() {
+        let stem = clip_stem(
+            "2026-11-17_10-00-00",
+            "c2a53c07",
+            &play_weapon("WeapNV9mmPistol"),
+            "flinch",
+        );
+        assert_eq!(
+            stem,
+            "2026-11-17_10-00-00_c2a53c0_PLAY-WeapNV9mmPistol_flinch"
+        );
+        let dir = std::env::temp_dir().join(format!("nv-rs-clip-log-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("game.log");
+        let lines: String = (0..300).map(|i| format!("line {i} \"quoted\"\n")).collect();
+        std::fs::write(&log, lines).unwrap();
+        std::env::set_var("NV_REPORT_LOG", &log);
+        let tail = recent_log(5);
+        std::env::remove_var("NV_REPORT_LOG");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(tail.contains("\"line 299 \\\"quoted\\\"\""), "{tail}");
+        assert!(
+            tail.contains("line 295") && !tail.contains("line 294"),
+            "{tail}"
+        );
+        let extra = format!(
+            "\"mode\":\"play\",\n\"place\":{{\"cell\":\"0001A2B3\",\"editor_id\":\"REPCONNBasement\",\"name\":\"REPCONN Basement\",\"position\":[1.000,2.000,3.000]}},\n\"log\":{tail},\n"
+        );
+        let t0 = Instant::now();
+        let json = sidecar(
+            &stem,
+            "PLAY-WeapNV9mmPistol",
+            "flinch",
+            "{}",
+            t0,
+            &[],
+            &[],
+            &extra,
+        );
+        assert!(json.contains("\"mode\":\"play\""), "{json}");
+        assert!(json.contains("\"editor_id\":\"REPCONNBasement\""), "{json}");
+        // Balanced (a JSON reader would take it): every brace and bracket closed.
+        let depth = json.chars().fold(0i32, |d, c| match c {
+            '{' | '[' => d + 1,
+            '}' | ']' => d - 1,
+            _ => d,
+        });
+        assert_eq!(depth, 0, "{json}");
+        assert_eq!(recent_log(5), "[]", "no log without NV_REPORT_LOG");
     }
 }

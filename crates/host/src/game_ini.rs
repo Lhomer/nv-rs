@@ -104,6 +104,8 @@ pub struct Keys {
     pub menu_frame_limit: Option<u32>,
     /// `bShowFrameRate`: the frame-rate counter shown from the start (`d3d9_wgpu::frame_rate`).
     pub show_frame_rate: Option<bool>,
+    /// `bRecordButton`: the Record button shown (`crate::room_record`; F9 records either way).
+    pub record_button: Option<bool>,
     pub stepped_threads: Option<bool>,
     pub render_thread: Option<bool>,
     /// The fix rows the file turns on or off, by `crate::fixes::Fix::env`.
@@ -156,6 +158,10 @@ impl Keys {
                 "bShowFrameRate" => {
                     keys.show_frame_rate = flag(raw);
                     keys.show_frame_rate.is_some()
+                }
+                "bRecordButton" => {
+                    keys.record_button = flag(raw);
+                    keys.record_button.is_some()
                 }
                 "bSteppedThreads" => {
                     keys.stepped_threads = flag(raw);
@@ -518,6 +524,7 @@ mod tests {
                 "iFrameLimit",
                 "iMenuFrameLimit",
                 "bShowFrameRate",
+                "bRecordButton",
                 "bSteppedThreads",
                 "bRenderThread",
                 "iRecoil",
@@ -578,6 +585,7 @@ mod tests {
             keys.show_frame_rate,
             Some(crate::fixes::PLAY_SHOW_FRAME_RATE)
         );
+        assert_eq!(keys.record_button, Some(crate::fixes::PLAY_RECORD_BUTTON));
         // The fix lines are commented out: the preset decides.
         assert!(keys.fixes.is_empty());
         assert_eq!(

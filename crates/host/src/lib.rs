@@ -275,6 +275,10 @@ impl Host {
         // F11 in the game shows or hides it either way.
         #[cfg(windows)]
         engine_platform::d3d9real::want_frame_rate(choice.show_frame_rate);
+        // The regular game's clips (F9 and a small Record button: `room_record`), in a launcher's
+        // play run on Windows; `[nv-rs Display] bRecordButton=0` hides the button.
+        #[cfg(windows)]
+        room_record::want_play(choice.play_clips, choice.record_button);
         // Who draws (`fixes::Choice::renderer`: in a launcher's play run, Fallout.ini's
         // `[nv-rs Display] sRenderer`, Vulkan by default); `NV_D3D9`, when it names a backend,
         // decides instead. A test or script without `NV_D3D9` makes no choice: nothing draws.
