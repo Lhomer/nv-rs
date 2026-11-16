@@ -163,6 +163,50 @@ pub const MAX_DT: f32 = 0.05;
 pub const UNITS_PER_METRE: f32 = crate::UNITS_PER_METRE;
 
 /// How far (m) a kick spreads for a body speed `v` (m/s).
+/// The bone a hit struck: the one whose segment passes nearest the impact `point` (from its joint
+/// to the middle of its children's joints; an end bone's on past its joint half its parent's
+/// length), the bones' joints
+/// `joints` (world) and parents `parents`. The joint alone named a hit on the thigh for the calf
+/// (the knee's joint): Patrick's c2a53c0 clip logged both a .44's hits as "L Calf".
+pub fn struck_bone(joints: &[V3], parents: &[Option<usize>], point: V3) -> usize {
+    let n = joints.len().min(parents.len());
+    let mut ends = vec![([0.0f32; 3], 0u32); n];
+    for b in 0..n {
+        if let Some(p) = parents[b].filter(|&p| p < n) {
+            ends[p] = (add(ends[p].0, joints[b]), ends[p].1 + 1);
+        }
+    }
+    let distance = |b: usize| {
+        let a = joints[b];
+        let (sum, count) = ends[b];
+        let end = if count > 0 {
+            scale(sum, 1.0 / count as f32)
+        } else {
+            match parents[b].filter(|&p| p < n) {
+                // An end bone (a hand, a foot, the head): on past its joint half its parent's
+                // length.
+                Some(p) => add(a, scale(sub(a, joints[p]), 0.5)),
+                None => a,
+            }
+        };
+        let ab = sub(end, a);
+        let l2 = dot(ab, ab);
+        let t = if l2 > 1e-9 {
+            (dot(sub(point, a), ab) / l2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        length(sub(point, add(a, scale(ab, t))))
+    };
+    (0..n)
+        .min_by(|&a, &b| {
+            distance(a)
+                .partial_cmp(&distance(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(0)
+}
+
 pub fn spread_of(v: f32) -> f32 {
     let t = tuning::get();
     (t.spread_base + t.spread_per_mps * v.max(0.0)).min(t.spread_max)
@@ -813,6 +857,32 @@ pub fn brace_weight(t: f32) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The struck bone is the one whose segment the impact is on: a hit on the thigh names the
+    /// thigh (not the calf, whose joint is the knee), on the belly the spine, on the shin the calf,
+    /// at the hand the hand.
+    #[test]
+    fn the_struck_bone_is_the_one_its_segment_is_on() {
+        use super::*;
+        // Pelvis 0, spine 1, thigh 2, calf 3, foot 4, upper arm 5, hand 6.
+        let joints = [
+            [0.0, 0.0, 100.0],
+            [0.0, 0.0, 110.0],
+            [-10.0, 0.0, 95.0],
+            [-10.0, 0.0, 50.0],
+            [-10.0, 0.0, 8.0],
+            [-20.0, 0.0, 140.0],
+            [-20.0, 0.0, 90.0],
+        ];
+        let parents = [None, Some(0), Some(0), Some(2), Some(3), Some(1), Some(5)];
+        let at = |p: V3| struck_bone(&joints, &parents, p);
+        // Low on the thigh, nearer the knee's joint than the hip's: the thigh.
+        assert_eq!(at([-10.0, 6.0, 60.0]), 2);
+        assert_eq!(at([-10.0, 6.0, 30.0]), 3);
+        assert_eq!(at([-20.0, 3.0, 84.0]), 6);
+        assert_eq!(at([-20.0, 3.0, 110.0]), 5);
+        assert_eq!(at([0.0, 8.0, 112.0]), 1);
+    }
 
     /// The shoulder's human range: a reach straight back is brought down to 50 degrees from
     /// hanging, across the chest to 30, up past the head to 150; one within it is left as it is,

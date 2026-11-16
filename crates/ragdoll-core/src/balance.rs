@@ -364,6 +364,20 @@ pub struct Stepping {
 }
 
 impl Stepping {
+    /// The game's own move of the actor (its AI walking it, not the steps': world, game units)
+    /// carried by the feet: where they stand and where they step go with it, so the steps never
+    /// pull the actor back to where it was (Patrick's c2a53c0 clip). The expected reference stays:
+    /// an AI move that goes on still ends the stepping (`recovering`).
+    pub fn carry(&mut self, moved: V3) {
+        for f in self.planted.iter_mut() {
+            *f = add(*f, moved);
+        }
+        for s in self.steps.iter_mut() {
+            s.from = add(s.from, moved);
+            s.to = add(s.to, moved);
+        }
+    }
+
     /// A stepping of the plan's steps (their targets already on the ground).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -515,6 +529,41 @@ impl Stepping {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's own move of the actor carries the steps' feet (where they stand, where they
+    /// step), not the expected reference (an AI move that goes on still ends the stepping).
+    #[test]
+    fn the_steps_go_with_the_actor() {
+        let mut s = Stepping {
+            dir: [0.0, -1.0, 0.0],
+            v: 1.0,
+            aggressor: 0,
+            steps: vec![Step {
+                foot: 0,
+                from: [0.0; 3],
+                to: [0.0, -10.0, 0.0],
+                time: 0.3,
+            }],
+            current: 0,
+            t: 0.0,
+            planted: [[-8.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+            weight: 1.0,
+            arms: 0.0,
+            shift: [0.0; 3],
+            shift_v: [0.0; 3],
+            recovering: false,
+            outcome: Outcome::Caught,
+            since: 0.0,
+            reference: [0.0; 3],
+            reference_z0: 0.0,
+            feet_z0: 0.0,
+        };
+        s.carry([5.0, 0.0, 0.0]);
+        assert_eq!(s.planted, [[-3.0, 0.0, 0.0], [13.0, 0.0, 0.0]]);
+        assert_eq!(s.steps[0].from, [5.0, 0.0, 0.0]);
+        assert_eq!(s.steps[0].to, [5.0, -10.0, 0.0]);
+        assert_eq!(s.reference, [0.0; 3]);
+    }
 
     fn feet() -> [V3; 2] {
         [[-8.0, 0.0, 0.0], [8.0, 0.0, 0.0]]

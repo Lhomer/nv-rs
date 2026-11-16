@@ -621,6 +621,51 @@ pub fn carried(anim_carrier: (M3, V3), anim_hand: (M3, V3), carrier: (M3, V3)) -
 
 /// The reason a brace's planted hands let go this frame, if any: the body recovered (its steps
 /// done, the brace reached and held, its centre of mass slower than [`RECOVERED_SPEED`] m/s).
+/// Why a brace's hands let go once its reaction's time is up ([`crate::active::REACTION_MOST`]); a
+/// hand let go then goes home along its own way (a weapon's support hand onto its grip: handed
+/// over at once it wobbled there), while the body is handed back (`crate::active::reaction_weight`).
+pub const TIME_UP: &str = "the reaction's time is up";
+/// How far (rad) the actor may turn from where its brace began before its hands let go: the game's
+/// AI turns it (toward its attacker), and hands held where they touched twist the body round.
+pub const TURNED_AWAY: f32 = 0.45;
+/// How far (game units) the game may move the actor (its AI walking it: not the steps) from where
+/// its brace began before its hands let go: a hand held where it touched dragged the body behind.
+pub const WALKED_AWAY: f32 = 10.0;
+
+/// Why the brace's hands let go now, if they do: the reaction's time is up
+/// ([`crate::active::REACTION_MOST`] seconds after the last hit, `since_hit`: [`TIME_UP`]), the
+/// actor turned away from where the brace began (`turned`, rad; [`TURNED_AWAY`]: the game's AI turns
+/// it, and hands held where they touched twisted the body round: Patrick's c2a53c0 clip) or was
+/// walked away from it (`walked`, game units; [`WALKED_AWAY`]), or the body recovered
+/// ([`recovered`]).
+pub fn let_go(
+    stepping: bool,
+    brace_t: f32,
+    com_speed: f32,
+    since_hit: f32,
+    turned: f32,
+    walked: f32,
+) -> Option<&'static str> {
+    if since_hit >= crate::active::REACTION_MOST {
+        return Some(TIME_UP);
+    }
+    if turned >= TURNED_AWAY {
+        return Some("turned away from the wall");
+    }
+    if walked >= WALKED_AWAY {
+        return Some("walked away from the wall");
+    }
+    recovered(stepping, brace_t, com_speed)
+}
+
+/// The angle (rad) between two flat facings (unit or not); 0 for a missing one.
+pub fn turned(from: V3, to: V3) -> f32 {
+    let (Some(a), Some(b)) = (unit([from[0], from[1], 0.0]), unit([to[0], to[1], 0.0])) else {
+        return 0.0;
+    };
+    dot(a, b).clamp(-1.0, 1.0).acos()
+}
+
 pub fn recovered(stepping: bool, brace_t: f32, com_speed: f32) -> Option<&'static str> {
     let k = crate::tuning::get();
     (!stepping && brace_t >= k.brace_reach + k.brace_hold && com_speed < RECOVERED_SPEED)
@@ -767,6 +812,36 @@ pub fn units(m: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A brace's hands let go once one hit's time is up, once the game turns the actor away from
+    /// the wall or walks it off, or once the body recovered; not while it still reacts there.
+    #[test]
+    fn the_hands_let_go_when_the_reaction_is_over() {
+        let held = let_go(false, 0.5, 1.0, 0.5, 0.0, 0.0);
+        assert_eq!(held, None);
+        assert_eq!(
+            let_go(false, 0.5, 1.0, crate::active::REACTION_MOST, 0.0, 0.0),
+            Some(TIME_UP)
+        );
+        assert_eq!(
+            let_go(false, 0.5, 1.0, 0.5, TURNED_AWAY, 0.0),
+            Some("turned away from the wall")
+        );
+        assert_eq!(
+            let_go(false, 0.5, 1.0, 0.5, 0.0, WALKED_AWAY),
+            Some("walked away from the wall")
+        );
+        assert_eq!(
+            let_go(false, 0.5, 1.0, 0.5, 0.0, 0.0),
+            recovered(false, 0.5, 1.0)
+        );
+        // The turn between flat facings, either way round, and none for a missing one.
+        assert!(
+            (turned([0.0, 1.0, 0.0], [1.0, 0.0, 0.3]) - std::f32::consts::FRAC_PI_2).abs() < 1e-5
+        );
+        assert!((turned([0.0, 1.0, 0.0], [0.0, -2.0, 0.0]) - std::f32::consts::PI).abs() < 1e-5);
+        assert_eq!(turned([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]), 0.0);
+    }
 
     fn wall() -> Surface {
         Surface::new([0.0; 3], [0.0, 1.0, 0.0], Some(50.0), None).unwrap()

@@ -354,7 +354,8 @@ procedural stepping; 3: bracing and falling into the ragdoll, later). Stage 1: a
 knockdown's topple speed makes the living body flinch. `[nv-rs Gunplay] iHitReactions` (0-200 %,
 0 off; Settings > Gameplay "Hit Reactions").
 - **The kick:** per hit (never the stack), the knockdowns' momentum and mass: v = p / mass x
-  Hit Reactions %. The struck bone is the rig's bone nearest the impact. Each bone of the rig
+  Hit Reactions %. The struck bone is the rig's bone whose segment the impact is on
+  (`flinch::struck_bone`). Each bone of the rig
   (`Bip01` pelvis, spine 0-2, neck, head, clavicles, upper arms, forearms, thighs, calves; a
   creature's that has them) gets an angular kick of 16 rad/s per m/s x its weight, about the axis
   across its lever to the impact and the hit's direction; weight = the role's lightness (pelvis
@@ -484,6 +485,83 @@ with no holder (the weapon's default ammo) for anything but an actor (`jip::comm
 for the shot, the hit's round and the breakdown; a knocked-down actor's fall damage names no
 attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
 patches (#624) and the knockdown's companion refusal were not on the path.
+
+### One hit, then a 5.5 s runaway, a spin and a snap (Patrick, 2026-11-16, c2a53c0's .44 fold clip)
+
+A .44 into a Powder Ganger braced at a waist-high obstacle. The first reaction looked right (a
+fold, the hands planted at 3.85 and 4.03 s). But after the hands let go ("recovered", 4.745 s),
+with no further hit, the body kept moving for about 5.5 s:
+- the pelvis offset went 3.5 → 23 → 10 → 32 units, then dropped from 18 to 1.3 in 0.25 s (a
+  snap upright);
+- the body tilted stiffly, an arm went behind the back, and it spun in circles.
+
+The game's AI keeps turning and walking the actor while it reacts. The reaction stayed fixed in
+the world:
+- a planted hand held where it touched, so turning the actor twisted the body round it, and
+  walking dragged the body behind it;
+- the physical body trailed the moving actor on its pelvis spring, then snapped back to it as it
+  was handed back.
+
+The lab had hidden this: its mannequin always faced +Y, and the lab never turned or walked it.
+
+- **The reaction goes with the actor** (`active_ragdoll::carry`). The game's own move of the actor
+  each frame is carried by the physical body's origin, the feet where they stand and step
+  (`balance::Stepping::carry`), and a brace's count of it. The game's own move is the reference's
+  move less the steps' own (`Rig::own_moved`). A body going over is not carried.
+- **The hands let go when the actor is turned or walked away** (`brace::let_go`):
+  - turned 0.45 rad from where the brace began (`TURNED_AWAY`);
+  - walked 10 units (`WALKED_AWAY`);
+  - one hit's time is up (`TIME_UP`);
+  - or recovered, as before.
+- **One hit's reaction is capped** (`active::REACTION_MOST`, 2 s; `active::reaction_weight`). A
+  reaction that is not going over starts handing its body back to the animation 2 s after its
+  last hit, busy or not, eased out over `BLEND_BACK` (0.8 s). A hand let go then still goes home
+  its own way: handing it over at once wobbled a rifle's support hand on its grip.
+- **Handed back, it only settles** (`active::Settle`). While the body's weight goes down (no hit
+  since, not going over), each bone's shown offset from its target and the pelvis's from its own
+  may only shrink. A growing one is held where it was the frame before. A brace's arms are left to
+  their own way home: held, they spun at 9 rad/s.
+- **The pose log** (`active_ragdoll::sample_fields`) adds three fields to `body`:
+  - `pelvis_jump`: the shown pelvis's move in the frame beyond the actor's own, in game units;
+  - `yaw_rate`: its turn against the animation, in rad/s (`active::heading_off`);
+  - `settling`: whether the hand-back holds it.
+- **The double hit.** The two hits 12 ms apart (450 then 307 m/s, both "L Calf") were one round.
+  The .44 went through the body (power 28, a body costs 15: sqrt(13 / 28) of 450 is 307). Its
+  continuation, started 45 units past the impact (`BODY_DEPTH`), hit the same body again a frame
+  later, so its momentum and damage counted twice. Now a continuation remembers the character it
+  passed through (`Bullet::through`):
+  - its impact on that character again does no damage (zeroed before the game processes it) and
+    goes no further;
+  - the knockdowns take no second hit from it (`ballistics::passed_through`; logged `the round
+    that passed through it again: no second hit`).
+- **The struck bone** is now the one whose segment the impact is on (`flinch::struck_bone`): from
+  its joint to its children's; an end bone's on past its joint half its parent's length. Before it
+  was the nearest joint, and "Calf" is the knee's joint: a hit on the thigh was named for the calf.
+  The hurt limb (`condition_hit`) uses it too. Whether the game's impact point was really on the
+  leg (Patrick aimed at the midsection) is not known from here.
+- **Lab** (`scenario::runaway`; the lab's `turn` in degrees/s and `walk` in units/s). One .44 at the
+  chest of an armed and an unarmed actor at a table, an armed one at a half wall and on flat
+  ground; each standing, turned at 90 and -200 degrees/s, walked at 120 units/s, and turned and
+  walked. Worst of the 20 runs, before → after:
+
+  | Measure | Before | After |
+  |---|---|---|
+  | Pelvis offset growth after nothing holds it (units) | 30.2 | 1.5 |
+  | Growth while handed back (units) | 0.47 | 0.013 |
+  | Shown pelvis move beyond the actor's per frame while handed back (units) | 1.66 | 0.19 |
+  | Turn against the animation (rad/s) | 5.14 | 1.15 |
+  | Turn off the animation (rad) | 0.28 | 0.07 |
+  | Back in its animation (s) | 6.9 | 2.8 |
+
+  Walked, the pelvis had trailed the animation by 17 units for the whole reaction and dropped
+  from 16.9 to 1.5 in 0.5 s at the end; now it is within 0.7. The tests:
+  - `one_hit_then_nothing_only_settles`: no growth past 3 units once nothing holds it, none past
+    0.05 while handed back, no move past 0.5 units a frame;
+  - `one_hit_reaction_is_capped`: handed back by 2.85 s, everything home within a second more;
+  - `heading_never_spins`: at most 2 rad/s and 0.2 rad off the animation.
+
+  The lab's own facing was fixed with it: the brace, reach, legs and shoulders now use the
+  animation's facing, not +Y. Not seen in the game yet.
 
 ### Arms through the body, a folded body snapping upright (Patrick, 2026-11-17, 454ebb2's 10:47 clip)
 
@@ -738,7 +816,8 @@ direction every frame). Now (`ragdoll_core::brace`, the same code in the game an
   8 degrees in the lab's wall brace, settling within about 1.5 degrees.
 - **It lets go once.** A hand lets go when the body has recovered (its steps done, the brace
   held, the centre of mass slower than 0.25 m/s), pushes off (the shoulder further from the
-  plant than the arm reaches), or after 3 s. It then goes back along a path to where the free
+  plant than the arm reaches), or after 3 s; also when the game turns or walks the actor away, or
+  2 s after the hit (see "One hit, then a 5.5 s runaway"). It then goes back along a path to where the free
   arm's hand is, and the arm is handed back over 0.5 s. It never reaches again in the same
   brace.
 - **The bracing arms' motors are no longer firmer** (`BRACE_FIRM` 0): firmer motors fought the

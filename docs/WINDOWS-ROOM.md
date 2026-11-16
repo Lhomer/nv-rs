@@ -105,8 +105,10 @@ Beside each clip a `.json` sidecar of the same name holds:
 - `samples`: the target's state ten times a second, and every frame while it reacts
   (`position`, `knock_state`, `life_state`, `health`, `falling`, `getting_up`), each with `t`, and
   `body`: the reaction's `active` (the physical body on), `pelvis_offset` (game units written over
-  the animation), `spread` (the body's farthest bone from the pelvis, m; the body is dropped past
-  2.5), `drift` and `drift_most` (reads a later game pass moved, and the most, in tolerances),
+  the animation), `pelvis_jump` (the shown pelvis's move in the frame beyond the actor's own,
+  game units), `yaw_rate` (its turn against the animation, rad/s), `settling` (being handed back:
+  it only comes closer), `spread` (the body's farthest bone from the pelvis, m; the body is dropped
+  past 2.5), `drift` and `drift_most` (reads a later game pass moved, and the most, in tolerances),
   `jumps` (animation jumps eased in) and `fade` (how much of a dropped body's way back is left);
   `null` when it is not reacting.
 

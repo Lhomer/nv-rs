@@ -120,6 +120,9 @@ struct Bullet {
     muzzle: f32,
     velocity: f32,
     made: Instant,
+    /// The character a continuation passed through (0: none): its impact on it again is the same
+    /// round's, never a second hit ([`passed_through`]).
+    through: u32,
 }
 
 static BULLETS: Mutex<Option<HashMap<u32, Bullet>>> = Mutex::new(None);
@@ -302,8 +305,14 @@ pub fn install(e: &mut Engine) {
         } else {
             None
         };
+        // A continuation back on the body it passed through: the same round, no second damage
+        // and no further pass ([`passed_through`]).
+        let again = first.is_some_and(|(collidee, ..)| passed_through(projectile, collidee));
+        if again {
+            e.mem.set_f32(projectile + DAMAGE, 0.0);
+        }
         let processed = projectile_process_impacts(e, Ptr::new(projectile));
-        if processed {
+        if processed && !again {
             if let Some(impact) = first {
                 penetrate(e, projectile, impact);
             }
@@ -380,8 +389,19 @@ fn shot(e: &mut Engine, form: u32, shooter: u32, weapon: u32, projectile: u32) {
             muzzle,
             velocity: caliber.velocity * muzzle,
             made: Instant::now(),
+            through: 0,
         },
     );
+}
+
+/// Whether `projectile` is a continuation of a round that already passed through `target`: it
+/// started a body's depth past the impact ([`BODY_DEPTH`]), which can still be inside a body bent
+/// over or struck along its length, and hit it again a frame later. That is the same round, its
+/// momentum and damage already counted (Patrick's c2a53c0 clip: one .44 logged two hits 12 ms
+/// apart, 450 then 307 m/s, the continuation's speed after a body's pass): the knockdowns take no
+/// second hit from it, and the game's damage for it is zeroed before it is processed.
+pub fn passed_through(projectile: u32, target: u32) -> bool {
+    target != 0 && projectile != 0 && bullet(projectile).is_some_and(|b| b.through == target)
 }
 
 fn remember(projectile: u32, bullet: Bullet) {
@@ -637,6 +657,9 @@ fn penetrate(e: &mut Engine, projectile: u32, (collidee, at, material_id): (u32,
             passes: b.passes + 1,
             power: left,
             made: Instant::now(),
+            // Past a body: that body (its impact on it again is the same round's); past a thin
+            // object: whatever it last passed through.
+            through: if body { collidee } else { b.through },
             ..b
         },
     };
@@ -689,6 +712,39 @@ pub fn frame(e: &mut Engine) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A round's continuation back on the body it passed through is the same round (Patrick's
+    /// c2a53c0 clip: one .44, two hits 12 ms apart, the second at the speed a body's pass leaves
+    /// it): never a second hit; another body, a fresh bullet or no target is.
+    #[test]
+    fn a_continuation_never_hits_the_body_it_passed_through_again() {
+        let caliber = caliber_of(".44 Magnum").unwrap();
+        let b = Bullet {
+            caliber,
+            load: Load::Standard,
+            passes: 1,
+            power: after_pass(caliber.penetration, BODY_COST).unwrap(),
+            pellet: false,
+            muzzle: 1.0,
+            velocity: caliber.velocity,
+            made: Instant::now(),
+            through: 0x0300_0000,
+        };
+        remember(0x0700_0010, b);
+        remember(0x0700_0020, Bullet { through: 0, ..b });
+        assert!(passed_through(0x0700_0010, 0x0300_0000));
+        assert!(!passed_through(0x0700_0010, 0x0300_0100));
+        assert!(!passed_through(0x0700_0020, 0x0300_0000));
+        assert!(!passed_through(0x0700_0030, 0x0300_0000));
+        assert!(!passed_through(0x0700_0010, 0));
+        // The speed it goes on at after a .44's pass through a body: 307 of 450 m/s.
+        let keep = (b.power / caliber.penetration).sqrt();
+        assert!(
+            (caliber.velocity * keep - 307.0).abs() < 1.0,
+            "{}",
+            caliber.velocity * keep
+        );
+    }
 
     /// The current ammo is asked for an actor as it is, and for anything else (a rigged terminal,
     /// a mine, no shooter) with no holder: the game's function reads an actor's process from it.

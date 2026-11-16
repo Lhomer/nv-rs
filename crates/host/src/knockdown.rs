@@ -293,6 +293,14 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
         return; // not a character
     }
     let who = describe(e, target);
+    // A round's continuation back on the body it passed through: the same round, already counted
+    // (`crate::ballistics::passed_through`).
+    if crate::ballistics::passed_through(e.mem.u32(hit + HIT_SOURCE), target) {
+        note(format!(
+            "{who}: the round that passed through it again: no second hit"
+        ));
+        return;
+    }
     if e.mem.u8(target + TEAMMATE) != 0 && !t.knockdown_companions {
         note(format!(
             "{who}: a companion (bKnockdownCompanions=0), left standing"

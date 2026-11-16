@@ -250,6 +250,111 @@ pub fn weight(since: f32) -> f32 {
     1.0 - ease((since - t.active_for) / t.blend_back.max(0.05))
 }
 
+/// How far a world turn `r` turns the flat heading `facing` (rad, signed, -pi to pi): the yaw of a
+/// shown pelvis against its animation (the host's pose log and the lab's `yaw_rate`: a body that
+/// spins shows it).
+pub fn heading_off(r: &M3, facing: V3) -> f32 {
+    let f = [facing[0], facing[1], 0.0];
+    let g = mv(r, f);
+    let (a, b) = (f[1].atan2(f[0]), g[1].atan2(g[0]));
+    let mut d = b - a;
+    while d > std::f32::consts::PI {
+        d -= std::f32::consts::TAU;
+    }
+    while d < -std::f32::consts::PI {
+        d += std::f32::consts::TAU;
+    }
+    d
+}
+
+/// The turn (rad) between two yaws (`heading_off`), the short way round.
+pub fn yaw_between(a: f32, b: f32) -> f32 {
+    let d = (b - a).abs() % std::f32::consts::TAU;
+    d.min(std::f32::consts::TAU - d)
+}
+
+/// How long one hit's reaction holds the body (s from the last hit) when it does not topple: then
+/// it is handed back to the animation (eased out over [`BLEND_BACK`]) whatever still holds it (a
+/// brace's hands let go and are handed back too: `crate::brace::let_go`). Patrick's c2a53c0 fold
+/// clip: one .44 hit held its body 5.7 s, the actor's AI walking and turning it all the while.
+pub const REACTION_MOST: f32 = 2.0;
+
+/// The physics' weight in the shown pose (as [`weight`]) `since_busy` seconds after the reaction
+/// was last busy (steps, a brace, a fall) and `since_hit` after its last hit: a reaction that is not
+/// going over ([`REACTION_MOST`]) starts handing back by then, busy or not.
+pub fn reaction_weight(since_busy: f32, since_hit: f32, falling: bool) -> f32 {
+    let since = if falling {
+        since_busy
+    } else {
+        since_busy.max(since_hit - REACTION_MOST + tuning::get().active_for)
+    };
+    weight(since)
+}
+
+/// A reaction being handed back only settles toward its animation: while the body's weight goes
+/// down (no hit since, not going over), each bone's shown world rotation may only come closer to
+/// its target, and the shown pelvis to its own; a body that runs off on its own (a pin, a turn,
+/// the AI walking the actor) is never shown gaining on it (Patrick's c2a53c0 fold clip: the pelvis
+/// 3.5 to 23 to 32 units after the hands let go, no hit).
+#[derive(Clone, Debug, Default)]
+pub struct Settle {
+    /// Each bone's offset angle (rad) and the pelvis's (game units) the frame before; none while
+    /// not settling.
+    angle: Vec<f32>,
+    pelvis: Option<f32>,
+}
+
+impl Settle {
+    /// Not settling (the reaction is on): nothing held.
+    pub fn open(&mut self) {
+        self.angle.clear();
+        self.pelvis = None;
+    }
+
+    /// Whether it is holding (settling).
+    pub fn holding(&self) -> bool {
+        self.pelvis.is_some()
+    }
+
+    /// The shown world rotations `shown` over their `target`s and the shown pelvis's offset from
+    /// its own target `pelvis` (game units), held to no more than the frame before's; not the
+    /// bones `free` says (a brace's arms, on their own way home: held, they spun).
+    pub fn hold(
+        &mut self,
+        shown: &mut [Q],
+        target: &[Q],
+        pelvis: &mut V3,
+        free: impl Fn(usize) -> bool,
+    ) {
+        if self.angle.len() != shown.len() {
+            self.angle = vec![f32::INFINITY; shown.len()];
+        }
+        for (i, ((s, t), most)) in shown
+            .iter_mut()
+            .zip(target)
+            .zip(self.angle.iter_mut())
+            .enumerate()
+        {
+            if free(i) {
+                *most = f32::INFINITY;
+                continue;
+            }
+            let v = qlog(qmul(*s, qconj(*t)));
+            let a = length(v);
+            if a > *most && a > 1e-6 {
+                *s = qnorm(qmul(qexp(scale(v, *most / a)), *t));
+            } else {
+                *most = a;
+            }
+        }
+        let l = length(*pelvis);
+        match self.pelvis {
+            Some(most) if l > most && l > 1e-6 => *pelvis = scale(*pelvis, most / l),
+            _ => self.pelvis = Some(l),
+        }
+    }
+}
+
 /// The torso's motors at the limbs' `strength` ([`strength`]): from [`TORSO_SOFT`] instead of
 /// [`DRIVE_SOFT`], back to full as they come back.
 pub fn torso_strength(strength: f32) -> f32 {
@@ -1881,6 +1986,64 @@ pub fn hinge_limit_from(u: V3, f: V3, axis: V3, low: f32, flex: f32, lean: f32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One non-toppling hit's body is handed back from [`REACTION_MOST`] after it, busy or not; a
+    /// fall's is not; before then the weight is the reaction's own.
+    #[test]
+    fn a_reaction_is_handed_back_by_its_time() {
+        let t = tuning::get();
+        // Busy all along (a brace held): full until its time, then eased out, gone after the
+        // hand-back.
+        assert_eq!(reaction_weight(0.0, 1.0, false), 1.0);
+        assert_eq!(reaction_weight(0.0, REACTION_MOST, false), 1.0);
+        let mid = reaction_weight(0.0, REACTION_MOST + t.blend_back * 0.5, false);
+        assert!(mid > 0.2 && mid < 0.8, "{mid}");
+        assert!(reaction_weight(0.0, REACTION_MOST + t.blend_back + 1e-3, false) <= 1e-5);
+        // Going over: its own.
+        assert_eq!(reaction_weight(0.0, 10.0, true), 1.0);
+        // Never more than its own weight.
+        for s in [0.0, 1.0, 1.5, 2.0, 3.0] {
+            assert!(reaction_weight(s, 0.5, false) <= weight(s) + 1e-6);
+        }
+    }
+
+    /// A settling body is never shown gaining on its targets: each bone's offset and the pelvis's
+    /// only shrink (a growing one is held where it was, a shrinking one taken); a free bone is left
+    /// alone; opened, it holds nothing.
+    #[test]
+    fn a_settling_body_only_comes_closer() {
+        let target = vec![Q_ID; 3];
+        let turned = |a: f32| qexp([0.0, 0.0, a]);
+        let mut settle = Settle::default();
+        let mut shown = vec![turned(0.3), turned(0.2), turned(0.5)];
+        let mut pelvis = [3.0, 0.0, 0.0];
+        settle.hold(&mut shown, &target, &mut pelvis, |_| false);
+        assert!(settle.holding());
+        // Growing: held at the frame before's (the spin's sign kept); the free bone grows.
+        let mut shown = vec![turned(0.6), turned(-0.4), turned(0.9)];
+        let mut pelvis = [0.0, 8.0, 0.0];
+        settle.hold(&mut shown, &target, &mut pelvis, |b| b == 2);
+        assert!((length(qlog(shown[0])) - 0.3).abs() < 1e-4);
+        assert!((length(qlog(shown[1])) - 0.2).abs() < 1e-4);
+        assert!(qlog(shown[1])[2] < 0.0);
+        assert!((length(qlog(shown[2])) - 0.9).abs() < 1e-4);
+        assert!((length(pelvis) - 3.0).abs() < 1e-4 && pelvis[1] > 0.0);
+        // Shrinking: taken, and the new least holds.
+        let mut shown = vec![turned(0.1), turned(0.1), turned(0.1)];
+        let mut pelvis = [1.0, 0.0, 0.0];
+        settle.hold(&mut shown, &target, &mut pelvis, |_| false);
+        let mut again = vec![turned(0.3), turned(0.3), turned(0.3)];
+        let mut p2 = [2.0, 0.0, 0.0];
+        settle.hold(&mut again, &target, &mut p2, |_| false);
+        assert!((length(qlog(again[0])) - 0.1).abs() < 1e-4);
+        assert!((length(p2) - 1.0).abs() < 1e-4);
+        settle.open();
+        assert!(!settle.holding());
+        let mut free = vec![turned(0.8); 3];
+        let mut p3 = [9.0, 0.0, 0.0];
+        settle.hold(&mut free, &target, &mut p3, |_| false);
+        assert!((length(qlog(free[0])) - 0.8).abs() < 1e-4 && length(p3) == 9.0);
+    }
 
     /// A standing figure: pelvis, a spine up, an arm out, a leg down.
     fn figure() -> Vec<Bone> {

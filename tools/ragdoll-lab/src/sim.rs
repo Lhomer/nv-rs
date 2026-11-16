@@ -85,6 +85,10 @@ pub struct Brace {
     /// brace: missing, or an armed body's weapon arm keeping its aim).
     pub surface: Option<Surface>,
     pub hands: [Option<Hand>; 2],
+    /// The animation's facing when the brace began, and how far the actor was walked since (its
+    /// hands let go once it turns or is walked away: `ragdoll_core::brace::let_go`).
+    pub facing: V3,
+    pub walked: f32,
 }
 
 impl Brace {
@@ -153,6 +157,8 @@ pub struct Rig {
     pub shift_back: Option<(V3, f64, f32)>,
     /// After a fall that did not happen: the support it had then, and since when it eases back.
     pub support_back: Option<(f32, f64)>,
+    /// The hand-back only settles (`ragdoll_core::active::Settle`; the host's `Rig::settle`).
+    pub settle: active::Settle,
 }
 
 impl Rig {
@@ -180,6 +186,7 @@ impl Rig {
             last: None,
             shift_back: None,
             support_back: None,
+            settle: active::Settle::default(),
         }
     }
 }
@@ -272,6 +279,22 @@ pub struct Stats {
     /// off: `ragdoll_core::one_hand::off_grip`), from the first hit on: the one-handed accuracy
     /// penalty's share.
     pub off_grip: Vec<f32>,
+    /// The hand-back (`ragdoll_core::active::Settle`, Patrick's c2a53c0 fold clip): the most the
+    /// pelvis's shown offset from its animation grew in a frame while it settles (units; it only
+    /// settles: 0), the biggest move of the shown pelvis in a frame then beyond the actor's own
+    /// (units: no snap back), and, over the whole reaction, the fastest the shown pelvis turned
+    /// against its animation (rad/s: no spin) and the most it was turned off it (rad).
+    pub settle_rise: f32,
+    pub settle_jump: f32,
+    /// The most the pelvis's shown offset from its animation (units) grew past what it was when
+    /// nothing held the body any more (its hands let go or never braced, its steps done, no fall,
+    /// no hit since): Patrick's c2a53c0 clip, 3.5 to 32 units after "recovered".
+    pub release_rise: f32,
+    /// When the physical body was last handed back to the animation (its weight in the shown pose
+    /// down to nothing; the brace's arms may still be on their way home).
+    pub handed_back_at: Option<f64>,
+    pub yaw_rate: f32,
+    pub yaw_off: f32,
 }
 
 /// The support hand's way back to its grip, watched ([`Sim::watch_regrip`]).
@@ -411,6 +434,11 @@ pub struct Sim {
     pub armour: f32,
     pub weapon: Weapon,
     pub range: f32,
+    /// The animation's root: its heading (rad about Z), and how fast it turns (rad/s) and walks
+    /// (units/s along +X) while it stands, as the game's AI moves an actor while it reacts.
+    pub heading: f32,
+    pub turn: f32,
+    pub walk: f32,
     /// The body holds a weapon (aims it) and is attacking (an attack a big hit interrupts);
     /// the weapon is two-handed (the left hand supports it) or one-handed (a pistol).
     pub armed: bool,
@@ -444,6 +472,10 @@ pub struct Sim {
     pub regrip: RegripWatch,
     pub grip_hold: bool,
     velocity: Option<[V3; COUNT]>,
+    /// The animated pelvis and the shown pelvis's turn against it the frame before ([`Stats::yaw_rate`]).
+    anim_pelvis: Option<(V3, f32)>,
+    /// The pelvis's offset when nothing held the body any more ([`Stats::release_rise`]).
+    release_off: Option<f32>,
     acceleration: Option<[V3; COUNT]>,
     pub stats: Stats,
     pub log: Vec<String>,
@@ -467,6 +499,9 @@ impl Sim {
             armour: 0.0,
             weapon: Weapon::default(),
             range: 10.0,
+            heading: 0.0,
+            turn: 0.0,
+            walk: 0.0,
             armed: false,
             two_handed: true,
             attacking: false,
@@ -488,6 +523,8 @@ impl Sim {
             regrip: RegripWatch::default(),
             grip_hold: false,
             velocity: None,
+            anim_pelvis: None,
+            release_off: None,
             acceleration: None,
             stats: Stats::default(),
             log: Vec::new(),
@@ -542,6 +579,7 @@ impl Sim {
         self.posed = self.anim();
         self.posed_before = self.posed;
         self.velocity = None;
+        self.anim_pelvis = None;
         self.acceleration = None;
         self.note("reset: standing at the start".into());
     }
@@ -582,7 +620,7 @@ impl Sim {
         for b in 0..COUNT {
             let (prot, ppos) = match mq::PARENT[b] {
                 Some(p) => out[p],
-                None => (IDENTITY, self.pos),
+                None => (rotation([0.0, 0.0, self.heading]), self.pos),
             };
             out[b] = (
                 mul(&prot, &self.anim_local(b)),
@@ -754,14 +792,11 @@ impl Sim {
         }
     }
 
+    /// The struck bone (the host's): the one whose segment the impact is on
+    /// (`ragdoll_core::flinch::struck_bone`).
     fn nearest_bone(&self, point: V3) -> usize {
-        (0..COUNT)
-            .min_by(|&a, &b| {
-                length(sub(self.posed[a].1, point))
-                    .partial_cmp(&length(sub(self.posed[b].1, point)))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .unwrap_or(0)
+        let joints: Vec<V3> = self.posed.iter().map(|x| x.1).collect();
+        ragdoll_core::flinch::struck_bone(&joints, &mq::PARENT, point)
     }
 
     // --- Stage 1 (the host's `active_ragdoll::hit`). ---------------------------------------------
@@ -809,6 +844,8 @@ impl Sim {
         let touched = dips.iter().filter(|d| **d > 0.02).count();
         self.ensure_body();
         self.rig.hit_at = self.t;
+        self.release_off = None;
+        self.stats.handed_back_at = None;
         self.rig.since = self.t;
         let m = 1.0 / UNITS_PER_METRE;
         if let Some(body) = self.rig.body.as_mut() {
@@ -1161,6 +1198,11 @@ impl Sim {
         }
     }
 
+    /// The animation's facing (flat): its root's forward (the host's `facing`).
+    fn anim_facing(&self) -> V3 {
+        apply_m(&rotation([0.0, 0.0, self.heading]), FORWARD)
+    }
+
     /// The host's `reach_arm`: the arm reaching as a person's does (`reach_arm_ik`).
     fn reach_arm(
         &self,
@@ -1174,7 +1216,7 @@ impl Sim {
         let h = mq::bone_of(Role::Hand, side)?;
         let hand0 = anim[h].1;
         let goal = add(hand0, scale(sub(target, hand0), w.clamp(0.0, 1.0)));
-        let (r1, r2) = reach_arm_ik(anim[u].1, anim[f].1, hand0, goal, FORWARD, side)?;
+        let (r1, r2) = reach_arm_ik(anim[u].1, anim[f].1, hand0, goal, self.anim_facing(), side)?;
         Some((u, r1, f, r2))
     }
 
@@ -1196,8 +1238,8 @@ impl Sim {
             ) {
                 let reach = length(sub(anim[f].1, anim[u].1)) + length(sub(anim[h].1, anim[f].1));
                 let target = brace_target(anim[u].1, dir, wall, top);
-                reaches[side as usize] =
-                    surface.is_none() || hands::reaches(anim[u].1, target, reach, FORWARD, side);
+                reaches[side as usize] = surface.is_none()
+                    || hands::reaches(anim[u].1, target, reach, self.anim_facing(), side);
             }
         }
         let one_arm = self.tune.brace_holds * self.tune.balance.max(1.0) / 100.0 * hands::ONE_ARM;
@@ -1212,6 +1254,8 @@ impl Sim {
             top,
             surface,
             hands: [0u8, 1].map(|s| bracing[s as usize].then(|| Hand::new(s))),
+            facing: self.anim_facing(),
+            walked: 0.0,
         }
     }
 
@@ -1222,7 +1266,16 @@ impl Sim {
         b.t += dt;
         // The planted hands let go once the body has recovered (`ragdoll_core::brace::recovered`).
         let com = self.rig.body.as_ref().map_or(0.0, |body| body.com_speed());
-        let let_go = hands::recovered(self.rig.balance.is_some(), b.t, com);
+        let since_hit = (self.t - self.rig.hit_at) as f32;
+        let turned = hands::turned(b.facing, self.anim_facing());
+        let let_go = hands::let_go(
+            self.rig.balance.is_some(),
+            b.t,
+            com,
+            since_hit,
+            turned,
+            b.walked,
+        );
         let posed = self.posed;
         let mut said = Vec::new();
         for side in 0..2u8 {
@@ -1242,7 +1295,7 @@ impl Sim {
             let target = hands::held_goal(
                 anim[u].1,
                 brace_target(anim[u].1, b.dir, b.wall, b.top),
-                FORWARD,
+                self.anim_facing(),
                 side,
             );
             let free = self.free_wrist[side as usize].unwrap_or(posed[h].1);
@@ -1319,7 +1372,7 @@ impl Sim {
                     out[u] = Some(ragdoll_core::flinch::held_turn(
                         &rotation(scale(across, a)),
                         dir,
-                        FORWARD,
+                        self.anim_facing(),
                         side,
                     ));
                 }
@@ -1491,7 +1544,8 @@ impl Sim {
             let (hip, ankle) = (add(hip0, shift), add(ankle0, shift));
             let target = add(ankle, scale(sub(feet[side as usize], ankle), s.weight));
             // The knee forward whichever way the push goes (`leg_ik`: never bent backwards).
-            let Some((r1, m, level)) = leg_ik(hip0, knee0, ankle0, hip, target, FORWARD) else {
+            let Some((r1, m, level)) = leg_ik(hip0, knee0, ankle0, hip, target, self.anim_facing())
+            else {
                 continue;
             };
             out[t] = Some(r1);
@@ -1544,6 +1598,11 @@ impl Sim {
         };
         self.t += dt as f64;
         self.condition.decay(dt);
+        if self.state_is_standing() {
+            self.heading += self.turn * dt;
+            self.pos[0] += self.walk * dt;
+            self.carry([self.walk * dt, 0.0, 0.0]);
+        }
         self.posed_before = self.posed;
         match self.state {
             State::Standing => self.pose_frame(dt),
@@ -1566,6 +1625,28 @@ impl Sim {
             self.stats.recovered_at = Some(self.t);
             let since = self.t - self.stats.first_hit.unwrap_or(self.t);
             self.note(format!("recovered: {since:.2} s after the first hit"));
+        }
+    }
+
+    /// The game's own move of the actor (its AI walking it: not the steps') carried by the
+    /// physical body (the host's `carry`): its origin goes with the actor, so the body never trails
+    /// the actor on its pelvis spring and snaps back to it as it is handed back. Not a body going
+    /// over (that is physical).
+    fn carry(&mut self, moved: V3) {
+        if self.rig.body.is_none() || self.rig.fall.is_some() || length(moved) <= 0.0 {
+            return;
+        }
+        self.rig.origin = add(self.rig.origin, moved);
+        if let Some(b) = self.rig.brace.as_mut() {
+            b.walked += length(moved);
+        }
+        if let Some(s) = self.rig.balance.as_mut() {
+            s.carry(moved);
+        }
+        if let Some((feet, _)) = self.rig.planted.as_mut() {
+            for f in feet.iter_mut() {
+                *f = add(*f, moved);
+            }
         }
     }
 
@@ -1659,6 +1740,7 @@ impl Sim {
             self.rig.since = self.t;
         }
         let support_now = self.support();
+        let facing_now = self.anim_facing();
         let shown_w = match self.rig.body.as_mut() {
             Some(body) => {
                 let m = 1.0 / UNITS_PER_METRE;
@@ -1733,7 +1815,7 @@ impl Sim {
                         })
                         .collect(),
                     anim: anim.iter().map(|a| active::qfrom_m(&a.0)).collect(),
-                    forward: FORWARD,
+                    forward: facing_now,
                 };
                 // A hurt leg sags: its knee bent more, the pelvis lower over it.
                 let mut targets = targets;
@@ -1779,10 +1861,19 @@ impl Sim {
                 if let Err(why) = body.check() {
                     self.rig.failed = Some(why);
                 }
-                active::weight((self.t - self.rig.since) as f32)
+                // Handed back by its time whatever still holds it, unless it goes over
+                // (`active::reaction_weight`).
+                active::reaction_weight(
+                    (self.t - self.rig.since) as f32,
+                    since_hit,
+                    self.rig.fall.is_some(),
+                )
             }
             None => 0.0,
         };
+        if self.rig.body.is_some() && shown_w <= 0.0 && self.stats.handed_back_at.is_none() {
+            self.stats.handed_back_at = Some(self.t);
+        }
         // A body gone wrong is dropped back to the animation, said once (the game's too).
         // Never in one frame: the pose last shown eases out over the animation (the host's too),
         // the animation's, not this frame's targets (the steps' legs went with the body).
@@ -1817,11 +1908,23 @@ impl Sim {
             // The targets as the body tracks them (no elbow or knee past its human range) and the
             // body, blended (`Body::shown`).
             let wanted: Vec<active::Q> = target.iter().map(active::qfrom_m).collect();
-            for (b, q) in body.shown(&wanted, shown_w).into_iter().enumerate() {
+            let mut shown = body.shown(&wanted, shown_w);
+            let sim = add(scale(pose[mq::PELVIS].1, UNITS_PER_METRE), self.rig.origin);
+            let mut off = scale(sub(sim, pelvis_target), shown_w);
+            // Handed back: it only settles (`active::Settle`).
+            if shown_w < 1.0 && self.rig.fall.is_none() {
+                // A brace's arms go home their own way.
+                let bracing = self.rig.brace.is_some();
+                self.rig.settle.hold(&mut shown, &wanted, &mut off, |b| {
+                    bracing && mq::role_side(b).0.is_arm()
+                });
+            } else {
+                self.rig.settle.open();
+            }
+            for (b, q) in shown.into_iter().enumerate() {
                 rots[b] = active::m_from_q(q);
             }
-            let sim = add(scale(pose[mq::PELVIS].1, UNITS_PER_METRE), self.rig.origin);
-            pelvis = add(pelvis_target, scale(sub(sim, pelvis_target), shown_w));
+            pelvis = add(pelvis_target, off);
         }
         // What is left of a dropped body's last pose, on top.
         if let Some(fade) = &self.rig.fade {
@@ -1867,7 +1970,7 @@ impl Sim {
                     wrist,
                     goal,
                     1.0,
-                    FORWARD,
+                    self.anim_facing(),
                     hands::MOST_TWIST * self.dt,
                 ) {
                     let (iu, ifo) = (mul(&r1, &pu), mul(&mul(&r1, &r2), &pf));
@@ -1921,7 +2024,7 @@ impl Sim {
                     wrist,
                     grip.1,
                     1.0,
-                    FORWARD,
+                    self.anim_facing(),
                     hands::MOST_TWIST * self.dt,
                 ) {
                     let blend = |a: M3, b: M3| {
@@ -1972,10 +2075,10 @@ impl Sim {
             body.hold_shoulders(
                 &mut rots,
                 &mut joints,
-                apply_m(&chest, FORWARD),
+                apply_m(&chest, self.anim_facing()),
                 apply_m(&chest, [0.0, 0.0, 1.0]),
                 &anim,
-                FORWARD,
+                self.anim_facing(),
                 &skip,
             );
             for b in 0..COUNT {
@@ -2265,6 +2368,37 @@ impl Sim {
         }
         self.velocity = Some(v);
         let anim = self.anim();
+        // The hand-back and the heading ([`Stats::settle_rise`], `settle_jump`, `yaw_rate`).
+        let p = mq::PELVIS;
+        let yaw = active::heading_off(
+            &mul(&self.posed[p].0, &transpose(&anim[p].0)),
+            self.anim_facing(),
+        );
+        self.stats.yaw_off = self.stats.yaw_off.max(yaw.abs());
+        if let Some((a0, yaw0)) = self.anim_pelvis {
+            let d = active::yaw_between(yaw0, yaw);
+            self.stats.yaw_rate = self.stats.yaw_rate.max(d / dt);
+            if self.rig.settle.holding() {
+                let off = length(sub(self.posed[p].1, anim[p].1));
+                let off0 = length(sub(before[p].1, a0));
+                self.stats.settle_rise = self.stats.settle_rise.max(off - off0);
+                let own = [self.walk * dt, 0.0, 0.0];
+                let moved = length(sub(sub(self.posed[p].1, before[p].1), own));
+                self.stats.settle_jump = self.stats.settle_jump.max(moved);
+            }
+        }
+        self.anim_pelvis = Some((anim[p].1, yaw));
+        let holding = self.rig.balance.is_some()
+            || self.rig.fall.is_some()
+            || self
+                .rig
+                .brace
+                .is_some_and(|b| b.hands.iter().flatten().any(|h| !h.released()));
+        if self.rig.body.is_some() && !holding {
+            let off = length(sub(self.posed[p].1, anim[p].1));
+            let base = *self.release_off.get_or_insert(off);
+            self.stats.release_rise = self.stats.release_rise.max(off - base);
+        }
         for b in 0..COUNT {
             if mq::role_side(b).0.is_arm() {
                 let turn = mul(&transpose(&before[b].0), &self.posed[b].0);
@@ -2431,6 +2565,7 @@ impl Sim {
         }
         self.rig = Rig::new(self.rig.limbs);
         self.velocity = None;
+        self.anim_pelvis = None;
         self.acceleration = None;
         self.last_knock = Some(self.t);
         self.stats.fell = true;

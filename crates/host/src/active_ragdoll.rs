@@ -160,6 +160,18 @@ pub struct Rig {
     /// distance from the pelvis, m): for the clips' samples ([`sample_fields`]).
     pub pelvis_now: f32,
     pub spread_now: f32,
+    /// The game's own moves of the actor (its AI walking it) carried by the reaction ([`carry`]):
+    /// the reference the frame before, and the steps' moves of it since (not the game's).
+    pub carried: Option<V3>,
+    pub own_moved: V3,
+    /// The hand-back only settles (`ragdoll_core::active::Settle`).
+    pub settle: active::Settle,
+    /// For the clips' samples ([`sample_fields`]): the shown pelvis (world) and its yaw against
+    /// the animation the frame before; this frame's yaw rate (rad/s), the shown pelvis's move
+    /// beyond the actor's own (game units) and whether the hand-back holds it.
+    pub shown_before: Option<(V3, f32)>,
+    pub yaw_rate_now: f32,
+    pub jump_now: f32,
 }
 
 /// How much deeper than the animation (game units) a shown forearm or hand may be in the torso
@@ -194,6 +206,10 @@ pub struct Brace {
     /// brace: missing, or an armed actor's weapon arm keeping its aim).
     pub surface: Option<Surface>,
     pub hands: [Option<Hand>; 2],
+    /// The actor's facing when the brace began, and how far the game walked it since: its hands
+    /// let go once it turns or walks it away (`ragdoll_core::brace::let_go`).
+    pub facing: V3,
+    pub walked: f32,
 }
 
 impl Brace {
@@ -521,6 +537,12 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         jumps: 0,
         pelvis_now: 0.0,
         spread_now: 0.0,
+        carried: None,
+        own_moved: [0.0; 3],
+        settle: active::Settle::default(),
+        shown_before: None,
+        yaw_rate_now: 0.0,
+        jump_now: 0.0,
     });
     true
 }
@@ -592,19 +614,14 @@ pub fn hit(
     rig.armed = armed;
     rig.aim_hold = aim_hold;
     let spread = spread_of(v);
-    // The struck bone: the rig's bone nearest the impact.
+    // The struck bone: the rig's bone whose segment the impact is on.
     let positions: Vec<V3> = rig
         .bones
         .iter()
         .map(|b| read3(e, b.node + WORLD_TRANSLATION))
         .collect();
-    let struck = (0..positions.len())
-        .min_by(|&a, &b| {
-            length(sub(positions[a], point))
-                .partial_cmp(&length(sub(positions[b], point)))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .unwrap_or(0);
+    let parents: Vec<Option<usize>> = rig.bones.iter().map(|b| b.parent).collect();
+    let struck = ragdoll_core::flinch::struck_bone(&positions, &parents, point);
     let struck_role = rig.bones[struck].role;
     // The muscles near the hit go slack for a moment (the spread); an armed body's arms hold their
     // aim (stronger, and the torso takes the push).
@@ -784,6 +801,9 @@ pub fn apply(e: &mut Engine) {
                 }
             }
         }
+        // The game's own move of the actor this frame (its AI walking it), carried by the
+        // reaction ([`carry`]).
+        let moved_by_game = carry(e, &mut rig);
         // World (game units) to the body's metres from its origin.
         let origin = rig.origin;
         let to_body = move |p: V3| scale(sub(p, origin), 1.0 / UNITS_PER_METRE);
@@ -1049,17 +1069,36 @@ pub fn apply(e: &mut Engine) {
             if let Err(why) = body.check() {
                 failed = Some(format!("the body: {why}"));
             }
-            let w = active::weight(since);
+            // Handed back by its time whatever still holds it, unless it goes over
+            // (`active::reaction_weight`: Patrick's c2a53c0 fold clip held one hit's body 5.7 s).
+            let w = active::reaction_weight(
+                since,
+                rig.hit_at.elapsed().as_secs_f32(),
+                rig.fall.is_some(),
+            );
             phys_w = w;
             let pose = body.pose();
             // The targets as the body tracks them (no elbow or knee past its human range) and the
             // body, blended (`Body::shown`: the elbows and knees against their parents).
             let wanted: Vec<active::Q> = target.iter().map(active::qfrom_m).collect();
-            for (b, q) in body.shown(&wanted, w).into_iter().enumerate() {
+            let mut blended = body.shown(&wanted, w);
+            let sim = add(scale(pose[pi].1, UNITS_PER_METRE), origin);
+            let mut off = scale(sub(sim, pelvis_target), w);
+            // Handed back, it only settles (`active::Settle`): never shown gaining on the
+            // animation; a brace's arms go home their own way.
+            if w < 1.0 && rig.fall.is_none() {
+                let bracing = brace_now.is_some();
+                let bones = &rig.bones;
+                rig.settle.hold(&mut blended, &wanted, &mut off, |b| {
+                    bracing && bones[b].role.is_arm()
+                });
+            } else {
+                rig.settle.open();
+            }
+            for (b, q) in blended.into_iter().enumerate() {
                 shown[b] = active::m_from_q(q);
             }
-            let sim = add(scale(pose[pi].1, UNITS_PER_METRE), origin);
-            pelvis_offset = add(add(rig.shift, lag), scale(sub(sim, pelvis_target), w));
+            pelvis_offset = add(add(rig.shift, lag), off);
             if w <= 0.0 && !busy {
                 rig.body = None;
             }
@@ -1392,6 +1431,15 @@ pub fn apply(e: &mut Engine) {
         }
         update(e, root);
         rig.pelvis_now = length(pelvis_offset);
+        // The shown pelvis's turn against its animation and its move beyond the actor's own, for
+        // the clips' samples (a spin, a snap back).
+        let shown_pelvis = add(anim[pi].1, pelvis_offset);
+        let yaw = active::heading_off(&mul(&shown[pi], &transpose(&anim[pi].0)), forward);
+        if let Some((p0, yaw0)) = rig.shown_before {
+            rig.yaw_rate_now = active::yaw_between(yaw0, yaw) / dt.max(1e-4);
+            rig.jump_now = length(sub(sub(shown_pelvis, p0), moved_by_game));
+        }
+        rig.shown_before = Some((shown_pelvis, yaw));
         rig.spread_now = rig.body.as_ref().map_or(0.0, |b| spread_of_body(b, pi));
         // The pose shown, over the animation: where a fade starts if the body is dropped.
         rig.last = (!resting).then(|| {
@@ -1432,9 +1480,12 @@ pub fn sample_fields(actor: u32) -> String {
     let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     match rigs.iter().find(|r| r.actor == actor) {
         Some(r) => format!(
-            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{}}}",
+            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"settling\":{},\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{}}}",
             r.body.is_some(),
             room_events::num(r.pelvis_now),
+            room_events::num(r.jump_now),
+            room_events::num(r.yaw_rate_now),
+            r.settle.holding(),
             room_events::num(r.spread_now),
             r.drift,
             room_events::num(r.drift_most),
@@ -1819,6 +1870,7 @@ fn balance_frame(
         ];
         let moved = sub(to, reference);
         crate::knockdown::place(e, actor, to);
+        rig.own_moved = add(rig.own_moved, moved);
         // Any earlier move the root's world has not shown yet goes with this one.
         let waiting = rig
             .placed
@@ -2156,6 +2208,8 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
             top: None,
             surface: None,
             hands: [None, None],
+            facing: facing(e, rig),
+            walked: 0.0,
         });
     }
     rig.since = Instant::now();
@@ -2340,14 +2394,17 @@ pub fn condition_hit(e: &mut Engine, actor: u32, severity: f32, point: V3) -> co
         rigs.iter()
             .find(|r| r.actor == actor)
             .and_then(|rig| {
-                rig.bones
+                // The bone whose segment the impact is on (as the flinch names it).
+                let joints: Vec<V3> = rig
+                    .bones
                     .iter()
-                    .min_by(|a, b| {
-                        let da = length(sub(read3(e, a.node + WORLD_TRANSLATION), point));
-                        let db = length(sub(read3(e, b.node + WORLD_TRANSLATION), point));
-                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|b| condition::region_of(b.role, b.side))
+                    .map(|b| read3(e, b.node + WORLD_TRANSLATION))
+                    .collect();
+                let parents: Vec<Option<usize>> = rig.bones.iter().map(|b| b.parent).collect();
+                let b = rig
+                    .bones
+                    .get(ragdoll_core::flinch::struck_bone(&joints, &parents, point))?;
+                Some(condition::region_of(b.role, b.side))
             })
             .unwrap_or(condition::Region::Torso)
     };
@@ -2416,6 +2473,8 @@ fn start_brace(e: &mut Engine, actor: u32, root: u32, dir: V3, v: f32, aggressor
             top,
             surface,
             hands: [0u8, 1].map(|s| which[s as usize].then(|| Hand::new(s))),
+            facing: facing(e, rig),
+            walked: 0.0,
         });
     }
     // Over a waist-high obstacle it folds over (its hips pivot on the top); a wall it crumples
@@ -2477,6 +2536,37 @@ fn start_brace(e: &mut Engine, actor: u32, root: u32, dir: V3, v: f32, aggressor
     ));
 }
 
+/// The game's own move of the actor since the frame before (its AI walking it: the reference's
+/// move less the steps' own, [`Rig::own_moved`]), carried by the reaction: the physical body's
+/// origin, the feet where they stand and step, a brace's count of it (its hands let go once the
+/// actor is walked away). Without it the body trailed the walking actor on its pelvis spring and
+/// snapped back to it as it was handed back (Patrick's c2a53c0 fold clip: 18 to 1.3 units in 0.25
+/// s). Not a body going over (that is physical). Answers the move.
+fn carry(e: &Engine, rig: &mut Rig) -> V3 {
+    let reference = read3(e, rig.actor + REFR_POSITION);
+    let own = std::mem::take(&mut rig.own_moved);
+    let moved = rig
+        .carried
+        .map_or([0.0; 3], |last| sub(sub(reference, last), own));
+    rig.carried = Some(reference);
+    if rig.body.is_none() || rig.fall.is_some() || length(moved) <= 1e-4 {
+        return moved;
+    }
+    rig.origin = add(rig.origin, moved);
+    if let Some((feet, _)) = rig.planted.as_mut() {
+        for f in feet.iter_mut() {
+            *f = add(*f, moved);
+        }
+    }
+    if let Some(b) = rig.brace.as_mut() {
+        b.walked += length(moved);
+    }
+    if let Some(s) = rig.balance.as_mut() {
+        s.carry(moved);
+    }
+    moved
+}
+
 /// The way the actor faces (world, flat): its 3D root's forward (+Y) axis.
 fn facing(e: &Engine, rig: &Rig) -> V3 {
     if rig.root == 0 {
@@ -2501,8 +2591,15 @@ fn brace_frame(e: &mut Engine, rig: &mut Rig, anim: &[(M3, V3)], out: &mut [Opti
     };
     b.t += dt;
     let com = rig.body.as_ref().map_or(0.0, |body| body.com_speed());
-    let let_go = hands::recovered(rig.balance.is_some(), b.t, com);
     let forward = facing(e, rig);
+    let let_go = hands::let_go(
+        rig.balance.is_some(),
+        b.t,
+        com,
+        rig.hit_at.elapsed().as_secs_f32(),
+        hands::turned(b.facing, forward),
+        b.walked,
+    );
     let mut said = Vec::new();
     for side in 0..2u8 {
         let Some(hand) = b.hands[side as usize].as_mut() else {

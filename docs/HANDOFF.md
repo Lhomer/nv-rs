@@ -7,6 +7,26 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (one hit, then a runaway, a spin and a snap; the double hit)
+
+- **Now:**
+  - Host changes: `active_ragdoll::carry`, `Rig::own_moved` / `settle` / `shown_before`,
+    `Brace::facing` / `walked`, and `sample_fields`' `pelvis_jump` / `yaw_rate` / `settling`.
+  - ragdoll-core changes: `brace::let_go` / `turned` / `TIME_UP` / `TURNED_AWAY` /
+    `WALKED_AWAY`, `active::REACTION_MOST` / `reaction_weight` / `Settle` / `heading_off`,
+    `balance::Stepping::carry` and `flinch::struck_bone`.
+  - Ballistics: `Bullet::through` and `passed_through`; `knockdown::after_hit` skips the round
+    that passed through.
+  - Lab: `turn`, `walk`, the animation's facing, and `scenario::runaway`.
+  - Docs: docs/GUNPLAY.md "One hit, then a 5.5 s runaway".
+  - Lab before → after: release growth 30.2 → 1.5, spin 5.14 → 1.15 rad/s, back in the animation
+    6.9 → 2.8 s. Host tests pass. Not run in the game.
+- **Patrick:** the c2a53c0 .44 fold clip: after the hands let go, no more hits, the body moved on
+  its own 5.5 s and spun, then snapped upright; one .44 logged two hits 12 ms apart, both "L Calf".
+  Asked: only settle after a reaction, a smooth return (at least 0.4 s, no big per-frame drop),
+  about 2 s for one non-toppling hit, yaw rate in the pose log, a lab test that it never spins,
+  and a check of the double hit and the bone.
+
 ### Claude, 2026-11-17 (a Record button in the regular game)
 
 - **Now (`crate::room_record`: `want_play`, `taken_keys`, `play_weapon`, `place_fields`, `recent_log` (`NV_REPORT_LOG`), the button small (`BUTTON`) and hideable; `active_ragdoll::reacting_actors`; `[nv-rs Display] bRecordButton` / `NV_RECORD_BUTTON` (game_ini.tsv, `game_ini::Keys::record_button`, `fixes::Choice::play_clips` / `record_button`, `PLAY_RECORD_BUTTON`, the launcher's `switches`), `player_move` taking F9 from the game in play; docs/PLAYTESTING.md "Record a bug", WINDOWS-ROOM.md):** host tests pass; the launcher type-checks for Windows; not run on Windows.

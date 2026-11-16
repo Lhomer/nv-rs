@@ -52,6 +52,10 @@ pub struct Spec {
     pub scale: f32,
     pub armour: f32,
     pub range: f32,
+    /// The animation's root turning (degrees a second) and walking (units a second along +X), as
+    /// the game's AI moves an actor while it reacts.
+    pub turn: f32,
+    pub walk: f32,
     pub limbs: Limbs,
     pub armed: bool,
     /// The weapon is two-handed (`armed=rifle`, or `armed=1`) or one-handed (`armed=pistol`).
@@ -71,6 +75,8 @@ impl Default for Spec {
             scale: 1.0,
             armour: 0.0,
             range: 10.0,
+            turn: 0.0,
+            walk: 0.0,
             limbs: Limbs::WHOLE,
             armed: false,
             two_handed: true,
@@ -373,6 +379,8 @@ impl Spec {
                     spec.armour = value.parse().map_err(|_| "armour".to_string())?
                 }
                 "range" => spec.range = value.parse().map_err(|_| "range".to_string())?,
+                "turn" => spec.turn = value.parse().map_err(|_| "turn".to_string())?,
+                "walk" => spec.walk = value.parse().map_err(|_| "walk".to_string())?,
                 "armed" => {
                     spec.armed = value != "0";
                     spec.two_handed = value != "pistol";
@@ -464,6 +472,12 @@ pub struct Report {
     pub regrip_overshoot: f32,
     pub regrip_reversals: u32,
     pub regrip_drift: f32,
+    pub settle_rise: f32,
+    pub settle_jump: f32,
+    pub release_rise: f32,
+    pub handed_back: Option<f32>,
+    pub yaw_rate: f32,
+    pub yaw_off: f32,
     pub expect: Vec<(String, bool)>,
     pub log: Vec<String>,
 }
@@ -491,6 +505,7 @@ impl Report {
              \"brace_hands\":[{},{}],\"hand_losses\":{},\"hand_jitter_mps\":{:.3},\
              \"hand_slip_cm\":{:.2},\"elbow_reversals\":{},\"regrip_watched\":{},\
              \"regrip_overshoot_cm\":{:.2},\"regrip_reversals\":{},\"regrip_drift_cm\":{:.2},\
+             \"settle_rise\":{:.3},\"settle_jump\":{:.3},\"release_rise\":{:.3},\"yaw_rate\":{:.3},\"yaw_off\":{:.3},\
              \"expectations\":[{}],\"passed\":{},\"log\":[{}]}}",
             s(&self.name),
             s(self.ground),
@@ -528,6 +543,11 @@ impl Report {
             self.regrip_overshoot,
             self.regrip_reversals,
             self.regrip_drift,
+            self.settle_rise,
+            self.settle_jump,
+            self.release_rise,
+            self.yaw_rate,
+            self.yaw_off,
             expect.join(","),
             self.passed(),
             list(&self.log)
@@ -548,6 +568,8 @@ pub fn prepare(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<(), String> {
     sim.scale = spec.scale.clamp(0.25, 4.0);
     sim.armour = spec.armour.max(0.0);
     sim.range = spec.range.clamp(0.5, 200.0);
+    sim.turn = spec.turn.to_radians();
+    sim.walk = spec.walk;
     sim.set_limbs(spec.limbs);
     sim.armed = spec.armed;
     sim.two_handed = spec.two_handed;
@@ -674,6 +696,15 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
         regrip_overshoot: st.regrip_overshoot,
         regrip_reversals: st.regrip_reversals,
         regrip_drift: st.regrip_drift,
+        settle_rise: st.settle_rise,
+        settle_jump: st.settle_jump,
+        release_rise: st.release_rise,
+        handed_back: match (st.handed_back_at, st.last_hit) {
+            (Some(b), Some(h)) => Some((b - h) as f32),
+            _ => None,
+        },
+        yaw_rate: st.yaw_rate,
+        yaw_off: st.yaw_off,
         expect: Vec::new(),
         log: sim.log.iter().rev().take(60).rev().cloned().collect(),
     };
@@ -732,6 +763,21 @@ pub fn run(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<Report, String> {
                 e if e.starts_with("ragdollarmspin<=") => e[16..]
                     .parse::<f32>()
                     .is_ok_and(|w| report.ragdoll_arm_spin <= w),
+                e if e.starts_with("settlerise<=") => e[12..]
+                    .parse::<f32>()
+                    .is_ok_and(|v| report.settle_rise <= v),
+                e if e.starts_with("settlejump<=") => e[12..]
+                    .parse::<f32>()
+                    .is_ok_and(|v| report.settle_jump <= v),
+                e if e.starts_with("releaserise<=") => e[13..]
+                    .parse::<f32>()
+                    .is_ok_and(|v| report.release_rise <= v),
+                e if e.starts_with("yawrate<=") => {
+                    e[9..].parse::<f32>().is_ok_and(|v| report.yaw_rate <= v)
+                }
+                e if e.starts_with("recovery<=") => e[10..]
+                    .parse::<f32>()
+                    .is_ok_and(|v| report.recovery.is_some_and(|r| r <= v)),
                 e if e.starts_with("steps>=") => {
                     e[7..].parse::<u32>().is_ok_and(|n| report.steps >= n)
                 }
@@ -2034,5 +2080,136 @@ mod arms {
             most.0,
             most.1
         );
+    }
+}
+
+#[cfg(test)]
+/// Patrick's c2a53c0 fold clip (a .44 into a Powder Ganger braced at a waist-high obstacle): after
+/// the hands let go, with no further hit, the body kept moving on its own for 5.5 s (the pelvis 3.5
+/// to 23 to 32 units off its animation, a stiff tilt, spinning), then snapped upright (18 to 1.3
+/// units in 0.25 s). The game's AI turning and walking the actor all the while: the lab's `turn`
+/// (degrees/s) and `walk` (units/s).
+mod runaway {
+    use super::*;
+    use crate::sim::Sim;
+    use ragdoll_core::active;
+
+    /// One non-toppling .44 hit, then nothing, at a waist-high table, a half wall, in the open;
+    /// armed and not; the actor standing, turned, walked, turned and walked.
+    fn specs() -> Vec<String> {
+        let mut out = Vec::new();
+        for scene in [
+            "ground=table&armed=1",
+            "ground=table",
+            "ground=halfwall&armed=1",
+            "ground=flat&armed=1",
+        ] {
+            for moving in [
+                "",
+                "&turn=90",
+                "&turn=-200",
+                "&walk=120",
+                "&turn=90&walk=120",
+            ] {
+                out.push(format!("{scene}&hits=44@chest{moving}"));
+            }
+        }
+        out
+    }
+
+    fn runs() -> Vec<(String, Report)> {
+        specs()
+            .into_iter()
+            .map(|spec| {
+                let mut sim = Sim::new(GroundKind::Flat);
+                let r = run(&mut sim, &Spec::parse(&spec).unwrap(), Tuning::GAME).unwrap();
+                (spec, r)
+            })
+            .collect()
+    }
+
+    /// The runs, printed for the record (`cargo test runaway -- --nocapture`).
+    fn printed() -> Vec<(String, Report)> {
+        let all = runs();
+        for (spec, r) in &all {
+            eprintln!(
+                "{spec:52} release rise {:.2}  hand-back rise {:.3} jump {:.2}  yaw {:.2} rad/s \
+                 (off {:.2} rad)  handed back {:?} s, recovery {:?} s",
+                r.release_rise,
+                r.settle_rise,
+                r.settle_jump,
+                r.yaw_rate,
+                r.yaw_off,
+                r.handed_back,
+                r.recovery
+            );
+        }
+        all
+    }
+
+    /// One hit, then nothing: once nothing holds the body (its hands let go, its steps done) its
+    /// offset never runs away (before: 29.8 and 30.2 units with the actor turned at 200 degrees/s),
+    /// and once it is handed back it only settles (the offset never grows, before: 0.47), smoothly
+    /// (the shown pelvis no more than half a unit a frame beyond the actor's own move; before:
+    /// 1.66).
+    #[test]
+    fn one_hit_then_nothing_only_settles() {
+        for (spec, r) in printed() {
+            assert!(!r.fell, "{spec}: one .44 hit does not topple it");
+            assert!(
+                r.release_rise <= 3.0,
+                "{spec}: ran off after release: {:.2}",
+                r.release_rise
+            );
+            assert!(
+                r.settle_rise <= 0.05,
+                "{spec}: grew while handed back: {:.3}",
+                r.settle_rise
+            );
+            assert!(
+                r.settle_jump <= 0.5,
+                "{spec}: jumped while handed back: {:.2}",
+                r.settle_jump
+            );
+        }
+    }
+
+    /// One non-toppling hit's reaction is over by [`active::REACTION_MOST`]: its body handed back
+    /// to the animation one hand-back later, and all of it (a brace's arm home too) within a
+    /// second more (before: 6.9 s at the table, the hands held, then home).
+    #[test]
+    fn one_hit_reaction_is_capped() {
+        let back = active::REACTION_MOST + ragdoll_core::tuning::get().blend_back + 0.05;
+        for (spec, r) in runs() {
+            let at = r.handed_back.unwrap_or(f32::INFINITY);
+            assert!(
+                at <= back,
+                "{spec}: body handed back after {at:.2} s (most {back:.2})"
+            );
+            let rec = r.recovery.unwrap_or(f32::INFINITY);
+            assert!(
+                rec <= back + 1.0,
+                "{spec}: back in its animation after {rec:.2} s"
+            );
+        }
+    }
+
+    /// The heading never spins: the shown pelvis never turns against its animation faster than 2
+    /// rad/s nor more than 0.2 rad off it, the actor standing, turned either way, walked (before:
+    /// 5.14 rad/s and 0.28 rad, the brace hand held where it touched while the AI turned it).
+    #[test]
+    fn heading_never_spins() {
+        for (spec, r) in runs() {
+            assert!(
+                r.yaw_rate <= 2.0,
+                "{spec}: turned {:.2} rad/s against its animation",
+                r.yaw_rate
+            );
+            assert!(
+                r.yaw_off <= 0.2,
+                "{spec}: turned {:.2} rad off its animation",
+                r.yaw_off
+            );
+        }
     }
 }
