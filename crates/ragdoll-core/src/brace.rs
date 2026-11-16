@@ -654,6 +654,20 @@ pub fn bracing_arms(
     out
 }
 
+/// A hand's goal held inside the shoulder's human range (`crate::flinch::shoulder_range`) for an
+/// actor facing `forward` (its up the world's), the arm on `side`: what the brace's targets, its
+/// plants and the shown arm go to.
+pub fn held_goal(shoulder: V3, goal: V3, forward: V3, side: u8) -> V3 {
+    crate::flinch::shoulder_range(shoulder, goal, forward, [0.0, 0.0, 1.0], side)
+}
+
+/// Whether the arm on `side` at `shoulder` takes a brace to `target`: within its `reach` (game
+/// units) and not behind the back (`crate::flinch::behind_the_back`).
+pub fn reaches(shoulder: V3, target: V3, reach: f32, forward: V3, side: u8) -> bool {
+    can_reach(shoulder, target, reach)
+        && !crate::flinch::behind_the_back(shoulder, target, forward, side)
+}
+
 /// Whether a hand on an arm `reach` long (game units) at `shoulder` can get to `target`.
 pub fn can_reach(shoulder: V3, target: V3, reach: f32) -> bool {
     length(sub(target, shoulder)) <= reach * 0.98

@@ -471,6 +471,52 @@ stretched and grew, and the game froze. Two causes, both fixed:
   poses (the pass writing back three times a frame, a hair off, the animation skipping frames)
   makes exactly the shown pose and never adds up.
 
+### Arms through the body, a folded body snapping upright (Patrick, 2026-11-17, 454ebb2's 10:47 clip)
+
+454ebb2 looked a lot better, but the arms flailed through the body, and a body folded over the
+railing jittered and then snapped upright. (The tester's target never dies: that was a posed fall,
+not Havok.)
+
+- **Falls that do not happen.** `knockdown::knock_down` refuses (2.5 s after a knockdown, 1.5 s
+  after a get-up, the game's `CanKnockDown`, a low process), but the fall pose was started without
+  asking, and a refusal did not tell it. Now `knockdown::can_knock_now` is asked first: a big hit
+  that cannot knock down now is a stagger (logged `no knockdown now (...): a stagger instead`), and
+  `active_ragdoll::fall` asks it too. Every refusal calls `fall_failed`. A fall pose that does not
+  go into the ragdoll (refused, or still standing `FALL_WAIT` after the switch was asked) eases its
+  support and its pelvis offset back over 0.6 s (`FALL_BACK`; they went in one frame). While it
+  goes over the support never drops under half (`FALL_SUPPORT`): the ragdoll takes it, and a posed
+  body with none folded into what was behind it. A knocked-down or dead actor is never written:
+  `apply` drops its rig before anything is written (knock state, life state), the fade included.
+- **The shoulder's range** (`ragdoll_core::flinch::SHOULDER_RANGE`, `shoulder_range`): forward
+  and out to the side up to 150 degrees, straight back 50, across the chest 30. The brace's
+  targets, the reach IK (`reach_arm_ik`) and the windmill (`held_turn`) are held inside it; a brace
+  hand is not sent behind the back (`brace::reaches`). The shown pose's unarmed arms are held to
+  it too, allowed as far past it as the animation has them (`Body::hold_shoulders`).
+- **Arms out of the torso.** An unarmed body's forearms and hands are pushed out of its pelvis and
+  spine capsules in its step, never deeper than the pose it was made from had them
+  (`Body::keep_limbs_out`; a planted brace hand is left to its pin), and the shown pose's arms are
+  turned out at the shoulder where they go more than 0.35 units deeper than the animation has them
+  (`Body::clear_arms`; not a planted hand, a grip, or an armed actor's arms: those are the weapon
+  pose's and the aim's).
+- **The head nods.** The neck's and head's motors go to 55% after a hit (`NECK_SOFT`; the chest
+  10%, `TORSO_SOFT`; the waist and limbs 45%), a hit goes in over 40 ms (`HIT_TIME`), and an
+  unarmed body's free arms (not bracing, not falling) turn at most 0.55 of the arms' bound
+  (`UNARMED_ARM_SPIN`). The elbows' allowance past straight is 0.02 rad (was 0.03).
+- **The elbow's little flex** off straight in the targets goes with the body's weight (it popped
+  3.4 degrees in one frame as the body ended).
+- **Lab tests** (`scenario::arms`; unarmed, FNV's tree): on flat ground, a railing, a table, a
+  half-wall and a wall, a .44 at the left clavicle, the left upper arm from 40 degrees round, the
+  head and the chest, at 30, 60 and 240 frames a second: no shoulder past its range, no elbow past
+  straight by more than 0.03 rad, a free arm's bones at most 8 rad/s and 6 degrees a 60 Hz frame,
+  no forearm or hand more than 1 cm deeper in the torso than the animation has it. A .44 at the
+  head: the head 24 degrees against the chest (at most 25), the arms' ringing after 0.6 s 1.2
+  degrees (at most 2), the chest 14.6 against the pelvis: **the 12 asked is not reached** (held to
+  15). A big hit in the cooldown makes no fall pose; a fall pose whose knock-down is refused stands
+  back up with no bone turning more than 6 degrees nor the pelvis moving more than 3 units in a
+  frame (the old snap: 15.9 degrees). The lab's own refused fall had the same snap (its fall was
+  taken before the refusal); fixed with it. The brace scenes' arm speed cap is 8 rad/s (was 6.6).
+  Not seen in the game yet.
+
 ### The slow plank lean (Patrick, 2026-11-17, the 126915e clip)
 
 The snapping was gone, but on most shots the NPC still leaned back slowly as one stiff plank, then

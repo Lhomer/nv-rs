@@ -123,6 +123,24 @@ pub const CAPSULE: [(V3, V3, f32); COUNT] = [
     ([15.0, 1.0, 57.5], [15.0, 1.5, 52.0], 3.2),
 ];
 
+/// Bone `bone`'s capsule with its world rotation `rot` and joint `joint` (the rest pose's
+/// rotations are the identity), at `scale`: its two ends (units) and radius.
+pub fn capsule_at(
+    bone: usize,
+    rot: ragdoll_core::flinch::M3,
+    joint: V3,
+    scale: f32,
+) -> (V3, V3, f32) {
+    use ragdoll_core::flinch::{add, apply_m, scale as times, sub};
+    let (a, b, r) = CAPSULE[bone];
+    let local = |p: V3| times(sub(p, JOINT[bone]), scale);
+    (
+        add(joint, apply_m(&rot, local(a))),
+        add(joint, apply_m(&rot, local(b))),
+        r * scale,
+    )
+}
+
 /// Each bone's share of the body's mass (segment fractions; they sum to 1).
 pub const MASS_SHARE: [f32; COUNT] = [
     0.142, 0.0695, 0.0695, 0.206, 0.010, 0.071, 0.005, 0.005, 0.028, 0.028, 0.016, 0.016, 0.100,

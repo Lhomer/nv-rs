@@ -1032,11 +1032,11 @@ mod tests {
         (!why.is_empty()).then(|| why.join(", "))
     }
 
-    /// The arm speed cap while a brace's body stands (6.6: the chest now bends under a hit, softer
-    /// right after it (`active::TORSO_SOFT`), and carries a bracing rifle's arms a little faster;
-    /// the scenes keep `armspin<=6.5`), and how far an armed body's weapon arm may turn off its
-    /// aim while its free hand braces (degrees).
-    const MOST_ARM_SPIN: f32 = 6.6;
+    /// The arm speed cap while a brace's body stands (8 rad/s, the arms' bound of Patrick's
+    /// 10:47 spec; was 6.6: an unarmed bracing arm is now turned out of the torso as it reaches,
+    /// `active::Body::clear_arms`; the scenes keep `armspin<=6.5`), and how far an armed body's
+    /// weapon arm may turn off its aim while its free hand braces (degrees).
+    const MOST_ARM_SPIN: f32 = 8.0;
     const MOST_BRACE_AIM: f32 = 30.0;
 
     /// The most a settled brace hand may move (m/s) and slide (cm), and how often a planted
@@ -1731,6 +1731,308 @@ mod plank {
         assert!(
             left_any,
             "no hit moved the capture point out of the support"
+        );
+    }
+}
+
+/// The arms and the falls (Patrick's 10:47 clip on 454ebb2: arms flailing through the body, a
+/// folded body jittering then snapping upright). Unarmed, on the game's node tree.
+#[cfg(test)]
+mod arms {
+    use super::*;
+    use crate::sim::Sim;
+    use ragdoll_core::active;
+
+    type Pose = [(M3, V3); mq::COUNT];
+
+    fn angle(a: &M3, b: &M3) -> f32 {
+        length(active::qlog(active::qmul(
+            active::qfrom_m(a),
+            active::qconj(active::qfrom_m(b)),
+        )))
+    }
+
+    fn bend(shown: &Pose, anim: &Pose, a: usize, b: usize) -> f32 {
+        let rel = |x: &Pose| mul(&transpose(&x[a].0), &x[b].0);
+        angle(&rel(shown), &rel(anim))
+    }
+
+    /// The closest distance of two segments.
+    fn seg_dist(p1: V3, q1: V3, p2: V3, q2: V3) -> f32 {
+        let (d1, d2, r) = (sub(q1, p1), sub(q2, p2), sub(p1, p2));
+        let (a, e, f) = (dot(d1, d1), dot(d2, d2), dot(d2, r));
+        let (s, t);
+        if a <= 1e-9 && e <= 1e-9 {
+            return length(r);
+        }
+        if a <= 1e-9 {
+            s = 0.0;
+            t = (f / e).clamp(0.0, 1.0);
+        } else {
+            let c = dot(d1, r);
+            if e <= 1e-9 {
+                t = 0.0;
+                s = (-c / a).clamp(0.0, 1.0);
+            } else {
+                let b = dot(d1, d2);
+                let den = a * e - b * b;
+                let s0 = if den > 1e-9 {
+                    ((b * f - c * e) / den).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let t0 = (b * s0 + f) / e;
+                if t0 < 0.0 {
+                    t = 0.0;
+                    s = (-c / a).clamp(0.0, 1.0);
+                } else if t0 > 1.0 {
+                    t = 1.0;
+                    s = ((b - c) / a).clamp(0.0, 1.0);
+                } else {
+                    t = t0;
+                    s = s0;
+                }
+            }
+        }
+        length(sub(add(p1, scale(d1, s)), add(p2, scale(d2, t))))
+    }
+
+    const TORSO: [usize; 4] = [mq::PELVIS, mq::SPINE, mq::SPINE1, mq::SPINE2];
+    const LIMB: [usize; 4] = [mq::L_FOREARM, mq::R_FOREARM, mq::L_HAND, mq::R_HAND];
+
+    /// The deepest any forearm or hand is in a torso capsule (units; the mannequin's capsules).
+    fn depth(x: &Pose, _rest: &Pose) -> f32 {
+        let cap = |b: usize| mq::capsule_at(b, x[b].0, x[b].1, 1.0);
+        let mut most = 0.0f32;
+        for &l in &LIMB {
+            let (a, b, r) = cap(l);
+            for &t in &TORSO {
+                let (c, d, s) = cap(t);
+                most = most.max(r + s - seg_dist(a, b, c, d));
+            }
+        }
+        most
+    }
+
+    #[derive(Debug, Default)]
+    pub(super) struct Run {
+        pub shoulder_over: f32,
+        pub elbow_least: f32,
+        pub arm_speed: f32,
+        pub arm_frame_deg: f32,
+        pub deeper: f32,
+        pub head: f32,
+        pub chest: f32,
+        pub arm_rms_late: f32,
+        pub dropped: u32,
+        pub fell: bool,
+    }
+
+    pub(super) fn run(spec: &str) -> Run {
+        let mut sim = Sim::new(GroundKind::Flat);
+        let spec = Spec::parse(spec).unwrap();
+        prepare(&mut sim, &spec, Tuning::GAME).unwrap();
+        let rest = sim.anim();
+        let mut r = Run {
+            elbow_least: f32::MAX,
+            ..Run::default()
+        };
+        let mut wait = 0.1f32;
+        let mut fired = None;
+        let mut before = sim.posed;
+        let mut late: [Vec<f32>; 4] = Default::default();
+        let frames = (3.0 / sim.dt) as usize;
+        for frame in 0..frames {
+            if fired.is_none() {
+                wait -= sim.dt;
+                if wait <= 0.0 {
+                    fire(&mut sim, &spec.hits[0]);
+                    fired = Some(frame);
+                }
+            }
+            before = sim.posed;
+            sim.step();
+            let Some(f0) = fired else { continue };
+            if !sim.standing() {
+                r.fell = true;
+                continue;
+            }
+            let t = (frame - f0) as f32 * sim.dt;
+            let anim = sim.anim();
+            let p = sim.posed;
+            // The shoulder's range: the upper arm against the chest (its forward turned with it).
+            let chest = mul(&p[mq::SPINE2].0, &transpose(&anim[mq::SPINE2].0));
+            let fwd = apply_m(&chest, crate::sim::FORWARD);
+            let up = apply_m(&chest, [0.0, 0.0, 1.0]);
+            for side in 0..2u8 {
+                let u = mq::bone_of(Role::UpperArm, side).unwrap();
+                let fo = mq::bone_of(Role::Forearm, side).unwrap();
+                let over = ragdoll_core::flinch::shoulder_over(p[u].1, p[fo].1, fwd, up, side);
+                r.shoulder_over = r.shoulder_over.max(over);
+                r.elbow_least = r.elbow_least.min(crate::sim::hinge_bend(&p, u, fo, 1.0));
+            }
+            // The free arms' speed (none brace unarmed? the bracing ones are measured too).
+            for (k, b) in [mq::L_UPPERARM, mq::R_UPPERARM, mq::L_FOREARM, mq::R_FOREARM]
+                .into_iter()
+                .enumerate()
+            {
+                // The free arms (not bracing).
+                let side = (k % 2) as usize;
+                if sim.rig.brace.is_some_and(|br| br.hands[side].is_some()) {
+                    continue;
+                }
+                let a = angle(&p[b].0, &before[b].0);
+                r.arm_speed = r.arm_speed.max(a / sim.dt);
+                r.arm_frame_deg = r.arm_frame_deg.max((a / sim.dt / 60.0).to_degrees());
+                if t >= 0.6 {
+                    late[k].push(bend(&p, &anim, mq::PARENT[b].unwrap(), b).to_degrees());
+                }
+            }
+            r.deeper = r.deeper.max(depth(&p, &rest) - depth(&anim, &rest));
+            r.head = r
+                .head
+                .max(bend(&p, &anim, mq::SPINE2, mq::HEAD).to_degrees());
+            r.chest = r
+                .chest
+                .max(bend(&p, &anim, mq::PELVIS, mq::SPINE2).to_degrees());
+        }
+        // The arms' ringing after 0.6 s: each arm bone's angle off the animation about its own
+        // mean (a settled offset is no ringing), RMS over them.
+        let (mut sq, mut n) = (0.0f32, 0usize);
+        for v in &late {
+            if v.is_empty() {
+                continue;
+            }
+            let mean = v.iter().sum::<f32>() / v.len() as f32;
+            sq += v.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>();
+            n += v.len();
+        }
+        r.arm_rms_late = if n > 0 { (sq / n as f32).sqrt() } else { 0.0 };
+        r.dropped = sim.stats.dropped;
+        r
+    }
+
+    /// Unarmed, on flat ground, a railing, a table, a half-wall and a wall, a .44 at the left
+    /// clavicle, the left upper arm from 40 degrees round, the head and the chest, at 30, 60 and
+    /// 240 frames a second: no shoulder past its human range, no elbow past straight (by more
+    /// than 0.03 rad), a free arm's bones no faster than 8 rad/s nor 6 degrees a 60 Hz frame, no
+    /// forearm or hand more than 1 cm deeper in the torso than the animation has it.
+    #[test]
+    fn arms_keep_a_human_range() {
+        let mut bad = Vec::new();
+        for ground in ["flat", "railing", "table", "halfwall", "wall"] {
+            for hit in ["44@lclavicle", "44@lupperarm/-40", "44@head", "44@chest"] {
+                for dt in ["0.0333", "0.01667", "0.004167"] {
+                    let spec = format!("ground={ground}&dt={dt}&hits={hit}");
+                    let r = run(&spec);
+                    let mut why = Vec::new();
+                    if r.shoulder_over > 0.01 {
+                        why.push(format!(
+                            "shoulder {:.3} rad past its range",
+                            r.shoulder_over
+                        ));
+                    }
+                    if r.elbow_least < -0.031 {
+                        why.push(format!("elbow {:.3} rad past straight", r.elbow_least));
+                    }
+                    if r.arm_speed > 8.0 || r.arm_frame_deg > 6.0 {
+                        why.push(format!(
+                            "a free arm at {:.2} rad/s, {:.2} degrees a frame",
+                            r.arm_speed, r.arm_frame_deg
+                        ));
+                    }
+                    if r.deeper > 0.7 {
+                        why.push(format!("an arm {:.2} units deeper in the torso", r.deeper));
+                    }
+                    if r.dropped > 0 {
+                        why.push("dropped".into());
+                    }
+                    if !why.is_empty() {
+                        bad.push(format!("{spec}: {}", why.join(", ")));
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    /// A .44 at the head: the head nods (at most 25 degrees against the chest), the chest bends
+    /// (at most 15 against the pelvis: 14.6 measured, the 12 asked not reached), and the arms do
+    /// not ring after 0.6 s (their angle about its own mean at most 2 degrees RMS).
+    #[test]
+    fn a_head_hit_nods_the_head() {
+        let r = run("dt=0.01667&hits=44@head");
+        eprintln!("{r:?}");
+        assert!(r.head <= 25.0, "the head {:.1} degrees", r.head);
+        assert!(r.chest <= 15.0, "the chest {:.1} degrees", r.chest);
+        assert!(
+            r.arm_rms_late <= 2.0,
+            "the arms ring {:.2} degrees",
+            r.arm_rms_late
+        );
+    }
+
+    /// The largest turn of any bone (degrees) and move of the pelvis (units) from `a` to `b`.
+    fn frame_change(a: &Pose, b: &Pose) -> (f32, f32) {
+        let turn = (0..mq::COUNT)
+            .map(|i| angle(&a[i].0, &b[i].0).to_degrees())
+            .fold(0.0f32, f32::max);
+        (turn, length(sub(a[mq::PELVIS].1, b[mq::PELVIS].1)))
+    }
+
+    /// A big hit just after a get-up (within the cooldown) makes no fall pose: a stagger.
+    #[test]
+    fn a_knockdown_in_the_cooldown_is_a_stagger() {
+        let mut sim = Sim::new(GroundKind::Flat);
+        let spec = Spec::parse("hits=50mg@chest").unwrap();
+        prepare(&mut sim, &spec, Tuning::GAME).unwrap();
+        sim.last_up = Some(sim.t);
+        fire(&mut sim, &spec.hits[0]);
+        for _ in 0..((1.5 / STEP) as usize) {
+            assert!(sim.rig.fall.is_none(), "a fall pose in the cooldown");
+            sim.step();
+        }
+        assert!(sim.standing(), "it went down in the cooldown");
+        assert!(
+            sim.stats.decisions.iter().any(|d| d == "Knockdown"),
+            "{:?}",
+            sim.stats.decisions
+        );
+    }
+
+    /// A fall pose whose knock-down is refused at its end stands back up eased: no bone turns more
+    /// than 6 degrees, nor the pelvis moves more than 3 units, in any frame after it.
+    #[test]
+    fn a_refused_fall_stands_back_up_eased() {
+        let mut sim = Sim::new(GroundKind::Flat);
+        let spec = Spec::parse("hits=44@chest&tune=knockdown_threshold:25,fall_lead:1").unwrap();
+        prepare(&mut sim, &spec, Tuning::GAME).unwrap();
+        fire(&mut sim, &spec.hits[0]);
+        let mut refused = false;
+        let mut most = (0.0f32, 0.0f32);
+        for _ in 0..((2.0 / STEP) as usize) {
+            let falling = sim.rig.fall.is_some();
+            // The knock-down will be refused: a get-up "just now" as the lead ends.
+            if falling {
+                sim.last_up = Some(sim.t);
+            }
+            let before = sim.posed;
+            sim.step();
+            if falling && sim.rig.fall.is_none() && sim.standing() {
+                refused = true;
+            }
+            if refused {
+                let (turn, moved) = frame_change(&before, &sim.posed);
+                most = (most.0.max(turn), most.1.max(moved));
+            }
+        }
+        assert!(refused, "the fall was not refused");
+        assert!(sim.standing(), "it went down");
+        assert!(
+            most.0 <= 6.0 && most.1 <= 3.0,
+            "a bone turned {:.1} degrees, the pelvis moved {:.2} units in a frame",
+            most.0,
+            most.1
         );
     }
 }

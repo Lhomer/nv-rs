@@ -415,6 +415,101 @@ pub fn human_reach(shoulder: V3, goal: V3, forward: V3, side: u8) -> V3 {
     add(shoulder, add(turned, scale(out, wide)))
 }
 
+/// A shoulder's human range (Patrick's 10:47 clip on 454ebb2: arms through the body): the upper
+/// arm's elevation from hanging straight down (rad) allowed at each azimuth round the chest
+/// (rad: 0 forward, +pi/2 out to its own side, +-pi straight back, -pi/2 across the chest),
+/// as (azimuth, elevation) points joined linearly: forward and out up to 150 degrees (flexion,
+/// abduction), straight back 50 (extension), across the chest 30 (adduction).
+pub const SHOULDER_RANGE: [(f32, f32); 6] = [
+    (-std::f32::consts::PI, 0.873),
+    (-std::f32::consts::FRAC_PI_2, 0.524),
+    (-1.047, 0.524),
+    (-0.524, 2.618),
+    (1.571, 2.618),
+    (std::f32::consts::PI, 0.873),
+];
+
+/// The elevation [`SHOULDER_RANGE`] allows at azimuth `az` (rad).
+pub fn shoulder_limit(az: f32) -> f32 {
+    let r = &SHOULDER_RANGE;
+    for w in r.windows(2) {
+        let ((a0, e0), (a1, e1)) = (w[0], w[1]);
+        if az >= a0 && az <= a1 {
+            let k = if a1 > a0 { (az - a0) / (a1 - a0) } else { 0.0 };
+            return e0 + (e1 - e0) * k;
+        }
+    }
+    r[0].1
+}
+
+/// A direction `d` from the shoulder of the arm on `side` as the chest has it (facing `fwd`, its
+/// up `up`): (elevation from straight down, azimuth), rad; `None` for no direction.
+fn shoulder_angles(d: V3, fwd: V3, up: V3, side: u8) -> Option<(f32, f32, V3, V3, V3)> {
+    let up = unit(up)?;
+    let fwd = unit(sub(fwd, scale(up, dot(fwd, up))))?;
+    let right = cross(fwd, up);
+    let out = if side == 0 { scale(right, -1.0) } else { right };
+    let d = unit(d)?;
+    let elevation = (-dot(d, up)).clamp(-1.0, 1.0).acos();
+    let azimuth = dot(d, out).atan2(dot(d, fwd));
+    Some((elevation, azimuth, fwd, out, up))
+}
+
+/// How far (rad) the upper arm from `shoulder` to `elbow` is past the shoulder's human range
+/// ([`SHOULDER_RANGE`]) for a chest facing `fwd` with its up `up`; 0 within it.
+pub fn shoulder_over(shoulder: V3, elbow: V3, fwd: V3, up: V3, side: u8) -> f32 {
+    shoulder_angles(sub(elbow, shoulder), fwd, up, side)
+        .map_or(0.0, |(e, az, ..)| (e - shoulder_limit(az)).max(0.0))
+}
+
+/// `goal` (a hand's, from `shoulder`) held inside the shoulder's human range for a chest facing
+/// `fwd` with its up `up`: its elevation brought down to what its azimuth allows, its distance kept.
+pub fn shoulder_range(shoulder: V3, goal: V3, fwd: V3, up: V3, side: u8) -> V3 {
+    let d = sub(goal, shoulder);
+    let len = length(d);
+    let Some((e, az, fwd, out, up)) = shoulder_angles(d, fwd, up, side) else {
+        return goal;
+    };
+    let most = shoulder_limit(az);
+    if e <= most {
+        return goal;
+    }
+    let (se, ce) = most.sin_cos();
+    let (sa, ca) = az.sin_cos();
+    let dir = add(
+        add(scale(fwd, se * ca), scale(out, se * sa)),
+        scale(up, -ce),
+    );
+    add(shoulder, scale(dir, len))
+}
+
+/// A world turn `turn` of an upper arm (pointing `dir` from its shoulder, before the turn) held so
+/// the arm stays inside the shoulder's human range for a chest facing `fwd` ([`shoulder_range`]):
+/// the windmill's swing never takes an arm up behind the back.
+pub fn held_turn(turn: &M3, dir: V3, fwd: V3, side: u8) -> M3 {
+    let d = apply_m(turn, dir);
+    let held = sub(
+        shoulder_range([0.0; 3], d, fwd, [0.0, 0.0, 1.0], side),
+        [0.0; 3],
+    );
+    let (Some(a), Some(b)) = (unit(d), unit(held)) else {
+        return *turn;
+    };
+    let Some(axis) = unit(cross(a, b)) else {
+        return *turn;
+    };
+    let angle = dot(a, b).clamp(-1.0, 1.0).acos();
+    mul(&rotation(scale(axis, angle)), turn)
+}
+
+/// Whether a reach to `goal` from `shoulder` goes behind the back (the shoulder's range has to
+/// move it more than a tenth of its length, or further than 10 units): no brace hand goes there.
+pub fn behind_the_back(shoulder: V3, goal: V3, fwd: V3, side: u8) -> bool {
+    let held = shoulder_range(shoulder, goal, fwd, [0.0, 0.0, 1.0], side);
+    let moved = length(sub(held, goal));
+    moved > (0.1 * length(sub(goal, shoulder))).max(10.0)
+}
+
 /// The way out to the side for an arm on `side` (0 left, 1 right) of an actor facing `fwd`.
 fn side_out(fwd: V3, side: u8) -> V3 {
     let right = cross(fwd, [0.0, 0.0, 1.0]);
@@ -513,7 +608,9 @@ pub fn reach_arm_ik(
     side: u8,
 ) -> Option<(M3, M3)> {
     let fwd = unit([forward[0], forward[1], 0.0]);
-    let mut goal = human_reach(shoulder, goal, forward, side);
+    let goal = human_reach(shoulder, goal, forward, side);
+    // And the rest of the shoulder's range: never up past 150 degrees, across the chest past 30.
+    let mut goal = shoulder_range(shoulder, goal, forward, [0.0, 0.0, 1.0], side);
     let hinge = hinge_axis(shoulder, elbow0, hand0, fwd);
     let out = fwd.map_or([0.0; 3], |f| side_out(f, side));
     let mut reach = hinge_ik(shoulder, elbow0, hand0, shoulder, goal, hinge, out)?;
@@ -716,6 +813,53 @@ pub fn brace_weight(t: f32) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The shoulder's human range: a reach straight back is brought down to 50 degrees from
+    /// hanging, across the chest to 30, up past the head to 150; one within it is left as it is,
+    /// and its length is kept.
+    #[test]
+    fn the_shoulder_keeps_its_range() {
+        let s = [0.0, 0.0, 100.0];
+        let fwd = [0.0, 1.0, 0.0];
+        let up = [0.0, 0.0, 1.0];
+        let elevation = |g: V3| {
+            let d = unit(sub(g, s)).unwrap();
+            (-dot(d, up)).acos().to_degrees()
+        };
+        // Straight back and level (90 degrees up behind): down to 50.
+        let back = shoulder_range(s, [0.0, -40.0, 100.0], fwd, up, 1);
+        assert!((elevation(back) - 50.0).abs() < 0.5, "{}", elevation(back));
+        assert!((length(sub(back, s)) - 40.0).abs() < 1e-3);
+        // Level across the chest (the right arm reaching left): down to 30.
+        let across = shoulder_range(s, [-40.0, 0.0, 100.0], fwd, up, 1);
+        assert!(
+            (elevation(across) - 30.0).abs() < 0.5,
+            "{}",
+            elevation(across)
+        );
+        // Straight up: down to 150.
+        let up_high = shoulder_range(s, [0.0, 0.0, 140.0], fwd, up, 1);
+        assert!(
+            (elevation(up_high) - 150.0).abs() < 0.5,
+            "{}",
+            elevation(up_high)
+        );
+        // Forward and level, out to the side: as they are.
+        for g in [[0.0, 40.0, 100.0], [40.0, 0.0, 100.0], [0.0, -10.0, 60.0]] {
+            assert_eq!(shoulder_range(s, g, fwd, up, 1), g);
+            assert_eq!(shoulder_over(s, g, fwd, up, 1), 0.0);
+        }
+        assert!(shoulder_over(s, [0.0, -40.0, 100.0], fwd, up, 1) > 0.6);
+        // The left arm: its out is -X.
+        assert_eq!(
+            shoulder_range(s, [-40.0, 0.0, 100.0], fwd, up, 0),
+            [-40.0, 0.0, 100.0]
+        );
+        // A brace goal up behind the back is not taken.
+        assert!(behind_the_back(s, [0.0, -40.0, 110.0], fwd, 1));
+        assert!(!behind_the_back(s, [0.0, -20.0, 60.0], fwd, 1));
+    }
+
     use super::*;
 
     /// A wall nearer than the reach holds the hand at its face; none (or one beyond) leaves the

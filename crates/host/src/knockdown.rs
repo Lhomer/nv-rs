@@ -397,6 +397,16 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
             // Stage 3: the posed body goes over first (the flinch's kick on top), then falls into
             // its ragdoll; without the layer, the hard switch as before.
             crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction, false);
+            // Not knocked down now (just knocked down or up, the game refuses): no fall pose
+            // (it would go over and stand up again), a stagger (Patrick's 10:47 clip on 454ebb2).
+            if let Err(why) = can_knock_now(e, target) {
+                note(format!(
+                    "{who}: no knockdown now ({why}): a stagger instead"
+                ));
+                crate::active_ragdoll::interrupt_attack(e, target, "staggered");
+                crate::active_ragdoll::push(e, target, p, mass, hit_direction, aggressor);
+                return;
+            }
             // No `StopAttack` here: the ragdoll ends the attack, and nothing is changed in the
             // process before the game's `CanKnockDown` reads it.
             if !crate::active_ragdoll::fall(e, target, aggressor, point, direction, speed) {
@@ -753,6 +763,29 @@ pub fn clamp_speed(v: [f32; 3], most: f32) -> ([f32; 3], bool) {
     (v.map(|x| x * most / l), true)
 }
 
+/// Whether `actor` would be knocked down now ([`knock_down`]'s own refusals, asked before a fall
+/// pose begins): a process at the middle-high level or above, not the player, not within the
+/// cooldowns after a knock-down or a get-up, and the game's `CanKnockDown`. `Err` says why not.
+pub fn can_knock_now(e: &mut Engine, actor: u32) -> Result<(), String> {
+    let process = e.mem.u32(actor + PROCESS);
+    if process == 0 {
+        return Err("no process".into());
+    }
+    if actor == e.global::<u32>(PLAYER) {
+        return Err("the player".into());
+    }
+    if e.mem.u8(process + PROCESS_LEVEL) > MIDDLE_HIGH {
+        return Err("a low process (no KnockExplosion)".into());
+    }
+    if let Some(why) = cooling_down(actor) {
+        return Err(why);
+    }
+    if !e.call(CAN_KNOCK_DOWN, &args![actor]).bool() {
+        return Err("the game's CanKnockDown refuses".into());
+    }
+    Ok(())
+}
+
 /// Knocks the living `actor` down into its ragdoll, pushed from `point` along `direction` with
 /// the momentum `m` (module documentation), and follows its fall; `aggressor` is credited with a
 /// fall's kill. The entry for any knock-down (a later leg-loss fall).
@@ -767,10 +800,17 @@ pub fn knock_down(
     use engine::units::fallout_ai::middlehighprocess::middle_high_process_knock_explosion;
     let process = e.mem.u32(actor + PROCESS);
     if process == 0 || actor == e.global::<u32>(PLAYER) {
+        crate::active_ragdoll::fall_failed(actor);
         return;
     }
     if e.mem.u8(process + PROCESS_LEVEL) > MIDDLE_HIGH {
-        return; // KnockExplosion is MiddleHighProcess's: a lower process has none
+        // KnockExplosion is MiddleHighProcess's: a lower process has none.
+        note(format!(
+            "{}: not knocked down: a low process (no KnockExplosion)",
+            describe(e, actor)
+        ));
+        crate::active_ragdoll::fall_failed(actor);
+        return;
     }
     let strength = KNOCK_STRENGTH;
     let speed = launch_speed(body_speed);
@@ -781,6 +821,7 @@ pub fn knock_down(
     let id = e.mem.u32(actor + FORM_ID);
     if let Some(why) = cooling_down(actor) {
         note(format!("{who}: duplicate guard: {why}, not knocked again"));
+        crate::active_ragdoll::fall_failed(actor);
         return;
     }
     if !e.call(CAN_KNOCK_DOWN, &args![actor]).bool() {
@@ -799,6 +840,7 @@ pub fn knock_down(
              flag 0x4000000 {no_knockdowns}, process state {action} (9 or 17 refuse), slot 0x1e4 \
              refuses {other_says})"
         ));
+        crate::active_ragdoll::fall_failed(actor);
         return;
     }
     let ragdoll = e.vcall(actor, 0x38c, &args![]).bool();

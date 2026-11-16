@@ -47,6 +47,13 @@ pub const FLIGHT: f64 = 1.5;
 /// The feet go back from where the steps left them to the animation's over this long (s), eased
 /// (the host's `active_ragdoll::FEET_BACK`).
 pub const FEET_BACK: f32 = 0.4;
+/// The least of the support's carrying while the posed body goes over (the host's), and how long
+/// a fall that did not happen takes to ease back up (s).
+pub const FALL_SUPPORT: f32 = 0.5;
+pub const FALL_BACK: f32 = 0.6;
+/// How much deeper than the animation (game units) a shown forearm or hand may be in the torso
+/// before its arm is turned out (`active::Body::clear_arms`; the host's `ARM_SLACK`).
+pub const ARM_SLACK: f32 = 0.35;
 /// How long the steps' pelvis offset takes back to none once they are done (s; the host's).
 pub const SHIFT_BACK: f32 = 0.3;
 /// The get-up's blend back to the rest pose (s).
@@ -143,7 +150,9 @@ pub struct Rig {
     pub origin: V3,
     pub fade: Option<active::Fade>,
     pub last: Option<(Vec<active::Q>, V3)>,
-    pub shift_back: Option<(V3, f64)>,
+    pub shift_back: Option<(V3, f64, f32)>,
+    /// After a fall that did not happen: the support it had then, and since when it eases back.
+    pub support_back: Option<(f32, f64)>,
 }
 
 impl Rig {
@@ -170,6 +179,7 @@ impl Rig {
             fade: None,
             last: None,
             shift_back: None,
+            support_back: None,
         }
     }
 }
@@ -719,6 +729,14 @@ impl Sim {
                 }
                 self.stack = None;
                 self.flinch(p, mass, point, direction, false);
+                // Not knocked down now (just knocked down, just got up): no fall pose, a stagger
+                // (the host's `knockdown::can_knock_now`).
+                if let Err(why) = self.can_knock_now() {
+                    self.note(format!("no fall pose: {why}: a stagger"));
+                    self.interrupt_attack("staggered");
+                    self.push(p, mass, direction);
+                    return;
+                }
                 self.interrupt_attack("knocked down");
                 if !self.fall(point, stacked.direction, speed) {
                     self.knock_down(stacked.direction, speed, "knockdown");
@@ -1179,7 +1197,7 @@ impl Sim {
                 let reach = length(sub(anim[f].1, anim[u].1)) + length(sub(anim[h].1, anim[f].1));
                 let target = brace_target(anim[u].1, dir, wall, top);
                 reaches[side as usize] =
-                    surface.is_none() || hands::can_reach(anim[u].1, target, reach);
+                    surface.is_none() || hands::reaches(anim[u].1, target, reach, FORWARD, side);
             }
         }
         let one_arm = self.tune.brace_holds * self.tune.balance.max(1.0) / 100.0 * hands::ONE_ARM;
@@ -1220,7 +1238,13 @@ impl Sim {
             };
             // The shown arm (the frame before): where its wrist is against the surface.
             let reach = length(sub(posed[f].1, posed[u].1)) + length(sub(posed[h].1, posed[f].1));
-            let target = brace_target(anim[u].1, b.dir, b.wall, b.top);
+            // Inside the shoulder's human range (never up behind the back).
+            let target = hands::held_goal(
+                anim[u].1,
+                brace_target(anim[u].1, b.dir, b.wall, b.top),
+                FORWARD,
+                side,
+            );
             let free = self.free_wrist[side as usize].unwrap_or(posed[h].1);
             let home = self.home(&posed, side).map_or(free, |x| x.1);
             match hand.update(
@@ -1288,7 +1312,16 @@ impl Sim {
                     let phase = if side == 0 { 0.0 } else { std::f32::consts::PI };
                     let a = t.windmill_swing
                         * (std::f32::consts::TAU * t.windmill_hz * f.t + phase).sin();
-                    out[u] = Some(rotation(scale(across, a)));
+                    // Inside the shoulder's human range (never up behind the back).
+                    let dir = mq::bone_of(Role::Forearm, side).map_or([0.0, 0.0, -1.0], |fo| {
+                        sub(self.posed[fo].1, self.posed[u].1)
+                    });
+                    out[u] = Some(ragdoll_core::flinch::held_turn(
+                        &rotation(scale(across, a)),
+                        dir,
+                        FORWARD,
+                        side,
+                    ));
                 }
             }
         }
@@ -1311,6 +1344,9 @@ impl Sim {
             f.dir[0],
             f.dir[1]
         ));
+        // Still going over as the knock-down is asked: a refusal eases it back up
+        // (`fall_failed`).
+        self.rig.fall = Some(f);
         match f.fold {
             // Over the top: launched up enough that the hips clear it (`fold_launch`).
             Some(top) => {
@@ -1325,7 +1361,12 @@ impl Sim {
             }
             None => self.knock_down(f.dir, f.speed, f.why),
         }
-        true
+        if self.in_ragdoll() {
+            self.rig.fall = None;
+            return true;
+        }
+        // Refused: posed this frame as it stands back up.
+        false
     }
 
     /// Stage 3's entry for a knockdown: false when the layer is off (the caller knocks it down).
@@ -1482,7 +1523,7 @@ impl Sim {
                 s.outcome,
                 length(self.rig.shift)
             ));
-            self.rig.shift_back = Some((self.rig.shift, self.t));
+            self.rig.shift_back = Some((self.rig.shift, self.t, SHIFT_BACK));
         } else {
             self.rig.balance = Some(s);
         }
@@ -1600,10 +1641,10 @@ impl Sim {
         // The steps' pelvis offset, eased out once they are done (the host's `SHIFT_BACK`).
         if self.rig.balance.is_none() && self.rig.fall.is_none() {
             if self.rig.shift_back.is_none() && length(self.rig.shift) > 0.0 {
-                self.rig.shift_back = Some((self.rig.shift, self.t));
+                self.rig.shift_back = Some((self.rig.shift, self.t, SHIFT_BACK));
             }
-            if let Some((from, since)) = self.rig.shift_back {
-                let k = active::ease((self.t - since) as f32 / SHIFT_BACK);
+            if let Some((from, since, over)) = self.rig.shift_back {
+                let k = active::ease((self.t - since) as f32 / over);
                 if k >= 1.0 {
                     self.rig.shift_back = None;
                 }
@@ -1617,6 +1658,7 @@ impl Sim {
         if busy {
             self.rig.since = self.t;
         }
+        let support_now = self.support();
         let shown_w = match self.rig.body.as_mut() {
             Some(body) => {
                 let m = 1.0 / UNITS_PER_METRE;
@@ -1644,10 +1686,7 @@ impl Sim {
                     (mq::L_FOOT, to_body(planted[0])),
                     (mq::R_FOOT, to_body(planted[1])),
                 ];
-                let support = match &self.rig.fall {
-                    Some(f) => 1.0 - active::ease(f.t / f.lead.max(1e-3)),
-                    None => 1.0,
-                };
+                let support = support_now;
                 let pins: Vec<(usize, V3, f32, V3)> = self
                     .rig
                     .brace
@@ -1735,6 +1774,7 @@ impl Sim {
                     }
                 }
                 let strength = active::strength(since_hit) * self.condition.motor_scale();
+                body.free_arms(self.rig.brace.is_none() && self.rig.fall.is_none());
                 body.step(&targets, dt, strength);
                 if let Err(why) = body.check() {
                     self.rig.failed = Some(why);
@@ -1896,6 +1936,50 @@ impl Sim {
                     rots[h] = blend(rots[h], grip.0);
                     out = self.place(&rots, pelvis);
                 }
+            }
+        }
+        // Last, the arms turned out of the torso where they went deeper than the animation has
+        // them (the host's too: `Body::clear_arms`).
+        // Not an arm a brace or the grip puts on its goal (that goal is held already).
+        let mut skip: Vec<usize> = Vec::new();
+        for side in 0..2u8 {
+            let gripping = side == 0 && self.grip_hold;
+            // A planted brace hand stays where it touched.
+            let planted = self
+                .rig
+                .brace
+                .and_then(|b| b.hands[side as usize])
+                .is_some_and(|h| h.planted());
+            // An armed body's arms are the weapon pose's and its aim's.
+            if gripping || planted || self.armed {
+                skip.extend(mq::bone_of(Role::Hand, side));
+            }
+        }
+        if let Some(body) = &self.rig.body {
+            let mut rots: Vec<M3> = out.iter().map(|x| x.0).collect();
+            let mut joints: Vec<V3> = out.iter().map(|x| x.1).collect();
+            let size = self.scale;
+            body.clear_arms(
+                &mut rots,
+                &mut joints,
+                &anim,
+                |r, j, i| mq::capsule_at(i, r[i], j[i], size),
+                ARM_SLACK,
+                &skip,
+            );
+            // And inside the shoulder's human range, against the chest as it is turned.
+            let chest = mul(&rots[mq::SPINE2], &transpose(&anim[mq::SPINE2].0));
+            body.hold_shoulders(
+                &mut rots,
+                &mut joints,
+                apply_m(&chest, FORWARD),
+                apply_m(&chest, [0.0, 0.0, 1.0]),
+                &anim,
+                FORWARD,
+                &skip,
+            );
+            for b in 0..COUNT {
+                out[b] = (rots[b], joints[b]);
             }
         }
         self.posed = out;
@@ -2146,7 +2230,9 @@ impl Sim {
                 }
             })
             .collect();
-        self.rig.body = Some(active::Body::from_pose(&bones, STEP));
+        let mut body = active::Body::from_pose(&bones, STEP);
+        body.unarmed(!self.armed);
+        self.rig.body = Some(body);
     }
 
     /// The run's measures for a standing frame: the arms' turning speed, the weapon hand's drift
@@ -2209,23 +2295,57 @@ impl Sim {
         }
     }
 
+    /// Whether a knock-down would happen now (the host's `knockdown::can_knock_now`): not within
+    /// [`KNOCK_COOLDOWN`] of the last nor [`UP_COOLDOWN`] of the last get-up.
+    pub fn can_knock_now(&self) -> Result<(), String> {
+        if let Some(at) = self.last_knock.filter(|at| self.t - at < KNOCK_COOLDOWN) {
+            return Err(format!("knocked down {:.1} s ago", self.t - at));
+        }
+        if let Some(at) = self.last_up.filter(|at| self.t - at < UP_COOLDOWN) {
+            return Err(format!("got up {:.1} s ago", self.t - at));
+        }
+        Ok(())
+    }
+
+    /// The support's carrying of the body (the host's): while it goes over, eased down but never
+    /// under [`FALL_SUPPORT`] (the ragdoll takes it; a posed fall that sagged to nothing folded into
+    /// what was behind it and jittered); after a fall that did not happen, eased back up over
+    /// [`FALL_BACK`].
+    fn support(&mut self) -> f32 {
+        if let Some(f) = &self.rig.fall {
+            return (1.0 - active::ease(f.t / f.lead.max(1e-3))).max(FALL_SUPPORT);
+        }
+        match self.rig.support_back {
+            Some((from, since)) => {
+                let k = active::ease((self.t - since) as f32 / FALL_BACK);
+                if k >= 1.0 {
+                    self.rig.support_back = None;
+                }
+                from + (1.0 - from) * k
+            }
+            None => 1.0,
+        }
+    }
+
+    /// A fall that did not happen (the host's `active_ragdoll::fall_failed`): the posed body stands
+    /// back up from it, its support and its pelvis offset eased back over [`FALL_BACK`], never in
+    /// one frame.
+    fn fall_failed(&mut self, why: &str) {
+        let Some(f) = self.rig.fall.take() else {
+            return;
+        };
+        let support = (1.0 - active::ease(f.t / f.lead.max(1e-3))).max(FALL_SUPPORT);
+        self.rig.support_back = Some((support, self.t));
+        self.rig.shift_back = Some((self.rig.shift, self.t, FALL_BACK));
+        self.note(format!("the fall did not happen ({why}): eased back up"));
+    }
+
     // --- The ragdoll (the host's `knockdown::knock_down`, the launch, the get-up). ---------------
 
     fn knock_down(&mut self, direction: V3, body_speed: f32, why: &str) {
-        if let Some(at) = self.last_knock.filter(|at| self.t - at < KNOCK_COOLDOWN) {
-            self.note(format!(
-                "duplicate guard: knocked down {:.1} s ago, not knocked again",
-                self.t - at
-            ));
-            self.rig.fall = None;
-            return;
-        }
-        if let Some(at) = self.last_up.filter(|at| self.t - at < UP_COOLDOWN) {
-            self.note(format!(
-                "duplicate guard: got up {:.1} s ago, not knocked again",
-                self.t - at
-            ));
-            self.rig.fall = None;
+        if let Err(why) = self.can_knock_now() {
+            self.note(format!("duplicate guard: {why}, not knocked again"));
+            self.fall_failed(&why);
             return;
         }
         let speed = launch_speed(body_speed);

@@ -7,6 +7,11 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (arms through the body; the posed fall's snap)
+
+- **Now (`knockdown::can_knock_now`, `fall_failed` on every refusal, `active_ragdoll::stand_back_up` / `fall_support` / `FALL_SUPPORT` / `FALL_BACK`, `Rig::support_back`, `shift_back` with its own time; `ragdoll_core::flinch::SHOULDER_RANGE` / `shoulder_range` / `shoulder_over` / `behind_the_back` / `held_turn`, `brace::held_goal` / `reaches`; `active::Body::keep_limbs_out` / `clear_arms` / `hold_shoulders` / `capsule_at` / `unarmed` / `free_arms`, `closest_points`, `NECK_SOFT`, `UNARMED_ARM_SPIN`, `HIT_TIME` 0.04, `HYPEREXTEND` 0.02, the targets' flex with the weight (`hinged_with`); lab `Sim::can_knock_now` / `fall_failed` / `support`, `mq::capsule_at`, `scenario::arms`; docs/GUNPLAY.md "Arms through the body"):** lab and core pass; not run in the game. The .44 head hit's chest bend is 14.6 degrees, not the 12 asked.
+- **Patrick:** arms clip through the body; a folded body jitters, then snaps upright; a real death handed to Havok must never fade or snap back to standing.
+
 ### Claude, 2026-11-17 (the slow plank lean: FNV's spine hangs from NonAccum)
 
 - **Now (`ragdoll_core::active::physics_parents`, `Body::joint_gap`, `Body::roots`, `TORSO_SOFT` / `torso_strength` (tuning `torso_soft`), `HIT_TIME` 0.045; host `Bone::phys`, `find_bones`, `shown_positions` / `make_body` / the target chain on `phys`, the node roots written at their shown joint, a body only for a pending hit, the drop note's roots and joint gap; lab `mannequin::NODE_PARENT`, `Sim::body_parents`, `scenario::plank`, the write path on FNV's tree; docs/GUNPLAY.md "The slow plank lean"):** lab and core pass; not run in the game.

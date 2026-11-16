@@ -40,6 +40,10 @@ pub const DRIVE_SOFT: f32 = 0.45;
 /// the limbs keep [`DRIVE_SOFT`]): the struck torso bends instead of the whole body tipping as one
 /// piece (Patrick's 126915e clip), ramped back with the rest.
 pub const TORSO_SOFT: f32 = 0.1;
+/// The neck's and the head's motors right after a hit (a share of full): firmer than the chest's,
+/// so a head hit nods the head instead of whipping it (Patrick's 10:47 clip: a .44 at the head
+/// whipped it 37 degrees with [`TORSO_SOFT`]).
+pub const NECK_SOFT: f32 = 0.55;
 pub const DRIVE_RAMP: f32 = 0.7;
 pub const DRIVE_SCALE: f32 = 2.0;
 pub const DRIVE_ZETA: f32 = 1.0;
@@ -54,7 +58,7 @@ pub const MAX_BEND: f32 = 1.2;
 pub const BEND_ROOM: f32 = 1.5;
 /// A hit's momentum goes in over this long (s), eased in and out (no jump in any velocity or
 /// acceleration), while the joints carry it along the chain.
-pub const HIT_TIME: f32 = 0.045;
+pub const HIT_TIME: f32 = 0.04;
 /// A hit's push reaches each bone after its distance from the impact at this speed (m/s): it
 /// travels up and down the body.
 pub const HIT_WAVE: f32 = 5.0;
@@ -64,6 +68,9 @@ pub const SPIN_ROOM: f32 = 1.3;
 /// An arm's joint at most its role's spin (the human arms of 2026-11-15: 4 to 6 rad/s), the speed
 /// saturating smoothly from [`SPIN_KNEE`] of it.
 pub const ARM_SPIN_ROOM: f32 = 1.1;
+/// An unarmed body's arms against [`ARM_SPIN_ROOM`] (a share of it): no weapon pose holds them,
+/// and a hit flung them (Patrick's 10:47 clip: 9 to 20 rad/s, through the body).
+pub const UNARMED_ARM_SPIN: f32 = 0.55;
 /// A bone's speed (m/s) and spin (rad/s) at most, and how far from the pelvis any bone may be (m)
 /// before the body is not believed ([`Body::check`]).
 pub const MAX_SPEED: f32 = 12.0;
@@ -76,7 +83,7 @@ pub const SPIN_KNEE: f32 = 0.6;
 /// play), and how bent the animation must be for its bend to say the hinge's axis (rad).
 pub const ELBOW_FLEX: f32 = 2.5;
 pub const KNEE_FLEX: f32 = 2.4;
-pub const HYPEREXTEND: f32 = 0.03;
+pub const HYPEREXTEND: f32 = 0.02;
 pub const ELBOW_LEAN: f32 = 0.3;
 pub const KNEE_LEAN: f32 = 0.15;
 pub const AXIS_BEND: f32 = 0.2;
@@ -246,9 +253,15 @@ pub fn weight(since: f32) -> f32 {
 /// The torso's motors at the limbs' `strength` ([`strength`]): from [`TORSO_SOFT`] instead of
 /// [`DRIVE_SOFT`], back to full as they come back.
 pub fn torso_strength(strength: f32) -> f32 {
+    soft_strength(strength, tuning::get().torso_soft)
+}
+
+/// A motor softer than the limbs' right after a hit: from `soft` instead of [`DRIVE_SOFT`] at the
+/// limbs' `strength`, back to full as they come back.
+pub fn soft_strength(strength: f32, soft: f32) -> f32 {
     let t = tuning::get();
     let back = ((strength - t.drive_soft) / (1.0 - t.drive_soft).max(1e-3)).clamp(0.0, 1.0);
-    t.torso_soft + (1.0 - t.torso_soft) * back
+    soft + (1.0 - soft) * back
 }
 
 /// The motors' strength `since` seconds after the last hit (soft, eased back to full).
@@ -410,6 +423,49 @@ pub struct Body {
     /// Per bone: an elbow's or a knee's hinge axis, in its parent's frame (the way it flexes: a
     /// turn about it by a positive angle bends it), once known ([`Body::hinge_bend`]).
     pub hinge: Vec<Option<V3>>,
+    /// The forearms and hands against the torso ([`Body::keep_limbs_out`]): each pair (limb bone,
+    /// torso bone) and how deep the limb's capsule may be in the torso's (m): as deep as the pose
+    /// it was made from had it, no deeper.
+    pub outside: Vec<(usize, usize, f32)>,
+    /// Whether [`Body::keep_limbs_out`] runs (an unarmed body; an armed one's arms are the weapon
+    /// pose's and its aim's).
+    pub limbs_out: bool,
+    /// The arms' spin bound against the tuning's (`arm_spin_room`): [`UNARMED_ARM_SPIN`] for an
+    /// unarmed body that neither braces nor falls ([`Body::unarmed`]), 1 otherwise.
+    pub arm_spin: f32,
+}
+
+/// The closest points of the segments `p1`-`q1` and `p2`-`q2`.
+pub fn closest_points(p1: V3, q1: V3, p2: V3, q2: V3) -> (V3, V3) {
+    let (d1, d2, r) = (sub(q1, p1), sub(q2, p2), sub(p1, p2));
+    let (a, e, f) = (dot(d1, d1), dot(d2, d2), dot(d2, r));
+    let (s, t) = if a <= 1e-12 && e <= 1e-12 {
+        (0.0, 0.0)
+    } else if a <= 1e-12 {
+        (0.0, (f / e).clamp(0.0, 1.0))
+    } else {
+        let c = dot(d1, r);
+        if e <= 1e-12 {
+            ((-c / a).clamp(0.0, 1.0), 0.0)
+        } else {
+            let b = dot(d1, d2);
+            let den = a * e - b * b;
+            let s0 = if den > 1e-12 {
+                ((b * f - c * e) / den).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let t0 = (b * s0 + f) / e;
+            if t0 < 0.0 {
+                ((-c / a).clamp(0.0, 1.0), 0.0)
+            } else if t0 > 1.0 {
+                (((b - c) / a).clamp(0.0, 1.0), 1.0)
+            } else {
+                (s0, t0)
+            }
+        }
+    };
+    (add(p1, scale(d1, s)), add(p2, scale(d2, t)))
 }
 
 /// A joint as given to [`Body::from_pose`]: its bone's parent, role, world rotation, joint and
@@ -496,7 +552,7 @@ impl Body {
         }
         let mass = segments.iter().map(|s| s.mass).sum();
         let n = segments.len();
-        Body {
+        let mut body = Body {
             segments,
             state,
             pelvis,
@@ -504,6 +560,247 @@ impl Body {
             dip: vec![0.0; n],
             pushes: Vec::new(),
             hinge: vec![None; n],
+            outside: Vec::new(),
+            limbs_out: true,
+            arm_spin: 1.0,
+        };
+        for l in 0..n {
+            if !matches!(body.segments[l].role, Role::Forearm | Role::Hand) {
+                continue;
+            }
+            for t in 0..n {
+                if matches!(body.segments[t].role, Role::Pelvis | Role::Spine) {
+                    let deep = body.depth(l, t).0.max(0.0);
+                    body.outside.push((l, t, deep));
+                }
+            }
+        }
+        body
+    }
+
+    /// The shown pose's upper arms held inside the shoulder's human range
+    /// (`crate::flinch::shoulder_range`) for a chest facing `fwd` with its up `up`: an arm past it
+    /// is turned about its shoulder, the least way back in, its forearm and hand with it (their
+    /// joints moved too). An arm the animation itself holds past the range (a rifle's support
+    /// arm across the chest) may be as far past it as the animation has it (`anim`, its chest
+    /// turned as the shown one is not: the animation's own forward and up, `anim_fwd`), no
+    /// further. The side of each arm is told by where its shoulder is. The hands in `skip` (an
+    /// arm a brace or a grip puts on its goal: its goal is held already) are left as they are.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hold_shoulders(
+        &self,
+        rots: &mut [M3],
+        joints: &mut [V3],
+        fwd: V3,
+        up: V3,
+        anim: &[(M3, V3)],
+        anim_fwd: V3,
+        skip: &[usize],
+    ) {
+        let n = self.segments.len();
+        if rots.len() != n || joints.len() != n || anim.len() != n {
+            return;
+        }
+        let right = cross(fwd, up);
+        for h in 0..n {
+            if self.segments[h].role != Role::Hand || skip.contains(&h) {
+                continue;
+            }
+            let Some(f) = self.segments[h].parent else {
+                continue;
+            };
+            let Some(u) = self.segments[f].parent else {
+                continue;
+            };
+            let Some(c) = self.segments[u].parent else {
+                continue;
+            };
+            let side = if dot(sub(joints[u], joints[c]), right) >= 0.0 {
+                1
+            } else {
+                0
+            };
+            let (shoulder, elbow) = (joints[u], joints[f]);
+            let allowed =
+                crate::flinch::shoulder_over(anim[u].1, anim[f].1, anim_fwd, [0.0, 0.0, 1.0], side);
+            let over = crate::flinch::shoulder_over(shoulder, elbow, fwd, up, side);
+            if over <= allowed + 1e-3 {
+                continue;
+            }
+            let held = crate::flinch::shoulder_range(shoulder, elbow, fwd, up, side);
+            let (Some(from), Some(to)) = (unit(sub(elbow, shoulder)), unit(sub(held, shoulder)))
+            else {
+                continue;
+            };
+            let Some(axis) = unit(cross(from, to)) else {
+                continue;
+            };
+            let angle = dot(from, to).clamp(-1.0, 1.0).acos().min(over - allowed);
+            if angle < 1e-4 {
+                continue;
+            }
+            let r = m_from_q(qexp(scale(axis, angle)));
+            for &b in &[u, f, h] {
+                rots[b] = crate::flinch::mul(&r, &rots[b]);
+            }
+            for &b in &[f, h] {
+                joints[b] = add(
+                    shoulder,
+                    crate::flinch::apply_m(&r, sub(joints[b], shoulder)),
+                );
+            }
+        }
+    }
+
+    /// The body as an unarmed actor's (`unarmed`) or an armed one's: an unarmed body keeps its
+    /// forearms and hands out of its torso ([`Body::keep_limbs_out`]); an armed one's arms are the
+    /// weapon pose's and its aim's.
+    pub fn unarmed(&mut self, unarmed: bool) {
+        self.limbs_out = unarmed;
+    }
+
+    /// The arms' spin bound this frame: an unarmed body's free arms (it neither braces nor
+    /// falls: `free`) slower ([`UNARMED_ARM_SPIN`]); else the tuning's.
+    pub fn free_arms(&mut self, free: bool) {
+        self.arm_spin = if free && self.limbs_out {
+            UNARMED_ARM_SPIN
+        } else {
+            1.0
+        };
+    }
+
+    /// Bone `i`'s capsule in a pose (`rots` world rotations, `joints` game units, `units` a
+    /// metre): its joint, its segment's end and its radius, as the body has them.
+    pub fn capsule_at(&self, rots: &[M3], joints: &[V3], i: usize, units: f32) -> (V3, V3, f32) {
+        let a = joints[i];
+        let b = add(
+            a,
+            scale(qrot(qfrom_m(&rots[i]), self.segments[i].seg), units),
+        );
+        (a, b, self.segments[i].radius * units)
+    }
+
+    /// Bone `i`'s capsule now: its joint, its end (m).
+    fn capsule(&self, i: usize) -> (V3, V3) {
+        let a = self.joint(i);
+        (a, add(a, qrot(self.state[i].q, self.segments[i].seg)))
+    }
+
+    /// How deep bone `l`'s capsule is in bone `t`'s (m; negative: apart), and the way out of it
+    /// for `l` (unit; none when the axes meet).
+    fn depth(&self, l: usize, t: usize) -> (f32, Option<V3>) {
+        let (a, b) = self.capsule(l);
+        let (c, d) = self.capsule(t);
+        let (pl, pt) = closest_points(a, b, c, d);
+        let gap = sub(pl, pt);
+        let r = self.segments[l].radius + self.segments[t].radius;
+        (r - length(gap), unit(gap))
+    }
+
+    /// The shown pose's arms turned out of the torso (Patrick's 10:47 clip on 454ebb2): `rots` the
+    /// shown world rotations, `joints` the shown joints (game units, `units` a metre), `anim` the
+    /// animated pose. Each arm whose forearm or hand is deeper in a torso capsule than in the
+    /// animation (by more than `slack` units) is turned about its shoulder, the least way out;
+    /// its joints are moved with it. `capsule` gives a bone's capsule (two ends and a radius, game
+    /// units) from a pose's rotations and joints ([`Body::capsule_at`]: the body's own). The hands
+    /// in `skip` (an arm a brace or a grip puts on its goal) are left as they are.
+    pub fn clear_arms(
+        &self,
+        rots: &mut [M3],
+        joints: &mut [V3],
+        anim: &[(M3, V3)],
+        capsule: impl Fn(&[M3], &[V3], usize) -> (V3, V3, f32),
+        slack: f32,
+        skip: &[usize],
+    ) {
+        let n = self.segments.len();
+        if rots.len() != n || joints.len() != n || anim.len() != n {
+            return;
+        }
+        let deep = |c1: (V3, V3, f32), c2: (V3, V3, f32)| {
+            let (p, q) = closest_points(c1.0, c1.1, c2.0, c2.1);
+            (c1.2 + c2.2 - length(sub(p, q)), p, unit(sub(p, q)))
+        };
+        let torso: Vec<usize> = (0..n)
+            .filter(|&i| matches!(self.segments[i].role, Role::Pelvis | Role::Spine))
+            .collect();
+        let anim_rots: Vec<M3> = anim.iter().map(|a| a.0).collect();
+        let anim_joints: Vec<V3> = anim.iter().map(|a| a.1).collect();
+        for h in 0..n {
+            if self.segments[h].role != Role::Hand || skip.contains(&h) {
+                continue;
+            }
+            let Some(f) = self.segments[h].parent else {
+                continue;
+            };
+            let Some(u) = self.segments[f].parent else {
+                continue;
+            };
+            for _ in 0..3 {
+                // The deepest of the forearm and the hand past what the animation has.
+                let mut worst: Option<(f32, V3, V3)> = None;
+                for &l in &[f, h] {
+                    for &t in &torso {
+                        let allowed = deep(
+                            capsule(&anim_rots, &anim_joints, l),
+                            capsule(&anim_rots, &anim_joints, t),
+                        )
+                        .0
+                        .max(0.0);
+                        let (d, at, way) = deep(capsule(rots, joints, l), capsule(rots, joints, t));
+                        let excess = d - allowed - slack;
+                        let way = way.unwrap_or([0.0, 0.0, 1.0]);
+                        if excess > 0.0 && worst.map_or(true, |w| excess > w.0) {
+                            worst = Some((excess, at, way));
+                        }
+                    }
+                }
+                let Some((excess, at, way)) = worst else {
+                    break;
+                };
+                let shoulder = joints[u];
+                let lever = sub(at, shoulder);
+                let Some(axis) = unit(cross(lever, way)) else {
+                    break;
+                };
+                let arm = length(sub(lever, scale(axis, dot(lever, axis)))).max(1.0);
+                let r = m_from_q(qexp(scale(axis, (excess / arm).min(0.5))));
+                for &b in &[u, f, h] {
+                    rots[b] = crate::flinch::mul(&r, &rots[b]);
+                }
+                for &b in &[f, h] {
+                    joints[b] = add(
+                        shoulder,
+                        crate::flinch::apply_m(&r, sub(joints[b], shoulder)),
+                    );
+                }
+            }
+        }
+    }
+
+    /// The forearms and hands pushed out of the torso (Patrick's 10:47 clip on 454ebb2: arms
+    /// through the body): a limb bone deeper in a torso bone's capsule than its pose allowed
+    /// ([`Body::outside`]) is moved straight out by the excess; the torso is not moved. A pinned
+    /// hand's arm (a planted brace hand, `pins`) is left to its pin.
+    fn keep_limbs_out(&mut self, pins: &[(usize, V3)]) {
+        for k in 0..self.outside.len() {
+            let (l, t, allowed) = self.outside[k];
+            let pinned = pins
+                .iter()
+                .any(|&(h, _)| h == l || self.segments.get(h).and_then(|s| s.parent) == Some(l));
+            if pinned {
+                continue;
+            }
+            let (deep, way) = self.depth(l, t);
+            let excess = deep - allowed;
+            if excess <= 1e-4 {
+                continue;
+            }
+            let way = way.unwrap_or_else(|| {
+                unit(sub(self.state[l].com, self.state[t].com)).unwrap_or([0.0, 0.0, 1.0])
+            });
+            let s = &mut self.state[l];
+            s.com = add(s.com, scale(way, excess));
         }
     }
 
@@ -576,6 +873,11 @@ impl Body {
     /// human range ([`hinge_limit`]), or `None` when all already are: what is shown and what the
     /// motors track never asks a joint to bend backwards or past its range.
     pub fn hinged(&self, rot: &[Q]) -> Option<Vec<Q>> {
+        self.hinged_with(rot, TARGET_FLEX)
+    }
+
+    /// [`Body::hinged`] with the targets' flex off straight `low` (rad).
+    pub fn hinged_with(&self, rot: &[Q], low: f32) -> Option<Vec<Q>> {
         if rot.len() != self.state.len() {
             return None;
         }
@@ -596,7 +898,7 @@ impl Body {
             };
             // The targets a little off straight (a person's joints seldom lock), so a limb flung
             // straight by its motion is not driven onto its stop.
-            if let Some(turn) = hinge_limit_from(u, f, axis, TARGET_FLEX, flex, lean) {
+            if let Some(turn) = hinge_limit_from(u, f, axis, low, flex, lean) {
                 let fixed = qnorm(qmul(now[p], qmul(turn, rel)));
                 out.get_or_insert_with(|| rot.to_vec())[i] = fixed;
             }
@@ -609,7 +911,11 @@ impl Body {
     /// elbow and knee is blended against its parent, not in the world: two poses within range
     /// blended bone by bone in the world can take the joint between them past straight.
     pub fn shown(&self, target: &[Q], w: f32) -> Vec<Q> {
-        let wanted = self.hinged(target).unwrap_or_else(|| target.to_vec());
+        // The targets' little flex off straight goes with the body's weight: none once it is out
+        // (it popped 3.4 degrees in one frame as the body ended: Patrick's 10:47 clip).
+        let wanted = self
+            .hinged_with(target, TARGET_FLEX * w.clamp(0.0, 1.0))
+            .unwrap_or_else(|| target.to_vec());
         if wanted.len() != self.state.len() {
             return wanted;
         }
@@ -926,6 +1232,9 @@ impl Body {
             self.hold_joints();
             self.limit_bends(targets);
             self.limit_hinges();
+            if self.limbs_out {
+                self.keep_limbs_out(&targets.hands);
+            }
             self.limit_turns(&before, h);
             for (s, b) in self.state.iter_mut().zip(&before) {
                 let v = scale(sub(s.com, b.com), 1.0 / h);
@@ -994,7 +1303,7 @@ impl Body {
             };
             let role = self.segments[i].role;
             let room = if role.is_arm() {
-                t.arm_spin_room
+                t.arm_spin_room * self.arm_spin
             } else {
                 t.spin_room
             };
@@ -1025,7 +1334,7 @@ impl Body {
             if !role.is_arm() {
                 continue;
             }
-            let most = role.spin() * t.arm_spin_room;
+            let most = role.spin() * t.arm_spin_room * self.arm_spin;
             let knee = most * SPIN_KNEE;
             let was = qmul(qconj(before[p].q), before[i].q);
             let now = qmul(qconj(self.state[p].q), self.state[i].q);
@@ -1085,17 +1394,16 @@ impl Body {
                 .sum();
             // The chest's and the neck's joints (a spine bone on a spine bone, the neck, the head):
             // the waist keeps the limbs' motor, so the torso bends without whirling the arms.
-            let upper = match self.segments[i].role {
-                Role::Neck | Role::Head => true,
-                Role::Spine => self.segments[i]
-                    .parent
-                    .is_some_and(|p| self.segments[p].role == Role::Spine),
-                _ => false,
-            };
-            let strength = if upper {
-                torso_strength(strength)
-            } else {
-                strength
+            let strength = match self.segments[i].role {
+                Role::Neck | Role::Head => soft_strength(strength, tuning::get().neck_soft),
+                Role::Spine
+                    if self.segments[i]
+                        .parent
+                        .is_some_and(|p| self.segments[p].role == Role::Spine) =>
+                {
+                    soft_strength(strength, tuning::get().torso_soft)
+                }
+                _ => strength,
             };
             let s = (strength * (1.0 - self.dip[i])).max(0.02);
             *joint = (

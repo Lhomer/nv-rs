@@ -142,8 +142,11 @@ pub struct Rig {
     /// written pose's offsets over the animation it starts from (each bone's, the pelvis's).
     pub fade: Option<active::Fade>,
     pub last: Option<(Vec<active::Q>, V3)>,
-    /// The steps' pelvis offset when they ended, eased out from then ([`SHIFT_BACK`]).
-    pub shift_back: Option<(V3, Instant)>,
+    /// The steps' pelvis offset when they ended, eased out from then ([`SHIFT_BACK`]), and after a
+    /// fall pose that did not go into the ragdoll, the support it had and since when it eases
+    /// back ([`FALL_BACK`]).
+    pub shift_back: Option<(V3, Instant, f32)>,
+    pub support_back: Option<(f32, Instant)>,
     /// A step's move of the reference (`crate::knockdown::place`) not yet in the root's world:
     /// the root's world before it, the move, since when.
     pub placed: Option<(V3, V3, Instant)>,
@@ -159,6 +162,9 @@ pub struct Rig {
     pub spread_now: f32,
 }
 
+/// How much deeper than the animation (game units) a shown forearm or hand may be in the torso
+/// before its arm is turned out (`active::Body::clear_arms`).
+const ARM_SLACK: f32 = 0.35;
 /// How long the steps' pelvis offset takes back to none once they are done (s).
 const SHIFT_BACK: f32 = 0.3;
 /// How long a step's move of the reference may wait for the root's world to show it (s).
@@ -508,6 +514,7 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         fade: None,
         last: None,
         shift_back: None,
+        support_back: None,
         placed: None,
         drift: 0,
         drift_most: 0.0,
@@ -764,7 +771,9 @@ pub fn apply(e: &mut Engine) {
                     rig.drift = 0;
                     rig.drift_most = 0.0;
                     rig.jumps = 0;
-                    rig.body = Some(make_body(e, &rig, &anim, &before, dt));
+                    let mut body = make_body(e, &rig, &anim, &before, dt);
+                    body.unarmed(!rig.armed);
+                    rig.body = Some(body);
                 }
                 _ => {
                     rig.before = Some(anim.clone());
@@ -876,11 +885,11 @@ pub fn apply(e: &mut Engine) {
         // over).
         if rig.balance.is_none() && rig.fall.is_none() {
             if rig.shift_back.is_none() && length(rig.shift) > 0.0 {
-                rig.shift_back = Some((rig.shift, Instant::now()));
+                rig.shift_back = Some((rig.shift, Instant::now(), SHIFT_BACK));
             }
             rig.shift = match rig.shift_back {
-                Some((from, since)) => {
-                    let k = active::ease(since.elapsed().as_secs_f32() / SHIFT_BACK);
+                Some((from, since, over)) => {
+                    let k = active::ease(since.elapsed().as_secs_f32() / over);
                     if k >= 1.0 {
                         rig.shift_back = None;
                     }
@@ -922,9 +931,16 @@ pub fn apply(e: &mut Engine) {
             }
             _ => Vec::new(),
         };
-        let support = match &rig.fall {
-            Some(f) => 1.0 - active::ease(f.t / f.lead.max(1e-3)),
-            None => 1.0,
+        let support = match (&rig.fall, rig.support_back) {
+            (Some(f), _) => fall_support(f),
+            (None, Some((from, since))) => {
+                let k = active::ease(since.elapsed().as_secs_f32() / FALL_BACK);
+                if k >= 1.0 {
+                    rig.support_back = None;
+                }
+                from + (1.0 - from) * k
+            }
+            (None, None) => 1.0,
         };
         let since = rig.since.elapsed().as_secs_f32();
         let world: Vec<f32> = rig
@@ -1024,6 +1040,7 @@ pub fn apply(e: &mut Engine) {
                     targets.pelvis[2] -= drop * 0.5;
                 }
             }
+            body.free_arms(brace_now.is_none() && rig.fall.is_none());
             body.step(
                 &targets,
                 dt,
@@ -1181,6 +1198,49 @@ pub fn apply(e: &mut Engine) {
                 0.0
             };
             crate::one_hand::set(rig.actor, off);
+        }
+        // The arms turned out of the torso where they went deeper than the animation has them
+        // (`active::Body::clear_arms`: Patrick's 10:47 clip, arms through the body).
+        if let Some(body) = rig.body.as_ref() {
+            // Not an arm a brace or the grip puts on its goal (that goal is held already).
+            let mut skip: Vec<usize> = Vec::new();
+            for side in 0..2u8 {
+                // A planted brace hand stays where it touched.
+                let planted = rig
+                    .brace
+                    .and_then(|b| b.hands[side as usize])
+                    .is_some_and(|h| h.planted());
+                // An armed actor's arms are the weapon pose's and its aim's.
+                if planted || (side == 0 && rig.grip_hold) || rig.armed {
+                    skip.extend(bone_of(&rig, Role::Hand, side));
+                }
+            }
+            let mut at = shown_positions(&rig, &anim, &shown, pi, pelvis_offset);
+            body.clear_arms(
+                &mut shown,
+                &mut at,
+                &anim,
+                |r, j, i| body.capsule_at(r, j, i, UNITS_PER_METRE),
+                ARM_SLACK,
+                &skip,
+            );
+            // And inside the shoulder's human range, against the chest as it is turned.
+            // The chest: the last spine bone (the clavicles hang from it).
+            if let Some(c) = (0..rig.bones.len())
+                .rev()
+                .find(|&i| rig.bones[i].role == Role::Spine)
+            {
+                let chest = mul(&shown[c], &transpose(&anim[c].0));
+                body.hold_shoulders(
+                    &mut shown,
+                    &mut at,
+                    apply_m(&chest, forward),
+                    apply_m(&chest, [0.0, 0.0, 1.0]),
+                    &anim,
+                    forward,
+                    &skip,
+                );
+            }
         }
         // What is left of a dropped body's last pose, on top.
         if let Some(fade) = &rig.fade {
@@ -1834,7 +1894,7 @@ fn balance_frame(
             s.outcome,
             length(shift)
         ));
-        rig.shift_back = Some((shift, Instant::now()));
+        rig.shift_back = Some((shift, Instant::now(), SHIFT_BACK));
     } else {
         rig.balance = Some(s);
     }
@@ -2333,7 +2393,7 @@ fn start_brace(e: &mut Engine, actor: u32, root: u32, dir: V3, v: f32, aggressor
                 let reach = length(sub(at(f), at(u))) + length(sub(at(h), at(f)));
                 let target = brace_target(at(u), dir, wall, top);
                 reaches[side as usize] =
-                    surface.is_none() || hands::can_reach(at(u), target, reach);
+                    surface.is_none() || hands::reaches(at(u), target, reach, facing(e, rig), side);
             }
         }
         let one_arm = limit * hands::ONE_ARM;
@@ -2448,7 +2508,13 @@ fn brace_frame(e: &mut Engine, rig: &mut Rig, anim: &[(M3, V3)], out: &mut [Opti
         let shown = |i: usize| read3(e, rig.bones[i].node + WORLD_TRANSLATION);
         let (shoulder, elbow, wrist) = (shown(u), shown(f), shown(h));
         let reach = length(sub(elbow, shoulder)) + length(sub(wrist, elbow));
-        let target = brace_target(anim[u].1, b.dir, b.wall, b.top);
+        // Inside the shoulder's human range (never up behind the back).
+        let target = hands::held_goal(
+            anim[u].1,
+            brace_target(anim[u].1, b.dir, b.wall, b.top),
+            forward,
+            side,
+        );
         let free = rig.free_wrist[side as usize].unwrap_or(wrist);
         let home = home_of(rig, anim, side, |i| world_of(e, rig, i)).map_or(free, |x| x.1);
         let name = if side == 0 { "left" } else { "right" };
@@ -2517,6 +2583,7 @@ fn fall_frame(e: &mut Engine, rig: &mut Rig, out: &mut [Option<M3>], dt: f32) ->
     rig.balance = None;
     f.t += dt;
     let across = unit(cross([0.0, 0.0, 1.0], f.dir)).unwrap_or([1.0, 0.0, 0.0]);
+    let facing_now = facing(e, rig);
     // It goes over physically (the support fades over the lead, [`apply`]); a windmill is the
     // one pose it is given.
     for side in 0..2u8 {
@@ -2524,7 +2591,19 @@ fn fall_frame(e: &mut Engine, rig: &mut Rig, out: &mut [Option<M3>], dt: f32) ->
             if let Some(u) = bone_of(rig, Role::UpperArm, side) {
                 let phase = if side == 0 { 0.0 } else { std::f32::consts::PI };
                 let a = WINDMILL_SWING * (std::f32::consts::TAU * WINDMILL_HZ * f.t + phase).sin();
-                out[u] = Some(rotation(scale(across, a)));
+                // Inside the shoulder's human range (never up behind the back).
+                let dir = bone_of(rig, Role::Forearm, side).map_or([0.0, 0.0, -1.0], |fo| {
+                    sub(
+                        read3(e, rig.bones[fo].node + WORLD_TRANSLATION),
+                        read3(e, rig.bones[u].node + WORLD_TRANSLATION),
+                    )
+                });
+                out[u] = Some(ragdoll_core::flinch::held_turn(
+                    &rotation(scale(across, a)),
+                    dir,
+                    facing_now,
+                    side,
+                ));
             }
         }
     }
@@ -2577,10 +2656,10 @@ fn fall_frame(e: &mut Engine, rig: &mut Rig, out: &mut [Option<M3>], dt: f32) ->
     if f.t > f.lead + FALL_WAIT {
         note(format!(
             "{}: the fall pose let go: still not in its ragdoll {FALL_WAIT} s after the switch \
-             was asked (knock state 0)",
+             was asked (knock state 0); eased back up over {FALL_BACK} s",
             describe(e, rig.actor)
         ));
-        rig.shift = [0.0; 3];
+        stand_back_up(rig, &f);
         return false;
     }
     rig.fall = Some(f);
@@ -2595,11 +2674,35 @@ const FALL_WAIT: f32 = 1.0;
 pub fn fall_failed(actor: u32) {
     let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     for r in rigs.iter_mut().filter(|r| r.actor == actor) {
-        if r.fall.take().is_some() {
-            r.shift = [0.0; 3];
+        if let Some(f) = r.fall.take() {
+            stand_back_up(r, &f);
+            note(format!(
+                "{actor:08X}: the knock-down did not happen: the fall pose eases back up over \
+                 {FALL_BACK} s"
+            ));
         }
     }
 }
+
+/// A fall pose that is not going into the ragdoll after all (a refused or given-up knock-down):
+/// its support and its pelvis offset eased back over [`FALL_BACK`] (they were let go in one frame:
+/// the body snapped upright, Patrick's 10:47 clip on 454ebb2).
+fn stand_back_up(rig: &mut Rig, f: &Fall) {
+    rig.support_back = Some((fall_support(f), Instant::now()));
+    rig.shift_back = Some((rig.shift, Instant::now(), FALL_BACK));
+}
+
+/// The support's carrying of a body going over: eased down over its lead, never under
+/// [`FALL_SUPPORT`] (the ragdoll takes it; a posed body left with none folded into what was behind
+/// it and jittered).
+fn fall_support(f: &Fall) -> f32 {
+    (1.0 - active::ease(f.t / f.lead.max(1e-3))).max(FALL_SUPPORT)
+}
+
+/// The least of the support while the posed body goes over, and how long a fall pose that did
+/// not go into the ragdoll takes to ease back up (s).
+const FALL_SUPPORT: f32 = 0.5;
+const FALL_BACK: f32 = 0.6;
 
 /// Stage 3's entry for a knockdown (from `crate::knockdown`): instead of the hard switch, the
 /// posed body goes over for [`FALL_LEAD`] and then falls into its ragdoll. False when it cannot
@@ -2628,6 +2731,11 @@ pub fn fall(
             "{}: no fall pose: no rig bones; straight into the ragdoll",
             describe(e, actor)
         ));
+        return false;
+    }
+    // A fall pose only for a knock-down that will happen (it went over, then stood up again).
+    if let Err(why) = crate::knockdown::can_knock_now(e, actor) {
+        note(format!("{}: no fall pose: {why}", describe(e, actor)));
         return false;
     }
     let root = e.call(ACTOR_3D, &args![actor]).u32();
