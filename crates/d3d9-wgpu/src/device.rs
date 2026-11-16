@@ -19,7 +19,7 @@ use crate::sm::{self, wgsl, Stage};
 use crate::state::{self, rs, SamplerKey};
 use d3d9_stream::{Handle, Rect};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Where the device's frames go.
@@ -782,6 +782,10 @@ pub struct Device {
     touch_overlay: Option<crate::touch_overlay::Overlay>,
     fps_was_shown: bool,
     shots: Option<Shots>,
+    /// A recording's frames ([`crate::capture`]): the back buffer's copies in flight (waiting for
+    /// their map) and the free readback buffers (with their size in bytes).
+    captures: Vec<CaptureCopy>,
+    capture_pool: Vec<(wgpu::Buffer, u64)>,
     warned: HashSet<String>,
     errors: Arc<AtomicU64>,
     pub(crate) draws: u64,
@@ -1200,6 +1204,8 @@ impl Device {
             touch_overlay: None,
             fps_was_shown: false,
             shots,
+            captures: Vec::new(),
+            capture_pool: Vec::new(),
             warned: HashSet::new(),
             errors,
             draws: 0,
@@ -1435,6 +1441,95 @@ impl Device {
         }
         let tex = self.new_texture(width, height, 1, d3d, false, !depth, samples)?;
         Some(self.level_surface(&tex, 0, 0))
+    }
+
+    /// The back buffer `b` copied into a readback buffer for the recording (one of the free ones
+    /// of its size, or a new one while fewer than [`crate::capture::IN_FLIGHT`] are in flight);
+    /// none when they are all in flight (the frame is skipped).
+    fn copy_for_capture(&mut self, b: &Surf) -> Option<CaptureCopy> {
+        let tex = b.tex.clone()?;
+        let row = (b.width * 4).div_ceil(256) * 256;
+        let size = u64::from(row) * u64::from(b.height);
+        let buffer = match self.capture_pool.iter().position(|(_, s)| *s == size) {
+            Some(i) => self.capture_pool.swap_remove(i).0,
+            None if self.captures.len() < crate::capture::IN_FLIGHT => {
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("capture"),
+                    size,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                })
+            }
+            None => return None,
+        };
+        self.encoder().copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(b.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: b.width,
+                height: b.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Some(CaptureCopy {
+            buffer,
+            size,
+            row,
+            width: b.width,
+            height: b.height,
+            rgba: b.format.wgpu == wgpu::TextureFormat::Rgba8Unorm,
+            at: std::time::Instant::now(),
+            ready: Arc::new(AtomicU8::new(CAPTURE_PENDING)),
+        })
+    }
+
+    /// The recording's copies whose maps are done: read, handed on ([`crate::capture::send`]) in
+    /// the order they were taken, their buffers back in the pool (dropped once no capture runs).
+    fn collect_captures(&mut self) {
+        if self.captures.is_empty() {
+            if !crate::capture::running() {
+                self.capture_pool.clear();
+            }
+            return;
+        }
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        while let Some(first) = self.captures.first() {
+            match first.ready.load(Ordering::Relaxed) {
+                CAPTURE_PENDING => break,
+                state => {
+                    let c = self.captures.remove(0);
+                    if state == CAPTURE_READY {
+                        if let Ok(data) = c.buffer.slice(..).get_mapped_range() {
+                            let bgra =
+                                crate::capture::tight_bgra(&data, c.row, c.width, c.height, c.rgba);
+                            drop(data);
+                            crate::capture::send(crate::capture::Frame {
+                                width: c.width,
+                                height: c.height,
+                                bgra,
+                                at: c.at,
+                            });
+                        }
+                        c.buffer.unmap();
+                        if crate::capture::running() {
+                            self.capture_pool.push((c.buffer, c.size));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn surface_of(&self, h: Handle) -> Option<Arc<Surf>> {
@@ -5957,6 +6052,15 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             );
             readback = Some((buffer, row, b.width, b.height, b.format));
         }
+        // A recording's frame ([`crate::capture`]): the back buffer copied into a free buffer,
+        // mapped once submitted (below), read at a later present.
+        let mut capture_copy = None;
+        if let Some(b) = &back {
+            self.collect_captures();
+            if crate::capture::due(std::time::Instant::now()) {
+                capture_copy = self.copy_for_capture(b);
+            }
+        }
         let mut frame_texture = None;
         let mut window_shot = None;
         // In the window's DPI awareness from the frame's size to its present ([`crate::window`]).
@@ -6043,6 +6147,24 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             frame_texture = Some(t);
         }
         self.flush();
+        // The recording's copy mapped after the submit that makes it (in order on the queue
+        // thread); the present that finds it ready reads it.
+        if let Some(c) = capture_copy {
+            let (buffer, ready) = (c.buffer.clone(), c.ready.clone());
+            self.on_queue(move |_| {
+                buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                    ready.store(
+                        if r.is_ok() {
+                            CAPTURE_READY
+                        } else {
+                            CAPTURE_FAILED
+                        },
+                        Ordering::Relaxed,
+                    );
+                });
+            });
+            self.captures.push(c);
+        }
         let presents = self.presents;
         if let Some(map) = self
             .start
@@ -6942,6 +7064,24 @@ pub(crate) fn surface_for(
 ) -> Result<wgpu::Surface<'static>, String> {
     Err("windows of other platforms come with the window layer's port".into())
 }
+
+/// A recording's copy of the back buffer in flight ([`Device::copy_for_capture`]): its buffer and
+/// size, its rows, the frame's size and order of bytes, when it was presented, and its map's
+/// state ([`CAPTURE_PENDING`], [`CAPTURE_READY`], [`CAPTURE_FAILED`]).
+struct CaptureCopy {
+    buffer: wgpu::Buffer,
+    size: u64,
+    row: u32,
+    width: u32,
+    height: u32,
+    rgba: bool,
+    at: std::time::Instant,
+    ready: Arc<AtomicU8>,
+}
+
+const CAPTURE_PENDING: u8 = 0;
+const CAPTURE_READY: u8 = 1;
+const CAPTURE_FAILED: u8 = 2;
 
 /// A pipeline and the layouts of its two sampler groups (the pixel shader's, the vertex
 /// shader's).

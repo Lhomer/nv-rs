@@ -3979,3 +3979,58 @@ fn a_failure_on_the_queue_thread_is_raised_on_the_render_thread() {
     }
     assert_eq!(g.b.device().map(|d| d.wgpu_errors()), Some(0));
 }
+
+/// A recording's capture (`d3d9_wgpu::capture`, the Windows test room's clips): with a capture
+/// running, presents hand on the back buffer's pixels (BGRA, its size), never waiting for the GPU;
+/// stopped, none come.
+#[test]
+fn a_capture_hands_on_the_back_buffers_frames() {
+    let Some(mut g) = Gpu::new(8, 1) else { return };
+    g.run(Cmd::SetRenderTarget {
+        device: DEVICE,
+        index: 0,
+        surface: BACK,
+    });
+    // A8R8G8B8 0xFF336699: red 0x33, green 0x66, blue 0x99.
+    g.clear(1, 0xFF33_6699, 1.0);
+    let frames = d3d9_wgpu::capture::start(120);
+    let mut got = None;
+    for frame in 1..=200u32 {
+        g.run(Cmd::Present {
+            device: DEVICE,
+            source: None,
+            dest: None,
+            window: 0,
+            dirty: false,
+            model: 0,
+            frame,
+        });
+        if let Ok(f) = frames.try_recv() {
+            got = Some(f);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    d3d9_wgpu::capture::stop();
+    let f = got.expect("a frame within 200 presents");
+    assert_eq!((f.width, f.height), (8, 8));
+    assert_eq!(f.bgra.len(), 8 * 8 * 4);
+    assert_eq!(&f.bgra[..4], &[0x99, 0x66, 0x33, 0xff], "BGRA");
+    assert!(f
+        .bgra
+        .chunks_exact(4)
+        .all(|p| p == [0x99, 0x66, 0x33, 0xff]));
+    // Stopped: no more frames.
+    for frame in 201..=210u32 {
+        g.run(Cmd::Present {
+            device: DEVICE,
+            source: None,
+            dest: None,
+            window: 0,
+            dirty: false,
+            model: 0,
+            frame,
+        });
+    }
+    assert!(frames.try_recv().is_err());
+}

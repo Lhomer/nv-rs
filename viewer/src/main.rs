@@ -236,6 +236,9 @@ fn main() {
         if let Some(log) = &mut frame_log {
             log.record(&mut game.engine);
         }
+        // The test room's clips (F9, the Record button; `host::room_record`): nothing outside
+        // the room.
+        host::room_record::frame(&mut game.engine);
         if last.map_or(true, |at| at.elapsed() >= Duration::from_secs(5)) {
             last = Some(Instant::now());
             println!("{}", game.movement.summary());

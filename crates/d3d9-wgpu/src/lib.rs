@@ -17,6 +17,7 @@
 mod ahead;
 mod answers;
 mod cache;
+pub mod capture;
 pub mod device;
 #[cfg(test)]
 mod fingerprint;

@@ -971,6 +971,10 @@ fn log_tail(path: &Path) -> String {
 
 struct Options {
     mods: bool,
+    /// The physics test room (`--room`, or the room package's Play.exe: built with
+    /// `NV_RS_ROOM=1`): the game starts straight into the room, with F9 clips
+    /// (docs/WINDOWS-ROOM.md).
+    room: bool,
     import: bool,
     check_only: bool,
     game: Option<PathBuf>,
@@ -980,6 +984,7 @@ struct Options {
 fn parse_options(raw: &[String]) -> Options {
     let mut options = Options {
         mods: false,
+        room: option_env!("NV_RS_ROOM") == Some("1"),
         import: false,
         check_only: false,
         game: std::env::var_os("NV_RS_GAME").map(PathBuf::from),
@@ -989,6 +994,7 @@ fn parse_options(raw: &[String]) -> Options {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--mods" => options.mods = true,
+            "--room" => options.room = true,
             "--import-saves" => options.import = true,
             "--check" => options.check_only = true,
             "--game" => options.game = args.next().map(PathBuf::from),
@@ -1329,6 +1335,14 @@ fn play(
         .env("NV_REPORT_DIR", &package.reports)
         .env("NV_REPORT_LOG", &log_path)
         .env("NV_SETTINGS", &package.settings);
+    // The physics test room: straight into it (`host::phone_range`), with its clips
+    // (`host::room_record`).
+    if options.room {
+        command
+            .env("NV_TEST_RANGE_PHONE", "1")
+            .env("NV_ROOM_RECORD", "1");
+        package.log("the physics test room: NV_TEST_RANGE_PHONE=1, NV_ROOM_RECORD=1");
+    }
 
     let fallout_ini = text_of(&std::fs::read(profile.fallout_ini()).unwrap_or_default());
     // A settings.ini still there (its choices could not go into the files) is read the same way
@@ -1569,6 +1583,8 @@ mod tests {
         .collect();
         let o = parse_options(&raw);
         assert!(o.mods && o.import && !o.check_only);
+        assert_eq!(o.room, option_env!("NV_RS_ROOM") == Some("1"));
+        assert!(parse_options(&["--room".to_string()]).room);
         assert_eq!(o.game.unwrap(), PathBuf::from("D:\\x"));
         assert_eq!(o.from.unwrap(), PathBuf::from("E:\\y"));
     }

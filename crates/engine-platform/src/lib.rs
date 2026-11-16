@@ -111,6 +111,7 @@ pub mod mouse_look;
 pub mod nls;
 pub mod nvapi;
 pub mod process;
+pub mod record;
 pub mod resampler;
 pub mod sound_out;
 pub mod speakers;

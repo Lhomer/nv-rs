@@ -520,6 +520,10 @@ fn ask_choice(note: &str, default: Choice) -> Option<Choice> {
 /// Asks what to start ([`ask_choice`], the last choice the default), remembers it, and starts
 /// Play.exe for it; closing the window starts nothing.
 fn choose_and_play(install: &Path, note: &str) {
+    // The test room's package: Play.exe starts the room; nothing to choose.
+    if crate::room() {
+        return play(install, Choice::Play);
+    }
     let Some(choice) = ask_choice(note, choice::remembered(install)) else {
         return;
     };
@@ -568,8 +572,9 @@ pub fn run() {
         .and_then(|text| update::installed_commit(&text));
     let (repo, tag) = crate::channel();
     let status = Status::show("Looking for a newer build...");
-    let latest = fetch_text(&crate::asset_url(repo, tag, "latest.txt")).and_then(|text| {
-        update::parse_latest(&text).ok_or_else(|| "the release's latest.txt is not readable".into())
+    let name = crate::latest_name();
+    let latest = fetch_text(&crate::asset_url(repo, tag, name)).and_then(|text| {
+        update::parse_latest(&text).ok_or_else(|| format!("the release's {name} is not readable"))
     });
     let latest = match latest {
         Ok(latest) => latest,

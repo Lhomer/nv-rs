@@ -11,7 +11,9 @@
 //!
 //! The release is the Play package workflow's rolling prerelease of the branch the package was
 //! built from: `NV_RS_UPDATE_REPO` and `NV_RS_UPDATE_TAG` at build time, else this fork's
-//! `claude/mouse-look-like-original` one ([`DEFAULT_REPO`], [`DEFAULT_TAG`]).
+//! `claude/mouse-look-like-original` one ([`DEFAULT_REPO`], [`DEFAULT_TAG`]). The test room's
+//! package (`NV_RS_ROOM=1`) updates from `windows-test`'s `windows-latest.txt`
+//! (`NV_RS_UPDATE_LATEST`) and starts the room without asking.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 // Off Windows only the tests use the update logic.
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -25,6 +27,18 @@ mod windows;
 /// The release a package built without the workflow's settings looks at.
 pub const DEFAULT_REPO: &str = "Lhomer/nv-rs";
 pub const DEFAULT_TAG: &str = "play-claude-mouse-look-like-original";
+
+/// The release's file naming the newest build (`latest.txt`; the test room's package reads
+/// `windows-latest.txt`: `NV_RS_UPDATE_LATEST` at build time).
+pub fn latest_name() -> &'static str {
+    option_env!("NV_RS_UPDATE_LATEST").unwrap_or("latest.txt")
+}
+
+/// Whether this is the test room's package (`NV_RS_ROOM=1` at build time,
+/// docs/WINDOWS-ROOM.md): Play.exe starts the room, so there is nothing to choose.
+pub fn room() -> bool {
+    option_env!("NV_RS_ROOM") == Some("1")
+}
 
 /// The release this build updates from: `(owner/repo, tag)`.
 pub fn channel() -> (&'static str, &'static str) {

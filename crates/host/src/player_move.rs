@@ -1626,6 +1626,14 @@ impl crate::Host {
         };
         #[cfg(not(any(windows, target_os = "android", target_os = "linux")))]
         let window_keys = [false; 256];
+        // The test room takes F9 (its clips: the game's own F9, Quickload, never sees it there, so a
+        // clip never loads a save), F6 and F7 (`crate::room_record`).
+        let mut window_keys = window_keys;
+        if crate::room_record::on() {
+            for key in crate::room_record::ROOM_KEYS {
+                window_keys[key] = false;
+            }
+        }
         for code in 0..=255u8 {
             let scripted = script
                 .iter()

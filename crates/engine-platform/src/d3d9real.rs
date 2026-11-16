@@ -951,6 +951,16 @@ pub fn inject_release_all() {
     }
 }
 
+/// The wgpu backend's frame capture (a recording's frames: the Windows test room's clips) and its
+/// overlay shapes (the room's Record button), for the host.
+pub use d3d9_wgpu::capture;
+pub use d3d9_wgpu::touch_overlay;
+
+/// The game's real top-level window (an `HWND`; 0 before it has one).
+pub fn game_window() -> isize {
+    GAME_TOP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The next frame captured into the `NV_SHOT` folder (the Linux room's `shot` step): that folder,
 /// or `None` when the run has none.
 pub fn ask_shot() -> Option<std::path::PathBuf> {
