@@ -126,7 +126,7 @@ const NEXT_ITEM: u32 = 0x004c_a330;
 const ITERATOR_DELETE: u32 = 0x004b_f630;
 const ITEM_FULL_NAME: u32 = 0x004b_e2d0;
 const ITEM_GET_WORN: u32 = 0x004b_ddd0;
-const ITEM_DELETE: u32 = 0x0044_59e0;
+pub(crate) const ITEM_DELETE: u32 = 0x0044_59e0;
 const FORM_TYPE: u32 = 0x0040_1170;
 const BIPED_PART: u32 = 0x0048_0db0;
 const WEAPON: u32 = 0x28;
@@ -443,7 +443,7 @@ fn restore_combined(e: &mut Engine, second: u32) {
 }
 
 /// What an item is to the equipment.
-fn kind_of(e: &mut Engine, item: u32) -> Kind {
+pub(crate) fn kind_of(e: &mut Engine, item: u32) -> Kind {
     let form = e.mem.u32(item + 8);
     if form == 0 {
         return Kind::Other;
@@ -464,7 +464,7 @@ fn kind_of(e: &mut Engine, item: u32) -> Kind {
 
 /// The player's worn items that `wanted` replaces, as the walk's copies (deleted by the caller,
 /// `004459e0`), at most [`MOST_EQUIPPED`].
-fn equipped_for(e: &mut Engine, wanted: Kind) -> Vec<u32> {
+pub(crate) fn equipped_for(e: &mut Engine, wanted: Kind) -> Vec<u32> {
     let player = e.global::<u32>(PLAYER);
     let mut found = Vec::new();
     if player == 0 {

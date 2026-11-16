@@ -63,6 +63,8 @@ pub struct Spec {
     pub read_back: bool,
     pub leave_written: bool,
     pub aim_pass: bool,
+    /// The player's perks (`perks=stoppingpower,hotloads,bowlingball`).
+    pub perks: crate::sim::Perks,
     pub limbs: Limbs,
     pub armed: bool,
     /// The weapon is two-handed (`armed=rifle`, or `armed=1`) or one-handed (`armed=pistol`).
@@ -89,6 +91,7 @@ impl Default for Spec {
             read_back: false,
             leave_written: false,
             aim_pass: false,
+            perks: crate::sim::Perks::default(),
             limbs: Limbs::WHOLE,
             armed: false,
             two_handed: true,
@@ -400,6 +403,16 @@ impl Spec {
                     spec.leave_written = value == "written";
                 }
                 "aimpass" => spec.aim_pass = value == "1",
+                "perks" => {
+                    for perk in value.split(',').filter(|p| !p.is_empty()) {
+                        match perk {
+                            "stoppingpower" => spec.perks.stopping_power = true,
+                            "hotloads" => spec.perks.hot_loads = true,
+                            "bowlingball" => spec.perks.bowling_ball = true,
+                            _ => return Err(format!("perks: {perk}")),
+                        }
+                    }
+                }
                 "armed" => {
                     spec.armed = value != "0";
                     spec.two_handed = value != "pistol";
@@ -609,6 +622,7 @@ pub fn prepare(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<(), String> {
     sim.read_back = spec.read_back;
     sim.leave_written = spec.leave_written;
     sim.aim_pass = spec.aim_pass;
+    sim.perks = spec.perks;
     sim.set_limbs(spec.limbs);
     sim.armed = spec.armed;
     sim.two_handed = spec.two_handed;
@@ -2415,5 +2429,98 @@ mod locomotion {
                 assert!(spin <= 12.0, "{armed} {hit}: {spin:.1} rad/s");
             }
         }
+    }
+}
+
+#[cfg(test)]
+/// nv-rs's own perks in the active ragdoll (`ragdoll_core::perks`; the host's `perks`): the push
+/// numbers with and without each.
+mod perk_pushes {
+    use super::*;
+    use crate::sim::Sim;
+    use ragdoll_core::knock::Reaction;
+
+    fn run_with(spec: &str) -> (Report, Vec<f32>) {
+        let mut sim = Sim::new(GroundKind::Flat);
+        let r = run(&mut sim, &Spec::parse(spec).unwrap(), Tuning::GAME).unwrap();
+        (r, sim.stats.pushes.clone())
+    }
+
+    /// Stopping Power: each of the player's hits pushes the active ragdoll 1.35 times as hard; a
+    /// 10mm at the chest (0.53 m/s against a stagger at 0.56) staggers and interrupts the attack
+    /// with it and not without; the push's speed and topple decision are the hit's own.
+    #[test]
+    fn stopping_power_pushes_harder_and_interrupts_sooner() {
+        for hit in ["9mm@chest", "10mm@chest", "44@chest"] {
+            let (plain, p0) = run_with(&format!("attacking=1&hits={hit}"));
+            let (perk, p1) = run_with(&format!("attacking=1&hits={hit}&perks=stoppingpower"));
+            eprintln!(
+                "{hit}: push {:.1} -> {:.1} N s, steps {} -> {}, {:?} -> {:?}, interrupted {} -> {}",
+                p0[0], p1[0], plain.steps, perk.steps, plain.decisions, perk.decisions,
+                plain.interrupted, perk.interrupted
+            );
+            assert!((p1[0] / p0[0] - 1.35).abs() < 1e-3, "{hit}");
+            assert!((perk.peak_speed - plain.peak_speed).abs() < 1e-4, "{hit}");
+        }
+        let (plain, _) = run_with("attacking=1&hits=10mm@chest");
+        let (perk, _) = run_with("attacking=1&hits=10mm@chest&perks=stoppingpower");
+        assert_eq!(plain.decisions, vec!["None".to_string()]);
+        assert_eq!(perk.decisions, vec!["Stagger".to_string()]);
+        assert!(perk.interrupted);
+    }
+
+    /// Hot Loads: the round leaves 10% faster, so its push into the body is 10% more.
+    #[test]
+    fn hot_loads_pushes_ten_percent_more() {
+        for hit in ["9mm@chest", "308@chest", "556@chest"] {
+            let (plain, p0) = run_with(&format!("hits={hit}"));
+            let (perk, p1) = run_with(&format!("hits={hit}&perks=hotloads"));
+            eprintln!(
+                "{hit}: push {:.1} -> {:.1} N s, speed {:.2} -> {:.2} m/s",
+                p0.iter().sum::<f32>(),
+                p1.iter().sum::<f32>(),
+                plain.peak_speed,
+                perk.peak_speed
+            );
+            let ratio = p1.iter().sum::<f32>() / p0.iter().sum::<f32>();
+            assert!((ratio - 1.1).abs() < 0.02, "{hit}: {ratio}");
+        }
+    }
+
+    /// Bowling Ball: a knocked-over 80 kg body flying into the actor: nothing without the perk;
+    /// with it, a push into the active ragdoll at 2 m/s, a stagger with a catch step at 4, a
+    /// knock-down at 8.
+    #[test]
+    fn bowling_ball_pushes_by_the_flying_bodys_speed() {
+        let bump = |speed: f32, perk: bool| {
+            let mut sim = Sim::new(GroundKind::Flat);
+            prepare(&mut sim, &Spec::parse("hits=").unwrap(), Tuning::GAME).unwrap();
+            sim.perks.bowling_ball = perk;
+            for _ in 0..18 {
+                sim.step();
+            }
+            let d = sim.bump(80.0, speed, [0.0, -1.0, 0.0]);
+            for _ in 0..120 {
+                sim.step();
+            }
+            (
+                d,
+                sim.stats.pushes.first().copied().unwrap_or(0.0),
+                sim.stats.steps,
+                sim.stats.fell,
+            )
+        };
+        for speed in [2.0, 4.0, 8.0] {
+            let (without, ..) = bump(speed, false);
+            let (with, p, steps, fell) = bump(speed, true);
+            eprintln!("{speed} m/s: without {without:?}; with {with:?}, {p:.0} N s, steps {steps}, fell {fell}");
+            assert_eq!(without, None);
+        }
+        assert_eq!(bump(2.0, true).0, Some(Reaction::None));
+        assert!(bump(2.0, true).1 > 0.0);
+        assert_eq!(bump(4.0, true).0, Some(Reaction::Stagger));
+        assert!(bump(4.0, true).2 >= 1, "steps");
+        assert_eq!(bump(8.0, true).0, Some(Reaction::Knockdown));
+        assert!(bump(8.0, true).3, "knocked over");
     }
 }

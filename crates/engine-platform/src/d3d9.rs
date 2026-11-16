@@ -515,6 +515,17 @@ pub fn time_zone_for_year(e: &mut Engine, year: u32) -> Vec<u8> {
     })
 }
 
+/// The player's folder for a CSIDL as [`folder_path`], `None` also when no table is loaded yet.
+pub fn folder_path_if_loaded(e: &mut Engine, csidl: u32) -> Option<(u32, Vec<u8>)> {
+    state!(e)
+        .graphics
+        .adapter
+        .as_deref()?
+        .folders
+        .get(&csidl)
+        .cloned()
+}
+
 /// The player's folder for a CSIDL (`SHGetFolderPathA`'s result and path), if the table has it.
 pub fn folder_path(e: &mut Engine, csidl: u32) -> Option<(u32, Vec<u8>)> {
     adapter(e).folders.get(&csidl).cloned()

@@ -486,6 +486,51 @@ for the shot, the hit's round and the breakdown; a knocked-down actor's fall dam
 attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
 patches (#624) and the knockdown's companion refusal were not on the path.
 
+### nv-rs's own perks (Patrick, 2026-11-17)
+
+Five new perks, real perk records the player picks at level-up: nv-rs's own plugin,
+`nv-rs Perks.esp`, made in code (`perks::plugin_bytes`; no file of it is kept in the repository),
+written into `Data` and added to the player's `plugins.txt` at start-up, before the game reads
+its plugin list (`perks::ensure_plugin`; the `[nv-rs Fixes]` row `bNewPerks`, on in the fixes
+preset). The game loads five `PERK` records:
+- each has its name, its description, a level in `DATA`, one rank, and is playable;
+- each has its requirements as `GetPermanentActorValue` conditions, as the game's own perks
+  have them.
+
+The level-up menu offers them, and the Pip-Boy lists the ones taken. A save with one lists the
+plugin as any mod's; nv-rs writes no save. Every effect needs the perk (`perks::has`: the player's
+rank, as the level-up menu reads it, of the plugin's form). The numbers are `ragdoll_core::perks`.
+
+| Perk | Needs | What it does |
+|---|---|---|
+| Stopping Power | Guns 45, level 12 | The player's hits push the active ragdoll (the flinch, the catch steps) 1.35 times as hard, and stagger (interrupt an attack) from 75% of the stagger share; the damage, the stack and the knock-down are the hit's own (`knockdown::after_hit`) |
+| Hot Loads | Guns 50, level 14 | Every gun the player fires 10% faster at the muzzle, its own factor (`ballistics::hot_loads`): the flight (drop), the push and the penetration follow; not the damage. The K detailed stats show it: `x 1.10 Hot Loads +10%` |
+| Bowling Ball | Strength 6, level 10 | A body the player knocked down, its pelvis flying at 1 m/s or more in its first 1.5 s, coming within 48 units of another living actor: that actor takes a push of 0.25 of the body's momentum, once, as a hit of no damage (`knockdown::bowling`, `bump`): steps, a stagger, a knock-down when fast |
+| Light Touch+ | Sneak 50, Agility 6, level 8 | The pickpocket chance (`00643400`, which the roll and the pickpocket menu's line both read): the value's penalty halved, 10 added, the game's limits kept. The game's chance has no weight term: the value is all an item counts for |
+| Scavenger's Instinct | Perception 6, level 6 | Looting (quick loot, and the container menu on a container or a corpse), an item that beats every equipped item it would replace is marked `^` and listed first. A weapon is scored by its force (its damage of all its projectiles, a melee weapon's with its weight; the equipped one with its weapon mods), apparel by DT, then DR; an empty slot is beaten by anything worth something |
+
+Lab (`scenario::perk_pushes`):
+- Stopping Power: a 9mm, a 10mm and a .44 at the chest push 25.9 → 35.0, 42.1 → 56.9 and 63.2 →
+  85.3 N s. The 10mm (0.53 m/s against a stagger at 0.56) staggers and interrupts with the perk,
+  and not without.
+- Hot Loads: 9mm 25.9 → 28.5 N s, .308 90.8 → 99.8, 5.56 likewise 10% more.
+- Bowling Ball, an 80 kg body (nothing without the perk):
+  - 2 m/s: 40 N s → a push;
+  - 4 m/s: 80 N s → a stagger with a catch step;
+  - 8 m/s: 160 N s → a knock-down.
+
+Unit tests:
+- the numbers (`ragdoll_core::perks`);
+- the plugin read back with the `esm` crate's reader (`perks::the_plugin_holds_the_five_perks`);
+- `plugins.txt` (`the_plugin_is_listed_once`);
+- Light Touch+ on a game in memory, the chance 20 without the perk, 40 with it
+  (`light_touch_changes_the_chance_only_with_the_perk`);
+- the quick loot rows (`a_better_row_is_marked_and_first`);
+- the K stats' line.
+
+Not run in the game: the condition function index (495, `GetPermanentActorValue`) and the actor
+value numbers are the game's as known, not read from a running game here; the perks have no icon.
+
 ### d0f4192 drew no reactions at all (Patrick, 2026-11-16, the 15-16-34 Play and 15-18-15 tester clips)
 
 The pose logs had the reactions as before, but the videos showed every hit actor in its plain

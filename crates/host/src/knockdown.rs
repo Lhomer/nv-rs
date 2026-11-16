@@ -350,7 +350,23 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
     // (`ragdoll_core::condition`; the actor's fatigue and hurt limbs are kept with it).
     let own = p / mass * t.hit_force.max(0) as f32 / 100.0;
     let stage = crate::active_ragdoll::condition_hit(e, target, own / topple.max(0.1), point);
-    let decision = ragdoll_core::condition::escalate(reaction(speed, topple), stage);
+    // Stopping Power (the player's perk, `crate::perks`): the stagger (an attack interrupted) from a
+    // lower share of the topple speed, and the push into the active ragdoll harder; the damage,
+    // the stack and the knock-down are the hit's own.
+    let stopping = crate::perks::player_has(e, aggressor, crate::perks::Perk::StoppingPower);
+    let decision = ragdoll_core::condition::escalate(
+        ragdoll_core::perks::reaction(speed, topple, stopping),
+        stage,
+    );
+    let pushed = ragdoll_core::perks::stopping_push(p, stopping);
+    if stopping {
+        note(format!(
+            "{who}: Stopping Power: the push {p:.1} -> {pushed:.1} N s, the stagger from {:.2} m/s",
+            topple
+                * ragdoll_core::tuning::get().stagger_share
+                * ragdoll_core::perks::STOPPING_POWER_STAGGER
+        ));
+    }
     if crate::room_events::on() {
         use crate::room_events::{num, text};
         crate::room_events::record(
@@ -404,7 +420,7 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
             note(format!("{who}: stack reset on the knockdown"));
             // Stage 3: the posed body goes over first (the flinch's kick on top), then falls into
             // its ragdoll; without the layer, the hard switch as before.
-            crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction, false);
+            crate::active_ragdoll::hit(e, target, pushed, mass, point, hit_direction, false);
             // Not knocked down now (just knocked down or up, the game refuses): no fall pose
             // (it would go over and stand up again), a stagger (Patrick's 10:47 clip on 454ebb2).
             if let Err(why) = can_knock_now(e, target) {
@@ -412,7 +428,7 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
                     "{who}: no knockdown now ({why}): a stagger instead"
                 ));
                 crate::active_ragdoll::interrupt_attack(e, target, "staggered");
-                crate::active_ragdoll::push(e, target, p, mass, hit_direction, aggressor);
+                crate::active_ragdoll::push(e, target, pushed, mass, hit_direction, aggressor);
                 return;
             }
             // No `StopAttack` here: the ragdoll ends the attack, and nothing is changed in the
@@ -426,9 +442,9 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
         // on every hit below topple (the stack's speed, so each rapid hit pushed harder) added up
         // and slid or launched it while it stood (Patrick, 2026-11-15).
         Reaction::Stagger => {
-            crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction, false);
+            crate::active_ragdoll::hit(e, target, pushed, mass, point, hit_direction, false);
             crate::active_ragdoll::interrupt_attack(e, target, "staggered");
-            crate::active_ragdoll::push(e, target, p, mass, hit_direction, aggressor);
+            crate::active_ragdoll::push(e, target, pushed, mass, hit_direction, aggressor);
             note(format!(
             "{who}: stagger (the game's hit reaction only, no push): this hit {:.2} m/s ({p:.1} N s), \
              the stack {speed:.2} m/s ({total:.1} N s over {} hits) vs topple {topple:.2} m/s",
@@ -438,8 +454,8 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
         }
         // Below the stagger too: the physics flinch, per hit (`crate::active_ragdoll`).
         Reaction::None => {
-            crate::active_ragdoll::hit(e, target, p, mass, point, hit_direction, true);
-            crate::active_ragdoll::push(e, target, p, mass, hit_direction, aggressor);
+            crate::active_ragdoll::hit(e, target, pushed, mass, point, hit_direction, true);
+            crate::active_ragdoll::push(e, target, pushed, mass, hit_direction, aggressor);
         }
     }
 }
@@ -1121,6 +1137,7 @@ fn pending_knock_downs(e: &mut Engine) {
 pub fn frame(e: &mut Engine) {
     pending_knock_downs(e);
     let followed: Vec<Followed> = DOWN.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    bowling(e, &followed);
     launches(e);
     get_ups(e);
     if followed.is_empty() {
@@ -1151,6 +1168,177 @@ pub fn frame(e: &mut Engine) {
         }
     }
     *DOWN.lock().unwrap_or_else(|p| p.into_inner()) = keep;
+}
+
+/// The process lists (`ProcessManager`, `011e0e80`): the array of actors (`+8`), and the first and
+/// past-the-last index of the high process level (`+0x14`, `+0x24`).
+const PROCESS_LISTS: u32 = 0x011e_0e80;
+const PROCESS_LISTS_ACTORS: u32 = 0x08;
+const PROCESS_LISTS_HIGH_FIRST: u32 = 0x14;
+const PROCESS_LISTS_HIGH_PAST: u32 = 0x24;
+/// The most actors a frame's Bowling Ball looks at.
+const BOWLING_MOST_ACTORS: u32 = 256;
+
+/// The pairs (the body, the actor it hit) Bowling Ball already pushed: each once.
+static BOWLED: Mutex<Vec<(u32, u32, Instant)>> = Mutex::new(Vec::new());
+
+/// The actors of the high process level (those near the player).
+fn high_actors(e: &Engine) -> Vec<u32> {
+    let data = e.mem.u32(PROCESS_LISTS + PROCESS_LISTS_ACTORS);
+    let first = e.mem.u32(PROCESS_LISTS + PROCESS_LISTS_HIGH_FIRST);
+    let past = e.mem.u32(PROCESS_LISTS + PROCESS_LISTS_HIGH_PAST);
+    if data == 0 || past < first {
+        return Vec::new();
+    }
+    (first..past.min(first + BOWLING_MOST_ACTORS))
+        .map(|i| e.mem.u32(data.wrapping_add(i.wrapping_mul(4))))
+        .filter(|&a| a != 0)
+        .collect()
+}
+
+/// Bowling Ball (the player's perk, `crate::perks`; `ragdoll_core::perks::bowling_push`): a body the
+/// player knocked down, flying (its pelvis at [`ragdoll_core::perks::BOWLING_LEAST_SPEED`] or more)
+/// in the first [`ragdoll_core::perks::BOWLING_FOR`] seconds, into another living actor (its pelvis
+/// within [`ragdoll_core::perks::BOWLING_REACH`] across of the actor's feet and below its head):
+/// that actor takes a push of the body's momentum's share, once, as a hit of no damage
+/// ([`bump`]).
+fn bowling(e: &mut Engine, followed: &[Followed]) {
+    use ragdoll_core::perks::{BOWLING_FOR, BOWLING_LEAST_SPEED, BOWLING_REACH};
+    let player = e.global::<u32>(PLAYER);
+    BOWLED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|b| b.2.elapsed().as_secs_f32() < BOWLING_FOR * 2.0);
+    let flying: Vec<&Followed> = followed
+        .iter()
+        .filter(|f| f.2 == player && f.4.elapsed().as_secs_f32() < BOWLING_FOR)
+        .collect();
+    if flying.is_empty() || !crate::perks::has(e, crate::perks::Perk::BowlingBall) {
+        return;
+    }
+    let scale_hk = hk_scale(e);
+    let others = high_actors(e);
+    for &&(actor, id, _, _, _) in &flying {
+        if !live(e, actor, id) {
+            continue;
+        }
+        let bones = bodies(e, actor);
+        let Some(pelvis) = pelvis_of(e, &bones) else {
+            continue;
+        };
+        let pelvis_body = bones.iter().find_map(|&(node, body)| {
+            let name = e.mem.u32(node + NODE_NAME);
+            (name != 0 && e.mem.cstr(name).eq_ignore_ascii_case(b"Bip01 Pelvis")).then_some(body)
+        });
+        let Some(v) = pelvis_body.and_then(|b| linear(e, b)) else {
+            continue;
+        };
+        let v = v.map(|x| x * scale_hk / ragdoll_core::knock::UNITS_PER_METRE);
+        let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if !(speed >= BOWLING_LEAST_SPEED) {
+            continue;
+        }
+        let scale = e.call(GET_SCALE, &args![actor]).f64() as f32;
+        let body = body_of(e, actor);
+        let (mass, _) = mass_of(e, actor, body, scale);
+        for &other in &others {
+            if other == actor || other == player {
+                continue;
+            }
+            let Some(at) = position(e, other) else {
+                continue;
+            };
+            let across = ((pelvis[0] - at[0]).powi(2) + (pelvis[1] - at[1]).powi(2)).sqrt();
+            if across > BOWLING_REACH || pelvis[2] < at[2] - 10.0 || pelvis[2] > at[2] + 130.0 {
+                continue;
+            }
+            let done = BOWLED
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .any(|b| b.0 == actor && b.1 == other);
+            if done {
+                continue;
+            }
+            BOWLED
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push((actor, other, Instant::now()));
+            bump(e, other, actor, mass, speed, v, pelvis, player);
+        }
+    }
+}
+
+/// Bowling Ball's push on `target`: a body of `mass` (kg) at `speed` (m/s, along `v`) from `body`
+/// hit it at `point`: the push (`ragdoll_core::perks::bowling_push`) as a hit's, no damage: a
+/// knock-down past the topple speed (the posed fall, else the game's), a stagger (the attack
+/// interrupted, the catch steps) past its share, else the flinch and the steps.
+#[allow(clippy::too_many_arguments)]
+fn bump(
+    e: &mut Engine,
+    target: u32,
+    body: u32,
+    mass: f32,
+    speed: f32,
+    v: [f32; 3],
+    point: [f32; 3],
+    aggressor: u32,
+) {
+    let t = crate::gunplay::tuning();
+    let process = e.mem.u32(target + PROCESS);
+    if process == 0
+        || matches!(e.mem.u32(target + LIFE_STATE), 1 | 2)
+        || !e.vcall(target, 0x100, &args![]).bool()
+        || (e.mem.u8(target + TEAMMATE) != 0 && !t.knockdown_companions)
+        || crate::active_ragdoll::falling(target)
+    {
+        return;
+    }
+    let p = ragdoll_core::perks::bowling_push(mass, speed);
+    if p <= 0.0 {
+        return;
+    }
+    let flat = [v[0], v[1], 0.0];
+    let l = (flat[0] * flat[0] + flat[1] * flat[1]).sqrt();
+    let direction = if l > 1e-3 {
+        [flat[0] / l, flat[1] / l, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let scale = e.call(GET_SCALE, &args![target]).f64() as f32;
+    let kind = body_of(e, target);
+    let (own, _) = mass_of(e, target, kind, scale);
+    let topple = topple_speed(kind, scale, t.knockdown_threshold);
+    let hit_v = p / own * t.hit_force.max(0) as f32 / 100.0;
+    let decision = reaction(hit_v, topple);
+    let who = describe(e, target);
+    note(format!(
+        "{who}: Bowling Ball: {} flew into it at {speed:.1} m/s ({mass:.0} kg): {p:.0} N s -> \
+         {hit_v:.2} m/s on {own:.0} kg vs topple {topple:.2} m/s -> {decision:?}",
+        describe(e, body)
+    ));
+    match decision {
+        Reaction::Knockdown => {
+            crate::active_ragdoll::hit(e, target, p, own, point, direction, false);
+            if can_knock_now(e, target).is_err() {
+                crate::active_ragdoll::interrupt_attack(e, target, "staggered");
+                crate::active_ragdoll::push(e, target, p, own, direction, aggressor);
+                return;
+            }
+            if !crate::active_ragdoll::fall(e, target, aggressor, point, direction, hit_v) {
+                knock_down(e, target, aggressor, point, direction, hit_v)
+            }
+        }
+        Reaction::Stagger => {
+            crate::active_ragdoll::hit(e, target, p, own, point, direction, false);
+            crate::active_ragdoll::interrupt_attack(e, target, "staggered");
+            crate::active_ragdoll::push(e, target, p, own, direction, aggressor);
+        }
+        Reaction::None => {
+            crate::active_ragdoll::hit(e, target, p, own, point, direction, true);
+            crate::active_ragdoll::push(e, target, p, own, direction, aggressor);
+        }
+    }
 }
 
 /// The actors knocked down here and when, and those that got up again and when.

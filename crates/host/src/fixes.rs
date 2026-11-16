@@ -67,6 +67,7 @@ pub static FIXES: &[Fix] = &[
     crate::pickpocket_chance::FIX,
     crate::quick_start::FIX,
     crate::equipment_stats::FIX,
+    crate::perks::FIX,
     crate::cell_offsets::FIX,
     VATS_LAG,
     ACTOR_CAUSE_WITNESSES,

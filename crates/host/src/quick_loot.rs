@@ -294,6 +294,8 @@ pub struct Row {
     pub count: i32,
     pub name: Vec<u8>,
     pub icon: Vec<u8>,
+    /// It beats what the player has equipped in its slot (Scavenger's Instinct, `crate::perks`).
+    pub better: bool,
 }
 
 /// The panel's tiles (0 for one the reader did not make).
@@ -555,14 +557,20 @@ pub fn fit(text: &[u8], limit: usize) -> Vec<u8> {
     cut
 }
 
-/// A row's text: the name, and "(count)" above one (the count is never cut).
+/// A row's text: the name (marked when it beats the equipped, Scavenger's Instinct), and "(count)"
+/// above one (the count is never cut).
 pub fn row_label(row: &Row) -> Vec<u8> {
     let count = if row.count > 1 {
         format!(" ({})", row.count).into_bytes()
     } else {
         Vec::new()
     };
-    let mut label = fit(&row.name, ROW_CHARACTERS.saturating_sub(count.len()));
+    let name = if row.better {
+        crate::perks::marked(&row.name)
+    } else {
+        row.name.clone()
+    };
+    let mut label = fit(&name, ROW_CHARACTERS.saturating_sub(count.len()));
     label.extend_from_slice(&count);
     label
 }
@@ -932,15 +940,19 @@ fn rows(e: &mut Engine, target: u32) -> Vec<Row> {
         let stack = rows.iter().filter(|r| r.form == form).count() as u32;
         let name = e.call(ITEM_FULL_NAME, &args![item]).u32();
         let icon = e.call(ITEM_ICON, &args![item, 0u32]).u32();
+        let better = crate::perks::better(e, item);
         rows.push(Row {
             form,
             stack,
             count: e.mem.u32(item + 4) as i32,
             name: game_string(e, name),
             icon: game_string(e, icon),
+            better,
         });
     }
     free(e, &items);
+    // Scavenger's Instinct: what beats the equipped first (`ragdoll_core::perks::better_first`).
+    ragdoll_core::perks::better_first(&mut rows, |r| r.better);
     rows
 }
 
@@ -1512,7 +1524,32 @@ mod tests {
             count,
             name: name.as_bytes().to_vec(),
             icon: b"Interface\\Icons\\PipboyImages\\Items\\items_stimpak.dds".to_vec(),
+            better: false,
         }
+    }
+
+    /// Scavenger's Instinct: a row that beats the equipped is marked in front of its name and goes
+    /// to the top, the others keeping their order.
+    #[test]
+    fn a_better_row_is_marked_and_first() {
+        let mut better = row("Hunting Rifle", 1);
+        better.better = true;
+        assert_eq!(row_label(&better), b"^ Hunting Rifle".to_vec());
+        assert_eq!(
+            row_label(&row("Hunting Rifle", 2)),
+            b"Hunting Rifle (2)".to_vec()
+        );
+        let mut rows = vec![row("Stimpak", 3), better.clone(), row("Caps", 20)];
+        ragdoll_core::perks::better_first(&mut rows, |r| r.better);
+        let names: Vec<Vec<u8>> = rows.iter().map(row_label).collect();
+        assert_eq!(
+            names,
+            vec![
+                b"^ Hunting Rifle".to_vec(),
+                b"Stimpak (3)".to_vec(),
+                b"Caps (20)".to_vec()
+            ]
+        );
     }
 
     fn keys(take_all: bool) -> Keys {

@@ -7,6 +7,22 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (five new perks: nv-rs Perks.esp)
+
+- **Now:**
+  - Host: `crates/host/src/perks.rs`. The row `bNewPerks` / `NV_NEW_PERKS` (on in fixes). Overrides
+    of `00643400`, `0075d160` and `0075d130`. `ensure_plugin` called after the adapter table loads.
+  - Effects: `esm::write` (the plugin's bytes), `ragdoll_core::perks` (the numbers),
+    `knockdown::after_hit` (Stopping Power), `knockdown::bowling` (Bowling Ball),
+    `ballistics::hot_loads` and `Breakdown::hot_loads`, `quick_loot::Row::better`.
+  - Lab: `scenario::perk_pushes` and `perks=`.
+  - Docs: docs/GUNPLAY.md "nv-rs's own perks", docs/FIXES.md.
+  - Tests pass. Not run in the game: the condition function 495 and the actor value numbers are
+    the known ones, not read in a game here.
+- **Patrick:** five new perks as real perk records at level-up: Stopping Power, Hot Loads, Bowling
+  Ball, Light Touch+, Scavenger's Instinct. Every effect gated on the perk, tests for each.
+  Approved: a real `.esp` written into Data and added to `plugins.txt`.
+
 ### Claude, 2026-11-17 (d0f4192 drew no reactions: the write put back too early)
 
 - **Now:**

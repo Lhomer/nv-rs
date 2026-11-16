@@ -30,6 +30,7 @@ use ragdoll_core::knock::{
     Push, Reaction, HOLD_SECONDS, LYING_HEIGHT, STILL_FRAMES, STILL_SPEED,
 };
 use ragdoll_core::obstacle;
+use ragdoll_core::perks;
 use ragdoll_core::tuning::{self, Tuning};
 use rapier3d::prelude::*;
 
@@ -326,6 +327,8 @@ pub struct Stats {
     /// When the physical body was last handed back to the animation (its weight in the shown pose
     /// down to nothing; the brace's arms may still be on their way home).
     pub handed_back_at: Option<f64>,
+    /// Each hit's push into the active ragdoll (N s; Stopping Power's included).
+    pub pushes: Vec<f32>,
     /// How many offsets `active::Limit` held over the run.
     pub limited: u32,
     pub yaw_rate: f32,
@@ -498,6 +501,9 @@ pub struct Sim {
     pub leave_written: bool,
     /// `active::Limit` off (a test's comparison only).
     pub limit_off: bool,
+    /// The player's perks of nv-rs's own (`ragdoll_core::perks`; the host's `perks`): every hit
+    /// here is the player's.
+    pub perks: Perks,
     /// With [`Sim::read_back`]: once the AI moves the actor, its animation leaves the upper spine
     /// to a later pass that turns it toward the attacker on top of what it holds (an aim, or a new
     /// set after a cripple: the clip's upper body spinning at the waist).
@@ -587,6 +593,7 @@ impl Sim {
             base_ready: false,
             leave_written: false,
             limit_off: false,
+            perks: Perks::default(),
             aim_pass: false,
             own_moved: [0.0; 3],
             offsets_before: None,
@@ -992,7 +999,15 @@ impl Sim {
         let own = p / mass * hit_force;
         self.condition
             .hit(own / topple.max(0.1), condition::region_of(role, side));
-        let decision = condition::escalate(reaction(speed, topple), self.condition.stage());
+        // Stopping Power: the stagger (an attack interrupted) from a lower share of the topple speed,
+        // and the push into the active ragdoll harder; the stack and the knock-down are the hit's.
+        let stopping = self.perks.stopping_power;
+        let decision = condition::escalate(
+            perks::reaction(speed, topple, stopping),
+            self.condition.stage(),
+        );
+        let pushed = perks::stopping_push(p, stopping);
+        self.stats.pushes.push(pushed);
         self.stats.peak_speed = self.stats.peak_speed.max(speed);
         self.stats.topple = topple;
         self.stats.decisions.push(format!("{decision:?}"));
@@ -1012,13 +1027,13 @@ impl Sim {
                     self.note(format!("clamp: launch {speed:.1} m/s held to {max} m/s"));
                 }
                 self.stack = None;
-                self.flinch(p, mass, point, direction, false);
+                self.flinch(pushed, mass, point, direction, false);
                 // Not knocked down now (just knocked down, just got up): no fall pose, a stagger
                 // (the host's `knockdown::can_knock_now`).
                 if let Err(why) = self.can_knock_now() {
                     self.note(format!("no fall pose: {why}: a stagger"));
                     self.interrupt_attack("staggered");
-                    self.push(p, mass, direction);
+                    self.push(pushed, mass, direction);
                     return;
                 }
                 self.interrupt_attack("knocked down");
@@ -1027,15 +1042,64 @@ impl Sim {
                 }
             }
             Reaction::Stagger => {
-                self.flinch(p, mass, point, direction, false);
+                self.flinch(pushed, mass, point, direction, false);
                 self.interrupt_attack("staggered");
-                self.push(p, mass, direction);
+                self.push(pushed, mass, direction);
             }
             Reaction::None => {
-                self.flinch(p, mass, point, direction, true);
-                self.push(p, mass, direction);
+                self.flinch(pushed, mass, point, direction, true);
+                self.push(pushed, mass, direction);
             }
         }
+    }
+
+    /// Bowling Ball (the host's `perks::bowling`): a body the player knocked over, of `mass` (kg),
+    /// flying into this actor at `speed` (m/s) along `direction`: a push of its momentum's share
+    /// (`ragdoll_core::perks::bowling_push`), as a hit's at the pelvis, no damage. Answers the
+    /// reaction (none without the perk).
+    pub fn bump(&mut self, mass: f32, speed: f32, direction: V3) -> Option<Reaction> {
+        if !self.perks.bowling_ball || !self.standing() {
+            return None;
+        }
+        let p = perks::bowling_push(mass, speed);
+        if p <= 0.0 {
+            return None;
+        }
+        let own = self.mass();
+        let v = p / own;
+        let topple = self.topple();
+        let point = self.posed[mq::PELVIS].1;
+        let decision = reaction(v, topple);
+        self.stats.hits += 1;
+        self.stats.first_hit.get_or_insert(self.t);
+        self.stats.last_hit = Some(self.t);
+        self.stats.peak_speed = self.stats.peak_speed.max(v);
+        self.stats.topple = topple;
+        self.stats.decisions.push(format!("{decision:?}"));
+        self.stats.pushes.push(p);
+        self.note(format!(
+            "bowling ball: a body of {mass:.0} kg at {speed:.1} m/s: {p:.0} N s -> {v:.2} m/s on \
+             {own:.0} kg vs topple {topple:.2} m/s -> {decision:?}"
+        ));
+        match decision {
+            Reaction::Knockdown => {
+                self.flinch(p, own, point, direction, false);
+                self.interrupt_attack("knocked down");
+                if !self.fall(point, direction, v) {
+                    self.knock_down(direction, v, "bowling ball");
+                }
+            }
+            Reaction::Stagger => {
+                self.flinch(p, own, point, direction, false);
+                self.interrupt_attack("staggered");
+                self.push(p, own, direction);
+            }
+            Reaction::None => {
+                self.flinch(p, own, point, direction, true);
+                self.push(p, own, direction);
+            }
+        }
+        Some(decision)
     }
 
     /// The struck bone (the host's): the one whose segment the impact is on
@@ -3177,9 +3241,11 @@ impl Sim {
     pub fn fire(&mut self, point: V3, direction: V3, part: &str, pick: &Pick) {
         match self.weapon.clone() {
             Weapon::Gun { gun, load } => {
-                let Some((round, pellets)) = weapons::round(gun, load) else {
+                let Some((mut round, pellets)) = weapons::round(gun, load) else {
                     return;
                 };
+                // Hot Loads: the player's guns 10% faster at the muzzle.
+                round.speed = perks::hot_loads(round.speed, self.perks.hot_loads);
                 let radius = if pellets > 1 {
                     PELLET_SPREAD * self.range
                 } else {
@@ -3277,4 +3343,12 @@ fn describe(push: Push) -> String {
         Push::Blast { damage } => format!("blast ({damage:.0} damage here):"),
         Push::Damage { damage } => format!("hit of no known calibre ({damage:.0} damage):"),
     }
+}
+
+/// nv-rs's own perks the lab's player has (`ragdoll_core::perks`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Perks {
+    pub stopping_power: bool,
+    pub hot_loads: bool,
+    pub bowling_ball: bool,
 }

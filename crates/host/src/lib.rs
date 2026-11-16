@@ -46,6 +46,7 @@ pub mod native_inflate;
 pub mod one_hand;
 pub mod patch_data;
 pub mod perk_every_level;
+pub mod perks;
 pub mod phone_range;
 pub mod phys_blend;
 pub mod pickpocket_chance;
@@ -354,6 +355,11 @@ impl Host {
         // The machine table before the C initializers: `__get_sse2_info` (`00ed1927`, from
         // the initializer `00ed454f`) asks the processor, which the table answers.
         load_adapter_table(&mut engine);
+        // nv-rs's own perks' plugin in Data and the player's plugins.txt (with the row on), before
+        // the game reads its plugin list (`perks`).
+        for line in perks::ensure_plugin(&mut engine, data) {
+            eprintln!("{line}");
+        }
         start_cinit_float(&mut engine, &mut movement);
         let static_init = engine::static_init::run(&mut engine, &STAND_INS);
         // A skipped initializer leaves its global (a setting among them) unbuilt, silently

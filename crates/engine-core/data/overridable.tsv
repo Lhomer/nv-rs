@@ -66,6 +66,7 @@
 0061a380	2	nv-rs dialogue topic index
 0061a5a0	1	nv-rs dialogue topic index
 00623cb0	0	ITR
+00643400	1	nv-rs perks
 00646260	0	JIP
 00646360	0	JIP
 00646d00	1	JIP
@@ -83,6 +84,8 @@
 00718840	2	nv-rs weighty combat
 00719790	2	nv-rs equipment stats
 0071d0a0	1	nv-rs thread races
+0075d130	1	nv-rs perks
+0075d160	1	nv-rs perks
 0075eac0	1	nv-rs pickpocket chance
 007638b0	1	nv-rs compact text
 0077a480	0	JIP

@@ -3264,11 +3264,15 @@ fn note(line: String) {
 mod tests {
     use super::*;
 
+    /// The tests of the write's put-back share [`WRITTEN`]: one at a time.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
     /// After the draw every bone written gets back the game's own local (what it held when read),
     /// so the game's next frame never starts from the reaction's write (Patrick's 14-16-02 clip:
     /// a write left in the bones was read back stale, then taken for the animation).
     #[test]
     fn the_write_is_put_back_after_the_draw() {
+        let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
         let mut e = Engine::new();
         e.mem.map(0x4000, 0x1000);
         let node = 0x4000u32;
@@ -3295,6 +3299,7 @@ mod tests {
     /// was ever seen).
     #[test]
     fn the_write_is_drawn_then_put_back() {
+        let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
         let mut e = Engine::new();
         e.mem.map(0x5000, 0x1000);
         let node = 0x5000u32;

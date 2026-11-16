@@ -372,8 +372,11 @@ fn shot(e: &mut Engine, form: u32, shooter: u32, weapon: u32, projectile: u32) {
     // The gun's own multiplier (`crate::gun_velocity`), and the penetration with the speed: the
     // round's energy goes with the square of its speed.
     let gun = crate::gun_velocity::multiplier(e, weapon).0;
-    let muzzle = given * mods.velocity * fitted * gun;
-    let faster = (mods.velocity * fitted * gun).clamp(0.25, 4.0);
+    // Hot Loads (the player's perk, `crate::perks`): its own factor, so the flight (drop), the push
+    // and the penetration follow; the damage is the game's.
+    let hot = hot_loads(e, shooter);
+    let muzzle = given * mods.velocity * fitted * gun * hot;
+    let faster = (mods.velocity * fitted * gun * hot).clamp(0.25, 4.0);
     e.mem.set_f32(projectile + SPEED_MULT, muzzle);
     let projectiles = u32::from(e.mem.u8(weapon + WEAPON_PROJECTILES))
         + crate::weapon_mods::extra_projectiles(&weapon_mods);
@@ -496,11 +499,19 @@ pub fn weapon_round(e: &mut Engine, weapon: u32, shooter: u32) -> Option<Round> 
         speed: caliber.velocity
             * mods.velocity
             * fitted
-            * crate::gun_velocity::multiplier(e, weapon).0,
+            * crate::gun_velocity::multiplier(e, weapon).0
+            * hot_loads(e, shooter),
         share: transfer_share(load, pellet),
         threshold: mods.threshold,
         pellet,
     })
+}
+
+/// Hot Loads' factor for a shot of `shooter`: [`ragdoll_core::perks::HOT_LOADS`] for the player with
+/// the perk (`crate::perks`), else 1.
+pub fn hot_loads(e: &mut Engine, shooter: u32) -> f32 {
+    let has = crate::perks::player_has(e, shooter, crate::perks::Perk::HotLoads);
+    ragdoll_core::perks::hot_loads(1.0, has)
 }
 
 /// A gun's calibre (by its default ammo) and its damage, `None` for a weapon of no calibre (melee,
@@ -531,6 +542,8 @@ pub struct Breakdown {
     pub gun_source: crate::gun_velocity::Source,
     /// Each mod with a velocity factor: its name and factor.
     pub mods: Vec<(String, f32)>,
+    /// Hot Loads' factor (the player's perk; 1 without it).
+    pub hot_loads: f32,
     /// m/s at the muzzle, the bullet's mass (kg), its projectiles a shot.
     pub velocity: f32,
     pub mass: f32,
@@ -574,7 +587,8 @@ pub fn breakdown(e: &mut Engine, weapon: u32, item: u32, holder: u32) -> Option<
     let projectiles = u32::from(e.mem.u8(weapon + WEAPON_PROJECTILES)).max(1)
         + crate::weapon_mods::extra_projectiles(&attached);
     let pellet = projectiles > 1 && load != Load::Slug;
-    let faster = (mods.velocity * fitted * gun).clamp(0.25, 4.0);
+    let hot = hot_loads(e, holder);
+    let faster = (mods.velocity * fitted * gun * hot).clamp(0.25, 4.0);
     Some(Breakdown {
         caliber,
         ammo_name,
@@ -582,7 +596,8 @@ pub fn breakdown(e: &mut Engine, weapon: u32, item: u32, holder: u32) -> Option<
         gun,
         gun_source,
         mods: named,
-        velocity: caliber.velocity * mods.velocity * fitted * gun,
+        hot_loads: hot,
+        velocity: caliber.velocity * mods.velocity * fitted * gun * hot,
         mass: caliber.mass * mods.mass / 1000.0,
         projectiles,
         pellet,

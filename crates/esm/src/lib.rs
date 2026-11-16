@@ -32,6 +32,7 @@ pub mod record;
 pub mod text;
 pub mod types;
 pub mod weapon;
+pub mod write;
 
 pub use error::{Error, Result};
 pub use load_order::{ActivePlugins, LoadOrder, LoadedPlugin, RecordRef};

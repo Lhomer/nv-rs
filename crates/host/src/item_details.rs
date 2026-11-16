@@ -149,6 +149,14 @@ pub fn round_lines(b: &Breakdown) -> Vec<String> {
     for (name, f) in &b.mods {
         factors.push_str(&format!(" x {f:.2} {name}"));
     }
+    // The player's Hot Loads perk: its own factor (`crate::perks`).
+    if b.hot_loads > 1.0 + 1e-4 {
+        factors.push_str(&format!(
+            " x {:.2} Hot Loads +{:.0}%",
+            b.hot_loads,
+            (b.hot_loads - 1.0) * 100.0
+        ));
+    }
     v.push(factors);
     let p = b.mass * b.velocity;
     let into = p * b.share * crate::knockdown::BULLET_FEEL;
@@ -442,6 +450,7 @@ mod tests {
             gun: 1.1,
             gun_source: crate::gun_velocity::Source::Table("WeapNVSniperRifle".into()),
             mods: vec![("Suppressor".into(), 0.96)],
+            hot_loads: 1.0,
             velocity: 850.0 * 1.1 * 0.96,
             mass: 0.0113,
             projectiles: 1,
@@ -458,6 +467,17 @@ mod tests {
         assert!(text.contains("x 0.96 Suppressor"), "{text}");
         assert!(text.contains("Muzzle velocity: 898 m/s"), "{text}");
         assert!(text.contains("11.3 g"), "{text}");
+        assert!(text.len() < MAX_TEXT);
+        assert!(!text.contains("Hot Loads"), "{text}");
+        // With the player's Hot Loads perk: its own factor in the line, the velocity 10% more.
+        let hot = Breakdown {
+            hot_loads: ragdoll_core::perks::HOT_LOADS,
+            velocity: b.velocity * ragdoll_core::perks::HOT_LOADS,
+            ..b
+        };
+        let text = round_lines(&hot).join("\n");
+        assert!(text.contains("x 1.10 Hot Loads +10%"), "{text}");
+        assert!(text.contains("Muzzle velocity: 987 m/s"), "{text}");
         assert!(text.len() < MAX_TEXT);
     }
 }
