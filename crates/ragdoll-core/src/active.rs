@@ -361,6 +361,10 @@ pub fn yaw_of(q: Q) -> f32 {
 pub struct Limit {
     before: Vec<Q>,
     pelvis: Option<V3>,
+    /// Each bone held a frame before and not caught up with its offset yet: it catches up at
+    /// twice the pull ([`PULL_TURN`]), never at the spin bound (it jumped at 20 rad/s as a bound
+    /// let go in the lab).
+    catching: Vec<bool>,
 }
 
 impl Limit {
@@ -368,6 +372,7 @@ impl Limit {
     pub fn open(&mut self) {
         self.before.clear();
         self.pelvis = None;
+        self.catching.clear();
     }
 
     /// The shown offsets only followed, not held (a fall: the ragdoll's), so the bounds pull in
@@ -403,11 +408,15 @@ impl Limit {
                 .map(|(s, a)| short(qnorm(qmul(*s, qconj(*a)))))
                 .collect();
         }
+        if self.catching.len() != shown.len() {
+            self.catching = vec![false; shown.len()];
+        }
         let mut held = 0;
         for (i, (s, a)) in shown.iter_mut().zip(anim).enumerate() {
             let mut off = short(qnorm(qmul(*s, qconj(*a))));
             if free(i) {
                 self.before[i] = off;
+                self.catching[i] = false;
                 continue;
             }
             let was = off;
@@ -425,12 +434,20 @@ impl Limit {
             // No faster than the spin bound from the frame before; a bound pulling it in, no
             // faster than its pull.
             let bound = length(qlog(qmul(off, qconj(was)))) > 1e-5;
-            let most = if bound { PULL_TURN * dt } else { step_most };
+            let most = if bound {
+                PULL_TURN * dt
+            } else if self.catching[i] {
+                2.0 * PULL_TURN * dt
+            } else {
+                step_most
+            };
             let d = qlog(qmul(off, qconj(self.before[i])));
             let l = length(d);
             if l > most {
                 off = qnorm(qmul(qexp(scale(d, most / l)), self.before[i]));
             }
+            // Held, or not caught up yet: it catches up gently.
+            self.catching[i] = bound || (self.catching[i] && l > most);
             if length(qlog(qmul(off, qconj(was)))) > 1e-5 {
                 held += 1;
                 *s = qnorm(qmul(off, *a));

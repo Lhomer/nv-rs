@@ -486,6 +486,48 @@ for the shot, the hit's round and the breakdown; a knocked-down actor's fall dam
 attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
 patches (#624) and the knockdown's companion refusal were not on the path.
 
+### d0f4192 drew no reactions at all (Patrick, 2026-11-16, the 15-16-34 Play and 15-18-15 tester clips)
+
+The pose logs had the reactions as before, but the videos showed every hit actor in its plain
+idle:
+- the body was active in 678 of 708 and 1,709 of 1,815 samples;
+- the offsets reached 9.3 and 5.7 units, and every flinch was logged.
+
+A .44 knock-down still went into Havok's ragdoll and got up. Only our own pose write was lost.
+
+**The cause.** d0f4192 put the game's locals back after the draw's first-person set-up
+(`00874c10`). But the frame's draw sequence (`00870a00`, `00870bd0`) draws the world after it, in
+`00874b50` and `00875110`, and what that drew was worked out from the locals as they then were:
+the game's own, put back.
+
+- **The write is put back after the whole frame's drawing** (`active_ragdoll::draw_then_put_back`).
+  `crate::fixes::install` joins `DRAW_FRAME` (`008706b0`) when weighty combat is on: the frame
+  drawn (blended by the smooth physics drawing when that is on, through
+  `phys_blend::draw_frame`), then the drawn transforms read, then the game's locals put back,
+  also when the drawing unwinds. That is still before the game's next animation update, so the
+  next read is the game's own pose: the stale reads and the spin stay fixed. `008706b0` is now
+  shared by the two rows (`fixes::rows_share_an_address_only_where_install_joins_them`,
+  `overridable.tsv`).
+- **What was drawn is checked** (`active_ragdoll::after_draw`). After the drawing, the pelvis's,
+  the top spine bone's and the head's world transforms are read against their animated world:
+  - the pose log has `drawn_offset` (game units) and `drawn_turn` (degrees);
+  - "back in its animation" says the most of each over the reaction;
+  - a reaction shown more than 1 unit off its animation but drawn on it for 30 frames logs
+    `the reaction's write did not reach the drawing`.
+- **The bounds never take a standing flinch's size away** (`scenario::runaway`,
+  `the_bounds_keep_a_standing_flinch`, the lab's `Sim::limit_off`). 24 standing hits: 9mm to
+  .45-70, at the chest, clavicle, head, side and pelvis; unarmed, pistol and rifle.
+  - Each turns its bones as far with the bounds as without: 5.9 to 41.1 degrees.
+  - The exception is an armed 9mm at the chest, where without them a bone flipped over to 125
+    degrees; held, it is 30.
+  - A bound letting go caught up at the spin bound (20 rad/s on a hit from the side); it now
+    catches up at twice the pull (`Limit`'s `catching`): 8.4 rad/s.
+- Tests: `active_ragdoll::tests::the_write_is_drawn_then_put_back` (the write is in the bones
+  while the frame draws, put back after, also when the drawing unwinds).
+
+The lab has no renderer and no game files are here, so the drawn offset in the game is not
+measured yet: the next clip's `drawn_offset` and `drawn_turn` show it.
+
 ### A small flinch as the AI starts to walk: a spin and a snap (Patrick, 2026-11-16, b44a964's 14-16-02 Play clip)
 
 A Powder Ganger in Goodsprings, a 10mm. Hit 1 (head, 0.53 m/s, one caught step) settled by 3.03
@@ -515,8 +557,9 @@ was taken for "a later pass moved our write" and the remembered pose was kept.
 
 The motors were not at fault: every error in the body is taken the short way (`qlog`).
 
-- **The write is put back after the draw** (`active_ragdoll::unwrite`, from `gunplay`'s
-  `FIRST_PERSON_SETUP` wrapper after the draw's set-up). Every bone written gets back the game's
+- **The write is put back after the draw** (`active_ragdoll::unwrite`; d0f4192 did it after the
+  draw's set-up, before the world was drawn, and drew no reactions: now after the whole frame's
+  drawing, see "d0f4192 drew no reactions at all"). Every bone written gets back the game's
   own local as it was read. The draw shows the reaction: the world transforms the write updated
   stay until the game updates them. Nothing of it is left for the game's next frame: its
   animation and its later passes work on its own pose. The next read is the animation as it is,

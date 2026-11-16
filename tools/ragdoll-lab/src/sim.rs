@@ -326,6 +326,8 @@ pub struct Stats {
     /// When the physical body was last handed back to the animation (its weight in the shown pose
     /// down to nothing; the brace's arms may still be on their way home).
     pub handed_back_at: Option<f64>,
+    /// How many offsets `active::Limit` held over the run.
+    pub limited: u32,
     pub yaw_rate: f32,
     pub yaw_off: f32,
 }
@@ -494,6 +496,8 @@ pub struct Sim {
     /// With [`Sim::read_back`]: the write left in the bones, as b44a964 left it (its reads went
     /// stale under a walk: the clip's); off, the host puts the game's values back after the draw.
     pub leave_written: bool,
+    /// `active::Limit` off (a test's comparison only).
+    pub limit_off: bool,
     /// With [`Sim::read_back`]: once the AI moves the actor, its animation leaves the upper spine
     /// to a later pass that turns it toward the attacker on top of what it holds (an aim, or a new
     /// set after a cripple: the clip's upper body spinning at the waist).
@@ -582,6 +586,7 @@ impl Sim {
             written: None,
             base_ready: false,
             leave_written: false,
+            limit_off: false,
             aim_pass: false,
             own_moved: [0.0; 3],
             offsets_before: None,
@@ -2233,10 +2238,11 @@ impl Sim {
             }
             // Never more than the push justifies, nor turning faster than a person
             // (`active::Limit`); a fall is the ragdoll's.
-            if self.rig.fall.is_none() {
-                self.rig
-                    .limit
-                    .hold(&mut shown, &wanted, &mut off, self.rig.react_v, dt, free);
+            if self.rig.fall.is_none() && !self.limit_off {
+                self.stats.limited +=
+                    self.rig
+                        .limit
+                        .hold(&mut shown, &wanted, &mut off, self.rig.react_v, dt, free);
             } else {
                 self.rig.limit.follow(&shown, &wanted, off);
             }

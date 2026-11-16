@@ -7,6 +7,22 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (d0f4192 drew no reactions: the write put back too early)
+
+- **Now:**
+  - Host: `active_ragdoll::draw_then_put_back` and `after_draw`; `fixes::install` joins
+    `DRAW_FRAME` (`phys_blend::draw_frame`); `drawn_offset` and `drawn_turn` in the pose log; a
+    log line when the write does not reach the drawing.
+  - Core: `Limit` catches up gently after a bound.
+  - Lab: `Sim::limit_off`, `the_bounds_keep_a_standing_flinch`.
+  - Docs: docs/GUNPLAY.md "d0f4192 drew no reactions at all".
+  - Host, lab, core and repo-hygiene tests pass; the Windows check is clean. Not run in the game
+    (no game here): the next clip's `drawn_offset` says.
+- **Patrick:** d0f4192's 15-16-34 Play and 15-18-15 tester clips: no reaction drawn at all,
+  though the pose logs had them. Asked: keep the write through the drawing and put it back before
+  the next animation update; check the bounds do not crush flinches; a drawn offset in the pose
+  log and a test; before/after numbers.
+
 ### Claude, 2026-11-17 (merge slaterain/nv-rs main up to 04e62ba)
 
 - **Now:** merged #626, #622, #641, #635, #621, #625, #619, #623, #651 and #646. #635 split the

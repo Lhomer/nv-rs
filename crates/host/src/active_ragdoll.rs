@@ -198,6 +198,17 @@ pub struct Rig {
     pub spin_bone: Role,
     /// How many offsets `active::Limit` has held since the body was made (the pose log's).
     pub limited: u32,
+    /// What the frame was drawn with ([`after_draw`]): the pelvis's, the spine's and the head's
+    /// nodes and their animated world (rotation, position) this frame; the most any was drawn off
+    /// it (game units, degrees) this frame and over the reaction.
+    pub drawn_ref: Vec<(u32, M3, V3)>,
+    pub drawn_offset: f32,
+    pub drawn_turn: f32,
+    pub drawn_most: (f32, f32),
+    /// Frames the body was shown off its animation but drawn on it (the write not reaching the
+    /// drawing), and whether that was said.
+    pub drawn_missing: u32,
+    pub drawn_warned: bool,
 }
 
 /// How much deeper than the animation (game units) a shown forearm or hand may be in the torso
@@ -588,6 +599,12 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         spin_now: 0.0,
         spin_bone: Role::Pelvis,
         limited: 0,
+        drawn_ref: Vec::new(),
+        drawn_offset: 0.0,
+        drawn_turn: 0.0,
+        drawn_most: (0.0, 0.0),
+        drawn_missing: 0,
+        drawn_warned: false,
     });
     true
 }
@@ -767,6 +784,64 @@ pub fn unwrite(e: &mut Engine) {
     for rig in rigs.iter_mut() {
         for bone in rig.bones.iter_mut() {
             bone.written = None;
+        }
+    }
+}
+
+/// The frame drawn by `draw` (the game's `DRAW_FRAME`, `crate::fixes::install`), then what it
+/// was drawn with read ([`after_draw`]) and the write put back ([`unwrite`]), also when the
+/// drawing unwinds. The write stays in the bones through the whole frame's drawing: the world is
+/// drawn after the first-person set-up where it is written, and put back there (d0f4192) the
+/// reactions were never seen (Patrick's 15-16-34 and 15-18-15 clips: bodies active, offsets up
+/// to 9 units, the actors drawn in their plain idle).
+pub fn draw_then_put_back(e: &mut Engine, draw: impl FnOnce(&mut Engine)) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draw(e)));
+    after_draw(e);
+    unwrite(e);
+    if let Err(unwinding) = result {
+        std::panic::resume_unwind(unwinding);
+    }
+}
+
+/// What each reacting actor was drawn with: its pelvis's, spine's and head's world transforms
+/// after the frame's drawing, against their animated world (`Rig::drawn_offset`, `drawn_turn`,
+/// the pose log's `drawn_offset` and `drawn_turn`): nothing when the write never reaches the
+/// screen.
+pub fn after_draw(e: &mut Engine) {
+    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    for rig in rigs.iter_mut() {
+        let (mut most, mut turn) = (0.0f32, 0.0f32);
+        for &(node, anim_r, anim_p) in &rig.drawn_ref {
+            if node == 0 {
+                continue;
+            }
+            let p = read3(e, node + WORLD_TRANSLATION);
+            let r = read9(e, node + WORLD_ROTATION);
+            if !(p.iter().all(|x| x.is_finite()) && r.iter().all(|x| x.is_finite())) {
+                continue;
+            }
+            most = most.max(length(sub(p, anim_p)));
+            let d = mul(&r, &transpose(&anim_r));
+            turn = turn.max(length(ragdoll_core::flinch::rotation_vector(&d)).to_degrees());
+        }
+        if rig.drawn_ref.is_empty() {
+            continue;
+        }
+        rig.drawn_offset = most;
+        rig.drawn_turn = turn;
+        rig.drawn_most = (rig.drawn_most.0.max(most), rig.drawn_most.1.max(turn));
+        rig.drawn_ref.clear();
+        // Shown well off its animation, drawn on it: the write is lost before the drawing.
+        if rig.pelvis_now > 1.0 && most < 0.05 && turn < 0.05 {
+            rig.drawn_missing += 1;
+            if rig.drawn_missing >= 30 && !rig.drawn_warned {
+                rig.drawn_warned = true;
+                note(format!(
+                    "{:08X}: the reaction's write did not reach the drawing ({} frames shown {:.1} \
+                     units off its animation, drawn on it)",
+                    rig.id, rig.drawn_missing, rig.pelvis_now
+                ));
+            }
         }
     }
 }
@@ -1584,6 +1659,15 @@ pub fn apply(e: &mut Engine) {
             }
         }
         update(e, root);
+        // The nodes the drawing is checked on (`after_draw`): the pelvis, the spine's top, the
+        // head, with their animated world.
+        rig.drawn_ref = [Role::Pelvis, Role::Spine, Role::Head]
+            .iter()
+            .filter_map(|&role| {
+                let i = (0..n).rev().find(|&i| rig.bones[i].role == role)?;
+                Some((rig.bones[i].node, anim[i].0, anim[i].1))
+            })
+            .collect();
         rig.pelvis_now = length(pelvis_offset);
         // The shown pelvis's turn against its animation and its move beyond the actor's own, for
         // the clips' samples (a spin, a snap back).
@@ -1618,7 +1702,12 @@ pub fn apply(e: &mut Engine) {
             (active::Fade::offsets(&shown, &anim_r), pelvis_offset)
         });
         if resting && rig.since.elapsed().as_secs_f32() > 0.2 {
-            note(format!("{}: back in its animation", describe(e, rig.actor)));
+            note(format!(
+                "{}: back in its animation (drawn off it at most {:.1} units, {:.1} degrees)",
+                describe(e, rig.actor),
+                rig.drawn_most.0,
+                rig.drawn_most.1
+            ));
             continue;
         }
         keep.push(rig);
@@ -1652,7 +1741,7 @@ pub fn sample_fields(actor: u32) -> String {
     let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     match rigs.iter().find(|r| r.actor == actor) {
         Some(r) => format!(
-            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"spin\":{},\"spin_bone\":{},\"settling\":{},\"yielded\":{},\"limited\":{},\"ai_speed\":{},\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{}}}",
+            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"spin\":{},\"spin_bone\":{},\"settling\":{},\"yielded\":{},\"limited\":{},\"ai_speed\":{},\"drawn_offset\":{},\"drawn_turn\":{},\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{}}}",
             r.body.is_some(),
             room_events::num(r.pelvis_now),
             room_events::num(r.jump_now),
@@ -1668,6 +1757,8 @@ pub fn sample_fields(actor: u32) -> String {
             r.yield_at.is_some(),
             r.limited,
             room_events::num(r.ai_speed),
+            room_events::num(r.drawn_offset),
+            room_events::num(r.drawn_turn),
             room_events::num(r.spread_now),
             r.drift,
             room_events::num(r.drift_most),
@@ -3196,5 +3287,47 @@ mod tests {
         assert_eq!(read9(&e, node + LOCAL_ROTATION), game.0);
         assert_eq!(read3(&e, node + LOCAL_TRANSLATION), game.1);
         assert!(WRITTEN.lock().unwrap().is_empty());
+    }
+
+    /// The write is in the bones through the whole frame's drawing (the world is drawn after the
+    /// first-person set-up where it is written), and put back only after it, also when the
+    /// drawing unwinds (Patrick's d0f4192 clips: put back before the world was drawn, no reaction
+    /// was ever seen).
+    #[test]
+    fn the_write_is_drawn_then_put_back() {
+        let mut e = Engine::new();
+        e.mem.map(0x5000, 0x1000);
+        let node = 0x5000u32;
+        let game: (M3, V3) = (
+            ragdoll_core::flinch::rotation([0.0, 0.0, 0.3]),
+            [1.0, 2.0, 3.0],
+        );
+        let ours: (M3, V3) = (
+            ragdoll_core::flinch::rotation([0.4, 0.0, 0.0]),
+            [5.0, 6.0, 7.0],
+        );
+        let write = |e: &mut Engine| {
+            write9(e, node + LOCAL_ROTATION, &ours.0);
+            write3(e, node + LOCAL_TRANSLATION, ours.1);
+            *WRITTEN.lock().unwrap() = vec![(node, game)];
+        };
+        write(&mut e);
+        let mut seen = None;
+        draw_then_put_back(&mut e, |e| {
+            seen = Some(read3(e, node + LOCAL_TRANSLATION));
+        });
+        assert_eq!(seen, Some(ours.1), "drawn with the reaction's write");
+        assert_eq!(
+            read3(&e, node + LOCAL_TRANSLATION),
+            game.1,
+            "put back after"
+        );
+        // An unwinding draw still puts it back.
+        write(&mut e);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            draw_then_put_back(&mut e, |_| panic!("the drawing stops"));
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(read3(&e, node + LOCAL_TRANSLATION), game.1);
     }
 }

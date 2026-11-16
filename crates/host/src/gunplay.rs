@@ -85,6 +85,7 @@ pub const FIX: Fix = Fix {
         KILL_IMPULSE,
         DISMEMBER_ROLL,
         CREATE_MENU_ELEMENTS,
+        crate::phys_blend::DRAW_FRAME,
         crate::test_range::SAVE_GAME,
         crate::test_range::QUICK_SAVE,
         crate::test_range::QUEUED_SAVES,
@@ -766,10 +767,6 @@ pub fn install(e: &mut Engine) {
         main_draw_world_mt_setup_1st_person(e, Ptr::new(a[0]));
         if let Some(placed) = placed {
             unplace_pose(e, &placed);
-        }
-        // The flinches' write put back: the game's next frame starts from its own pose.
-        if on() {
-            crate::active_ragdoll::unwrite(e);
         }
         Ret::default()
     });

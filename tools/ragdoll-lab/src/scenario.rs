@@ -2377,4 +2377,43 @@ mod locomotion {
         assert!(left >= 50, "{left}");
         assert_eq!(put_back, 0);
     }
+
+    /// The bounds never take a standing flinch's size away (d0f4192's clips drew none at all:
+    /// that was the write put back before the world was drawn, not the bounds): 9mm to .45-70 hits
+    /// at the chest, clavicle, head, side and pelvis, unarmed, pistol and rifle, turn their bones
+    /// as far with the bounds as without (a bone flipped over past 90 degrees without them aside),
+    /// and never faster than the spin bound (a bound letting go caught up at it before).
+    #[test]
+    fn the_bounds_keep_a_standing_flinch() {
+        for armed in ["0", "pistol", "rifle"] {
+            for hit in [
+                "9mm@chest",
+                "10mm@lclavicle",
+                "10mm@head",
+                "44@chest",
+                "44@head",
+                "44@spine1/40",
+                "9mm@pelvis",
+                "4570@chest",
+            ] {
+                let spec = Spec::parse(&format!("armed={armed}&hits={hit}")).unwrap();
+                let flinch = |off: bool| {
+                    let mut sim = Sim::new(GroundKind::Flat);
+                    sim.limit_off = off;
+                    let r = run(&mut sim, &spec, Tuning::GAME).unwrap();
+                    (r.flinch, r.bone_spin)
+                };
+                let ((with, spin), (without, _)) = (flinch(false), flinch(true));
+                eprintln!("{armed} {hit}: {with:.1} degrees with the bounds, {without:.1} without");
+                if without < 90.0 {
+                    assert!(
+                        with >= without * 0.95,
+                        "{armed} {hit}: {with:.1} < {without:.1}"
+                    );
+                }
+                assert!(with >= 5.0, "{armed} {hit}: {with:.1} degrees");
+                assert!(spin <= 12.0, "{armed} {hit}: {spin:.1} rad/s");
+            }
+        }
+    }
 }

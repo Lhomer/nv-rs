@@ -111,7 +111,9 @@ Beside each clip a `.json` sidecar of the same name holds:
   `settling` (being handed back: it only comes closer), `yielded` (it yields to its animation:
   the AI moved or turned the actor, or its animation jumped), `limited` (how many offsets were
   held to the push since the body was made), `ai_speed` (how fast the AI moves the actor,
-  units/s), `spread` (the body's farthest bone from the pelvis, m; the body is dropped past
+  units/s), `drawn_offset` and `drawn_turn` (what the frame was drawn with: the most the pelvis,
+  the spine's top or the head was drawn off its animation, game units and degrees; 0 while the
+  body is shown off it means the write never reached the drawing), `spread` (the body's farthest bone from the pelvis, m; the body is dropped past
   2.5), `drift` and `drift_most` (reads a later game pass moved, and the most, in tolerances),
   `jumps` (animation jumps the reaction yielded to) and `fade` (how much of a dropped body's way back is left);
   `null` when it is not reacting.

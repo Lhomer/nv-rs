@@ -154,10 +154,20 @@ fn hk_to_ni_entry(e: &mut Engine, a: &[u32]) -> Ret {
 }
 
 fn draw_frame_entry(e: &mut Engine, a: &[u32]) -> Ret {
-    draw_blended(e, |e| {
-        fn_008706b0(e, Ptr::new(a[0]), a[1], a[2] as u8, a[3] as u8)
-    });
+    draw_frame(e, a, true);
     Ret::default()
+}
+
+/// The frame's drawing (`008706b0`'s translation), the free bodies blended over it when `blend`
+/// (this fix on): also the joined `DRAW_FRAME` of `crate::fixes::install` (the hit reactions'
+/// write put back after it).
+pub(crate) fn draw_frame(e: &mut Engine, a: &[u32], blend: bool) {
+    let draw = |e: &mut Engine| fn_008706b0(e, Ptr::new(a[0]), a[1], a[2] as u8, a[3] as u8);
+    if blend {
+        draw_blended(e, draw);
+    } else {
+        draw(e);
+    }
 }
 
 /// Plans the blend (reads only), then writes it and draws under one guard: whatever was written

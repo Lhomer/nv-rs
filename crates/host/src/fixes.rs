@@ -1232,6 +1232,18 @@ pub fn install(e: &mut Engine, choice: &Choice) {
             crate::patch_data::strip_load_with_cell_offsets,
         );
     }
+    // The hit reactions' write stays in the bones through the whole frame's drawing (the world is
+    // drawn after the first-person set-up, where it is written: put back there, the reactions
+    // were never seen: Patrick's d0f4192 clips) and is put back after it (`DRAW_FRAME`, 008706b0),
+    // before the game's next animation update; with the smooth physics drawing on, one function
+    // does both.
+    if choice.is_on(&crate::gunplay::FIX) {
+        PHYS_BLEND_ON.store(
+            choice.is_on(&crate::phys_blend::FIX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        e.register(crate::phys_blend::DRAW_FRAME, draw_frame_with_reactions);
+    }
     // Three rows add to the Settings menu's options (`StartMenu::CreateMenuElements`, 007cc6e0):
     // with more than one on, one function makes the game's options and the rows of each that is
     // on, in this order: the Field of View row, the graphics rows, the weighty combat rows.
@@ -1248,6 +1260,18 @@ pub fn install(e: &mut Engine, choice: &Choice) {
         SETTINGS_ROWS.store(mask, std::sync::atomic::Ordering::Relaxed);
         e.register(crate::fov_slider::CREATE_MENU_ELEMENTS, settings_rows);
     }
+}
+
+/// Whether the smooth physics drawing is on under [`draw_frame_with_reactions`].
+static PHYS_BLEND_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The frame's drawing (`DRAW_FRAME`, 008706b0; blended when the smooth physics drawing is on),
+/// then the hit reactions' drawn offsets read and their write put back
+/// (`crate::active_ragdoll::after_draw`), also when the drawing unwinds.
+fn draw_frame_with_reactions(e: &mut Engine, a: &[u32]) -> Ret {
+    let blend = PHYS_BLEND_ON.load(std::sync::atomic::Ordering::Relaxed);
+    crate::active_ragdoll::draw_then_put_back(e, |e| crate::phys_blend::draw_frame(e, a, blend));
+    Ret::default()
 }
 
 /// Which of the Settings menu's added rows [`settings_rows`] makes: bit 0 the Field of View row,
@@ -1308,8 +1332,9 @@ mod tests {
     }
 
     /// Two rows replacing the same exe address would each drop the other's change when both are
-    /// on: the addresses two rows share are `TESWorldSpace::Load` and the Settings menu's
-    /// `CreateMenuElements`, which `install` gives one function doing all that are on
+    /// on: the addresses two rows share are `TESWorldSpace::Load`, the frame's drawing
+    /// (`DRAW_FRAME`: the smooth physics drawing and the hit reactions' put-back) and the Settings
+    /// menu's `CreateMenuElements`, which `install` gives one function doing all that are on
     /// (`patch_data::strip_load_with_cell_offsets`; the Field of View, graphics and weighty
     /// combat rows). A new
     /// shared address needs the same.
@@ -1335,6 +1360,11 @@ mod tests {
                 (
                     crate::fov_slider::CREATE_MENU_ELEMENTS,
                     crate::graphics_settings::FIX.name,
+                    crate::gunplay::FIX.name
+                ),
+                (
+                    crate::phys_blend::DRAW_FRAME,
+                    crate::phys_blend::FIX.name,
                     crate::gunplay::FIX.name
                 ),
                 (
