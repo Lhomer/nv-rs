@@ -260,6 +260,10 @@ pub struct Rig {
     pub follow: Option<(V3, f32, f32)>,
     /// The drawn get-up's blend from the ragdoll's last pose ([`begin_get_up_blend`]).
     pub getup: Option<GetUpBlend>,
+    /// The most a node came out of the update off the pose written for it this reaction (degrees,
+    /// [`hold_write_to_shown`]: the pose log's `write_held`), and whether it was said.
+    pub write_held: f32,
+    pub write_warned: bool,
     pub turn_warned: bool,
     /// How much each shown foot is lifted (`active::lift_amount`, game units).
     pub lift_low: [f32; 2],
@@ -716,6 +720,8 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         flinch_deg: 0.0,
         follow: None,
         getup: None,
+        write_held: 0.0,
+        write_warned: false,
         turn_warned: false,
         lift_low: [0.0; 2],
     });
@@ -843,6 +849,8 @@ pub fn hit(
     rig.hit_at = Instant::now();
     rig.turn_warned = false;
     rig.length_warned = false;
+    rig.write_warned = false;
+    rig.write_held = 0.0;
     // The flinch drawn on the torso (`active::TorsoFlinch`): a bend along the push, a twist for an
     // off-centre hit, a nod for the head (Patrick's 08-21-49 clip: the body's own turn drew a
     // .44 at 4 degrees).
@@ -1393,10 +1401,19 @@ fn write_get_up_blend(
         let r = active::qslerp(active::Q_ID, *off, left);
         *s = active::m_from_q(active::qnorm(active::qmul(r, active::qfrom_m(s))));
     }
-    let pelvis_offset = scale(gb.pelvis, left);
+    let mut pelvis_offset = scale(gb.pelvis, left);
     let going = gb.t < gb.len;
     let offsets = offsets_of(&rig.bones, anim, &shown);
-    let shown_at = shown_positions(rig, anim, &shown, pi, pelvis_offset);
+    let mut shown_at = shown_positions(rig, anim, &shown, pi, pelvis_offset);
+    // Nothing drawn under the floor it was set on (its reference, on the collision floor): turned
+    // up about its hips from lying, the legs swung through the ground; the whole body is lifted
+    // by what the lowest joint lacks (it varies smoothly, so the lift does).
+    let floor = read3(e, rig.actor + REFR_POSITION)[2];
+    let lowest = shown_at.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min);
+    if lowest.is_finite() && lowest < floor {
+        pelvis_offset[2] += floor - lowest;
+        shown_at = shown_positions(rig, anim, &shown, pi, pelvis_offset);
+    }
     for b in 0..n {
         let bone = &rig.bones[b];
         let base = bone.pose.unwrap_or_default();
@@ -1631,6 +1648,13 @@ pub fn apply(e: &mut Engine) {
         // The game's own move of the actor this frame (its AI walking it), carried by the
         // reaction ([`carry`]).
         let moved_by_game = carry(e, &mut rig, dt);
+        // A move of ours the root has not shown yet (`Rig::placed`) is measured against the root
+        // as the game moved it too: the AI walking the actor is the game's own move, never the
+        // reaction's lag (a7a2d15: a Ganger walked by its AI after its step drew its pelvis 30
+        // units back, 1.2 a frame, then popped).
+        if let Some(p) = rig.placed.as_mut() {
+            p.0 = add(p.0, moved_by_game);
+        }
         // World (game units) to the body's metres from its origin.
         let origin = rig.origin;
         let to_body = move |p: V3| scale(sub(p, origin), 1.0 / UNITS_PER_METRE);
@@ -2199,6 +2223,14 @@ pub fn apply(e: &mut Engine) {
             lag,
             active::hold_pelvis_up(sub(pelvis_offset, lag), rig.balance.is_some()),
         );
+        // While its AI walks or turns it, or it yields to its animation, the pelvis is drawn no
+        // more than `AI_PELVIS_MOST` off it (a7a2d15: 30 units, both feet under the floor).
+        if rig.yield_at.is_some() || active::ai_walking(rig.ai_speed, rig.ai_turn) {
+            let l = length(pelvis_offset);
+            if l > AI_PELVIS_MOST && l.is_finite() {
+                pelvis_offset = scale(pelvis_offset, AI_PELVIS_MOST / l);
+            }
+        }
         // No shown foot under its animated one, nor under its collision floor plus its ankle
         // (`active::lift_feet`): the legs turned up from the hips. Not while the steps place
         // the legs (their targets are held up already: `feet_on_floor`).
@@ -2338,17 +2370,37 @@ pub fn apply(e: &mut Engine) {
             offsets = offsets_of(&rig.bones, &anim, &shown);
             rig.fade = Some(fade);
         }
-        let resting = rig.body.is_none()
+        let mut resting = rig.body.is_none()
             && !busy
             && rig.fade.is_none()
             && rig.shift_back.is_none()
             && rig.placed.is_none();
+        // Back to its animation with something still drawn off it (a lag, a shift ended at once):
+        // eased out from the pose last drawn, never popped (a7a2d15: "back in its animation (drawn
+        // off at most 30.2)" in one frame).
+        if resting {
+            if let Some((off, p)) = rig.last.take() {
+                let turned = off
+                    .iter()
+                    .map(|q| length(active::qlog(*q)) * 2.0)
+                    .fold(0.0, f32::max);
+                if turned > 0.5f32.to_radians() || length(p) > 0.5 {
+                    let fade = active::Fade::new(off, p);
+                    shown = anim.iter().map(|a| a.0).collect();
+                    pelvis_offset = [0.0; 3];
+                    fade.on(&mut shown, &mut pelvis_offset);
+                    offsets = offsets_of(&rig.bones, &anim, &shown);
+                    rig.fade = Some(fade);
+                    resting = false;
+                }
+            }
+        }
         // What each bone is written with: the local its shown pose needs (absolute, the same
         // however often it is written; `ragdoll_core::pose::local_for`).
         // A bone the node tree hangs elsewhere than its physics parent (FNV's spine, under
         // `Bip01 NonAccum` beside the pelvis) is written at its shown joint: it follows the
         // pelvis's move and turn as the body has it.
-        let shown_at = shown_positions(&rig, &anim, &shown, pi, pelvis_offset);
+        let mut shown_at = shown_positions(&rig, &anim, &shown, pi, pelvis_offset);
         // Nothing drawn far off its animation (`active::too_far`: the steps' move the root does
         // not show yet aside, a fall's and a bracing arm's own): the body is dropped and nothing
         // is written this frame (a Young Bighorner drawn 1047 units off: Patrick's 21-16-09 clip).
@@ -2364,8 +2416,8 @@ pub fn apply(e: &mut Engine) {
             };
             if let Some((b, d)) = active::too_far(&shown_at, &animated, |b| !bracing(b)) {
                 note(format!(
-                    "{}: {} drawn {d:.0} units off its animation: the body is dropped, nothing \
-                     written this frame",
+                    "{}: {} drawn {d:.0} units off its animation: the body is dropped, eased back \
+                     from the pose last drawn",
                     describe(e, rig.actor),
                     BONES
                         .iter()
@@ -2375,14 +2427,24 @@ pub fn apply(e: &mut Engine) {
                 rig.body = None;
                 rig.flinches.clear();
                 rig.fade = None;
-                rig.last = None;
                 rig.balance = None;
                 rig.brace = None;
                 rig.shift = [0.0; 3];
                 rig.shift_back = None;
                 rig.placed = None;
-                keep.push(rig);
-                continue;
+                // Never in one frame (a7a2d15's Fiend: a hand 35 units off snapped the whole body
+                // back): the pose last drawn, eased out over the animation (`active::Fade`).
+                let Some((off, p)) = rig.last.take() else {
+                    keep.push(rig);
+                    continue;
+                };
+                let fade = active::Fade::new(off, p);
+                shown = anim.iter().map(|a| a.0).collect();
+                pelvis_offset = [0.0; 3];
+                fade.on(&mut shown, &mut pelvis_offset);
+                offsets = offsets_of(&rig.bones, &anim, &shown);
+                shown_at = shown_positions(&rig, &anim, &shown, pi, pelvis_offset);
+                rig.fade = Some(fade);
             }
         }
         let locals: Vec<(M3, V3)> = (0..n)
@@ -2416,6 +2478,17 @@ pub fn apply(e: &mut Engine) {
             }
         }
         update(e, root);
+        if !resting {
+            let wanted_at: Vec<Option<V3>> = (0..n)
+                .map(|b| {
+                    let bone = &rig.bones[b];
+                    (bone.role == Role::Pelvis
+                        || moves_root(bone.role, bone.parent.is_none(), bone.phys.is_some()))
+                    .then_some(shown_at[b])
+                })
+                .collect();
+            hold_write_to_shown(e, &mut rig, root, &shown, &wanted_at);
+        }
         drawn_heights(e, &mut rig, root, pi);
         let shown_world: Vec<(u32, M3, V3)> = rig
             .bones
@@ -2585,6 +2658,89 @@ fn floor_bound(rig: &Rig, i: usize, animated: f32) -> Option<f32> {
         .map(|g| g.1 + rig.ankle[i])
 }
 
+/// The write held to the pose it was worked out for (Patrick's a7a2d15 clips: the flinch was
+/// computed at 6 to 15 degrees but the spine, neck and head nodes came out of the update at 15% of
+/// it, the pelvis's share; the mock's tree, worked out the same way, drew all of it): each node's
+/// world rotation after the update against `shown` (and the pelvis's, a spine root's joint against
+/// `wanted_at`); a bone off by more than [`WRITE_TOLERANCE`] has its local solved from its actual
+/// parent node's world as the update left it (whatever the tree between them), parents first, and
+/// the update is run again. Said once a reaction: which bone, how far off, how much is left.
+fn hold_write_to_shown(
+    e: &mut Engine,
+    rig: &mut Rig,
+    root: u32,
+    shown: &[M3],
+    wanted_at: &[Option<V3>],
+) {
+    let n = rig.bones.len().min(shown.len());
+    let off_by = |e: &Engine, rig: &Rig| -> (f32, usize) {
+        (0..n)
+            .map(|b| {
+                let d = mul(
+                    &read9(e, rig.bones[b].node + WORLD_ROTATION),
+                    &transpose(&shown[b]),
+                );
+                (
+                    length(ragdoll_core::flinch::rotation_vector(&d)).to_degrees(),
+                    b,
+                )
+            })
+            .fold((0.0, 0), |a, x| if x.0 > a.0 { x } else { a })
+    };
+    let (before, worst) = off_by(e, rig);
+    if before <= WRITE_TOLERANCE || !before.is_finite() {
+        return;
+    }
+    let mut corrected = 0;
+    for _ in 0..2 {
+        for (b, want) in shown.iter().enumerate().take(n) {
+            let node = rig.bones[b].node;
+            let d = mul(&read9(e, node + WORLD_ROTATION), &transpose(want));
+            let off = length(ragdoll_core::flinch::rotation_vector(&d)).to_degrees();
+            if off <= WRITE_TOLERANCE || !off.is_finite() {
+                continue;
+            }
+            let parent = read_world(e, e.mem.u32(node + PARENT));
+            let rot = pose::ortho(&mul(&transpose(&parent.r), want));
+            let mut t = read3(e, node + LOCAL_TRANSLATION);
+            if let Some(at) = wanted_at.get(b).copied().flatten() {
+                t = scale(
+                    apply_m(&transpose(&parent.r), sub(at, parent.t)),
+                    1.0 / parent.s.max(1e-3),
+                );
+            }
+            if !(rot.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite())) {
+                continue;
+            }
+            write9(e, node + LOCAL_ROTATION, &rot);
+            write3(e, node + LOCAL_TRANSLATION, t);
+            rig.bones[b].written = Some((rot, t));
+            corrected += 1;
+        }
+        update(e, root);
+        if off_by(e, rig).0 <= WRITE_TOLERANCE {
+            break;
+        }
+    }
+    let (after, _) = off_by(e, rig);
+    rig.write_held = rig.write_held.max(before);
+    if !rig.write_warned {
+        rig.write_warned = true;
+        note(format!(
+            "{}: the write came out of the update {before:.1} degrees off at {} ({corrected} \
+             locals solved from their parent nodes; {after:.1} left)",
+            describe(e, rig.actor),
+            BONES
+                .iter()
+                .find(|(_, r)| *r == rig.bones[worst].role)
+                .map_or("a bone", |x| x.0)
+        ));
+    }
+}
+
+/// How far (degrees) a node's world may come out of the update off the pose written for it.
+const WRITE_TOLERANCE: f32 = 0.5;
+
 /// How far a foot moves on (game units, across) before the floor under it is cast for again.
 const GROUND_RECAST: f32 = 6.0;
 
@@ -2637,7 +2793,7 @@ pub fn sample_fields(actor: u32) -> String {
     let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     match rigs.iter().find(|r| r.actor == actor) {
         Some(r) => format!(
-            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"spin\":{},\"spin_bone\":{},\"settling\":{},\"yielded\":{},\"limited\":{},\"ai_speed\":{},\"drawn_offset\":{},\"drawn_turn\":{},\"drawn_skin\":[{},{},{}],\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{},\"heights\":[{},{},{}],\"feet_over_floor\":[{},{}],\"drawn_delta\":{},\"drawn_length\":{},\"drawn_length_bone\":{},\"rebased\":{},\"flinch_env\":{},\"flinch_deg\":{},\"computed_turn\":{}}}",
+            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"spin\":{},\"spin_bone\":{},\"settling\":{},\"yielded\":{},\"limited\":{},\"ai_speed\":{},\"drawn_offset\":{},\"drawn_turn\":{},\"drawn_skin\":[{},{},{}],\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{},\"heights\":[{},{},{}],\"feet_over_floor\":[{},{}],\"drawn_delta\":{},\"drawn_length\":{},\"drawn_length_bone\":{},\"rebased\":{},\"flinch_env\":{},\"flinch_deg\":{},\"computed_turn\":{},\"write_held\":{}}}",
             r.body.is_some(),
             room_events::num(r.pelvis_now),
             room_events::num(r.jump_now),
@@ -2679,6 +2835,7 @@ pub fn sample_fields(actor: u32) -> String {
             room_events::num(r.flinch_env),
             room_events::num(r.flinch_deg),
             room_events::num(r.shown_turn),
+            room_events::num(r.write_held),
         ),
         None => "\"body\":null".to_string(),
     }
@@ -3068,6 +3225,9 @@ fn actor_scale(e: &mut Engine, actor: u32) -> f32 {
         1.0
     }
 }
+
+/// The most the pelvis is drawn off its animation while the actor's AI moves it (game units).
+const AI_PELVIS_MOST: f32 = 8.0;
 
 /// How long the actor's follow of its feet takes (s, [`follow_feet`]).
 const FEET_FOLLOW: f32 = 0.3;
@@ -3619,6 +3779,10 @@ fn ground_point(e: &mut Engine, actor: u32, at: V3) -> Option<V3> {
 /// a little above it, never the navmesh (which lies several units under the collision floor:
 /// feet planted on it went into the floor, Patrick's 19-43-08 clip).
 pub(crate) fn floor_under(e: &mut Engine, at: V3) -> Option<f32> {
+    #[cfg(test)]
+    if let Some(f) = crate::rig_fixture::FLOOR.with(std::cell::Cell::get) {
+        return (f <= at[2] + FLOOR_FROM - 5.0).then_some(f);
+    }
     let from = [at[0], at[1], at[2] + FLOOR_FROM];
     cast_world(e, from, [0.0, 0.0, -1.0], FLOOR_RANGE)
         .filter(|hit| hit[2] <= at[2] + FLOOR_FROM - 5.0)
@@ -3938,6 +4102,16 @@ fn carry(e: &Engine, rig: &mut Rig, dt: f32) -> V3 {
         rig.ai_speed += (length([moved[0], moved[1], 0.0]) / dt - rig.ai_speed) * k;
         rig.ai_turn += (turned / dt - rig.ai_turn) * k;
     }
+    // The feet where the steps put them go with the actor whatever else does (a7a2d15: walked
+    // off by its AI after its step, the body handed back, the planted feet were left behind until
+    // a foot was 31 units off and the body dropped).
+    if rig.fall.is_none() && length(moved) > 1e-4 {
+        if let Some((feet, _)) = rig.planted.as_mut() {
+            for f in feet.iter_mut() {
+                *f = add(*f, moved);
+            }
+        }
+    }
     if rig.body.is_none() || rig.fall.is_some() {
         return moved;
     }
@@ -3949,13 +4123,8 @@ fn carry(e: &Engine, rig: &mut Rig, dt: f32) -> V3 {
     if length(moved) <= 1e-4 {
         return moved;
     }
-    // The body rides on the animation's own motion (`Body::carry`, in the frame's step); the
-    // feet where they stand and step, and a brace's count, go with the actor here.
-    if let Some((feet, _)) = rig.planted.as_mut() {
-        for f in feet.iter_mut() {
-            *f = add(*f, moved);
-        }
-    }
+    // The body rides on the animation's own motion (`Body::carry`, in the frame's step); a
+    // brace's count and the steps go with the actor here (the planted feet above).
     if let Some(b) = rig.brace.as_mut() {
         b.walked += length(moved);
     }
@@ -4365,11 +4534,11 @@ fn note(line: String) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The tests of the write's put-back share [`WRITTEN`]: one at a time.
-    pub(super) static SERIAL: Mutex<()> = Mutex::new(());
+    pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
 
     /// The update brought to a written skeleton runs no controller and keyframes no collision
     /// body: time 0, controllers off, the collision mode word at 3 through it, put back after.
@@ -4615,3 +4784,7 @@ mod tests {
 #[cfg(test)]
 #[path = "active_ragdoll_mock_tests.rs"]
 mod mock_tests;
+
+#[cfg(test)]
+#[path = "active_ragdoll_fixture_tests.rs"]
+pub(crate) mod fixture_tests;

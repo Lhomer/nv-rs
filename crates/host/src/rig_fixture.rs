@@ -1,0 +1,476 @@
+//! Tests only: an actor's 3D built in the engine's memory from a node tree (each node's name,
+//! parent, local rotation, translation and scale, and whether a ragdoll body hangs from it), with
+//! the game's calls the reactions (`crate::active_ragdoll`) and the knockdowns
+//! (`crate::knockdown`) make answered by doubles over it: the node walk, the update, the actor's
+//! form and process, the ragdoll's bodies and their velocities, the character controller, the
+//! navmesh. The trees come from a skeleton's dump (FNV's `skeleton.nif`, from the game's files on
+//! a machine that has them: game data, never in git) or, for the tests that need none, the lab's
+//! mannequin laid out as FNV's tree is.
+
+use engine_core::prelude::*;
+use ragdoll_core::flinch::{add, apply_m, length, mul, scale, sub, transpose, IDENTITY, M3, V3};
+
+/// A node of the tree: its name, parent (an index, earlier in the list), local transform, and
+/// whether a ragdoll body hangs from it.
+#[derive(Clone, Debug)]
+pub struct Node {
+    pub name: String,
+    pub parent: Option<usize>,
+    pub r: M3,
+    pub t: V3,
+    pub s: f32,
+    pub body: bool,
+}
+
+/// The node's layout (`NiAVObject`): name, parent, local rotation, translation, scale, world
+/// rotation, translation and scale.
+pub const NODE_NAME: u32 = 0x08;
+pub const PARENT: u32 = 0x18;
+pub const LOCAL_ROTATION: u32 = 0x34;
+pub const LOCAL_TRANSLATION: u32 = 0x58;
+pub const LOCAL_SCALE: u32 = 0x64;
+pub const WORLD_ROTATION: u32 = 0x68;
+pub const WORLD_TRANSLATION: u32 = 0x8c;
+pub const WORLD_SCALE: u32 = 0x98;
+
+/// The game's calls answered here.
+const ACTOR_3D: u32 = 0x0043_fcd0;
+const CHILD_COUNT: u32 = 0x0043_b480;
+const CHILD_AT: u32 = 0x0043_b4a0;
+const UPDATE_DATA: u32 = 0x0043_d410;
+const NODE_UPDATE: u32 = 0x00a5_9c60;
+const LOOKUP_FORM: u32 = 0x0048_39c0;
+const GET_SCALE: u32 = 0x0056_7400;
+const IS_WEAPON_DRAWN: u32 = 0x008a_16d0;
+const NODE_COLLISION_OBJECT: u32 = 0x0043_b610;
+const COLLISION_RIGID_BODY: u32 = 0x006f_a820;
+const HAVOK_BODY: u32 = 0x0062_0b80;
+const LINEAR_VELOCITY: u32 = 0x0056_0dc0;
+const ANGULAR_VELOCITY: u32 = 0x0056_0e50;
+const SET_LINEAR_VELOCITY: u32 = 0x0056_16d0;
+const SET_ANGULAR_VELOCITY: u32 = 0x0056_1800;
+const SET_LOCATION: u32 = 0x0057_5830;
+const CHAR_CONTROLLER: u32 = 0x0093_06d0;
+const CONTROLLER_SET_POSITION: u32 = 0x0056_20e0;
+const CONTROLLER_SET_VELOCITY: u32 = 0x0092_6980;
+const CONTROLLER_VELOCITY: u32 = 0x0080_7080;
+const PATHING_LOCATION_AT: u32 = 0x006d_ce10;
+const PATHING_POSITION: u32 = 0x04;
+const RESOLVE_TO_NAVMESH: u32 = 0x006d_dc00;
+const IS_VALID_LOCATION: u32 = 0x006d_ed70;
+/// Game units per Havok unit.
+const HK_TO_GAME: u32 = 0x011b_1864;
+pub const HK: f32 = 7.0;
+
+/// The actor's record and its process (`crate::active_ragdoll`'s offsets).
+pub const FORM_ID: u32 = 0x0c;
+pub const REFR_POSITION: u32 = 0x30;
+pub const PROCESS: u32 = 0x68;
+pub const KNOCK_STATE: u32 = 0x13c;
+/// A body's motion type (`crate::knockdown`'s `MOTION_TYPE`).
+const MOTION_TYPE: u32 = 0xe8;
+
+/// The layout of the fixture's memory.
+const BASE: u32 = 0x0200_0000;
+const SIZE: u32 = 0x0010_0000;
+const NODE_SIZE: u32 = 0x100;
+const NAMES: u32 = BASE + 0x8_0000;
+const BODIES: u32 = BASE + 0xa_0000;
+const BODY_SIZE: u32 = 0x100;
+pub const ACTOR: u32 = BASE + 0xc_0000;
+const PROCESS_AT: u32 = BASE + 0xc_1000;
+const CONTROLLER: u32 = BASE + 0xc_2000;
+const NODE_VTABLE: u32 = BASE + 0xc_3000;
+const PROCESS_VTABLE: u32 = BASE + 0xc_4000;
+const PATHING: u32 = BASE + 0xc_5000;
+pub const ACTOR_ID: u32 = 0x0012_3456;
+const IS_SELF: u32 = 0x7200_0000;
+const NOTHING: u32 = 0x7200_0010;
+/// `IsNode` and `IsGeometry` (vtable `+0x0c`, `+0x18`).
+const IS_NODE_SLOT: u32 = 0x0c;
+const IS_GEOMETRY_SLOT: u32 = 0x18;
+
+/// The world under the actor as the doubles answer it: the collision floor's height, the
+/// navmesh's (game units).
+#[derive(Clone, Copy, Debug)]
+pub struct Ground {
+    pub collision: Option<f32>,
+    pub navmesh: f32,
+}
+
+/// The engine with the tree laid out: each node's address (the list's order) and the 3D's root
+/// (the first node).
+pub struct Fixture {
+    pub e: Engine,
+    pub nodes: Vec<Node>,
+    pub at: Vec<u32>,
+}
+
+thread_local! {
+    /// The collision floor the tests' casts meet (`crate::active_ragdoll::floor_under`).
+    pub static FLOOR: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
+impl Fixture {
+    /// The tree laid out, its worlds worked out, the actor standing at its reference (0, 0, 0)
+    /// on a navmesh at `ground`.
+    pub fn new(nodes: Vec<Node>, ground: Ground) -> Fixture {
+        let mut e = Engine::new();
+        e.mem.map(BASE, SIZE);
+        let page = HK_TO_GAME & !0xfff;
+        e.mem.map(page, 0x1000);
+        e.mem.set_f32(HK_TO_GAME, HK);
+        // The process manager's lists (`jip::commands::jip_fn_effect::high_actors`): empty.
+        e.mem.map(0x011e_0000, 0x2000);
+        FLOOR.with(|f| f.set(ground.collision));
+        let at: Vec<u32> = (0..nodes.len() as u32)
+            .map(|i| BASE + i * NODE_SIZE)
+            .collect();
+        let mut name_at = NAMES;
+        for (i, n) in nodes.iter().enumerate() {
+            let node = at[i];
+            e.mem.set_u32(node, NODE_VTABLE);
+            e.mem.set_u32(node + PARENT, n.parent.map_or(0, |p| at[p]));
+            e.mem.set_cstr(name_at, n.name.as_bytes());
+            e.mem.set_u32(node + NODE_NAME, name_at);
+            name_at += (n.name.len() as u32 + 16) & !15;
+            write9(&mut e, node + LOCAL_ROTATION, &n.r);
+            write3(&mut e, node + LOCAL_TRANSLATION, n.t);
+            e.mem.set_f32(node + LOCAL_SCALE, n.s);
+        }
+        // The node walk: a node is its own children array; its children are the nodes whose
+        // parent it is.
+        let kids: Vec<Vec<u32>> = (0..nodes.len())
+            .map(|i| {
+                (0..nodes.len())
+                    .filter(|&c| nodes[c].parent == Some(i))
+                    .map(|c| at[c])
+                    .collect()
+            })
+            .collect();
+        let index = at.clone();
+        let kids2 = kids.clone();
+        let find = move |node: u32| index.iter().position(|&a| a == node);
+        let find2 = find.clone();
+        e.register_double(IS_SELF, |_, a| a[0].into_ret());
+        e.register_double(NOTHING, |_, _| 0u32.into_ret());
+        e.mem.set_u32(NODE_VTABLE + IS_NODE_SLOT, IS_SELF);
+        e.mem.set_u32(NODE_VTABLE + IS_GEOMETRY_SLOT, NOTHING);
+        e.register_double(CHILD_COUNT, move |_, a| {
+            find(a[0]).map_or(0, |i| kids[i].len() as u32).into_ret()
+        });
+        e.register_double(CHILD_AT, move |_, a| {
+            find2(a[0])
+                .and_then(|i| kids2[i].get(a[1] as usize).copied())
+                .unwrap_or(0)
+                .into_ret()
+        });
+        let order = at.clone();
+        e.register_double(UPDATE_DATA, |_, a| a[0].into_ret());
+        e.register_double(NODE_UPDATE, move |e, _| {
+            update_worlds(e, &order);
+            0u32.into_ret()
+        });
+        let root = at[0];
+        e.register_double(ACTOR_3D, move |_, a| {
+            if a[0] == ACTOR { root } else { 0 }.into_ret()
+        });
+        e.register_double(LOOKUP_FORM, |_, a| {
+            if a[0] == ACTOR_ID { ACTOR } else { 0 }.into_ret()
+        });
+        e.register_double(GET_SCALE, |_, _| 1.0f32.into_ret());
+        e.register_double(IS_WEAPON_DRAWN, |_, _| 0u32.into_ret());
+        // The ragdoll's bodies: a node with one answers a collision object (its body block), the
+        // collision object its rigid body, the rigid body its `hkpRigidBody` (the same block);
+        // velocities kept in the block (Havok units).
+        let with_body: Vec<(u32, u32)> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.body)
+            .enumerate()
+            .map(|(k, (i, _))| (at[i], BODIES + k as u32 * BODY_SIZE))
+            .collect();
+        let wb = with_body.clone();
+        e.register_double(NODE_COLLISION_OBJECT, move |_, a| {
+            wb.iter()
+                .find(|(n, _)| *n == a[0])
+                .map_or(0, |(_, b)| *b)
+                .into_ret()
+        });
+        e.register_double(COLLISION_RIGID_BODY, |_, a| a[0].into_ret());
+        e.register_double(HAVOK_BODY, |_, a| a[0].into_ret());
+        e.register_double(LINEAR_VELOCITY, |_, a| (a[0] + 0x10).into_ret());
+        e.register_double(ANGULAR_VELOCITY, |_, a| (a[0] + 0x20).into_ret());
+        e.register_double(SET_LINEAR_VELOCITY, |e, a| {
+            let v = read3(e, a[1]);
+            write3(e, a[0] + 0x10, v);
+            0u32.into_ret()
+        });
+        e.register_double(SET_ANGULAR_VELOCITY, |e, a| {
+            let v = read3(e, a[1]);
+            write3(e, a[0] + 0x20, v);
+            0u32.into_ret()
+        });
+        for (_, b) in &with_body {
+            e.mem.set_u8(b + MOTION_TYPE, 1);
+        }
+        // The actor, its process (middle-high, standing), its character controller.
+        e.mem.set_u32(ACTOR + FORM_ID, ACTOR_ID);
+        e.mem.set_u32(ACTOR + PROCESS, PROCESS_AT);
+        e.mem.set_u32(PROCESS_AT, PROCESS_VTABLE);
+        e.mem.set_u32(PROCESS_VTABLE + 0x3e4, NOTHING);
+        e.register_double(SET_LOCATION, |e, a| {
+            let p = read3(e, a[1]);
+            write3(e, a[0] + REFR_POSITION, p);
+            0u32.into_ret()
+        });
+        e.register_double(CHAR_CONTROLLER, |_, _| CONTROLLER.into_ret());
+        e.register_double(CONTROLLER_SET_POSITION, |_, _| 0u32.into_ret());
+        e.register_double(CONTROLLER_SET_VELOCITY, |e, a| {
+            let v = read3(e, a[1]);
+            write3(e, CONTROLLER + 0x700, v);
+            0u32.into_ret()
+        });
+        e.register_double(CONTROLLER_VELOCITY, |_, _| (CONTROLLER + 0x700).into_ret());
+        // The navmesh: under any point at its height.
+        let nav = ground.navmesh;
+        e.register_double(PATHING_LOCATION_AT, move |e, a| {
+            let p = read3(e, a[1]);
+            write3(e, a[0] + PATHING_POSITION, [p[0], p[1], nav]);
+            0u32.into_ret()
+        });
+        e.register_double(RESOLVE_TO_NAVMESH, |_, _| 1u32.into_ret());
+        e.register_double(IS_VALID_LOCATION, |_, _| 1u32.into_ret());
+        let _ = PATHING;
+        update_worlds(&mut e, &at);
+        Fixture { e, nodes, at }
+    }
+
+    /// The node named `name` (its address), when there is one.
+    pub fn node(&self, name: &str) -> Option<u32> {
+        self.nodes
+            .iter()
+            .position(|n| n.name.eq_ignore_ascii_case(name))
+            .map(|i| self.at[i])
+    }
+
+    /// The world rotation and translation of the node named `name`.
+    pub fn world(&self, name: &str) -> Option<(M3, V3)> {
+        let n = self.node(name)?;
+        Some((
+            read9(&self.e, n + WORLD_ROTATION),
+            read3(&self.e, n + WORLD_TRANSLATION),
+        ))
+    }
+
+    /// The actor's knock state.
+    pub fn set_knock_state(&mut self, state: u8) {
+        self.e.mem.set_u8(PROCESS_AT + KNOCK_STATE, state);
+    }
+
+    /// The worlds worked out again from the locals (the game's update).
+    pub fn update(&mut self) {
+        let at = self.at.clone();
+        update_worlds(&mut self.e, &at);
+    }
+
+    /// Each local as the animation has it (the tree's own; the root's, where the actor is, as
+    /// it is), the worlds worked out.
+    pub fn animate(&mut self) {
+        for i in 1..self.nodes.len() {
+            let (r, t) = (self.nodes[i].r, self.nodes[i].t);
+            write9(&mut self.e, self.at[i] + LOCAL_ROTATION, &r);
+            write3(&mut self.e, self.at[i] + LOCAL_TRANSLATION, t);
+        }
+        self.update();
+    }
+
+    /// Every node's world as the ragdoll leaves it: the tree's standing pose turned by `turn`
+    /// (world) about the point `about`, then moved by `by` (the root's translation unchanged:
+    /// a ragdoll moves its bones, not the actor). The locals are left as the animation's.
+    pub fn ragdoll_pose(&mut self, turn: M3, about: V3, by: V3) {
+        self.animate();
+        for i in 1..self.nodes.len() {
+            let n = self.at[i];
+            let r = read9(&self.e, n + WORLD_ROTATION);
+            let p = read3(&self.e, n + WORLD_TRANSLATION);
+            write9(&mut self.e, n + WORLD_ROTATION, &mul(&turn, &r));
+            write3(
+                &mut self.e,
+                n + WORLD_TRANSLATION,
+                add(add(about, apply_m(&turn, sub(p, about))), by),
+            );
+        }
+    }
+
+    /// The bodies' velocities (game units a second) by node name, as the doubles keep them.
+    pub fn body_velocities(&self) -> Vec<(String, V3)> {
+        let mut k = 0u32;
+        let mut out = Vec::new();
+        for (i, n) in self.nodes.iter().enumerate() {
+            if n.body {
+                let v = read3(&self.e, BODIES + k * BODY_SIZE + 0x10);
+                out.push((self.nodes[i].name.clone(), scale(v, HK)));
+                k += 1;
+            }
+        }
+        out
+    }
+
+    /// Every body's linear velocity set (game units a second).
+    pub fn set_body_velocities(&mut self, v: V3) {
+        let n = self.nodes.iter().filter(|n| n.body).count() as u32;
+        for k in 0..n {
+            write3(
+                &mut self.e,
+                BODIES + k * BODY_SIZE + 0x10,
+                scale(v, 1.0 / HK),
+            );
+        }
+    }
+
+    /// The actor's reference position.
+    pub fn reference(&self) -> V3 {
+        read3(&self.e, ACTOR + REFR_POSITION)
+    }
+}
+
+/// The worlds of the nodes at `order` (parents first) from their locals.
+pub fn update_worlds(e: &mut Engine, order: &[u32]) {
+    for &node in order {
+        let parent = e.mem.u32(node + PARENT);
+        let r = read9(e, node + LOCAL_ROTATION);
+        let t = read3(e, node + LOCAL_TRANSLATION);
+        let s = e.mem.f32(node + LOCAL_SCALE);
+        let (wr, wt, ws) = if parent == 0 {
+            (r, t, s)
+        } else {
+            let pr = read9(e, parent + WORLD_ROTATION);
+            let pt = read3(e, parent + WORLD_TRANSLATION);
+            let ps = e.mem.f32(parent + WORLD_SCALE);
+            (mul(&pr, &r), add(apply_m(&pr, scale(t, ps)), pt), ps * s)
+        };
+        write9(e, node + WORLD_ROTATION, &wr);
+        write3(e, node + WORLD_TRANSLATION, wt);
+        e.mem.set_f32(node + WORLD_SCALE, ws);
+    }
+}
+
+pub fn read3(e: &Engine, at: u32) -> V3 {
+    [0, 4, 8].map(|o| e.mem.f32(at + o))
+}
+pub fn read9(e: &Engine, at: u32) -> M3 {
+    std::array::from_fn(|i| e.mem.f32(at + 4 * i as u32))
+}
+pub fn write3(e: &mut Engine, at: u32, v: V3) {
+    for (i, x) in v.into_iter().enumerate() {
+        e.mem.set_f32(at + 4 * i as u32, x);
+    }
+}
+pub fn write9(e: &mut Engine, at: u32, m: &M3) {
+    for (i, x) in m.iter().enumerate() {
+        e.mem.set_f32(at + 4 * i as u32, *x);
+    }
+}
+
+/// The angle (degrees) between two rotations.
+pub fn degrees_between(a: &M3, b: &M3) -> f32 {
+    length(ragdoll_core::flinch::rotation_vector(&mul(
+        a,
+        &transpose(b),
+    )))
+    .to_degrees()
+}
+
+/// The lab's mannequin (`ragdoll_core::flinch::BONES` at the lab's joints) laid out as FNV's tree
+/// is (`Bip01` > `Bip01 NonAccum` > the pelvis, and the spine beside it), every bone's rest
+/// rotation a turn of its own (none the identity), and a ragdoll body on each rig bone but the
+/// pelvis (as the game's: a7a2d15 found none on it). For the tests that need no dump.
+pub fn mannequin() -> Vec<Node> {
+    use ragdoll_core::flinch::BONES;
+    const JOINT: [V3; 20] = [
+        [0.0, 0.0, 66.0],
+        [0.0, 0.0, 70.0],
+        [0.0, 0.0, 78.0],
+        [0.0, 0.0, 86.0],
+        [0.0, 0.0, 102.0],
+        [0.0, 0.5, 108.0],
+        [-2.0, 0.0, 100.0],
+        [2.0, 0.0, 100.0],
+        [-13.0, 0.0, 100.0],
+        [13.0, 0.0, 100.0],
+        [-14.0, 0.5, 79.0],
+        [14.0, 0.5, 79.0],
+        [-7.0, 0.0, 64.0],
+        [7.0, 0.0, 64.0],
+        [-7.0, 1.0, 35.0],
+        [7.0, 1.0, 35.0],
+        [-7.0, 0.0, 6.0],
+        [7.0, 0.0, 6.0],
+        [-15.0, 1.0, 59.0],
+        [15.0, 1.0, 59.0],
+    ];
+    const UP: [Option<usize>; 20] = [
+        None,
+        None,
+        Some(1),
+        Some(2),
+        Some(3),
+        Some(4),
+        Some(3),
+        Some(3),
+        Some(6),
+        Some(7),
+        Some(8),
+        Some(9),
+        Some(0),
+        Some(0),
+        Some(12),
+        Some(13),
+        Some(14),
+        Some(15),
+        Some(10),
+        Some(11),
+    ];
+    let rest = |k: f32| {
+        let along = ragdoll_core::flinch::rotation([
+            0.0,
+            -std::f32::consts::FRAC_PI_2 + 0.3 * k.sin(),
+            0.0,
+        ]);
+        let about = ragdoll_core::flinch::rotation([0.7 * k.cos(), 0.0, 0.5 * (2.0 * k).sin()]);
+        mul(&about, &along)
+    };
+    let non_accum_r = rest(0.37);
+    let mut out = vec![
+        Node {
+            name: "Scene Root".into(),
+            parent: None,
+            r: IDENTITY,
+            t: [0.0; 3],
+            s: 1.0,
+            body: false,
+        },
+        Node {
+            name: "Bip01 NonAccum".into(),
+            parent: Some(0),
+            r: non_accum_r,
+            t: [0.0, 0.0, 66.0],
+            s: 1.0,
+            body: false,
+        },
+    ];
+    let world: Vec<M3> = (0..20).map(|b| rest(b as f32 * 0.61 + 0.2)).collect();
+    for (b, (name, _)) in BONES.iter().enumerate() {
+        let (up_r, up_at) = UP[b].map_or((non_accum_r, [0.0, 0.0, 66.0]), |p| (world[p], JOINT[p]));
+        out.push(Node {
+            name: (*name).into(),
+            parent: Some(UP[b].map_or(1, |p| p + 2)),
+            r: mul(&transpose(&up_r), &world[b]),
+            t: apply_m(&transpose(&up_r), sub(JOINT[b], up_at)),
+            s: 1.0,
+            body: b != 0,
+        });
+    }
+    out
+}

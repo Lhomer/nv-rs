@@ -58,6 +58,8 @@ pub mod range_cells;
 mod range_floor;
 mod range_save;
 mod range_watch;
+#[cfg(test)]
+pub(crate) mod rig_fixture;
 pub mod room_events;
 pub mod room_record;
 pub mod room_script;

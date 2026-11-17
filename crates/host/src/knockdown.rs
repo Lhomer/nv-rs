@@ -165,6 +165,10 @@ pub const WATCH: Duration = Duration::from_secs(2);
 pub const WATCH_STEP: Duration = Duration::from_millis(200);
 pub const HOLD_PUSH: Duration = Duration::from_millis(600);
 pub const MAX_RISE: f32 = 60.0;
+/// The fastest any knocked-down body's bone or its controller may rise once it has landed, until
+/// it stands (game units a second): the physics pushing it out of the floor flung the hips up into
+/// a handstand on every get-up of Patrick's a7a2d15 clips (4 to 18 bones a frame for a second).
+pub const FLUNG_UP_MOST: f32 = 50.0;
 /// A getting-up ragdoll's bone is held only rising faster than this (game units a second): a
 /// fling, never the get-up animation's own rise.
 pub const BONE_FLING_RISE: f32 = 400.0;
@@ -892,8 +896,8 @@ pub fn knock_down(
     // 290 units below, the push (-0.03, -0.20, 0.98)).
     let scale = e.call(GET_SCALE, &args![actor]).f64() as f32;
     let bones = bodies(e, actor);
-    let pelvis_z = pelvis_of(e, &bones)
-        .map(|p| p[2])
+    let pelvis_z = pelvis_pos(e, actor, &bones)
+        .map(|p| p.0[2])
         .or_else(|| stood.map(|p| p[2] + PELVIS_HEIGHT * scale.clamp(0.25, 4.0)));
     let origin = explosion_origin(point, pelvis_z, direction);
     let start = stood.map_or(origin[2], |p| p[2]);
@@ -1043,6 +1047,7 @@ pub fn knock_down(
             tries: 0,
             at: Instant::now(),
             said: false,
+            held_said: false,
         });
     {
         let mut ups = GET_UPS.lock().unwrap_or_else(|p| p.into_inner());
@@ -1573,12 +1578,15 @@ struct Launch {
     /// When it was given, and whether the pelvis's velocity [`LAUNCH_LOG_AFTER`] later is said.
     at: Instant,
     said: bool,
+    held_said: bool,
 }
 
 /// When the pelvis's velocity after the switch is said (s): at most [`LAUNCH_MOST`] times the
 /// hit's speed.
 const LAUNCH_LOG_AFTER: f32 = 0.1;
 const LAUNCH_MOST: f32 = 1.05;
+/// How long from the switch the launch is held to the hit's speed (s).
+const LAUNCH_HELD: f32 = 0.25;
 
 static LAUNCHES: Mutex<Vec<Launch>> = Mutex::new(Vec::new());
 
@@ -1740,9 +1748,12 @@ fn give_launch(e: &mut Engine, actor: u32, direction: [f32; 3], speed: f32) -> u
     // speed nor of `KnockExplosion`'s push, which is replaced (Patrick's a45deed clip: a 4.30 m/s
     // hit flew at 5.7 and held 6.9 m/s).
     let going = crate::active_ragdoll::body_velocities(actor);
-    let pelvis_node = bones.iter().map(|b| b.0).find(|&n| is_pelvis(e, n));
-    let pelvis_going = pelvis_node
-        .and_then(|n| going.iter().find(|g| g.0 == n))
+    // The pelvis's motion from the rig's own list (its node has no ragdoll body in the game: read
+    // from the bodies, none was found and each bone kept the body's whole speed, a 4.35 m/s hit
+    // holding 470 units/s on a7a2d15).
+    let pelvis_going = going
+        .iter()
+        .find(|g| is_pelvis(e, g.0))
         .map_or([0.0; 3], |g| g.1);
     let mut given = 0;
     for &(node, body) in &bones {
@@ -1803,6 +1814,27 @@ fn launches(e: &mut Engine) {
         } else {
             along.iter().sum::<f32>() / along.len() as f32 * scale
         };
+        // The body never flies faster than the hit pushed it (`LAUNCH_HELD` from the switch):
+        // what the game's own knock-down push or the ragdoll's start adds along the launch is taken
+        // off each bone (a7a2d15: 470 units/s held for a 304 units/s hit).
+        if l.at.elapsed().as_secs_f32() < LAUNCH_HELD && kept > l.speed * LAUNCH_MOST {
+            let extra = (kept - l.speed) / scale;
+            for &(_, b) in &bones {
+                if let Some(v) = linear(e, b) {
+                    let nv = [0, 1, 2].map(|i| v[i] - l.direction[i] * extra);
+                    set_velocity(e, SET_LINEAR_VELOCITY, b, nv);
+                }
+            }
+            if !l.held_said {
+                l.held_said = true;
+                note(format!(
+                    "{}: the launch held to the hit's {:.0} units/s ({kept:.0} along it, knock \
+                     state {state})",
+                    describe(e, l.actor),
+                    l.speed
+                ));
+            }
+        }
         if kept < l.speed * LAUNCH_KEPT && l.tries < LAUNCH_TRIES && !bones.is_empty() {
             l.tries += 1;
             let given = give_launch(e, l.actor, l.direction, l.speed);
@@ -1826,17 +1858,31 @@ fn launches(e: &mut Engine) {
             if !l.said {
                 if l.at.elapsed().as_secs_f32() >= LAUNCH_LOG_AFTER {
                     l.said = true;
+                    // Its pelvis body, else the mean of its bodies (none hangs from the pelvis in
+                    // the game: the line was never written on a7a2d15).
                     let pelvis = bones
                         .iter()
                         .find(|b| is_pelvis(e, b.0))
                         .and_then(|&(_, b)| linear(e, b))
-                        .map(|v| v.map(|x| x * scale));
-                    if let Some(v) = pelvis {
+                        .map(|v| (v.map(|x| x * scale), "pelvis"))
+                        .or_else(|| {
+                            let vs: Vec<[f32; 3]> =
+                                bones.iter().filter_map(|&(_, b)| linear(e, b)).collect();
+                            (!vs.is_empty()).then(|| {
+                                let n = vs.len() as f32;
+                                (
+                                    [0, 1, 2]
+                                        .map(|i| vs.iter().map(|v| v[i]).sum::<f32>() / n * scale),
+                                    "body's mean",
+                                )
+                            })
+                        });
+                    if let Some((v, what)) = pelvis {
                         let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
                         let share = speed / l.speed.max(1e-3);
                         note(format!(
-                            "{}: the pelvis {LAUNCH_LOG_AFTER} s after the switch: {speed:.0} \
-                             units/s ({:.2} m/s), {share:.2} x the hit's {:.2} m/s{}",
+                            "{}: the {what} velocity {LAUNCH_LOG_AFTER} s after the switch: \
+                             {speed:.0} units/s ({:.2} m/s), {share:.2} x the hit's {:.2} m/s{}",
                             describe(e, l.actor),
                             speed / 70.0,
                             l.speed / 70.0,
@@ -1850,6 +1896,8 @@ fn launches(e: &mut Engine) {
                 } else {
                     keep.push(l);
                 }
+            } else if l.at.elapsed().as_secs_f32() < LAUNCH_HELD {
+                keep.push(l);
             }
         }
     }
@@ -1935,7 +1983,10 @@ fn get_ups(e: &mut Engine) {
         let state = e.mem.u8(process + KNOCK_STATE) as i8;
         // The ragdoll's pose as drawn, kept until the game's get-up animation takes the bones
         // (knock state 6), then blended from (`crate::active_ragdoll::begin_get_up_blend`).
-        if matches!(state, 1..=5) {
+        // The ragdoll's own states only (2 flying, 1 down): from state 3 the get-up animation is
+        // queued and the bones may already hold its pose (a7a2d15: the blend read "farthest bone
+        // 0 units off" on all seven get-ups).
+        if matches!(state, 1 | 2) {
             crate::active_ragdoll::note_ragdoll_pose(e, g.actor);
         } else if state == 6 && !g.blended {
             g.blended = true;
@@ -1998,14 +2049,31 @@ fn get_ups(e: &mut Engine) {
         };
         // Lying: the pelvis near the collision floor and the spine-to-head line near level
         // (`knock::lying`; the span alone let a kneeling slump up: Patrick's 08-21-49 clip).
-        let pelvis_at = pelvis_of(e, &bones);
+        let pelvis_found = pelvis_pos(e, g.actor, &bones);
+        let pelvis_at = pelvis_found.map(|p| p.0);
+        let pelvis_how = pelvis_found.map_or("no pelvis found", |p| p.1);
         let spine_at = node_at(e, &bones, b"Bip01 Spine1");
         let head_at = node_at(e, &bones, b"Bip01 Head");
         // The floor it will be set on (`ground_under`), the lying check's too (Patrick's a45deed
         // clip: let up 13 units over one floor, set on another).
-        let (floor_z, floor_why) = match pelvis_at {
-            Some(p) if !bones.is_empty() => ground_under(e, g.actor, p, low, Some(g.start[2])),
-            _ => (low - BONE_RADIUS, "the lowest bone, less its radius"),
+        // Always the real floor under it: the collision floor (cast from its lowest bone and
+        // its pelvis), never the navmesh with the collision floor within 15 units, never under
+        // where it stood on the same floor (`knock::get_up_floor`).
+        let centre_now = if bones.is_empty() {
+            g.start
+        } else {
+            sum.map(|x| x / bones.len() as f32)
+        };
+        let (floor_z, floor_why) = if bones.is_empty() {
+            (g.start[2], "where it stood (no bones)")
+        } else {
+            ground_under(
+                e,
+                g.actor,
+                pelvis_at.unwrap_or(centre_now),
+                low,
+                Some(g.start[2]),
+            )
         };
         let floor = pelvis_at.map(|_| floor_z);
         let lies = match (pelvis_at, spine_at, head_at, floor) {
@@ -2017,8 +2085,9 @@ fn get_ups(e: &mut Engine) {
             _ => height <= LYING_HEIGHT,
         };
         let lying_inputs = format!(
-            "pelvis {:.1} over {floor_why} at {floor_z:.0}, spine-to-head tilt {:.0} degrees, {}, \
-             {}",
+            "pelvis ({pelvis_how}) at z {:.1}, {:.1} over {floor_why} at {floor_z:.0}, \
+             spine-to-head tilt {:.0} degrees, {}, {}",
+            pelvis_at.map_or(f32::NAN, |p| p[2]),
             pelvis_at.map_or(f32::NAN, |p| p[2] - floor_z),
             spine_at
                 .zip(head_at)
@@ -2095,12 +2164,8 @@ fn get_ups(e: &mut Engine) {
             sum.map(|x| x / bones.len() as f32)
         };
         // Where the ragdoll ended up: its pelvis (else its bones' centre), on the ground under it.
-        let pelvis = pelvis_of(e, &bones).unwrap_or(centre);
-        let (ground, ground_why) = if bones.is_empty() {
-            (g.start[2], "where it stood (no bones)")
-        } else {
-            (floor_z, floor_why)
-        };
+        let pelvis = pelvis_at.unwrap_or(centre);
+        let (ground, ground_why) = (floor_z, floor_why);
         let body_at = [pelvis[0], pelvis[1], ground];
         let fit = fit_spot(e, g.actor, body_at);
         let at = fit.at;
@@ -2175,6 +2240,85 @@ fn node_at(e: &Engine, bones: &[(u32, u32)], name: &[u8]) -> Option<[f32; 3]> {
         (n != 0 && e.mem.cstr(n).eq_ignore_ascii_case(name))
             .then(|| read3(e, node + WORLD_TRANSLATION))
     })
+}
+
+/// Where the knocked-down body's pelvis is, and how it was found (Patrick's a7a2d15 clips: no
+/// ragdoll body hangs from `Bip01 Pelvis` in the game, so every get-up read "pelvis NaN" and was
+/// set on the lowest bone): its own body when it has one; else between its thighs' bodies (the
+/// hips, what the ragdoll moves); else the `Bip01 Pelvis` node found by name in its 3D, as the
+/// rig finds it. The bodies' node names are said once a run.
+fn pelvis_pos(
+    e: &mut Engine,
+    actor: u32,
+    bones: &[(u32, u32)],
+) -> Option<([f32; 3], &'static str)> {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    if !bones.is_empty() {
+        let names: Vec<String> = bones
+            .iter()
+            .map(|&(n, _)| String::from_utf8_lossy(&node_name(e, n)).into_owned())
+            .collect();
+        let who = describe(e, actor);
+        SAID.call_once(|| {
+            note(format!(
+                "{who}: its ragdoll's {} bodies hang from: {}",
+                names.len(),
+                names.join(", ")
+            ))
+        });
+    }
+    if let Some(p) = pelvis_of(e, bones) {
+        return Some((p, "its pelvis body"));
+    }
+    if let (Some(l), Some(r)) = (
+        node_at(e, bones, b"Bip01 L Thigh"),
+        node_at(e, bones, b"Bip01 R Thigh"),
+    ) {
+        return Some((
+            [
+                (l[0] + r[0]) / 2.0,
+                (l[1] + r[1]) / 2.0,
+                (l[2] + r[2]) / 2.0,
+            ],
+            "between its thighs",
+        ));
+    }
+    named_node(e, actor, b"Bip01 Pelvis")
+        .map(|n| (read3(e, n + WORLD_TRANSLATION), "its Bip01 Pelvis node"))
+}
+
+/// A node's name (`m_kName`), empty for none.
+fn node_name(e: &Engine, node: u32) -> Vec<u8> {
+    let name = e.mem.u32(node + NODE_NAME);
+    if name == 0 {
+        Vec::new()
+    } else {
+        e.mem.cstr(name)
+    }
+}
+
+/// The node named `name` in `actor`'s 3D (the rig's way of finding its bones), when there is one.
+fn named_node(e: &mut Engine, actor: u32, name: &[u8]) -> Option<u32> {
+    let root = e.call(ACTOR_3D, &args![actor]).u32();
+    let mut stack = vec![root];
+    let mut seen = 0;
+    while let Some(node) = stack.pop() {
+        if node == 0 || seen >= MAX_NODES {
+            continue;
+        }
+        seen += 1;
+        if node_name(e, node).eq_ignore_ascii_case(name) {
+            return Some(node);
+        }
+        let children = e.vcall(node, 0xc, &[]).u32();
+        if children != 0 {
+            let count = e.call(CHILD_COUNT, &args![children]).u32().min(64);
+            for i in 0..count {
+                stack.push(e.call(CHILD_AT, &args![children, i]).u32());
+            }
+        }
+    }
+    None
 }
 
 /// Whether `node` is the ragdoll's pelvis (named `Bip01 Pelvis`, `m_kName` at `+0x08`).
@@ -2309,7 +2453,10 @@ fn fit_spot(e: &mut Engine, actor: u32, body: [f32; 3]) -> Fit {
                 if ((at[0] - p[0]).powi(2) + (at[1] - p[1]).powi(2)).sqrt() <= NUDGE_SNAP
                     && (at[2] - p[2]).abs() <= GROUND_BELOW =>
             {
-                Some([p[0], p[1], p[2].min(at[2].max(p[2] - GROUND_BELOW))])
+                // The spot's height is the floor found under the body (`ground_under`): the navmesh
+                // lies several units under the collision floor, and set on it the get-up started
+                // that far in the ground (a7a2d15: 7 to 13 units lower on every get-up).
+                Some(p)
             }
             // No navmesh here (some places have none): free of other actors is all that is known.
             None => Some(p),
@@ -2387,13 +2534,16 @@ fn watch_get_up(
             // s on a45deed), and never rising past MAX_RISE.
             let blending = t < GET_UP_BLEND || matches!(state, 3 | 5 | 6);
             let across = (velocity[0] * velocity[0] + velocity[1] * velocity[1]).sqrt();
-            if velocity[2] > MAX_RISE || (blending && across > 1.0) {
+            // Through the get-up (states 3, 5, 6) the controller rises no faster than
+            // `FLUNG_UP_MOST`.
+            let rise = if blending { FLUNG_UP_MOST } else { MAX_RISE };
+            if velocity[2] > rise || (blending && across > 1.0) {
                 let (x, y) = if blending {
                     (0.0, 0.0)
                 } else {
                     (velocity[0], velocity[1])
                 };
-                let held = [x, y, velocity[2].min(MAX_RISE)];
+                let held = [x, y, velocity[2].min(rise)];
                 set_controller_velocity(e, controller, held);
                 clamped = Some(velocity[2]);
             }
@@ -2416,8 +2566,13 @@ fn watch_get_up(
             // frames: Patrick's 08-21-49 clip; on a45deed 7 to 14 bones were flung up through
             // state 6, the legs into a handstand); after it, only rising.
             if t < GET_UP_BLEND || matches!(state, 3 | 5 | 6) {
+                // ... and none pushed up faster than `FLUNG_UP_MOST` (the depenetration's throw:
+                // a7a2d15's hips shooting up into a handstand at knock state 6).
                 let (nv, held) = clamp_speed(v, most_up);
-                if held {
+                let up = FLUNG_UP_MOST / scale;
+                let lifted = nv[2] > up;
+                let nv = [nv[0], nv[1], nv[2].min(up)];
+                if held || lifted {
                     set_velocity(e, SET_LINEAR_VELOCITY, body, nv);
                     bones_held += 1;
                 }
@@ -2452,7 +2607,10 @@ fn watch_get_up(
                 "; clamp: rising {v:.0} held to {MAX_RISE}"
             )),
             if bones_held > 0 {
-                format!("; clamp: {bones_held} bones flung up held to {BONE_FLING_RISE}")
+                format!(
+                    "; clamp: {bones_held} bones held to {BONE_FLING_RISE} units/s, rising to \
+                     {FLUNG_UP_MOST}"
+                )
             } else {
                 String::new()
             },
@@ -2532,11 +2690,21 @@ fn hold_bones(e: &mut Engine, actor: u32, scale: f32, arms_only: bool) {
     let all = bodies(e, actor);
     // The collision floor under the body: a bone under it is being pushed out by the physics,
     // never held there (Patrick's 19-43-08 clip: the clamp held feet and calves in the floor).
-    let floor = pelvis_of(e, &all).and_then(|p| crate::active_ragdoll::floor_under(e, p));
+    let floor = pelvis_pos(e, actor, &all).and_then(|p| crate::active_ragdoll::floor_under(e, p.0));
     let mut under = 0;
+    let mut flung = 0;
     for (node, body) in all {
         let arm = is_arm_node(e, node);
         if arms_only && !arm {
+            // Landed: no bone pushed up faster than `FLUNG_UP_MOST` (a bone under it untouched,
+            // so the body still sleeps).
+            if let Some(v) = linear(e, body) {
+                let up = FLUNG_UP_MOST / scale;
+                if v[2] > up {
+                    set_velocity(e, SET_LINEAR_VELOCITY, body, [v[0], v[1], up]);
+                    flung += 1;
+                }
+            }
             continue;
         }
         if floor.is_some_and(|f| read3(e, node + WORLD_TRANSLATION)[2] < f - UNDER_FLOOR) {
@@ -2575,6 +2743,12 @@ fn hold_bones(e: &mut Engine, actor: u32, scale: f32, arms_only: bool) {
             set_velocity(e, SET_ANGULAR_VELOCITY, body, nw);
         }
         clamped += usize::from(a || b);
+    }
+    if flung > 0 {
+        note(format!(
+            "{}: clamp: {flung} bones rising held to {FLUNG_UP_MOST} units/s (landed)",
+            describe(e, actor)
+        ));
     }
     if clamped > 0 {
         note(format!(
@@ -2857,3 +3031,7 @@ mod tests {
         assert_eq!(clamp_speed([f32::NAN, 0.0, 0.0], 10.0), ([0.0; 3], true));
     }
 }
+
+#[cfg(test)]
+#[path = "knockdown_fixture_tests.rs"]
+mod fixture_tests;
