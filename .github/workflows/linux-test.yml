@@ -45,6 +45,10 @@ jobs:
         with:
           workspaces: linux
           key: linux-test
+      # The sound device's library since the merge of upstream's Linux sound (cpal's ALSA backend,
+      # engine-platform sound_out.rs): alsa-sys links libasound, found with pkg-config.
+      - name: ALSA's library
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - name: Build the room
         working-directory: linux
         run: cargo build --release --locked

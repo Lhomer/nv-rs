@@ -7,6 +7,42 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (merge slaterain/nv-rs main up to d3a855e)
+
+- **Now:** a regular merge of the 38 commits after 04e62ba (#647 to #675). Conflicts, both sides
+  kept:
+  - The Direct3D 9 layer: upstream builds `d3d9real` on every system (#640, winit's window on
+    Linux and macOS). The fork's `cfg(wgpu_window)` (and `engine-platform/build.rs`) is gone. The
+    window layers: Win32 on Windows, winit on Linux and macOS, `elsewhere.rs` on Android only.
+  - The fork's native window (`set_native_window`: Android always, the Linux room when it hands
+    its window over or runs headless) is taken first in `window_created`, `window_titled` and
+    `window_moved`; otherwise the window layer's. `d3d9_wgpu`'s `surface_for` and `client_size`:
+    Android's native window, the Linux room's handles (`d3d9_wgpu::native`) when set, else the
+    window layer's registered window. The real Direct3D 9 asked for off Windows: the rooms still
+    fall back to wgpu, any other run takes upstream's refusal.
+  - winit is not built for Android. cpal is, and Android 11+ has AAudio, but the room has no sound
+    table, so it stays silent. The Linux room pins winit 0.30.13 (upstream's) and its CI installs
+    `libasound2-dev`.
+  - `files.rs`: upstream's `host_paths` replaces the fork's `host_case`. `files::host_path` is
+    upstream's (a full path); `cell_offsets` and `perks` call it with `full_path`.
+  - `ini.rs`: upstream's `profile_path` (folder-relative names) and the core's `ini_value`. The
+    fork's `WritePrivateProfileStringA` is kept on top of them.
+  - Rows and keys: the fork's `bRecordButton`, gunplay, movement, perks and Test Range keys next
+    to upstream's `bAmbientOcclusion`, `fAmbientOcclusionStrength`, `bSunShadows` and
+    `bNotBackground`. `overridable.tsv`: upstream's `00646d00` count (0) and the fork's
+    `00646e50`.
+- **Checked:**
+  - JIP stays inert with `bJIPInstalled` off. `jip::game_patches::install` returns before setting
+    the INSTALLED bit, and #653's combat formulas and the GA/GF/GS/GW patches all test that bit.
+  - AO and sun shadows (#661, #668, #669) read the camera and sun at
+    `engine_core::world_drawn`, inside the frame draw, so the fork's `DRAW_FRAME` write is in
+    place while the world, its shadows and the first-person pass are drawn. Nothing there writes
+    bones.
+  - #654's geometry family draws the same nodes; `008706b0` stays overridable (count 2).
+  - #629's mod files live in `nv-rs mod files` beside the Saves folder, with real-path
+    confinement, so they never touch the saves.
+- **Patrick:** approved the merge after the reaction fix and quick start were published.
+
 ### Claude, 2026-11-17 (quick start: straight to the main menu)
 
 - **Now:** `quick_start` lists every start-up screen (`STARTUP`, tested): the `sIntroSequence`

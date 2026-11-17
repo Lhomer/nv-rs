@@ -70,6 +70,8 @@ mod engine;
 pub mod exe;
 pub mod extend;
 pub mod mem;
+pub mod mod_files;
+pub mod processor;
 pub mod profile;
 pub mod ptr;
 pub mod queue_check;
@@ -84,6 +86,7 @@ pub mod typed;
 pub mod types;
 pub mod units;
 pub mod watch_check;
+pub mod world_drawn;
 pub mod x87;
 
 pub use abi::{AbiFn, Ret};

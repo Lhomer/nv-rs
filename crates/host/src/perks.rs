@@ -209,7 +209,9 @@ fn install(e: &mut Engine) {
 fn plugins_txt(e: &mut Engine) -> Option<PathBuf> {
     if let Some((_, mut folder)) = engine_platform::d3d9::folder_path_if_loaded(e, 0x1c) {
         folder.extend_from_slice(b"\\FalloutNV\\plugins.txt");
-        return Some(engine_platform::files::host_path(e, &folder));
+        return Some(engine_platform::files::host_path(
+            &engine_platform::files::full_path(e, &folder),
+        ));
     }
     let local = std::env::var_os("LOCALAPPDATA")?;
     Some(Path::new(&local).join("FalloutNV").join("plugins.txt"))

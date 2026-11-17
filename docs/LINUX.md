@@ -36,6 +36,11 @@ It needs a Vulkan driver: a graphics card's, or Mesa's software one (lavapipe) o
 none (Debian and Ubuntu: `sudo apt install mesa-vulkan-drivers`). With no graphics card it uses
 lavapipe by itself; `--software` asks for it anyway.
 
+It also needs ALSA's library, `libasound.so.2` (Debian and Ubuntu: `libasound2` or
+`libasound2t64`, on almost every desktop already), since the merge of upstream's Linux sound
+(cpal, `engine-platform` `sound_out.rs`): the program links it and does not start without it.
+The room itself still plays no sound unless a sound table is given.
+
 ## The game files
 
 Your own Fallout: New Vegas 1.4.0.525 files (the Windows install's, the same `FalloutNV.exe` the

@@ -88,10 +88,9 @@ pub mod d3d9backend;
 pub mod d3d9device;
 pub mod d3d9draw;
 pub mod d3d9query;
-#[cfg(wgpu_window)]
 // On Android the real Direct3D 9's diagnostics (the face check, the borderless window's bookkeeping)
-// have no caller: wgpu draws alone.
-#[cfg_attr(not(windows), allow(dead_code))]
+// have no caller: wgpu draws alone, in the activity's window.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub mod d3d9real;
 pub mod d3d9resource;
 pub mod d3dx;
@@ -103,10 +102,13 @@ pub mod dsfx;
 pub mod dshow;
 pub mod dsound;
 pub mod files;
+pub mod host_paths;
 pub mod ini;
 pub mod library;
+pub mod machine_table;
 pub mod mixer;
 pub mod mmio;
+pub mod mod_files;
 pub mod mouse_look;
 pub mod nls;
 pub mod nvapi;
@@ -136,6 +138,8 @@ pub struct State {
     pub disk: files::Disk,
     /// The process side: the ANSI command line and the environment blocks ([`process`]).
     pub process: process::Process,
+    /// Mods' own files and the port's folder that keeps them ([`mod_files`]).
+    pub mod_files: mod_files::ModFiles,
 }
 
 /// What runs before the platform layer ends the process itself, which it does in one place: the
@@ -216,7 +220,6 @@ pub(crate) fn finish_drawing_at_exit(
 pub fn end_process(code: i32) -> ! {
     finish_drawing_at_exit(DRAW_EXIT_LIMIT);
     // What the start screen's capture still holds reaches the console and the log first.
-    #[cfg(wgpu_window)]
     d3d9_wgpu::loading::finish_output();
     engine_core::profile::stop();
     std::process::exit(code)
@@ -343,6 +346,7 @@ pub mod units {
     /// engines made from now on (`Engine::new` runs this before it makes the kernel).
     pub fn funcs(out: &mut Vec<(u32, crate::AbiFn)>) {
         crate::install_layer(&crate::LAYER);
+        engine_core::mod_files::install(&crate::mod_files::CALLS);
         out.extend(crate::layer_funcs());
     }
 }

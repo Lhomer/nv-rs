@@ -40,6 +40,7 @@ pub mod hit_force;
 pub mod item_details;
 pub mod knockdown;
 pub mod menu_tiles;
+pub mod mod_files;
 pub mod mod_fit_worn;
 pub mod movement;
 pub mod native_inflate;
@@ -61,6 +62,8 @@ pub mod room_events;
 pub mod room_record;
 pub mod room_script;
 pub mod save_out;
+#[cfg(windows)]
+pub mod scene_light;
 #[cfg(test)]
 mod start_up_tests;
 pub mod test_range;
@@ -130,6 +133,9 @@ pub(crate) fn install_rows_and_extenders(engine: &mut Engine, choice: &fixes::Ch
     // installed" unless the row `NV_JIP_INSTALLED` (off in every preset, set by
     // `fixes::install` above) switched it on (`crates/jip`).
     jip::install(engine);
+    // The Mod Configuration Menu's plugin, when its row is on: xNVSE loads MCM.dll after
+    // jip_nvse.dll and before ui_organizer.dll (`crates/mcm`).
+    mcm::install(engine);
     // UI Organizer, when its row is on: after JIP, as xNVSE loads ui_organizer.dll after
     // jip_nvse.dll (`crates/uio`).
     uio::install(engine);
@@ -138,9 +144,10 @@ pub(crate) fn install_rows_and_extenders(engine: &mut Engine, choice: &fixes::Ch
 /// The start-up log's lines on JIP's state, after it installed (`row_on`: its row asked for it;
 /// `answers_installed`: it does): none when it is off as asked or on as asked. (With real threads
 /// JIP's own data no longer makes a thread wait: its aux variables and item data have their own
-/// locks. A mod's event script run from another thread (JIP's actor, world and UI event hooks)
-/// and `AuxVarGetFltCond`'s name lookup still take xNVSE's shared state and wait for the main
-/// thread a moment; docs/FIXES.md and the INI row say so, the log does not.)
+/// locks, and xNVSE's string variables (which `AuxVarGetFltCond` reads its name from) theirs. A
+/// mod's event script run from another thread (JIP's actor, world and UI event hooks) still takes
+/// xNVSE's shared state and waits for the main thread a moment; docs/FIXES.md and the INI row say
+/// so, the log does not.)
 pub(crate) fn jip_start_lines(row_on: bool, answers_installed: bool) -> Vec<String> {
     let mut lines = Vec::new();
     if row_on && !answers_installed {
@@ -181,6 +188,9 @@ impl Host {
         #[cfg(not(windows))]
         not_provided_here()?;
         let mut engine = Box::new(Engine::with_exe(&exe)?);
+        // Mods' own files (MCM's and later JIP's INI and file commands) kept beside the saves, never
+        // in the game's folder (`mod_files`).
+        engine_platform::mod_files::set_folder(&mut engine, mod_files::folder(data));
         // The play loop's patches (`crates/play-patch`, empty on main) replace the entries with
         // the same addresses.
         for (address, function) in play_patch::funcs() {
@@ -201,6 +211,15 @@ impl Host {
         if let Some(note) = fixes::play_run_taken_as_test(choice, |name| std::env::var(name).ok()) {
             eprintln!("{note}");
         }
+        // Windows told the game is not background work, so a window that is not the active one
+        // keeps the full-speed cores (`qos`; `fixes::Choice::not_background`: on by default in
+        // every run and preset; `bNotBackground=0` in Fallout.ini's `[nv-rs Threads]` or
+        // `NV_NOT_BACKGROUND=0` turns it off). Before any thread of the port's starts: each makes
+        // its own call when this turned it on. One line either way.
+        eprintln!(
+            "{}",
+            qos::apply_at_start(choice.not_background, choice.not_background_by)
+        );
         // The game's clock (`GetTickCount`, `timeGetTime`, `QueryPerformanceCounter`) runs with
         // the real time from here on, `Sleep` moving it on too (`Engine::clock_now_ms`).
         // `NV_REPEATABLE=FRAMES` (a test mode, [`repeatable_frames`]): a virtual clock instead, the
@@ -255,32 +274,58 @@ impl Host {
         // The real Direct3D 9 calls (`NV_D3D9=real`) on a render thread of their own, play's
         // default (`fixes::Choice::render_thread`: a test without `NV_RENDER_THREAD` runs
         // without it); `NV_RENDER_THREAD=0` makes them on the game's threads.
-        #[cfg(windows)]
         engine_platform::d3d9real::want_render_thread(&mut engine, choice.render_thread);
-        #[cfg(windows)]
         if let Some(dir) = wgpu_cache_path() {
             engine_platform::d3d9real::want_wgpu_cache(&mut engine, dir);
         }
         // The borderless window (`fixes::Choice::borderless`: `NV_BORDERLESS`; else, in a
         // launcher's play run, Fallout.ini's `[nv-rs Display] bBorderless` or play's default, on).
         // A test or script without the variable makes no choice: the window as the game makes it.
-        #[cfg(windows)]
         if let Some(on) = choice.borderless {
             engine_platform::d3d9real::want_borderless(on);
         }
         // The frame-rate counter from the start (`fixes::Choice::show_frame_rate`: `NV_SHOW_FPS`; else,
         // in a launcher's play run, Fallout.ini's `[nv-rs Display] bShowFrameRate`; off by default).
         // F11 in the game shows or hides it either way.
-        #[cfg(windows)]
         engine_platform::d3d9real::want_frame_rate(choice.show_frame_rate);
         // The regular game's clips (F9 and a small Record button: `room_record`), in a launcher's
         // play run on Windows; `[nv-rs Display] bRecordButton=0` hides the button.
         #[cfg(windows)]
         room_record::want_play(choice.play_clips, choice.record_button);
+        // The new lighting (`fixes::Choice::ambient_occlusion`: `NV_AO`; else, in a launcher's play
+        // run, Fallout.ini's `[nv-rs Display] bAmbientOcclusion`; off by default), at its strength
+        // (`fAmbientOcclusionStrength`, `NV_AO_STRENGTH`). Off: nothing is installed, read or
+        // recorded.
+        // One reader for both: with the sun shadows on, the sun is the sun light the lit shaders
+        // take (the ambient occlusion's contact shadows follow it too); off, the sun disc's place,
+        // as before.
+        #[cfg(windows)]
+        let reader: fn(
+            &engine_platform::Engine,
+        ) -> Option<engine_platform::d3d9real::SceneView> = if choice.sun_shadows {
+            scene_light::read_lit
+        } else {
+            scene_light::read
+        };
+        #[cfg(windows)]
+        if choice.ambient_occlusion {
+            engine_platform::d3d9real::want_scene_light(reader, choice.ambient_occlusion_strength);
+            eprintln!(
+                "nv-rs: new lighting on (ambient occlusion at strength {}; Vulkan only)",
+                choice.ambient_occlusion_strength
+            );
+        }
+        // The sun shadows (`fixes::Choice::sun_shadows`: `NV_SUN_SHADOWS`; else, in a launcher's play
+        // run, Fallout.ini's `[nv-rs Display] bSunShadows`; off by default). Off: nothing is
+        // installed, read or recorded.
+        #[cfg(windows)]
+        if choice.sun_shadows {
+            engine_platform::d3d9real::want_sun_shadows(reader);
+            eprintln!("nv-rs: sun shadows on (Vulkan only; in the game's lighting, or the engineers' overlay with NV_SUN_SHADOWS=debug)");
+        }
         // Who draws (`fixes::Choice::renderer`: in a launcher's play run, Fallout.ini's
         // `[nv-rs Display] sRenderer`, Vulkan by default); `NV_D3D9`, when it names a backend,
         // decides instead. A test or script without `NV_D3D9` makes no choice: nothing draws.
-        #[cfg(windows)]
         if let Some(renderer) = choice.renderer {
             use engine_platform::d3d9real::{want_backend, Backends};
             want_backend(match renderer {
@@ -446,7 +491,6 @@ impl Host {
             return false;
         }
         self.join();
-        #[cfg(windows)]
         engine_platform::d3d9real::finish_recording(&mut self.engine);
         // The sound's recording too (`NV_SOUND_RECORD`): its WAV headers name every frame.
         engine_platform::dsound::finish_recording(&mut self.engine);
@@ -462,26 +506,34 @@ impl Host {
 
 /// [`Host::start_with`] and [`check_installation`] off Windows: the program builds on Linux and
 /// macOS, but the game cannot run there yet, so every start (and `--check`) is refused with the
-/// pieces that are still Windows-only, instead of a run that would go on without them (no window
-/// drawn, no sound, the game's own folder names not found, files listed by a call that stops)
-/// and fail somewhere less clear. On a processor other than x86-64 (Apple silicon) it also names
+/// pieces that are still Windows-only, instead of a run that would go on without them and fail
+/// somewhere less clear. The game's paths and file listings are provided
+/// (`engine_platform::host_paths`), and so is the sound on the speakers. The game's window with its
+/// mouse and keyboard is provided on Linux (winit, X11 and Wayland), not yet on macOS, where it
+/// needs the program's main thread. On a processor other than x86-64 (Apple silicon) it also names
 /// what differs there.
 #[cfg(any(not(windows), test))]
 fn not_provided_here() -> Result<(), String> {
-    not_provided_on(cfg!(target_arch = "x86_64"))
+    not_provided_on(cfg!(target_arch = "x86_64"), cfg!(target_vendor = "apple"))
 }
 
-/// [`not_provided_here`]'s message, for an x86-64 processor or another.
+/// [`not_provided_here`]'s message, for an x86-64 processor or another, on macOS or another
+/// system.
 #[cfg(any(not(windows), test))]
-fn not_provided_on(x86_64: bool) -> Result<(), String> {
+fn not_provided_on(x86_64: bool, apple: bool) -> Result<(), String> {
     let mut why = String::from(
         "nv-rs does not run the game on this system yet: it builds here, but these are only \
-         provided on Windows so far: the game's window with its mouse and keyboard (and so \
-         anything drawn), the sound on the speakers, the game's Windows folder names (a drive \
-         letter and backslashes) over this system's folders, the file listing's file times, \
-         this machine's tables (display adapter, sound devices, folders), which are measured on \
-         Windows, the distortion sound effect's table (measured from Windows' own DLL), and text \
-         in the game's code page outside ASCII",
+         provided on Windows so far: ",
+    );
+    if apple {
+        why.push_str(
+            "the game's window with its mouse and keyboard (and so anything drawn: on macOS the \
+             window needs the program's main thread), ",
+        );
+    }
+    why.push_str(
+        "this machine's tables (display adapter, sound devices, folders), which are measured on \
+         Windows, and code pages other than Windows' Western one (1252)",
     );
     if !x86_64 {
         why.push_str(
@@ -546,6 +598,63 @@ pub fn adapter_table_path() -> Option<PathBuf> {
     engine_platform::machine_file("NV_D3D9_ADAPTER", "d3d9_adapter.tsv")
 }
 
+/// The machine table's text. On Windows the file at [`adapter_table_path`], when it can be read.
+#[cfg(windows)]
+pub fn adapter_table_text() -> Option<String> {
+    std::fs::read_to_string(adapter_table_path()?).ok()
+}
+
+/// The machine table's text. On Linux and macOS the file `NV_D3D9_ADAPTER` names when it is set
+/// (a test's table), else the table of this machine (`engine_platform::machine_table`), made once
+/// per run from what the system reports, with the game's Documents and AppData inside nv-rs's own
+/// folder ([`own_folder`], made here when missing). What could not be answered is said in the log.
+#[cfg(not(windows))]
+pub fn adapter_table_text() -> Option<String> {
+    if let Some(path) = std::env::var_os("NV_D3D9_ADAPTER") {
+        return std::fs::read_to_string(path).ok();
+    }
+    static TABLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let own = own_folder();
+        if let Ok(own) = &own {
+            for folder in engine_platform::machine_table::game_folders(own) {
+                if let Err(why) = std::fs::create_dir_all(&folder) {
+                    eprintln!("machine table: {}: {why}", folder.display());
+                }
+            }
+        }
+        let (table, problems) = engine_platform::machine_table::this_machine(own);
+        for line in problems {
+            eprintln!("{line}");
+        }
+        table
+    });
+    Some(table.clone())
+}
+
+/// nv-rs's own folder on Linux and macOS (its saves, settings and the game's Documents and
+/// AppData): Linux `$XDG_DATA_HOME/nv-rs` (a full path only), else `~/.local/share/nv-rs`; macOS
+/// `~/Library/Application Support/nv-rs`. The same rule as `game_folders::own_folder` (#630), which
+/// takes this place when it is merged.
+#[cfg(not(windows))]
+pub fn own_folder() -> Result<PathBuf, String> {
+    let full = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    };
+    let home = full("HOME").ok_or("HOME is not set to a full path")?;
+    if cfg!(target_os = "macos") {
+        return Ok(home
+            .join("Library")
+            .join("Application Support")
+            .join("nv-rs"));
+    }
+    Ok(full("XDG_DATA_HOME")
+        .unwrap_or_else(|| home.join(".local").join("share"))
+        .join("nv-rs"))
+}
+
 /// Where the player's D3DX texture cache is: `NV_D3DX_CACHE`, else
 /// `%LOCALAPPDATA%\nv-rs\d3dx-cache` (made on this machine by `scripts/d3dx-texture-capture`
 /// from the player's own textures; it stays local).
@@ -585,7 +694,7 @@ pub fn wgpu_cache_path() -> Option<PathBuf> {
 /// renderer's start-up asks about the adapter. Without the file nothing is loaded: the first
 /// Direct3D 9 query stops that stage and its message says how to capture the table.
 fn load_adapter_table(e: &mut Engine) {
-    if let Some(text) = adapter_table_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+    if let Some(text) = adapter_table_text() {
         engine_platform::d3d9::load_adapter_table(e, &text);
     }
     if let Some(dir) = texture_cache_path() {
@@ -794,26 +903,31 @@ mod tests {
     fn a_start_off_windows_is_refused_naming_what_is_missing() {
         let why = super::not_provided_here().unwrap_err();
         for x86_64 in [true, false] {
-            let why = super::not_provided_on(x86_64).unwrap_err();
-            for piece in [
-                "window",
-                "mouse and keyboard",
-                "sound",
-                "folder names",
-                "file times",
-                "tables",
-                "distortion",
-                "code page",
-            ] {
-                assert!(why.contains(piece), "{piece}: {why}");
+            for apple in [true, false] {
+                let why = super::not_provided_on(x86_64, apple).unwrap_err();
+                for piece in ["sound devices", "tables", "code page"] {
+                    assert!(why.contains(piece), "{piece}: {why}");
+                }
+                // The window with its mouse and keyboard: provided on Linux, not yet on macOS.
+                assert_eq!(why.contains("window"), apple, "{why}");
+                assert_eq!(why.contains("mouse and keyboard"), apple, "{why}");
+                assert_eq!(why.contains("main thread"), apple, "{why}");
+                // The game's paths and file listings are provided off Windows now.
+                assert!(!why.contains("folder names"), "{why}");
+                assert!(!why.contains("file times"), "{why}");
+                // The sound on the speakers is provided everywhere (engine-platform sound_out.rs).
+                assert!(!why.contains("speakers"), "{why}");
+                // So is the distortion's table (engine-platform dsfx.rs, the DLL's constants).
+                assert!(!why.contains("distortion"), "{why}");
+                // The processor's own differences only off x86-64 (Apple silicon).
+                assert_eq!(why.contains("x87"), !x86_64, "{why}");
+                assert_eq!(why.contains("RSQRTSS"), !x86_64, "{why}");
             }
-            // The processor's own differences only off x86-64 (Apple silicon).
-            assert_eq!(why.contains("x87"), !x86_64, "{why}");
-            assert_eq!(why.contains("RSQRTSS"), !x86_64, "{why}");
         }
         assert_eq!(
             why,
-            super::not_provided_on(cfg!(target_arch = "x86_64")).unwrap_err()
+            super::not_provided_on(cfg!(target_arch = "x86_64"), cfg!(target_vendor = "apple"))
+                .unwrap_err()
         );
     }
 

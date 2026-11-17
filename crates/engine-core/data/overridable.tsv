@@ -69,7 +69,7 @@
 00643400	1	nv-rs perks
 00646260	0	JIP
 00646360	0	JIP
-00646d00	1	JIP
+00646d00	0	JIP
 00646e50	1	nv-rs weighty combat
 00652140	0	nv-rs thread races
 00652160	0	nv-rs thread races
@@ -276,11 +276,13 @@
 #> 3.9 GH2
 
 #> 3.9 GF
+004f15a0	0	JIP
 00601c30	0	JIP
 
 #> 3.9 GS
 
 #> 3.9 GW
+00867a40	0	JIP
 
 #> 3.9 GL
 

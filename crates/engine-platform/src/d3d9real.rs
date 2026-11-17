@@ -42,12 +42,10 @@
 //! render thread, the forwarded calls, and the keyboard and mouse state DirectInput reads
 //! ([`Input`], [`held_keys`], [`take_input`]). The real windows come from a window layer of the
 //! system's: `d3d9real/win32.rs` on Windows (the Win32 window, its messages and raw input, moved
-//! there unchanged); elsewhere none yet (`d3d9real/elsewhere.rs` refuses with a line). The real
-//! Direct3D 9 (`super::d3d9backend`) is Windows only.
-
-// Until the callers outside this file are compiled on every system (PR 3b), nothing calls this
-// file off Windows.
-#![cfg_attr(not(windows), allow(dead_code))]
+//! there unchanged); elsewhere `d3d9real/winit_window.rs` (winit: X11 and Wayland; macOS refused
+//! until a host hands the window layer the program's main thread), whose keyboard and mouse go
+//! through `d3d9real/input.rs` with the Win32 window's codes and rules. The real Direct3D 9
+//! (`super::d3d9backend`) is Windows only.
 
 #[cfg(windows)]
 use crate::mouse_look::{absolute_to_pixels, should_recentre, MouseLook, RawMotion};
@@ -70,14 +68,22 @@ use windows::Win32::Graphics::Direct3D9::*;
 mod win32;
 #[cfg(windows)]
 use win32 as window_layer;
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
+mod winit_window;
+#[cfg(all(not(windows), not(target_os = "android")))]
+use winit_window as window_layer;
+// Android (the fork's test build): no window layer; the activity's window is the game's.
+#[cfg(target_os = "android")]
 mod elsewhere;
-#[cfg(not(windows))]
+#[cfg(target_os = "android")]
 use elsewhere as window_layer;
+// The keyboard and mouse of a window layer other than Win32's, into [`Input`].
+mod input;
 use window_layer::window_thread;
-// Off Windows the fork's test builds (Android, the Linux room) give the game's window the app's
-// native window, here below (`set_native_window`, `window_created`, `window_titled`,
-// `window_moved`), not a window layer's.
+// Off Windows the fork's test builds (Android, and the Linux room when it hands its own window
+// over) give the game's window the app's native window, here below (`set_native_window`,
+// `window_created`, `window_titled`, `window_moved`), not a window layer's; otherwise the window
+// layer makes it.
 #[cfg(windows)]
 pub use window_layer::{native_size, switch_window_mode, window_moved, window_titled};
 
@@ -88,10 +94,62 @@ type WindowTitled = fn(&mut Engine, u32, &[u8]);
 /// The real window following the game's position and size ([`window_moved`]).
 type WindowMoved = fn(&mut Engine, u32, [i32; 4], u32);
 
+/// A real window as its window layer names it (never 0): on Windows its `HWND`, elsewhere the
+/// layer's own number for it, by which the drawing side knows it (`d3d9_wgpu::register_window`).
+/// This file only keeps it and hands it on (to the layer's functions and to the backend's
+/// `CreateDevice`); it never reads it as a Win32 handle.
+pub type RealWindow = isize;
+
 /// What a window layer gives this file, the same on every system: the thread that makes the real
-/// windows ([`Request`]s sent to it, each answered with the real window, 0 when it failed), and the
-/// real window following the game's title and position.
+/// windows ([`Request`]s sent to it, each answered with the [`RealWindow`], 0 when it failed), and
+/// the real window following the game's title and position.
+///
+/// What every layer gives the drawing side and calls here, so that nothing of one system's crosses
+/// to this file:
+/// - each window's surface handles (raw-window-handle), its client area's size in real pixels,
+///   whether it is minimised or hidden, and its monitor's refresh rate: `d3d9_wgpu::GameWindow`,
+///   made known by its [`RealWindow`] (on Windows `d3d9_wgpu` reads the same four from Windows on
+///   the `HWND`, in the window's own DPI awareness);
+/// - its keyboard and mouse by DirectInput's codes into [`Input`] (`input.rs`: `key`, `button`,
+///   `moved`; F11 the frame-rate counter's by `d3d9_wgpu::frame_rate::key`, F12 the report's),
+///   `input::focus_lost` when it loses the focus, [`window_closed`] when the player closes it, and
+///   `d3d9_wgpu::window_changed` when it is activated, shown again or its scale changes. The
+///   Win32 window keeps its own message handling for keys and the mouse (moved unchanged in PR 3a)
+///   into the same [`Input`].
 const _: (WindowThread, WindowTitled, WindowMoved) = (window_thread, window_titled, window_moved);
+
+/// The player closed the game's window (its close button, or the system's way to close a window):
+/// the run ends, as the original's does. What the host asked to finish first runs before (the
+/// copy-out of saves, `crate::on_exit`). The window runs on its own thread, so this covers only the
+/// jobs main has already handed on: a save written in the frame still running on main when the
+/// window closes can be lost.
+fn window_closed() -> ! {
+    // Tests: a thread that asked for it ([`TEST_CLOSE`]) says it got here and stops here instead
+    // of ending the test run.
+    #[cfg(test)]
+    if TEST_CLOSE.with(std::cell::Cell::get) {
+        TEST_CLOSED.store(true, std::sync::atomic::Ordering::Relaxed);
+        loop {
+            std::thread::park();
+        }
+    }
+    eprintln!(
+        "NV_D3D9={}: the game's window was closed: the run ends",
+        tag()
+    );
+    crate::run_exit_hooks();
+    crate::end_process(0)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: this thread's [`window_closed`] stops instead of ending the run.
+    static TEST_CLOSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests: a [`window_closed`] of a [`TEST_CLOSE`] thread was reached.
+#[cfg(test)]
+static TEST_CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The real Direct3D 9 device a backend hands the layer's side channel (D3DX's texture loading,
 /// `super::d3dxreal`): Windows only; elsewhere there is none.
@@ -234,7 +292,7 @@ fn tag() -> &'static str {
 /// handle, the stream to the backend, and what was asked of it.
 #[derive(Default)]
 pub struct Real {
-    windows: HashMap<u32, isize>,
+    windows: HashMap<u32, RealWindow>,
     /// The stream to the backend, made with the first `IDirect3D9`.
     stream: Option<Stream>,
     /// The open cut's slot (`super::d3d9draw`): where the drawing side's calls record, until the
@@ -289,7 +347,8 @@ impl std::fmt::Debug for Real {
 impl Real {
     /// Tests: whether no answer of the real device has differed from the model's, once every
     /// command recorded is carried out.
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn logged_is_empty(&mut self) -> bool {
         if let Some(s) = self.stream.as_mut() {
             s.finish();
@@ -312,7 +371,8 @@ fn real(e: &mut Engine) -> &mut Real {
 
 /// Tests: `stream` as the backend's for the modelled device `device`, as a made device has one, so its
 /// calls are recorded (the two-producer tests watch the order the backend sees).
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn test_stream(e: &mut Engine, device: u32, stream: Stream) {
     let r = real(e);
     r.stream = Some(stream);
@@ -321,14 +381,15 @@ pub(crate) fn test_stream(e: &mut Engine, device: u32, stream: Stream) {
 
 /// Tests: the modelled object `object` as one the backend was asked for (its calls are recorded;
 /// a surface reads back through [`read_surface`]).
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn test_forwarded(e: &mut Engine, object: u32) {
     real(e).forwarded.insert(object);
 }
 
 /// The real window of a modelled window handle, when it has one (under the device lock with real
 /// threads: the window functions make them, the device presents in them).
-pub fn real_window(e: &Engine, handle: u32) -> Option<isize> {
+pub fn real_window(e: &Engine, handle: u32) -> Option<RealWindow> {
     let _device = engine_core::real_threads::device_guard(e);
     device_ref!(e).real.windows.get(&handle).copied()
 }
@@ -616,22 +677,35 @@ pub fn take_input() -> Input {
 
 /// A window to make on the window thread: title, style, extended style, rectangle, the real
 /// parent (0 for a top-level window), how a top-level `WS_VISIBLE` one is shown, and where the
-/// handle goes (0 when it failed).
+/// handle goes (0 when it failed). The styles are the game's own (its `CreateWindowExA`
+/// arguments, the modelled window's), which the Win32 window hands Windows as they are; another
+/// window layer reads only what they ask for ([`Request::visible`]).
 struct Request {
     title: Vec<u8>,
     style: u32,
+    #[cfg_attr(not(windows), allow(dead_code))]
     ex_style: u32,
     rect: [i32; 4],
-    parent: isize,
+    parent: RealWindow,
     show: Showing,
-    reply: std::sync::mpsc::Sender<isize>,
+    reply: std::sync::mpsc::Sender<RealWindow>,
+}
+
+/// `WS_VISIBLE`: the game asks for its window shown.
+const WS_VISIBLE_STYLE: u32 = 0x1000_0000;
+
+impl Request {
+    /// Whether the game asks for the window shown (`WS_VISIBLE` in its style).
+    #[cfg_attr(windows, allow(dead_code))]
+    fn visible(&self) -> bool {
+        self.style & WS_VISIBLE_STYLE != 0
+    }
 }
 
 /// Whether the game's window is shown without taking the focus (`NV_D3D9_BACKGROUND`, for the
 /// scripted runs, so that one does not take the keyboard and the cursor from whoever works
 /// beside it), and at the bottom of the window stack, behind that person's windows. Off, it is
 /// shown as the game's `WS_VISIBLE` window is: activated.
-#[cfg(windows)]
 fn shown_in_background() -> bool {
     std::env::var_os("NV_D3D9_BACKGROUND").is_some()
 }
@@ -654,7 +728,6 @@ enum Showing {
     Never,
 }
 
-#[cfg(windows)]
 impl Showing {
     /// The run's choice: `NV_D3D9_HIDDEN=1` before `NV_D3D9_BACKGROUND`.
     fn asked() -> Showing {
@@ -731,10 +804,92 @@ fn record_game_window(
     }
 }
 
+/// What the new lighting reads of the game for a frame (`d3d9_wgpu::scene_light`).
+pub use d3d9_wgpu::scene_light::GameView as SceneView;
+
+/// The new lighting's reader of the game's camera and sun ([`want_scene_light`]); unset while off.
+static SCENE_LIGHT: std::sync::OnceLock<fn(&Engine) -> Option<SceneView>> =
+    std::sync::OnceLock::new();
+
+/// The new lighting's strength ([`want_scene_light`]), as `f32` bits; 0 until the run chose one (the
+/// step's default stands).
+static SCENE_LIGHT_STRENGTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Turns the new lighting on (ambient occlusion, `d3d9_wgpu::scene_light`;
+/// the run's choice, `host::fixes::Choice::ambient_occlusion`), before the game makes its device,
+/// at `strength` (`host::fixes::Choice::ambient_occlusion_strength`; clamped to
+/// `d3d9_wgpu::scene_light::STRENGTH_RANGE`). The frame's camera and sun, as `read` finds them in
+/// the game, are recorded for the backend where the world is drawn and nothing after it yet: at
+/// the frame draw's port-added point ([`engine_core::world_drawn`], first and third person) and at
+/// each depth-only `Clear` (the game's, before its first-person arms; the device runs the step
+/// once a frame, at the first). Never called while off: nothing is then read or recorded.
+pub fn want_scene_light(read: fn(&Engine) -> Option<SceneView>, strength: f32) {
+    d3d9_wgpu::scene_light::enable(true);
+    SCENE_LIGHT_STRENGTH.store(
+        d3d9_wgpu::scene_light::clamp_strength(strength).to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let _ = SCENE_LIGHT.set(read);
+    engine_core::world_drawn::install(world_drawn);
+}
+
+/// The frame draw's port-added point ([`engine_core::world_drawn`], installed by
+/// [`want_scene_light`]): the camera and sun recorded on the game's device.
+fn world_drawn(e: &mut Engine) {
+    if let Some(read) = SCENE_LIGHT.get().copied() {
+        world_drawn_lit(e, read);
+    }
+}
+
+/// [`world_drawn`] with the reader `read`, under the device lock: on the game's device (the
+/// first the backend has; none before the game makes it).
+fn world_drawn_lit(e: &mut Engine, read: fn(&Engine) -> Option<SceneView>) {
+    let _device = engine_core::real_threads::device_guard(e);
+    let Some(this) = real(e).devices.first().map(|(d, _)| *d) else {
+        return;
+    };
+    record_scene_light(e, this, read);
+}
+
+/// Records the frame's camera and sun as `read` finds them, for the backend's new lighting
+/// (`SetTransform` of `d3d9_wgpu::scene_light::STATE`) on the device `this`, at the run's strength;
+/// nothing when the game has no usable camera.
+fn record_scene_light(e: &mut Engine, this: u32, read: fn(&Engine) -> Option<SceneView>) {
+    let params = read(e)
+        .as_ref()
+        .and_then(d3d9_wgpu::scene_light::Params::from_game);
+    if let Some(mut p) = params {
+        let chosen = SCENE_LIGHT_STRENGTH.load(std::sync::atomic::Ordering::Relaxed);
+        if chosen != 0 {
+            p.strength = f32::from_bits(chosen);
+        }
+        let m = p.to_words();
+        record(
+            e,
+            this,
+            Cmd::SetTransform {
+                device: this,
+                state: d3d9_wgpu::scene_light::STATE,
+                matrix: Data::from_words(&m),
+            },
+        );
+    }
+}
+
+/// Turns the sun shadows on (`d3d9_wgpu::sun_shadow`; the run's choice,
+/// `host::fixes::Choice::sun_shadows`), before the game makes its device: at each depth-only
+/// `Clear` the frame's camera (the new lighting's words) and then its rotation, place and sun, as
+/// `read` finds them in the game, are recorded for the backend. Never called while off: nothing is
+/// then read or recorded for them.
+pub fn want_sun_shadows(read: fn(&Engine) -> Option<SceneView>) {
+    d3d9_wgpu::sun_shadow::enable(true);
+    let _ = SCENE_LIGHT.set(read);
+}
+
 /// `CreateWindowExA` made the modelled window `handle` (a child of `parent` when that is not
 /// 0): a real window of the same title, styles and rectangle (a child of the parent's real
-/// window).
-#[cfg(windows)]
+/// window). Off Windows, while the app hands its own window over (Android; the Linux room), that
+/// window instead ([`native_window_created`]).
 #[allow(clippy::too_many_arguments)]
 pub fn window_created(
     e: &mut Engine,
@@ -746,6 +901,11 @@ pub fn window_created(
     parent: u32,
 ) {
     if !wanted() {
+        return;
+    }
+    #[cfg(not(windows))]
+    if native_window_in_use() {
+        native_window_created(e, handle, style, ex_style, rect, parent);
         return;
     }
     let real_parent = if parent != 0 {
@@ -795,6 +955,7 @@ pub fn window_created(
 /// The borderless window ([`borderless`]), which keeps the monitor's size when the game moves or
 /// sizes its window (0: none), and the game's window that fills it.
 static BORDERLESS_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+#[cfg_attr(not(windows), allow(dead_code))]
 static BORDERLESS_CHILD: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 /// The game's own top-level window and the child it draws in (the first of each made), the
@@ -891,23 +1052,27 @@ pub fn switch_window_mode(_on: bool) -> bool {
     false
 }
 
-/// `CreateWindowExA` made the modelled window `handle`: the game's top-level window is the
-/// activity's native window (waited for a little, the activity hands it over when it has one); a
-/// child of it draws there too.
+/// Whether the game's window is the app's native window ([`set_native_window`]): always on
+/// Android; on Linux when the test room handed its window over, or draws off screen.
 #[cfg(not(windows))]
-#[allow(clippy::too_many_arguments)]
-pub fn window_created(
+fn native_window_in_use() -> bool {
+    cfg!(target_os = "android")
+        || offscreen()
+        || NATIVE_WINDOW.load(std::sync::atomic::Ordering::Relaxed) != 0
+}
+
+/// `CreateWindowExA` made the modelled window `handle` while the app hands its own window over
+/// ([`native_window_in_use`]): the game's top-level window is the activity's native window (waited
+/// for a little, the activity hands it over when it has one); a child of it draws there too.
+#[cfg(not(windows))]
+fn native_window_created(
     e: &mut Engine,
     handle: u32,
-    _title: &[u8],
     style: u32,
     ex_style: u32,
     rect: [i32; 4],
     parent: u32,
 ) {
-    if !wanted() {
-        return;
-    }
     // Off screen (headless): no window to wait for; a token stands for it.
     if offscreen() && NATIVE_WINDOW.load(std::sync::atomic::Ordering::Relaxed) == 0 {
         NATIVE_WINDOW.store(1, std::sync::atomic::Ordering::Relaxed);
@@ -936,13 +1101,23 @@ pub fn window_created(
     real(e).windows.insert(handle, window);
 }
 
-/// No title on Android.
+/// The real window takes the game's title: the window layer's; the app's native window keeps its
+/// own.
 #[cfg(not(windows))]
-pub fn window_titled(_e: &mut Engine, _handle: u32, _title: &[u8]) {}
+pub fn window_titled(e: &mut Engine, handle: u32, title: &[u8]) {
+    if !native_window_in_use() {
+        window_layer::window_titled(e, handle, title);
+    }
+}
 
-/// The game's rectangles kept (as on Windows); the native window itself does not move.
+/// The real window follows the game's position and size: the window layer's; for the app's native
+/// window, which does not move, the game's rectangles are kept (as on Windows).
 #[cfg(not(windows))]
 pub fn window_moved(e: &mut Engine, handle: u32, rect: [i32; 4], flags: u32) {
+    if !native_window_in_use() {
+        window_layer::window_moved(e, handle, rect, flags);
+        return;
+    }
     let Some(window) = real_window(e, handle) else {
         return;
     };
@@ -993,11 +1168,15 @@ fn backend_of(
             .with_warm(warm),
         )
     };
-    // Android: no real Direct3D 9; wgpu draws whatever was asked.
     #[cfg(not(windows))]
     let real = || -> Box<dyn d3d9_stream::Backend> {
         let _ = (&board, warm);
-        Box::new(wgpu(d3d9_wgpu::Output::Window))
+        // The fork's test builds (Android, the Linux room: the app's own window) draw with wgpu
+        // whatever was asked, as before the merge of upstream's window layer.
+        if native_window_in_use() {
+            return Box::new(wgpu(d3d9_wgpu::Output::Window));
+        }
+        no_real_direct3d9()
     };
     match which {
         Backends::Real => real(),
@@ -1013,6 +1192,18 @@ fn backend_of(
             Box::new(wgpu(d3d9_wgpu::Output::Offscreen)),
         )),
     }
+}
+
+/// The real Direct3D 9 asked for where there is none (`NV_D3D9=real` or `real,wgpu`, the Renderer
+/// setting's `d3d9`, or wgpu's fallback when it finds no graphics card or cannot make the game's
+/// device): refused, the run ends with a line saying so.
+#[cfg(not(windows))]
+fn no_real_direct3d9() -> ! {
+    eprintln!(
+        "NV_D3D9={}: the real Direct3D 9 is only on Windows (on this system only wgpu draws: Vulkan, or Metal on macOS): the run ends",
+        backends().map_or("real", Backends::name)
+    );
+    crate::end_process(1)
 }
 
 /// Where wgpu draws the game's frames: its window, or off screen with no window at all
@@ -1047,9 +1238,7 @@ impl d3d9_stream::Backend for WgpuWithReport {
                 self.back_buffer = back_buffers.to_words().first().copied().unwrap_or(0);
             }
             Cmd::Present { .. } => {
-                #[cfg(windows)]
                 let (wgpu, back) = (&mut self.wgpu, self.back_buffer);
-                #[cfg(windows)]
                 shot::report_with(|| {
                     wgpu.device()
                         .and_then(|d| d.read_surface_pixels(back))
@@ -1362,8 +1551,84 @@ pub fn clear(
     stencil: u32,
     model: u32,
 ) {
+    let light = SCENE_LIGHT.get().copied();
+    clear_lit(
+        e, this, count, rects, flags, colour, z, stencil, model, light,
+    );
+}
+
+/// [`clear`] with the new lighting's reader `light` ([`want_scene_light`]; none while off).
+#[allow(clippy::too_many_arguments)]
+fn clear_lit(
+    e: &mut Engine,
+    this: u32,
+    count: u32,
+    rects: u32,
+    flags: u32,
+    colour: u32,
+    z: u32,
+    stencil: u32,
+    model: u32,
+    light: Option<fn(&Engine) -> Option<SceneView>>,
+) {
     if stream_of(real(e), this).is_none() {
         return;
+    }
+    // `D3DCLEAR_ZBUFFER` alone: the game's depth-only clear of its scene before the first-person
+    // arms. With the new lighting on, the frame's camera and sun first.
+    if flags == 2 {
+        if let Some(read) = light {
+            record_scene_light(e, this, read);
+            // The sun shadows ([`want_sun_shadows`]): the camera's rotation and place and the sun,
+            // after the frustum above (none without a sun); draws after it (the first-person arms
+            // and weapon) neither cast nor take the shadows.
+            let sun = read(e)
+                .as_ref()
+                .filter(|_| d3d9_wgpu::sun_shadow::enabled())
+                .and_then(d3d9_wgpu::sun_shadow::Frame::from_game);
+            if let Some(f) = sun {
+                let m = f.to_words();
+                record(
+                    e,
+                    this,
+                    Cmd::SetTransform {
+                        device: this,
+                        state: d3d9_wgpu::sun_shadow::STATE,
+                        matrix: Data::from_words(&m),
+                    },
+                );
+            }
+        }
+    }
+    // A colour and depth clear (the scene's, before the world is drawn; the water reflection's too):
+    // with the sun shadows on, the frame's camera and sun for the lit draws that follow
+    // (`d3d9_wgpu::sun_shadow::BEGIN_STATE`).
+    if flags & 3 == 3 && d3d9_wgpu::sun_shadow::enabled() {
+        if let Some(read) = light {
+            let view = read(e);
+            let params = view
+                .as_ref()
+                .and_then(d3d9_wgpu::scene_light::Params::from_game);
+            let frame = view
+                .as_ref()
+                .and_then(d3d9_wgpu::sun_shadow::Frame::from_game);
+            if let (Some(p), Some(f)) = (params, frame) {
+                for (state, m) in [
+                    (d3d9_wgpu::sun_shadow::VIEW_STATE, p.to_words()),
+                    (d3d9_wgpu::sun_shadow::BEGIN_STATE, f.to_words()),
+                ] {
+                    record(
+                        e,
+                        this,
+                        Cmd::SetTransform {
+                            device: this,
+                            state,
+                            matrix: Data::from_words(&m),
+                        },
+                    );
+                }
+            }
+        }
     }
     // The rectangles' words on the stack up to 16 rectangles (the game clears one or none).
     let mut inline = [0u32; 64];
@@ -2388,11 +2653,6 @@ fn wgpu_answer(r: &mut Real, query: u32) -> Option<Option<(u32, u32)>> {
 /// [`query_get_data`] with the render thread, without waiting for it: `None` without the render
 /// thread, or for a `D3DGETDATA_FLUSH` read whose `END` the real device has not issued yet (the
 /// call waits then).
-#[cfg(not(windows))]
-fn query_without_waiting(_r: &mut Real, _query: u32, _flags: u32) -> Option<Option<(u32, u32)>> {
-    None
-}
-
 #[cfg(windows)]
 fn query_without_waiting(r: &mut Real, query: u32, flags: u32) -> Option<Option<(u32, u32)>> {
     let board = r.query_board.as_ref()?;
@@ -2527,8 +2787,9 @@ pub fn texture_set_lod(e: &mut Engine, texture: u32, lod: u32, model: u32) {
 // takes them only at those presents (counted from 1), so a short stretch can be taken every frame.
 // Nothing is read or made when `NV_SHOT` is unset; the game's state and the model are not touched.
 // ---------------------------------------------------------------------------------------------
-#[cfg(windows)]
 pub(super) mod shot {
+    // Off Windows only the tests read most of this: the capture reads the real Direct3D 9.
+    #![cfg_attr(not(windows), allow(dead_code))]
     #[cfg(windows)]
     use super::*;
     use std::path::PathBuf;
@@ -2869,6 +3130,8 @@ pub(super) mod shot {
 //   reported too (`another mesh, same pixel shader as a face pass`: an NPC head to compare with).
 // ---------------------------------------------------------------------------------------------
 pub(super) mod face_check {
+    // Off Windows only the tests read these: the real Direct3D 9 that looks is Windows only.
+    #![cfg_attr(not(windows), allow(dead_code))]
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Mutex, OnceLock};
@@ -2969,6 +3232,7 @@ pub(super) mod face_check {
 }
 
 /// `NV_FACE_CHECK`: a texture was created (diagnostic only); the face texture is followed.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn face_check_texture(
     texture: u32,
     levels: &[u32],
@@ -3077,6 +3341,7 @@ pub(super) fn face_check_upload(
 }
 
 /// `NV_FACE_CHECK`: a sampler took a texture.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn face_check_bind(sampler: u32, texture: u32) {
     let mut s = face_check::state();
     let old = s.samplers.insert(sampler, texture).unwrap_or(0);
@@ -3097,6 +3362,7 @@ pub(super) fn face_check_bind(sampler: u32, texture: u32) {
 }
 
 /// `NV_FACE_CHECK`: a shader was set.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn face_check_shader(shader: u32, pixel: bool) {
     let mut s = face_check::state();
     if pixel {
@@ -3108,6 +3374,7 @@ pub(super) fn face_check_shader(shader: u32, pixel: bool) {
 
 /// `NV_FACE_CHECK`: a frame ends: its indexed draw counts (the first 12 frames once the face texture
 /// exists) and, once, the projection transform as set.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn face_check_present() {
     let mut s = face_check::state();
     if s.faces.is_empty() {
@@ -3144,6 +3411,7 @@ pub(super) fn face_check_present() {
 
 /// `NV_FACE_CHECK`: an indexed draw with the face texture bound, or one of the few after it.
 /// `NV_FACE_CHECK`: a render state was set.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn face_check_render_state(state: u32, value: u32) {
     let mut s = face_check::state();
     s.render_states.insert(state, value);
@@ -3153,6 +3421,7 @@ pub(super) fn face_check_render_state(state: u32, value: u32) {
 /// `NV_FACE_CHECK`: float shader constants were set (`pixel` for the pixel shader's).
 /// `NV_FACE_CHECK`: float constants set (`words`: the registers, 4 words each, as the call gave
 /// them).
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn face_check_constants(pixel: bool, start: u32, words: &[u32]) {
     let mut s = face_check::state();
     for (i, register) in words.chunks_exact(4).take(256).enumerate() {
@@ -3168,6 +3437,7 @@ pub(super) fn face_check_constants(pixel: bool, start: u32, words: &[u32]) {
 }
 
 /// The render states the face check prints, with their `D3DRENDERSTATETYPE` numbers.
+#[cfg_attr(not(windows), allow(dead_code))]
 const FACE_CHECK_STATES: [(&str, u32); 14] = [
     ("ZENABLE", 7),
     ("FILLMODE", 8),
@@ -3187,6 +3457,7 @@ const FACE_CHECK_STATES: [(&str, u32); 14] = [
 
 /// The determinant of the upper-left 3x3 of three rows of four float words (a negative one
 /// mirrors, flipping the triangles' winding).
+#[cfg_attr(not(windows), allow(dead_code))]
 fn face_check_det3(rows: [&[u32]; 3]) -> f32 {
     let m = |r: usize, c: usize| f32::from_bits(rows[r][c]);
     m(0, 0) * (m(1, 1) * m(2, 2) - m(1, 2) * m(2, 1))
@@ -3196,6 +3467,7 @@ fn face_check_det3(rows: [&[u32]; 3]) -> f32 {
 
 /// The determinants the face check prints: view (2), projection (3), world (256) when set, and
 /// of vertex constants c0..c2 (rows) when set.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn face_check_determinants(s: &face_check::State) -> String {
     let mut parts = Vec::new();
     for (name, state) in [("view", 2u32), ("projection", 3), ("world", 256)] {
@@ -3217,6 +3489,7 @@ pub(super) fn face_check_determinants(s: &face_check::State) -> String {
 }
 
 /// One line of float constants: `cN=(x,y,z,w)` for each register set so far, in order.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn face_check_constant_list(map: &HashMap<u32, [u32; 4]>, below: u32) -> String {
     let mut registers: Vec<u32> = map.keys().copied().filter(|&r| r < below).collect();
     registers.sort();
@@ -3232,6 +3505,7 @@ pub(super) fn face_check_constant_list(map: &HashMap<u32, [u32; 4]>, below: u32)
 
 /// `NV_FACE_CHECK`: an indexed draw with the face texture bound, or one of the few after it.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn face_check_draw(
     kind: u32,
     base_vertex: u32,
@@ -3416,7 +3690,8 @@ pub(crate) fn test_window() -> Option<isize> {
 
 /// Test only: the 64 by 64 windowed `D3DPRESENT_PARAMETERS` words a test device is made with
 /// (one back buffer, `D3DSWAPEFFECT_DISCARD`).
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn test_present() -> [u32; 14] {
     let mut p = [0u32; 14];
     p[0] = 64;
@@ -3497,7 +3772,8 @@ pub(crate) fn test_real_device_on(
 /// Test only: `backend` as the engine's forwarding (carried out at once, or on a render thread
 /// with `threaded`), with the modelled `devices` and `objects` given counterparts there (the
 /// stand-ins of `d3d9backend::stub`).
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn test_forwarding(
     e: &mut Engine,
     backend: Box<dyn d3d9_stream::Backend>,
@@ -3516,7 +3792,8 @@ pub(crate) fn test_forwarding(
 }
 
 /// Test only: returns once every command recorded is carried out (the render thread's too).
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn test_finish(e: &mut Engine) {
     if let Some(s) = real(e).stream.as_mut() {
         s.finish();
@@ -3547,9 +3824,161 @@ pub(crate) fn real_texture(e: &mut Engine, texture: u32) -> Option<IDirect3DBase
     b.test_texture(texture)
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window layer other than Win32's reads from the game's styles only whether the window is
+    /// to be shown: `WS_VISIBLE`, whatever else the style holds.
+    #[test]
+    fn a_request_is_visible_when_the_game_asks_for_it() {
+        let request = |style| Request {
+            title: Vec::new(),
+            style,
+            ex_style: 0,
+            rect: [0; 4],
+            parent: 0,
+            show: Showing::Activated,
+            reply: std::sync::mpsc::channel().0,
+        };
+        assert!(request(0x1000_0000).visible());
+        // WS_OVERLAPPEDWINDOW | WS_VISIBLE, the game's framed window.
+        assert!(request(0x10cf_0000).visible());
+        assert!(!request(0x00cf_0000).visible());
+        assert!(!request(0).visible());
+        assert!(!request(0xefff_ffff).visible());
+    }
+
+    /// A backend that keeps each command's name and its state or flags word.
+    struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<(&'static str, u32)>>>);
+
+    impl d3d9_stream::Backend for Recorder {
+        fn execute(&mut self, cmd: Cmd<Data<'_>>) -> Reply {
+            let word = match &cmd {
+                Cmd::SetTransform { state, .. } => *state,
+                Cmd::Clear { flags, .. } => *flags,
+                _ => 0,
+            };
+            self.0.lock().unwrap().push((cmd.name(), word));
+            Reply::None
+        }
+    }
+
+    /// A game view the new lighting can use (an interior: no sun).
+    fn stub_view(_: &Engine) -> Option<SceneView> {
+        Some(SceneView {
+            frustum: [-0.7, 0.7, 0.4, -0.4, 5.0, 5000.0],
+            ortho: false,
+            rotate: [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            position: [0.0; 3],
+            to_sun: None,
+            sun_colour: [0.0; 3],
+            interior: true,
+        })
+    }
+
+    /// The new lighting's hook: with a reader installed, the game's depth-only `Clear` (flags 2) is
+    /// preceded by exactly one `SetTransform` of the new lighting's state, immediately before it;
+    /// any other clear (colour, colour and depth, depth and stencil) records only itself; without
+    /// a reader nothing is added, and in this test binary none is ever installed, so the public
+    /// `clear` adds nothing either.
+    #[test]
+    fn the_new_lighting_is_recorded_just_before_the_depth_only_clear() {
+        const DEVICE: u32 = 0x1000;
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut e = Engine::new();
+        {
+            let r = real(&mut e);
+            r.stream = Some(Stream::direct(Box::new(Recorder(std::sync::Arc::clone(
+                &log,
+            )))));
+            r.devices.push((DEVICE, None));
+        }
+        let cleared =
+            |e: &mut Engine, flags: u32, light: Option<fn(&Engine) -> Option<SceneView>>| {
+                log.lock().unwrap().clear();
+                clear_lit(e, DEVICE, 0, 0, flags, 0, 0, 0, 0, light);
+                std::mem::take(&mut *log.lock().unwrap())
+            };
+        let state = d3d9_wgpu::scene_light::STATE;
+        assert_eq!(
+            cleared(&mut e, 2, Some(stub_view)),
+            [("SetTransform", state), ("Clear", 2)]
+        );
+        for flags in [7, 3, 6, 1] {
+            assert_eq!(
+                cleared(&mut e, flags, Some(stub_view)),
+                [("Clear", flags)],
+                "{flags}"
+            );
+        }
+        assert_eq!(cleared(&mut e, 2, None), [("Clear", 2)]);
+        // A reader that finds no usable camera (the main menu): nothing added.
+        assert_eq!(cleared(&mut e, 2, Some(|_| None)), [("Clear", 2)]);
+        // Never asked for in this binary: the public clear adds nothing.
+        assert!(SCENE_LIGHT.get().is_none());
+        log.lock().unwrap().clear();
+        clear(&mut e, DEVICE, 0, 0, 2, 0, 0, 0, 0);
+        assert_eq!(*log.lock().unwrap(), [("Clear", 2)]);
+    }
+
+    /// The frame draw's point where the world is drawn (`engine_core::world_drawn`, first and
+    /// third person): with a reader, exactly one `SetTransform` of the new lighting's state on the
+    /// game's device, carrying the camera and the run's strength; nothing before the game has its
+    /// device or without a usable camera. Never asked for in this binary: the point records nothing.
+    #[test]
+    fn the_new_lighting_is_recorded_where_the_world_is_drawn() {
+        const DEVICE: u32 = 0x1000;
+        type Seen = std::sync::Arc<std::sync::Mutex<Vec<(u32, Vec<u32>)>>>;
+        /// A backend that keeps each `SetTransform`'s state and words, and each other command's name
+        /// as state 0.
+        struct Words(Seen);
+        impl d3d9_stream::Backend for Words {
+            fn execute(&mut self, cmd: Cmd<Data<'_>>) -> Reply {
+                let seen = match &cmd {
+                    Cmd::SetTransform { state, matrix, .. } => (*state, matrix.to_words().to_vec()),
+                    _ => (0, Vec::new()),
+                };
+                self.0.lock().unwrap().push(seen);
+                Reply::None
+            }
+        }
+        let seen: Seen = std::sync::Arc::default();
+        let mut e = Engine::new();
+        real(&mut e).stream = Some(Stream::direct(Box::new(Words(std::sync::Arc::clone(
+            &seen,
+        )))));
+        let take = || std::mem::take(&mut *seen.lock().unwrap());
+        // No device yet (the main menu's start): nothing.
+        world_drawn_lit(&mut e, stub_view);
+        assert!(take().is_empty());
+        real(&mut e).devices.push((DEVICE, None));
+        let state = d3d9_wgpu::scene_light::STATE;
+        let strength = |e: &mut Engine| {
+            world_drawn_lit(e, stub_view);
+            let got = take();
+            assert_eq!(got.len(), 1, "{got:?}");
+            assert_eq!(got[0].0, state);
+            d3d9_wgpu::scene_light::Params::from_words(&got[0].1)
+                .expect("usable parameters")
+                .strength
+        };
+        // The default strength until the run chose one; then the chosen one.
+        assert_eq!(strength(&mut e), d3d9_wgpu::scene_light::STRENGTH);
+        let was =
+            SCENE_LIGHT_STRENGTH.swap(0.85f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        let chosen = strength(&mut e);
+        SCENE_LIGHT_STRENGTH.store(was, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(chosen, 0.85);
+        // No usable camera: nothing.
+        world_drawn_lit(&mut e, |_| None);
+        assert!(take().is_empty());
+        // Never asked for in this binary: the frame draw's point records nothing.
+        assert!(SCENE_LIGHT.get().is_none());
+        engine_core::world_drawn::world_drawn(&mut e);
+        world_drawn(&mut e);
+        assert!(take().is_empty());
+    }
 
     /// With real threads, a kernel-locked function that reaches the device's state takes the device
     /// lock first: `SetWindowPos` (an import, run under the kernel lock) moves the real window
