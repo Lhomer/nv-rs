@@ -210,3 +210,259 @@ fn np_off_takes_nothing() {
     assert_eq!(r.steps, 0);
     assert!(!owns(ACTOR));
 }
+
+/// What a fall's hand-over did.
+struct Fell {
+    /// The knock state after it, the strength `KnockExplosion` was asked for, the bodies' velocity
+    /// set (game units a second, the root body's) and the body's centre's at the hand-over (from
+    /// [`falls`]), the most a body was off the drawn pose once moved (game units), the fastest a
+    /// body rose (game units a second), whether the get-up watch has it.
+    knock_state: u8,
+    strength: f32,
+    root_speed: f32,
+    centre_speed: f32,
+    body_off: f32,
+    jump: f32,
+    frame: f32,
+    rising: f32,
+    centre_rising: f32,
+    havok_root: f32,
+    havok_centre: f32,
+    get_up: bool,
+    steps: u32,
+    frames_to_fall: u32,
+}
+
+fn fall_run(speed: f32) -> Fell {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static STRENGTH: AtomicU32 = AtomicU32::new(u32::MAX);
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut f = Fixture::new(
+        rig_fixture::fnv_skeleton(),
+        Ground {
+            collision: Some(0.0),
+            navmesh: -8.0,
+        },
+    );
+    f.make_character();
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    let was = crate::gunplay::tuning();
+    crate::gunplay::set_tuning(crate::gunplay::Tuning {
+        new_physics: true,
+        ..was
+    });
+    // The game's calls of the hand-over: not an AI thread, `CanKnockDown` yes, `KnockExplosion`
+    // into the ragdoll (knock state 2, its strength kept), a body's position and rotation set.
+    f.e.register_double(0x008c_7aa0, |_, _| 0u32.into_ret());
+    f.e.register_double(0x0088_45a0, |_, _| 1u32.into_ret());
+    STRENGTH.store(u32::MAX, Ordering::Relaxed);
+    f.e.register_double(crate::hit_force::KNOCK_EXPLOSION, |e, a| {
+        STRENGTH.store(a[5], Ordering::Relaxed);
+        e.mem.set_u8(a[0] + 0x13c, 2);
+        0u32.into_ret()
+    });
+    f.e.register_double(0x00ca_8960, |e, a| {
+        let p = rig_fixture::read3(e, a[1]);
+        rig_fixture::write3(e, a[0] + 0x120, p);
+        for i in 0..4 {
+            let x = e.mem.f32(a[2] + 4 * i);
+            e.mem.set_f32(a[0] + 0x160 + 4 * i, x);
+        }
+        0u32.into_ret()
+    });
+    let body_nodes: Vec<usize> = model()
+        .bodies
+        .iter()
+        .map(|b| f.nodes.iter().position(|n| n.name == b.node).unwrap())
+        .collect();
+    let spine = model().body("Bip01 Spine2").unwrap();
+    let root = f.at[0];
+    f.animate();
+    // Each Havok body kept on its node's animated pose, as the game's keyframing keeps it (Havok
+    // units, its rotation as x, y, z, w).
+    let bodies_of = |f: &mut Fixture| crate::knockdown::tests_bodies(&mut f.e, ACTOR);
+    let keyframe = |f: &mut Fixture| {
+        for (node, body) in bodies_of(f) {
+            let (r, t) = f.world_of(node);
+            rig_fixture::write3(&mut f.e, body + 0x120, scale(t, 1.0 / rig_fixture::HK));
+            let q = ragdoll_core::active::qfrom_m(&r);
+            for (i, x) in [q[1], q[2], q[3], q[0]].into_iter().enumerate() {
+                f.e.mem.set_f32(body + 0x160 + 4 * i as u32, x);
+            }
+        }
+    };
+    keyframe(&mut f);
+    assert!(claim(&mut f.e, ACTOR));
+    let start = Instant::now();
+    let mut hit_done = false;
+    let mut frames_to_fall = 0;
+    let mut steps = 0;
+    let mut drawn_last: Vec<(M3, V3)> = Vec::new();
+    // The last frame's time (s), as New Physics measures it: from one frame's run to the next.
+    let mut frame = 0.0f32;
+    let mut last_run: Option<Instant> = None;
+    while start.elapsed() < Duration::from_secs_f32(2.0) {
+        std::thread::sleep(Duration::from_millis(16));
+        if f.e.mem.u8(rig_fixture::PROCESS_AT + 0x13c) != 0 {
+            break;
+        }
+        let reference = f.reference();
+        rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, reference);
+        f.animate();
+        keyframe(&mut f);
+        if !hit_done && start.elapsed() > Duration::from_millis(200) {
+            hit_done = true;
+            let chest = f.world_of(f.at[body_nodes[spine]]).1;
+            hit(
+                &mut f.e,
+                ACTOR,
+                speed * model().mass,
+                add(chest, [0.0, 8.0, 4.0]),
+                [0.0, -1.0, 0.0],
+            );
+        }
+        if let Some(t) = last_run {
+            frame = t.elapsed().as_secs_f32();
+        }
+        last_run = Some(Instant::now());
+        crate::active_ragdoll::apply(&mut f.e);
+        // What the frame drew while New Physics had it: its body nodes' worlds as written.
+        if owns(ACTOR) {
+            drawn_last = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
+        }
+        if let Some((_, s, _)) = state(ACTOR) {
+            steps = s;
+        }
+        if hit_done {
+            frames_to_fall += 1;
+        }
+        crate::active_ragdoll::after_draw(&mut f.e);
+        crate::active_ragdoll::unwrite(&mut f.e);
+    }
+    let falls = falls();
+    let (root_speed, centre_speed) = falls.first().map_or((0.0, 0.0), |x| (x.root, x.centre));
+    let handed = falls.first().map_or(Vec::new(), |x| x.pose.clone());
+    let mut body_off = if handed.is_empty() { f32::MAX } else { 0.0f32 };
+    let mut jump = 0.0f32;
+    let mut rising = 0.0f32;
+    let (mut lift, mut mass) = (0.0f32, 0.0f32);
+    let mut momentum = [0.0f32; 3];
+    let mut havok_root = 0.0f32;
+    for (node, body) in bodies_of(&mut f) {
+        let Some(k) = body_nodes.iter().position(|&i| f.at[i] == node) else {
+            continue;
+        };
+        if let Some(d) = drawn_last.get(k) {
+            let p = scale(rig_fixture::read3(&f.e, body + 0x120), rig_fixture::HK);
+            // The body moved on from the pose last drawn through its frame at its speed: what is
+            // left past that is a jump.
+            let v = scale(rig_fixture::read3(&f.e, body + 0x10), rig_fixture::HK);
+            jump = jump.max(length(sub(p, d.1)) - length(v) * frame);
+        }
+        if let Some(h) = handed.iter().find(|h| h.0 == node) {
+            let p = scale(rig_fixture::read3(&f.e, body + 0x120), rig_fixture::HK);
+            body_off = body_off.max(length(sub(p, h.1)));
+        }
+        let v = scale(rig_fixture::read3(&f.e, body + 0x10), rig_fixture::HK);
+        momentum = add(momentum, scale(v, model().bodies[k].mass));
+        if k == model().root {
+            havok_root = length(v);
+        }
+        let up = v[2];
+        rising = rising.max(up);
+        lift += up * model().bodies[k].mass;
+        mass += model().bodies[k].mass;
+    }
+    let out = Fell {
+        knock_state: f.e.mem.u8(rig_fixture::PROCESS_AT + 0x13c),
+        strength: f32::from_bits(STRENGTH.load(Ordering::Relaxed)),
+        root_speed,
+        centre_speed,
+        body_off,
+        jump,
+        frame,
+        rising,
+        centre_rising: lift / mass.max(1.0),
+        havok_root,
+        havok_centre: length(momentum) / mass.max(1.0),
+        get_up: crate::knockdown::in_get_up(ACTOR),
+        steps,
+        frames_to_fall,
+    };
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    crate::gunplay::set_tuning(was);
+    out
+}
+
+/// An anti-materiel hit (4.35 m/s on the body) is past any step: New Physics falls at once (no
+/// step), hands the body to the game's ragdoll with no push (`KnockExplosion` at strength 0,
+/// knock state 2), the bodies on New Physics' pose (within 1.5 units of the pose handed; at most 8
+/// units past their own motion through a game frame from the pose last drawn) and moving as its
+/// bodies were:
+/// the body's centre within 10% of the hit's speed, the root body (the pelvis, below a chest hit)
+/// at least 80% of it, the game's bodies moving within 2% of New Physics'; nothing flung up (the
+/// body's centre rising no faster than 30 units a second, no limb faster than 300, a hand's
+/// swing); the get-up watch has it.
+#[test]
+fn np_falls_into_the_games_ragdoll_on_fnvs_skeleton() {
+    let r = fall_run(4.35);
+    let hit = 4.35 * ragdoll_core::np_body::UNITS;
+    eprintln!(
+        "RESULT np fall 4.35 m/s: knock state {}, strength {}, root body {:.0} u/s and centre {:.0} u/s for a {hit:.0} u/s hit (the game's bodies {:.0} and {:.0}), bodies {:.2} u off the pose handed and {:.1} u past their motion from the last drawn, rising at most {:.0} u/s (centre {:.0}), steps {}, {} frames to the fall, get-up watch {}",
+        r.knock_state, r.strength, r.root_speed, r.centre_speed, r.havok_root, r.havok_centre, r.body_off, r.jump, r.rising, r.centre_rising, r.steps, r.frames_to_fall, r.get_up
+    );
+    assert_eq!(r.knock_state, 2, "not in its ragdoll");
+    assert_eq!(r.strength, 0.0, "KnockExplosion pushed");
+    assert_eq!(r.steps, 0, "it stepped first");
+    assert!(
+        r.frames_to_fall <= 3,
+        "{} frames to the fall",
+        r.frames_to_fall
+    );
+    assert!(
+        (r.centre_speed / hit - 1.0).abs() <= 0.1,
+        "centre {:.0} for {hit:.0}",
+        r.centre_speed
+    );
+    // The pelvis below a chest hit moves a little slower than the centre: the body turns too.
+    assert!(
+        r.root_speed >= 0.8 * hit,
+        "root body {:.0} for {hit:.0}",
+        r.root_speed
+    );
+    // The game's bodies move on as New Physics' did.
+    assert!(
+        (r.havok_root / r.root_speed - 1.0).abs() <= 0.02,
+        "the game's root body {:.0}",
+        r.havok_root
+    );
+    assert!(
+        (r.havok_centre / r.centre_speed - 1.0).abs() <= 0.02,
+        "the game's centre {:.0}",
+        r.havok_centre
+    );
+    assert!(
+        r.body_off < 1.5,
+        "bodies {:.2} off the pose handed",
+        r.body_off
+    );
+    // The arms slow behind the chest within the frame: what is left grows with the frame's time
+    // squared (8 units up to a 23 ms frame; the debug build's frames run long).
+    assert!(
+        r.jump < 8.0f32.max(15000.0 * r.frame * r.frame),
+        "bodies jumped {:.1} in a {:.0} ms frame",
+        r.jump,
+        r.frame * 1000.0
+    );
+    assert!(
+        r.centre_rising < 30.0,
+        "the centre rising at {:.0}",
+        r.centre_rising
+    );
+    assert!(r.rising < 300.0, "a body rising at {:.0}", r.rising);
+    assert!(r.get_up, "the get-up watch does not have it");
+}

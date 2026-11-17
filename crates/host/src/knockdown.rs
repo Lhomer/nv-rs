@@ -285,6 +285,8 @@ fn body_of(e: &mut Engine, actor: u32) -> Body {
 /// The actors knocked down and followed for their fall: (actor, attacker, highest z, since).
 /// (actor, its form id, attacker, highest z, since).
 type Followed = (u32, u32, u32, f32, Instant);
+/// Nodes' worlds: each node, its world rotation and translation.
+type Worlds<'a> = &'a [(u32, [f32; 9], [f32; 3])];
 static DOWN: Mutex<Vec<Followed>> = Mutex::new(Vec::new());
 
 /// Registers the hook (from `crate::gunplay::install`).
@@ -917,6 +919,95 @@ pub fn can_knock_now(e: &mut Engine, actor: u32) -> Result<(), String> {
 /// Knocks the living `actor` down into its ragdoll, pushed from `point` along `direction` with
 /// the momentum `m` (module documentation), and follows its fall; `aggressor` is credited with a
 /// fall's kill. The entry for any knock-down (a later leg-loss fall).
+/// New Physics' fall (`crate::new_physics`, out of steps): `actor` switched to the game's
+/// ragdoll with no push (`KnockExplosion` at strength 0 from where it stands, as the game knocks
+/// down an actor whose fatigue runs out), its bodies set on the pose drawn (New Physics' body, its
+/// write still in the nodes) and moving as New Physics' bodies were (`velocities`: each body's
+/// node, its linear velocity in game units a second and its angular velocity in rad/s): no launch
+/// and no launch hold. The get-up and the fall's damage are the knockdowns' own (its get-up watch
+/// and fall record). Answers the bodies set, or why not.
+pub(crate) fn hand_over(
+    e: &mut Engine,
+    actor: u32,
+    shown: &[(u32, [f32; 9], [f32; 3])],
+    animated: &[(u32, [f32; 9], [f32; 3])],
+    velocities: &[(u32, [f32; 3], [f32; 3])],
+) -> Result<usize, String> {
+    let process = e.mem.u32(actor + PROCESS);
+    if process == 0 || actor == e.global::<u32>(PLAYER) {
+        return Err("no process, or the player".into());
+    }
+    if e.mem.u8(process + PROCESS_LEVEL) > MIDDLE_HIGH {
+        return Err("a low process (no KnockExplosion)".into());
+    }
+    if e.call(AI_THREAD, &[]).bool() {
+        return Err("on an AI thread".into());
+    }
+    if !e.call(CAN_KNOCK_DOWN, &args![actor]).bool() {
+        return Err("the game's CanKnockDown refuses".into());
+    }
+    let stood = read3(e, actor + REFR_POSITION);
+    let id = e.mem.u32(actor + FORM_ID);
+    let who = describe(e, actor);
+    let _ = clear_stored_push(e, actor);
+    // Through the game's call (`crate::hit_force`'s wrapper lets it by: New Physics has let go,
+    // and the strength is 0), then the knock record (its duplicate guard).
+    e.call(
+        crate::hit_force::KNOCK_EXPLOSION,
+        &args![process, actor, stood[0], stood[1], stood[2], 0.0f32],
+    );
+    let state = e.mem.u8(process + KNOCK_STATE) as i8;
+    if state == 0 {
+        return Err("knock state still 0 after KnockExplosion".into());
+    }
+    KNOCKED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push((actor, Instant::now()));
+    let moved = start_from(e, actor, shown, Some(animated));
+    let scale = hk_scale(e);
+    let mut given = 0;
+    for (node, body) in bodies(e, actor) {
+        let Some(&(_, v, w)) = velocities.iter().find(|x| x.0 == node) else {
+            continue;
+        };
+        if linear(e, body).is_none() {
+            continue;
+        }
+        set_velocity(e, SET_LINEAR_VELOCITY, body, v.map(|x| x / scale));
+        set_velocity(e, SET_ANGULAR_VELOCITY, body, w);
+        given += 1;
+    }
+    note(format!(
+        "{who}: [np fall] into its ragdoll (knock state {state}): {moved} bodies on the pose drawn, \
+         {given} moving as New Physics' bodies were (no launch)"
+    ));
+    let mut ups = GET_UPS.lock().unwrap_or_else(|p| p.into_inner());
+    ups.retain(|g| g.actor != actor);
+    ups.push(GetUp {
+        actor,
+        id,
+        start: stood,
+        since: Instant::now(),
+        lying_since: None,
+        still_frames: 0,
+        held_said: false,
+        allowed: false,
+        placed: None,
+        next_log: 0.0,
+        fall_dir: [0.0, 0.0, -1.0],
+        braced: false,
+        nudges: 0,
+        nudge_at: Instant::now(),
+        blended: false,
+    });
+    drop(ups);
+    let mut down = DOWN.lock().unwrap_or_else(|p| p.into_inner());
+    down.retain(|d| d.0 != actor);
+    down.push((actor, id, 0, stood[2], Instant::now()));
+    Ok(given)
+}
+
 pub fn knock_down(
     e: &mut Engine,
     actor: u32,
@@ -1569,6 +1660,12 @@ pub const UPDATE_KNOCK_STATE: u32 = 0x0092_0150;
 const MAX_NODES: usize = 256;
 
 /// Every rigid body of the actor's 3D: its node and its `hkpRigidBody`.
+/// Tests: [`bodies`].
+#[cfg(test)]
+pub(crate) fn tests_bodies(e: &mut Engine, actor: u32) -> Vec<(u32, u32)> {
+    bodies(e, actor)
+}
+
 fn bodies(e: &mut Engine, actor: u32) -> Vec<(u32, u32)> {
     let root = e.call(ACTOR_3D, &args![actor]).u32();
     let mut found = Vec::new();
@@ -1667,6 +1764,19 @@ const BODY_SET_POSITION_AND_ROTATION: u32 = 0x00ca_8960;
 /// many bodies were moved.
 fn start_from_shown(e: &mut Engine, actor: u32) -> usize {
     let shown = crate::active_ragdoll::shown_world(actor);
+    start_from(e, actor, &shown, None)
+}
+
+/// [`start_from_shown`] from the pose `shown` (each node, its world rotation and position as
+/// drawn; New Physics' bodies), the bodies held against their nodes as they stand in `now` (the
+/// animation's worlds the bodies were keyframed to: New Physics hands over inside its write) or
+/// as the nodes are.
+fn start_from(
+    e: &mut Engine,
+    actor: u32,
+    shown: &[(u32, [f32; 9], [f32; 3])],
+    now: Option<Worlds>,
+) -> usize {
     if shown.is_empty() {
         return 0;
     }
@@ -1683,10 +1793,13 @@ fn start_from_shown(e: &mut Engine, actor: u32) -> usize {
                 None => continue,
             },
         };
-        let now_lead = (
-            read9(e, lead + WORLD_ROTATION),
-            read3(e, lead + WORLD_TRANSLATION),
-        );
+        let now_lead = match now.and_then(|n| n.iter().find(|x| x.0 == lead)) {
+            Some(&(_, r, p)) => (r, p),
+            None => (
+                read9(e, lead + WORLD_ROTATION),
+                read3(e, lead + WORLD_TRANSLATION),
+            ),
+        };
         let now = now_lead;
         let held = (
             [0, 4, 8, 12].map(|o| e.mem.f32(body + BODY_ROTATION + o)),

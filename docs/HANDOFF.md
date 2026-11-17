@@ -22,7 +22,9 @@ machinery runs.
   footing IK, the walk's path); the lab's step and walking-hit tests and videos.
 - **M3:** `host::new_physics` behind `bNewPhysics` (claim at `HitMe`, the game's own reaction
   skipped, the write/update/read-back/put-back, the actor moved with its steps); fixture tests.
-  Next: M4, the fall to the game's ragdoll and the get-up.
+- **M4:** a hit past any step falls into the game's ragdoll (`knockdown::hand_over`:
+  `KnockExplosion` at strength 0, each body on New Physics' pose and velocities, the knockdowns'
+  get-up); the fixture fall test. Next: M5 (the in-game metrics and how Patrick tests), then M6.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 

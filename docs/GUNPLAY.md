@@ -598,6 +598,25 @@ never touching it; 0.3 m/s takes no step (6.8 degrees); off, nothing is taken. N
 There is no stagger animation group in the game to suppress (the research found none: the visible
 stagger is `HitMe_ov2`'s physical reaction and the crippled-limb idle).
 
+**M4, the fall** (`new_physics.rs`, `knockdown::hand_over`). A hit past any step (the capture
+point still outside the feet after 3 catching steps, or more than 0.9 m outside them at once) is a
+fall: New Physics hands the body to the game's own ragdoll that frame. Through the game's call,
+`KnockExplosion` at strength 0 (the ragdoll with no push of its own; `crate::hit_force` lets this
+one by), knock state 2 checked; each Havok body is set on New Physics' pose (the knockdowns'
+`start_from`: the node's world turn and move from the animated pose the bodies were keyframed on
+to the pose handed, put on the body) and given its body's linear and angular velocity; the
+knockdowns' get-up watch and down log take it (aggressor none, the fall straight down), and the
+get-up is theirs. `[np fall]` logs the bodies handed and the root body's and the centre's speeds.
+Fixture test on FNV's skeleton (`np_falls_into_the_games_ragdoll_on_fnvs_skeleton`, the game's
+calls doubled, the bodies keyframed on the animation each frame): a 4.35 m/s chest hit (an
+anti-materiel round) falls in its first frame with no step, knock state 2, strength 0; the centre
+moves at 305 units a second for a 304 hit, the pelvis at 282 (the body turns too), the game's
+bodies within 2% of New Physics' (exactly, in the fixture), on the pose handed within 0.00 units
+and at most 6.9 units past their own motion from the pose last drawn (a 24 ms debug frame; the arms
+slow behind the chest within it), the centre not rising (-16 units a second; a hand at most 212),
+the get-up watch on. The fixture's bodies were spaced 0x100 apart, so each body's position (+0x120)
+fell on the next one's angular velocity: now 0x200. Not run in the game.
+
 ### bdf710a: the get-up hoisted upside down, the stagger's slide, the head's nod, the launch along the ground (Patrick, 2026-11-17, clip 1456)
 
 On FNV's skeleton (`tests-data/fnv_skeleton.txt`) the get-up fixture now runs knock state 6 as the

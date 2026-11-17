@@ -30,8 +30,10 @@ pub const STEP_PAST: f32 = 0.08;
 pub const STEP_MOST: f32 = 0.65;
 pub const STEP_TIME: f32 = 0.3;
 pub const STEP_LIFT: f32 = 0.08;
-/// Steps before it falls.
+/// Steps before it falls, and how far outside its feet the capture point may be before no step can
+/// catch it (m: the longest step and the foot's reach past it): it falls at once.
 pub const MAX_STEPS: u32 = 3;
+pub const UNREACHABLE: f32 = 0.9;
 /// How far a foot may stand off its animated place, once caught, before it steps back (m), and
 /// that step's swing (s).
 pub const STANCE_OFF: f32 = 0.1;
@@ -427,7 +429,7 @@ impl Balance {
                 self.outside > MARGIN
             };
         if out {
-            if self.steps >= MAX_STEPS {
+            if self.steps >= MAX_STEPS || self.outside > UNREACHABLE {
                 self.phase = Phase::Falling;
                 self.since = 0.0;
                 ask.falling = true;

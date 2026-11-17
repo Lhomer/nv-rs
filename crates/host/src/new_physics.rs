@@ -93,6 +93,24 @@ static ACTORS: Mutex<Vec<NpActor>> = Mutex::new(Vec::new());
 static WRITTEN: Mutex<Vec<(u32, (M3, V3))>> = Mutex::new(Vec::new());
 static ROOTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+/// The falls handed over (actor, the root body's speed and the body's centre's, game units a
+/// second): the tests' and the log's.
+static FALLS: Mutex<Vec<Fall>> = Mutex::new(Vec::new());
+
+/// A fall handed over: the actor, its root body's speed and its centre's (game units a second),
+/// and the pose handed (each body's node and its world position, game units).
+#[derive(Clone, Debug)]
+pub struct Fall {
+    pub actor: u32,
+    pub root: f32,
+    pub centre: f32,
+    pub pose: Vec<(u32, V3)>,
+}
+
+/// The falls handed over since the last [`clear`].
+pub fn falls() -> Vec<Fall> {
+    FALLS.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
 
 fn note(line: String) {
     room_events::record("note", &format!("\"text\":{}", room_events::text(&line)));
@@ -436,8 +454,48 @@ pub fn apply(e: &mut Engine) {
             a.moved = add(a.moved, mv);
         }
         if np.phase() == Phase::Falling {
-            // M4 hands it to the game's ragdoll.
-            note(format!("{:08X}: [np fall] out of steps: let go", a.id));
+            // Out of steps (or past any step's reach): the game's ragdoll takes it, moving as its
+            // bodies were (`crate::knockdown::hand_over`; the get-up is the knockdowns' own).
+            let k = ragdoll_core::np_body::UNITS;
+            let velocities: Vec<(u32, V3, V3)> = a
+                .nodes
+                .iter()
+                .zip(&np.states)
+                .map(|(&n, s)| (n, scale(s.v, k), s.w))
+                .collect();
+            let r = model().root;
+            let pelvis = length(scale(np.states[r].v, k));
+            let (_, com_v) = np.model.centre_of_mass(&np.states);
+            let shown: Vec<(u32, M3, V3)> = a
+                .nodes
+                .iter()
+                .zip(&a.drawn)
+                .map(|(&n, d)| (n, d.0, d.1))
+                .collect();
+            let animated: Vec<(u32, M3, V3)> = a
+                .nodes
+                .iter()
+                .zip(&anim)
+                .map(|(&n, d)| (n, d.0, d.1))
+                .collect();
+            match crate::knockdown::hand_over(e, a.actor, &shown, &animated, &velocities) {
+                Ok(n) => note(format!(
+                    "{:08X}: [np fall] handed to its ragdoll: {n} bodies moving on; the root body \
+                     at {pelvis:.0} units/s, the body's centre {:.0} units/s",
+                    a.id,
+                    length(com_v) * k
+                )),
+                Err(why) => note(format!(
+                    "{:08X}: [np fall] not handed over ({why}): let go",
+                    a.id
+                )),
+            }
+            FALLS.lock().unwrap_or_else(|p| p.into_inner()).push(Fall {
+                actor: a.actor,
+                root: pelvis,
+                centre: length(com_v) * k,
+                pose: shown.iter().map(|x| (x.0, x.2)).collect(),
+            });
             summary(&a);
             continue;
         }
@@ -533,6 +591,7 @@ pub fn clear() {
     WRITTEN.lock().unwrap_or_else(|p| p.into_inner()).clear();
     ROOTS.lock().unwrap_or_else(|p| p.into_inner()).clear();
     *LAST.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    FALLS.lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
 
 #[cfg(test)]
