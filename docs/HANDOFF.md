@@ -7,6 +7,25 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (00262dd still drew nothing: written before the world pass now)
+
+- **Now:**
+  - Host:
+    - `active_ragdoll::around_draw` and `world_pass` (`00873200`), `skin_bones`, `read_drawn`, and
+      `after_draw` from the skin; the pose log's `drawn_skin`;
+    - `iReactionDraw` (gunplay key, the b44a964 fallback);
+    - `knockdown::explosion_origin`, `keyframed` (the get-up watch);
+    - `body_velocities` held by `active::handover_velocities`.
+  - Docs: docs/GUNPLAY.md "00262dd still drew no reactions".
+  - Host tests pass; not run in the game.
+- **Patrick:** 00262dd's 18-21-05 clip: no reactions drawn though `drawn_offset` said 5 to 49 (read
+  after the draw, from our own update). Asked:
+  - write before the world pass and check from the skin's bones;
+  - the b44a964 write behind a switch;
+  - the in-air spin (origin under the body, unbounded hand-over);
+  - the get-up shown lying;
+  - before/after numbers.
+
 ### Claude, 2026-11-17 (five new perks: nv-rs Perks.esp)
 
 - **Now:**

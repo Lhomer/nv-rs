@@ -98,6 +98,39 @@ pub const KNOCK_STRENGTH: f32 = 2.0;
 pub const LAUNCH_TRIES: u8 = 2;
 pub const LAUNCH_KEPT: f32 = 0.4;
 pub const ORIGIN_BACK: f32 = 400.0;
+/// The most the explosion's way may rise (its direction's height, unit length): the push stays
+/// mostly along the ground.
+pub const ORIGIN_MOST_RISE: f32 = 0.3;
+/// A standing person's pelvis over their feet (game units), when the body has no pelvis to read.
+pub const PELVIS_HEIGHT: f32 = 60.0;
+
+/// `KnockExplosion`'s origin for a hit at `point` along `direction`: [`ORIGIN_BACK`] behind it at
+/// the pelvis's height (`pelvis_z`, else the hit's), along the hit's way with its rise held to
+/// [`ORIGIN_MOST_RISE`], so the explosion pushes the body along the ground, never straight up.
+pub fn explosion_origin(point: [f32; 3], pelvis_z: Option<f32>, direction: [f32; 3]) -> [f32; 3] {
+    let flat = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
+    let rise = if direction[2].is_finite() {
+        direction[2].clamp(-ORIGIN_MOST_RISE, ORIGIN_MOST_RISE)
+    } else {
+        0.0
+    };
+    let d = if flat > 1e-3 && flat.is_finite() {
+        let across = (1.0 - rise * rise).sqrt();
+        [
+            direction[0] / flat * across,
+            direction[1] / flat * across,
+            rise,
+        ]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let z = pelvis_z.filter(|z| z.is_finite()).unwrap_or(point[2]);
+    [
+        point[0] - d[0] * ORIGIN_BACK,
+        point[1] - d[1] * ORIGIN_BACK,
+        z - d[2] * ORIGIN_BACK,
+    ]
+}
 /// No second knock-down this soon after one, nor this soon after getting up.
 pub const KNOCK_COOLDOWN: Duration = Duration::from_millis(2500);
 pub const UP_COOLDOWN: Duration = Duration::from_millis(1500);
@@ -838,8 +871,16 @@ pub fn knock_down(
     }
     let strength = KNOCK_STRENGTH;
     let speed = launch_speed(body_speed);
-    let origin = [0, 1, 2].map(|i| point[i] - direction[i] * ORIGIN_BACK);
     let stood = position(e, actor);
+    // `KnockExplosion`'s origin behind the hit at the pelvis's height (`explosion_origin`): from a
+    // lifted direction it sat under the body and threw it straight up (Patrick's 18-21-05 clip:
+    // 290 units below, the push (-0.03, -0.20, 0.98)).
+    let scale = e.call(GET_SCALE, &args![actor]).f64() as f32;
+    let bones = bodies(e, actor);
+    let pelvis_z = pelvis_of(e, &bones)
+        .map(|p| p[2])
+        .or_else(|| stood.map(|p| p[2] + PELVIS_HEIGHT * scale.clamp(0.25, 4.0)));
+    let origin = explosion_origin(point, pelvis_z, direction);
     let start = stood.map_or(origin[2], |p| p[2]);
     let who = describe(e, actor);
     let id = e.mem.u32(actor + FORM_ID);
@@ -1475,6 +1516,15 @@ fn hk_scale(e: &Engine) -> f32 {
     }
 }
 
+/// An `hkpRigidBody`'s motion type (`+0xe8`) and Havok's keyframed one (an animation moves it).
+const MOTION_TYPE: u32 = 0xe8;
+const MOTION_KEYFRAMED: u8 = 4;
+
+/// Whether the Havok body `body` is keyframed (moved by an animation, not by the physics).
+fn keyframed(e: &Engine, body: u32) -> bool {
+    body != 0 && e.mem.u8(body + MOTION_TYPE) == MOTION_KEYFRAMED
+}
+
 fn linear(e: &mut Engine, body: u32) -> Option<[f32; 3]> {
     let at = e.call(LINEAR_VELOCITY, &args![body]).u32();
     (at != 0).then(|| read3(e, at))
@@ -1971,10 +2021,15 @@ fn watch_get_up(
             }
         }
     }
-    // The ragdoll's bones while the get-up blends: none may fly up.
+    // The ragdoll's bones while the get-up blends: none may fly up. A keyframed body (the get-up
+    // animation moving it) is the animation's: held, it kept the shown body lying through the
+    // get-up and popped it upright at its end (Patrick's 18-21-05 clip: 19 bones held at state 5).
     let most_up = MAX_RISE / scale;
     let mut bones_held = 0;
     for (_, body) in bodies(e, g.actor) {
+        if keyframed(e, body) {
+            continue;
+        }
         if let Some(v) = linear(e, body) {
             if v[2] > most_up {
                 set_velocity(e, SET_LINEAR_VELOCITY, body, [v[0], v[1], most_up]);
@@ -2303,6 +2358,30 @@ fn land(e: &mut Engine, actor: u32, aggressor: u32, drop: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The explosion's origin is behind the hit at the pelvis's height, its way rising at most
+    /// 0.3: a lifted hit no longer puts it under the body (Patrick's 18-21-05 clip: 290 units
+    /// below, the body thrown straight up).
+    #[test]
+    fn the_explosion_pushes_along_the_ground() {
+        let point = [100.0, 200.0, 70.0];
+        let o = explosion_origin(point, Some(60.0), [0.0, 0.4, 0.92]);
+        let way = [point[0] - o[0], point[1] - o[1], 60.0 - o[2]];
+        let l = (way[0] * way[0] + way[1] * way[1] + way[2] * way[2]).sqrt();
+        assert!((l - ORIGIN_BACK).abs() < 1e-2, "{l}");
+        assert!(way[2] / l <= ORIGIN_MOST_RISE + 1e-4, "{o:?}");
+        assert!(
+            o[2] >= 60.0 - ORIGIN_BACK * ORIGIN_MOST_RISE - 1e-3,
+            "{o:?}"
+        );
+        assert!(way[1] > 0.0 && way[0].abs() < 1e-3);
+        // A flat hit: straight behind, at the pelvis's height.
+        let o = explosion_origin(point, Some(60.0), [1.0, 0.0, 0.0]);
+        assert_eq!(o, [100.0 - ORIGIN_BACK, 200.0, 60.0]);
+        // No pelvis: the hit's height; a straight-down hit: a way along the ground.
+        let o = explosion_origin(point, None, [0.0, 0.0, -1.0]);
+        assert_eq!(o, [100.0, 200.0 - ORIGIN_BACK, 70.0]);
+    }
 
     /// The get-up waits for a still, lying body, never longer than its limit.
     #[test]

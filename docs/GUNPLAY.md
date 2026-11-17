@@ -486,6 +486,64 @@ for the shot, the hit's round and the breakdown; a knocked-down actor's fall dam
 attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
 patches (#624) and the knockdown's companion refusal were not on the path.
 
+### 00262dd still drew no reactions; a spin in the air; a get-up shown lying (Patrick, 2026-11-16, 18-21-05 clip)
+
+The 9mm and .44 hits showed only the plain idle, though the pose log had the body active in
+2,027 of 2,125 samples and `drawn_offset` 5 to 49 on every hit. That number fooled us: it read
+the bones' world transforms that our own update wrote at the first-person set-up, after the
+world had been drawn.
+
+The frame's draw sequence (`00870a00`, `00870bd0`) builds the frame (`00872f50`), then runs the
+world pass (`00873200`, given the world accumulator), where the actors are culled, skinned and
+drawn from the pose the bones then hold. The first-person set-up (`00874c10`) comes after.
+- b44a964 left its write in the locals, so the next frame's world pass drew it one frame late.
+- d0f4192 and 00262dd put the game's own locals back before that pass, so nothing ever showed.
+
+- **Written at the start of the frame's drawing** (`active_ragdoll::around_draw`, from
+  `fixes::install`'s joined `DRAW_FRAME`, `008706b0`). The write and the world update come first,
+  before the smooth physics drawing's own write and before the world pass. The drawing follows,
+  then the game's own locals are put back (`unwrite`), before the next animation update. The
+  first-person set-up no longer writes them; `place_pose` stays there.
+- **What is drawn is checked where it is drawn** (`active_ragdoll::world_pass`, at `00873200`'s
+  first call of the frame). The actor's 3D is walked to its skinned geometries (`IsNode`,
+  `IsGeometry`, the `NiSkinInstance` at `+0xbc`). The bones their skin instances list (`+0x14`,
+  the count in the skin data's `+0x44`) are matched by name to the rig's pelvis, spine top and
+  head, and their world transforms read against the animated pose:
+  - `drawn_offset` and `drawn_turn` in the pose log, and `drawn_missing` (a reaction shown off its
+    animation but drawn on it for 30 frames is logged) come from that;
+  - `drawn_skin` (in the pose log) says how many of the three were found in the skin, how many of
+    those were the rig's own nodes, and how many bones the skin lists.
+- **`[nv-rs Gunplay] iReactionDraw`** (`NV_GUNPLAY_REACTION_DRAW`):
+  - 0 (the default): the above;
+  - 1: b44a964's way, written at the first-person set-up and left in the bones (drawn a frame
+    late), the frame's drawing and the world pass not joined. It is the fallback, and the way to
+    bisect: with 1, nothing of the join runs.
+- **No spin in the air.**
+  - Before the fall the body's forearm and hand turned 61 to 169 rad/s, and the ragdoll took their
+    motion (`body_velocities`). It now takes it held (`active::handover_velocities`): the pelvis's
+    speed at most the hit's (or the fall's), and each bone's own motion about the pelvis at most
+    the spin bound (20 rad/s) times its distance from it.
+  - `KnockExplosion`'s origin sat 290 units below the body and pushed it along (-0.03, -0.20,
+    0.98), straight up. It is now 400 units behind the hit at the pelvis's height, its way rising
+    at most 0.3 (`knockdown::explosion_origin`).
+- **A get-up shown lying.** Knock states 1, 5 and 6 ran from 20.87 to 22.95 s; he stayed lying,
+  then popped to idle at state 0 (23.37). The get-up watch held every ragdoll body rising faster
+  than 60 units a second, 19 bones at state 5, while the get-up animation moves them. It now
+  leaves a keyframed body (motion type 4: the animation's) alone and holds only free ones.
+  - Not bisected in the game here. With `iReactionDraw=1` the join is off, for that bisect.
+  - Whether the game keyframes the bodies through the whole get-up is not measured; if it
+    doesn't, this does not change it.
+- Tests:
+  - `the_world_pass_draws_the_write_then_it_is_put_back` (the write, then `00873200` sees it,
+    then put back);
+  - `the_drawn_pose_is_read_from_the_skins_bones` (a scene in memory: a skin bone of its own, 6
+    units and 0.2 rad off);
+  - `the_explosion_pushes_along_the_ground`;
+  - `active::the_handover_holds_a_flung_arm`.
+
+  Not run in the game: no game here. The next clip's `drawn_offset` (now from the skin, at the
+  world pass) and `drawn_skin` say whether the write reaches the screen.
+
 ### nv-rs's own perks (Patrick, 2026-11-17)
 
 Five new perks, real perk records the player picks at level-up: nv-rs's own plugin,

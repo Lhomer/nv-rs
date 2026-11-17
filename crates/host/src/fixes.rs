@@ -1238,12 +1238,20 @@ pub fn install(e: &mut Engine, choice: &Choice) {
     // were never seen: Patrick's d0f4192 clips) and is put back after it (`DRAW_FRAME`, 008706b0),
     // before the game's next animation update; with the smooth physics drawing on, one function
     // does both.
-    if choice.is_on(&crate::gunplay::FIX) {
+    // The reactions are written at the start of the frame's drawing, before the world pass
+    // (`00873200`) culls, skins and draws the actors, and what it drew with is read there; with
+    // `iReactionDraw=1` neither is joined (b44a964's write at the first-person set-up, left in the
+    // bones).
+    if choice.is_on(&crate::gunplay::FIX) && choice.gunplay.reaction_draw == 0 {
         PHYS_BLEND_ON.store(
             choice.is_on(&crate::phys_blend::FIX),
             std::sync::atomic::Ordering::Relaxed,
         );
         e.register(crate::phys_blend::DRAW_FRAME, draw_frame_with_reactions);
+        e.register(
+            crate::active_ragdoll::WORLD_PASS,
+            crate::active_ragdoll::world_pass,
+        );
     }
     // Three rows add to the Settings menu's options (`StartMenu::CreateMenuElements`, 007cc6e0):
     // with more than one on, one function makes the game's options and the rows of each that is
@@ -1266,12 +1274,13 @@ pub fn install(e: &mut Engine, choice: &Choice) {
 /// Whether the smooth physics drawing is on under [`draw_frame_with_reactions`].
 static PHYS_BLEND_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The frame's drawing (`DRAW_FRAME`, 008706b0; blended when the smooth physics drawing is on),
-/// then the hit reactions' drawn offsets read and their write put back
-/// (`crate::active_ragdoll::after_draw`), also when the drawing unwinds.
+/// The frame's drawing (`DRAW_FRAME`, 008706b0) with the hit reactions in it
+/// (`crate::active_ragdoll::around_draw`: written first, before the smooth physics drawing's own
+/// write when that is on, then the frame blended and drawn, then put back), also when the drawing
+/// unwinds.
 fn draw_frame_with_reactions(e: &mut Engine, a: &[u32]) -> Ret {
     let blend = PHYS_BLEND_ON.load(std::sync::atomic::Ordering::Relaxed);
-    crate::active_ragdoll::draw_then_put_back(e, |e| crate::phys_blend::draw_frame(e, a, blend));
+    crate::active_ragdoll::around_draw(e, |e| crate::phys_blend::draw_frame(e, a, blend));
     Ret::default()
 }
 

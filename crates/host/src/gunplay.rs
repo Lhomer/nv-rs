@@ -86,6 +86,7 @@ pub const FIX: Fix = Fix {
         DISMEMBER_ROLL,
         CREATE_MENU_ELEMENTS,
         crate::phys_blend::DRAW_FRAME,
+        crate::active_ragdoll::WORLD_PASS,
         crate::test_range::SAVE_GAME,
         crate::test_range::QUICK_SAVE,
         crate::test_range::QUEUED_SAVES,
@@ -165,6 +166,11 @@ pub struct Tuning {
     pub hit_reactions: i32,
     /// `iBalance`: the catch steps' strength, percent; 0 = off ([`crate::balance`]).
     pub balance: i32,
+    /// `iReactionDraw`: where the hit reactions are written for the drawing
+    /// ([`crate::active_ragdoll::apply`]): 0 at the start of the frame's drawing and put back after
+    /// it; 1 as b44a964 did, at the first-person set-up and left in the bones (drawn a frame late,
+    /// the frame's drawing not joined).
+    pub reaction_draw: i32,
 }
 
 impl Tuning {
@@ -190,6 +196,7 @@ impl Tuning {
         details_key: 0x25,
         hit_reactions: 100,
         balance: 100,
+        reaction_draw: 0,
     };
 
     /// Sets `key` (a [`KEYS`] key) to `value`; false for a key that isn't one or a value out of
@@ -222,6 +229,7 @@ impl Tuning {
             "idetailskey" => self.details_key = value,
             "ihitreactions" => self.hit_reactions = value,
             "ibalance" => self.balance = value,
+            "ireactiondraw" => self.reaction_draw = value,
             _ => return false,
         }
         true
@@ -250,6 +258,7 @@ impl Tuning {
             "idetailskey" => self.details_key,
             "ihitreactions" => self.hit_reactions,
             "ibalance" => self.balance,
+            "ireactiondraw" => self.reaction_draw,
             _ => return None,
         })
     }
@@ -288,7 +297,7 @@ impl Default for Tuning {
 }
 
 /// The keys of [`SECTION`]: key, its environment variable, lowest and highest value.
-pub const KEYS: [(&str, &str, i32, i32); 20] = [
+pub const KEYS: [(&str, &str, i32, i32); 21] = [
     ("iRecoil", "NV_GUNPLAY_RECOIL", 0, 300),
     ("iRecoilRecovery", "NV_GUNPLAY_RECOVERY", 0, 100),
     ("iSway", "NV_GUNPLAY_SWAY", 0, 300),
@@ -319,6 +328,7 @@ pub const KEYS: [(&str, &str, i32, i32); 20] = [
     ("iDetailsKey", "NV_GUNPLAY_DETAILS_KEY", 1, 255),
     ("iHitReactions", "NV_GUNPLAY_HIT_REACTIONS", 0, 200),
     ("iBalance", "NV_GUNPLAY_BALANCE", 0, 200),
+    ("iReactionDraw", "NV_GUNPLAY_REACTION_DRAW", 0, 1),
 ];
 
 /// A value of `key` as the file or a variable holds it: `1`/`0` for a `b` key, a whole number for
@@ -360,6 +370,11 @@ pub fn is_on() -> bool {
 
 fn on() -> bool {
     ON.load(Ordering::Relaxed)
+}
+
+/// Whether weighty combat is on now (the hit reactions run).
+pub(crate) fn is_on_now() -> bool {
+    on()
 }
 
 // --- The game's words. ---------------------------------------------------------------------
@@ -759,8 +774,10 @@ pub fn install(e: &mut Engine) {
         }
     });
     e.register(FIRST_PERSON_SETUP, |e, a| {
-        // The living actors' flinches, posed over their animation before the world is drawn.
-        if on() {
+        // `iReactionDraw=1` (b44a964's): the flinches written here and left in the bones, drawn by
+        // the next frame's world pass. Else they are written at the start of the frame's drawing
+        // (`crate::fixes::install`'s joined `DRAW_FRAME`, `active_ragdoll::around_draw`).
+        if on() && tuning().reaction_draw == 1 {
             crate::active_ragdoll::apply(e);
         }
         let placed = if on() { place_pose(e) } else { None };
@@ -1879,6 +1896,7 @@ mod tests {
             details_key: 1,
             hit_reactions: 0,
             balance: 0,
+            reaction_draw: 1,
         };
         for (row, key) in rows.iter().zip(KEYS) {
             assert_eq!(row.switch, key.1, "{row:?}");

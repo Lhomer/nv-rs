@@ -209,6 +209,11 @@ pub struct Rig {
     /// drawing), and whether that was said.
     pub drawn_missing: u32,
     pub drawn_warned: bool,
+    /// What the world pass drew this frame ([`read_drawn`]: offset, turn, the checked bones found
+    /// in the skin, how many of them the rig's own nodes, the skin's bones), and the last frame's
+    /// count of those (the pose log's `drawn_skin`).
+    pub drawn_seen: Option<(f32, f32, u32, u32, u32)>,
+    pub drawn_skin: (u32, u32, u32),
 }
 
 /// How much deeper than the animation (game units) a shown forearm or hand may be in the torso
@@ -605,6 +610,8 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         drawn_most: (0.0, 0.0),
         drawn_missing: 0,
         drawn_warned: false,
+        drawn_seen: None,
+        drawn_skin: (0, 0, 0),
     });
     true
 }
@@ -803,48 +810,215 @@ pub fn draw_then_put_back(e: &mut Engine, draw: impl FnOnce(&mut Engine)) {
     }
 }
 
-/// What each reacting actor was drawn with: its pelvis's, spine's and head's world transforms
-/// after the frame's drawing, against their animated world (`Rig::drawn_offset`, `drawn_turn`,
-/// the pose log's `drawn_offset` and `drawn_turn`): nothing when the write never reaches the
-/// screen.
+/// The frame drawn by `draw` (the game's `DRAW_FRAME`, `crate::fixes::install`) with the
+/// reactions in it: written first ([`apply`]: the bones' locals and their world transforms), so
+/// the world pass (`00873200`, before the first-person set-up) culls, skins and draws the actors
+/// from them; what it drew with read there ([`world_pass`]); then put back ([`unwrite`]), also
+/// when the drawing unwinds, before the game's next animation update. 00262dd wrote them at the
+/// first-person set-up (`00874c10`), after the world pass: never drawn (Patrick's 18-21-05 clip).
+pub fn around_draw(e: &mut Engine, draw: impl FnOnce(&mut Engine)) {
+    if !crate::gunplay::is_on_now() {
+        draw(e);
+        return;
+    }
+    around_draw_with(e, apply, draw);
+}
+
+/// [`around_draw`] with its write `write` (the tests' own).
+fn around_draw_with(
+    e: &mut Engine,
+    write: impl FnOnce(&mut Engine),
+    draw: impl FnOnce(&mut Engine),
+) {
+    write(e);
+    DRAWN_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);
+    draw_then_put_back(e, draw);
+    DRAWN_PENDING.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `Main`'s world pass (`00873200`): where the actors are culled, skinned and drawn ([`world_pass`]).
+pub const WORLD_PASS: u32 = 0x0087_3200;
+
+/// The world pass's first call this frame is still to be read ([`world_pass`]).
+static DRAWN_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The world pass (`00873200`, `Main`'s world accumulate and draw; `crate::fixes::install`
+/// registers it with the joined drawing): at its first call of the frame, what each reacting
+/// actor is drawn with read from the bones its skinned geometry lists ([`read_drawn`]), then the
+/// pass as the game's.
+pub fn world_pass(e: &mut Engine, a: &[u32]) -> Ret {
+    if DRAWN_PENDING.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        read_drawn(e);
+    }
+    engine::units::fallout_misc::main_p2::fn_00873200(
+        e,
+        Ptr::new(a[0]),
+        a[1],
+        a[2],
+        a[3] as u8,
+        a[4] as u8,
+    );
+    Ret::default()
+}
+
+/// An `NiAVObject`'s `IsNode` (vtable `+0x0c`, the node or 0) and `IsGeometry` (`+0x18`), an
+/// `NiGeometry`'s skin instance (`+0xbc`), a skin instance's skin data (`+0x08`) and bone array
+/// (`+0x14`), a skin data's bone count (`+0x44`).
+const IS_NODE_SLOT: u32 = 0x0c;
+const IS_GEOMETRY_SLOT: u32 = 0x18;
+const GEOMETRY_SKIN: u32 = 0xbc;
+const SKIN_DATA: u32 = 0x08;
+const SKIN_BONES: u32 = 0x14;
+const SKIN_DATA_BONES: u32 = 0x44;
+/// The most objects, bones a skin, and the deepest a walk of an actor's 3D looks at.
+const MOST_OBJECTS: usize = 1024;
+const MOST_SKIN_BONES: u32 = 256;
+const MOST_DEPTH: u32 = 16;
+
+/// The bone nodes the skinned geometries under `root` list (their skin instances' bone arrays):
+/// what the drawing poses the actor's skin with.
+fn skin_bones(e: &mut Engine, root: u32) -> Vec<u32> {
+    let mut bones = Vec::new();
+    let mut stack = vec![(root, 0u32)];
+    let mut seen = 0usize;
+    while let Some((object, depth)) = stack.pop() {
+        if object == 0 || seen >= MOST_OBJECTS {
+            continue;
+        }
+        seen += 1;
+        if e.vcall(object, IS_NODE_SLOT, &args![]).u32() != 0 {
+            if depth >= MOST_DEPTH {
+                continue;
+            }
+            let count = e.call(CHILD_COUNT, &args![object]).u32().min(256);
+            for i in 0..count {
+                let child = e.call(CHILD_AT, &args![object, i]).u32();
+                stack.push((child, depth + 1));
+            }
+            continue;
+        }
+        if e.vcall(object, IS_GEOMETRY_SLOT, &args![]).u32() == 0 {
+            continue;
+        }
+        let skin = e.mem.u32(object + GEOMETRY_SKIN);
+        if skin == 0 {
+            continue;
+        }
+        let data = e.mem.u32(skin + SKIN_DATA);
+        let array = e.mem.u32(skin + SKIN_BONES);
+        if data == 0 || array == 0 {
+            continue;
+        }
+        let count = e.mem.u32(data + SKIN_DATA_BONES).min(MOST_SKIN_BONES);
+        for i in 0..count {
+            let bone = e.mem.u32(array + 4 * i);
+            if bone != 0 && !bones.contains(&bone) {
+                bones.push(bone);
+            }
+        }
+    }
+    bones
+}
+
+/// A node's name (`m_kName`, `+0x08`), empty for none.
+fn node_name(e: &Engine, node: u32) -> Vec<u8> {
+    let name = e.mem.u32(node + NODE_NAME);
+    if name == 0 {
+        Vec::new()
+    } else {
+        e.mem.cstr(name)
+    }
+}
+
+/// What the drawing sees of `refs` (the rig's nodes and their animated world): each matched by
+/// name to one of the skin's `bones`, that bone's world transform against the animated one.
+/// Answers the most offset (game units) and turn (degrees), how many matched, and how many of
+/// those were the rig's own node.
+fn drawn_against(e: &mut Engine, bones: &[u32], refs: &[(u32, M3, V3)]) -> (f32, f32, u32, u32) {
+    let names: Vec<(u32, Vec<u8>)> = bones.iter().map(|&b| (b, node_name(e, b))).collect();
+    let (mut most, mut turn, mut matched, mut same) = (0.0f32, 0.0f32, 0u32, 0u32);
+    for &(node, anim_r, anim_p) in refs {
+        let want = node_name(e, node);
+        let Some(&(bone, _)) = names
+            .iter()
+            .find(|(_, n)| !want.is_empty() && n.eq_ignore_ascii_case(&want))
+        else {
+            continue;
+        };
+        let p = read3(e, bone + WORLD_TRANSLATION);
+        let r = read9(e, bone + WORLD_ROTATION);
+        if !(p.iter().all(|x| x.is_finite()) && r.iter().all(|x| x.is_finite())) {
+            continue;
+        }
+        matched += 1;
+        same += u32::from(bone == node);
+        most = most.max(length(sub(p, anim_p)));
+        let d = mul(&r, &transpose(&anim_r));
+        turn = turn.max(length(ragdoll_core::flinch::rotation_vector(&d)).to_degrees());
+    }
+    (most, turn, matched, same)
+}
+
+/// What each reacting actor is drawn with, as the world pass begins ([`world_pass`]): its pelvis,
+/// spine top and head as its skinned geometry's bones have them, against their animated world
+/// (`Rig::drawn_offset`, `drawn_turn`; the pose log's).
+fn read_drawn(e: &mut Engine) {
+    let wanted: Vec<(u32, u32, Vec<(u32, M3, V3)>)> = {
+        let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+        rigs.iter()
+            .filter(|r| !r.drawn_ref.is_empty())
+            .map(|r| (r.actor, r.root, r.drawn_ref.clone()))
+            .collect()
+    };
+    let mut seen = Vec::new();
+    for (actor, root, refs) in wanted {
+        let bones = skin_bones(e, root);
+        seen.push((actor, drawn_against(e, &bones, &refs), bones.len()));
+    }
+    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    for (actor, (most, turn, matched, same), skin) in seen {
+        if let Some(rig) = rigs.iter_mut().find(|r| r.actor == actor) {
+            rig.drawn_seen = Some((most, turn, matched, same, skin as u32));
+        }
+    }
+}
+
+/// What each reacting actor was drawn with this frame ([`read_drawn`] at the world pass; nothing
+/// for a frame without one): `Rig::drawn_offset`, `drawn_turn`, the most over the reaction, and a
+/// reaction shown off its animation but drawn on it counted and said ([`DRAWN_MISSING_SAID`]).
 pub fn after_draw(e: &mut Engine) {
+    let _ = e;
     let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     for rig in rigs.iter_mut() {
-        let (mut most, mut turn) = (0.0f32, 0.0f32);
-        for &(node, anim_r, anim_p) in &rig.drawn_ref {
-            if node == 0 {
-                continue;
-            }
-            let p = read3(e, node + WORLD_TRANSLATION);
-            let r = read9(e, node + WORLD_ROTATION);
-            if !(p.iter().all(|x| x.is_finite()) && r.iter().all(|x| x.is_finite())) {
-                continue;
-            }
-            most = most.max(length(sub(p, anim_p)));
-            let d = mul(&r, &transpose(&anim_r));
-            turn = turn.max(length(ragdoll_core::flinch::rotation_vector(&d)).to_degrees());
-        }
         if rig.drawn_ref.is_empty() {
             continue;
         }
+        rig.drawn_ref.clear();
+        let Some((most, turn, matched, same, skin)) = rig.drawn_seen.take() else {
+            continue;
+        };
         rig.drawn_offset = most;
         rig.drawn_turn = turn;
+        rig.drawn_skin = (matched, same, skin);
         rig.drawn_most = (rig.drawn_most.0.max(most), rig.drawn_most.1.max(turn));
-        rig.drawn_ref.clear();
         // Shown well off its animation, drawn on it: the write is lost before the drawing.
         if rig.pelvis_now > 1.0 && most < 0.05 && turn < 0.05 {
             rig.drawn_missing += 1;
-            if rig.drawn_missing >= 30 && !rig.drawn_warned {
+            if rig.drawn_missing >= DRAWN_MISSING_SAID && !rig.drawn_warned {
                 rig.drawn_warned = true;
                 note(format!(
                     "{:08X}: the reaction's write did not reach the drawing ({} frames shown {:.1} \
-                     units off its animation, drawn on it)",
+                     units off its animation, its skin's bones on it; {matched} of the checked \
+                     bones found in its skin, {same} of them the rig's own nodes, {skin} bones)",
                     rig.id, rig.drawn_missing, rig.pelvis_now
                 ));
             }
         }
     }
 }
+
+/// Frames a reaction shown off its animation but drawn on it before it is said.
+const DRAWN_MISSING_SAID: u32 = 30;
 
 /// The reaction yields to its animation now (`active::YIELD_BACK`): its body handed back
 /// quickly, a brace's hands let go, the steps end. Once a hit.
@@ -1741,7 +1915,7 @@ pub fn sample_fields(actor: u32) -> String {
     let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     match rigs.iter().find(|r| r.actor == actor) {
         Some(r) => format!(
-            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"spin\":{},\"spin_bone\":{},\"settling\":{},\"yielded\":{},\"limited\":{},\"ai_speed\":{},\"drawn_offset\":{},\"drawn_turn\":{},\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{}}}",
+            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"spin\":{},\"spin_bone\":{},\"settling\":{},\"yielded\":{},\"limited\":{},\"ai_speed\":{},\"drawn_offset\":{},\"drawn_turn\":{},\"drawn_skin\":[{},{},{}],\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{}}}",
             r.body.is_some(),
             room_events::num(r.pelvis_now),
             room_events::num(r.jump_now),
@@ -1759,6 +1933,9 @@ pub fn sample_fields(actor: u32) -> String {
             room_events::num(r.ai_speed),
             room_events::num(r.drawn_offset),
             room_events::num(r.drawn_turn),
+            r.drawn_skin.0,
+            r.drawn_skin.1,
+            r.drawn_skin.2,
             room_events::num(r.spread_now),
             r.drift,
             room_events::num(r.drift_most),
@@ -2008,7 +2185,9 @@ fn make_body(
 }
 
 /// The physical body's bones' velocities (game units a second) by node, for the ragdoll to go on
-/// with when it takes the body (`crate::knockdown`): nothing jumps at the switch.
+/// with when it takes the body (`crate::knockdown`): nothing jumps at the switch. Held
+/// (`active::handover_velocities`): the pelvis's to the hit's speed (or the fall's), each bone's
+/// own motion about it to the spin bound.
 pub fn body_velocities(actor: u32) -> Vec<(u32, V3)> {
     let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     let Some(rig) = rigs.iter().find(|r| r.actor == actor) else {
@@ -2017,10 +2196,15 @@ pub fn body_velocities(actor: u32) -> Vec<(u32, V3)> {
     let Some(body) = &rig.body else {
         return Vec::new();
     };
+    let Some(pi) = bone_of(rig, Role::Pelvis, 2) else {
+        return Vec::new();
+    };
+    let most = rig.react_v.max(rig.fall.as_ref().map_or(0.0, |f| f.speed));
+    let held = active::handover_velocities(&body.state, pi, most);
     rig.bones
         .iter()
-        .zip(&body.state)
-        .map(|(b, s)| (b.node, scale(s.v, UNITS_PER_METRE)))
+        .zip(&held)
+        .map(|(b, v)| (b.node, scale(*v, UNITS_PER_METRE)))
         .collect()
 }
 
@@ -3291,6 +3475,110 @@ mod tests {
         assert_eq!(read9(&e, node + LOCAL_ROTATION), game.0);
         assert_eq!(read3(&e, node + LOCAL_TRANSLATION), game.1);
         assert!(WRITTEN.lock().unwrap().is_empty());
+    }
+
+    /// The call order of a frame with the reactions in it (`around_draw`): the write first, then
+    /// the world pass (`00873200`, where the actors are culled, skinned and drawn) sees it and
+    /// reads what it draws with, then the game's own locals put back after the drawing (00262dd
+    /// wrote after the world pass and put back after the frame: never drawn).
+    #[test]
+    fn the_world_pass_draws_the_write_then_it_is_put_back() {
+        let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let mut e = Engine::new();
+        e.mem.map(0x5000, 0x1000);
+        let node = 0x5000u32;
+        let game: (M3, V3) = (
+            ragdoll_core::flinch::rotation([0.0, 0.0, 0.3]),
+            [1.0, 2.0, 3.0],
+        );
+        let ours: (M3, V3) = (
+            ragdoll_core::flinch::rotation([0.4, 0.0, 0.0]),
+            [5.0, 6.0, 7.0],
+        );
+        let order = std::sync::Arc::new(Mutex::new(Vec::<&str>::new()));
+        let seen = std::sync::Arc::new(Mutex::new(None));
+        let (o, sn) = (order.clone(), seen.clone());
+        e.register_double(WORLD_PASS, move |e, _| {
+            o.lock().unwrap().push("world pass");
+            *sn.lock().unwrap() = Some((
+                read3(e, node + LOCAL_TRANSLATION),
+                DRAWN_PENDING.load(std::sync::atomic::Ordering::Relaxed),
+            ));
+            0u32.into_ret()
+        });
+        let o = order.clone();
+        around_draw_with(
+            &mut e,
+            |e| {
+                o.lock().unwrap().push("write");
+                write9(e, node + LOCAL_ROTATION, &ours.0);
+                write3(e, node + LOCAL_TRANSLATION, ours.1);
+                *WRITTEN.lock().unwrap() = vec![(node, game)];
+            },
+            |e| {
+                e.call(WORLD_PASS, &args![0u32, 0u32, 1u32, 1u32, 0u32]);
+            },
+        );
+        assert_eq!(*order.lock().unwrap(), vec!["write", "world pass"]);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some((ours.1, true)),
+            "the world pass drew the write, its drawn pose still to read"
+        );
+        assert_eq!(
+            read3(&e, node + LOCAL_TRANSLATION),
+            game.1,
+            "put back after"
+        );
+        assert!(!DRAWN_PENDING.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// What is drawn is read from the bones the skinned geometry lists, by name: a scene of a root
+    /// node with a skinned geometry whose skin lists a pelvis bone (a node of its own, not the
+    /// rig's) 6 units over its animated place and turned 0.2 rad.
+    #[test]
+    fn the_drawn_pose_is_read_from_the_skins_bones() {
+        let mut e = Engine::new();
+        e.mem.map(0x6000, 0x4000);
+        let (root, geometry, skin, data, array) =
+            (0x6000u32, 0x6200u32, 0x6400u32, 0x6500u32, 0x6600u32);
+        let (bone, rig_node, name) = (0x6800u32, 0x6a00u32, 0x6c00u32);
+        let (node_vt, geo_vt, leaf_vt) = (0x6e00u32, 0x6f00u32, 0x6f80u32);
+        let (is_self, is_none) = (0x7000_0100u32, 0x7000_0104u32);
+        e.register_double(is_self, |_, a| a[0].into_ret());
+        e.register_double(is_none, |_, _| 0u32.into_ret());
+        e.mem.set_u32(node_vt + IS_NODE_SLOT, is_self);
+        e.mem.set_u32(geo_vt + IS_NODE_SLOT, is_none);
+        e.mem.set_u32(geo_vt + IS_GEOMETRY_SLOT, is_self);
+        e.mem.set_u32(leaf_vt + IS_NODE_SLOT, is_none);
+        e.mem.set_u32(leaf_vt + IS_GEOMETRY_SLOT, is_none);
+        e.mem.set_u32(root, node_vt);
+        e.mem.set_u32(geometry, geo_vt);
+        e.register_double(CHILD_COUNT, move |_, a| u32::from(a[0] == root).into_ret());
+        e.register_double(CHILD_AT, move |_, _| geometry.into_ret());
+        e.mem.set_u32(geometry + GEOMETRY_SKIN, skin);
+        e.mem.set_u32(skin + SKIN_DATA, data);
+        e.mem.set_u32(skin + SKIN_BONES, array);
+        e.mem.set_u32(data + SKIN_DATA_BONES, 1);
+        e.mem.set_u32(array, bone);
+        e.mem.set_cstr(name, b"Bip01 Pelvis");
+        e.mem.set_u32(bone + NODE_NAME, name);
+        e.mem.set_u32(rig_node + NODE_NAME, name);
+        let anim_r = ragdoll_core::flinch::IDENTITY;
+        let anim_p: V3 = [10.0, 20.0, 90.0];
+        write9(
+            &mut e,
+            bone + WORLD_ROTATION,
+            &ragdoll_core::flinch::rotation([0.2, 0.0, 0.0]),
+        );
+        write3(&mut e, bone + WORLD_TRANSLATION, [10.0, 26.0, 90.0]);
+        let bones = skin_bones(&mut e, root);
+        assert_eq!(bones, vec![bone]);
+        let (most, turn, matched, same) =
+            drawn_against(&mut e, &bones, &[(rig_node, anim_r, anim_p)]);
+        assert!((most - 6.0).abs() < 1e-3, "{most}");
+        assert!((turn - 0.2f32.to_degrees()).abs() < 1e-2, "{turn}");
+        assert_eq!((matched, same), (1, 0));
     }
 
     /// The write is in the bones through the whole frame's drawing (the world is drawn after the

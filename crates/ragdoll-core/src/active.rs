@@ -474,6 +474,48 @@ impl Limit {
     }
 }
 
+/// The velocities (m/s) the ragdoll takes over from the body (`host::knockdown`'s launch): the
+/// pelvis's held to `most_speed` (the hit's speed, a fall's), and each bone's own motion about the
+/// pelvis to [`SPIN_MOST`] times its distance from it. A body's arm spinning at 61 to 169 rad/s
+/// before the switch flung the ragdoll about in the air (Patrick's 18-21-05 clip).
+pub fn handover_velocities(state: &[State], pelvis: usize, most_speed: f32) -> Vec<V3> {
+    let Some(p) = state.get(pelvis) else {
+        return state.iter().map(|s| s.v).collect();
+    };
+    let most = if most_speed.is_finite() {
+        most_speed.max(0.0)
+    } else {
+        0.0
+    };
+    let pv = p.v;
+    let l = length(pv);
+    let held = if l > most && l > 0.0 {
+        scale(pv, most / l)
+    } else {
+        pv
+    };
+    state
+        .iter()
+        .map(|s| {
+            let own = sub(s.v, pv);
+            let r = length(sub(s.com, p.com));
+            let cap = SPIN_MOST * r;
+            let ol = length(own);
+            let own = if ol > cap && ol > 0.0 {
+                scale(own, cap / ol)
+            } else {
+                own
+            };
+            let v = add(held, own);
+            if v.iter().all(|x| x.is_finite()) {
+                v
+            } else {
+                held
+            }
+        })
+        .collect()
+}
+
 /// `q` on the hemisphere of the identity (the shorter way round).
 fn short(q: Q) -> Q {
     if q[0] < 0.0 {
@@ -2318,6 +2360,33 @@ mod tests {
             );
             last = now;
         }
+    }
+
+    /// The ragdoll takes the body's motion held: the pelvis's speed to the hit's, a flung arm's
+    /// motion about the pelvis to the spin bound.
+    #[test]
+    fn the_handover_holds_a_flung_arm() {
+        let s = |com: V3, v: V3| State {
+            com,
+            q: Q_ID,
+            v,
+            w: [0.0; 3],
+        };
+        let state = [
+            s([0.0, 0.0, 1.0], [3.0, 0.0, 0.0]),
+            s([0.5, 0.0, 1.3], [3.0, 60.0, 0.0]),
+            s([0.0, 0.0, 1.4], [3.5, 0.0, 0.0]),
+        ];
+        let v = handover_velocities(&state, 0, 1.5);
+        assert!((length(v[0]) - 1.5).abs() < 1e-4);
+        let r = length(sub(state[1].com, state[0].com));
+        assert!(
+            (length(sub(v[1], v[0])) - SPIN_MOST * r).abs() < 1e-3,
+            "{:?}",
+            v[1]
+        );
+        // A bone moving with the pelvis keeps its own small motion.
+        assert!((length(sub(v[2], v[0])) - 0.5).abs() < 1e-4);
     }
 
     /// A body carried with its animation's motion keeps its offset from it: turned and moved

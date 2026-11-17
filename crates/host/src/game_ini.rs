@@ -547,6 +547,7 @@ mod tests {
                 "iDetailsKey",
                 "iHitReactions",
                 "iBalance",
+                "iReactionDraw",
                 "sTestRangeCell",
                 "bSnappyMovement",
                 "iAccelerate",
