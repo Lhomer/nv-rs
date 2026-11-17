@@ -36,6 +36,17 @@ hit's push travelling through the chain, balance from the motors, the pelvis's s
 capture-point steps, an eased blend back to the animation. Its sliders are under "Active
 ragdoll".
 
+## New Physics
+
+`src/np_lab.rs` runs New Physics (`ragdoll_core::np`, the game's code for `bNewPhysics`) on FNV's own
+ragdoll: the 18 bodies and 17 joint limits of `skeleton.nif` (`crates/ragdoll-core/data`), standing in
+the skeleton's bind pose. Its tests are the design's targets; videos:
+
+```
+cargo run --release --example np_frames -- OUT m1
+python3 -I scripts/np_video.py OUT/np_m1_recoil_0_8.json OUT/np_m1_recoil_0_8.mp4
+```
+
 ## What is not
 
 - **The ragdoll** is Rapier's, not Havok's. Its bone layout is the game's (the 20 Bip01 bones of

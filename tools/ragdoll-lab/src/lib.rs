@@ -5,6 +5,7 @@
 
 pub mod convert;
 pub mod mannequin;
+pub mod np_lab;
 pub mod render;
 pub mod scenario;
 pub mod sim;

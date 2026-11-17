@@ -519,6 +519,31 @@ plane limit), the head 0, the upper arms 3.6. What the data has that New Physics
   the elbow node 17.4), the wrist's 2.0; and the arms' hinge axles are 15 degrees apart. The
   bodies themselves sit on their nodes (within 0.12, the data's rounding).
 
+**M1, the body and its muscles** (`ragdoll-core`: `np_body`, `np_drive`, `np`; the lab's
+`np_lab`). The 18 bodies are rigid capsules with the data's masses and centres; the 17 joints are
+pinned at the child's node (the parent's anchor taken from the bind pose, so the drawn bones keep
+the skeleton's lengths) and held inside the data's limits, each widened to take in the animated
+pose's own value plus 3 degrees (the neck's bind pose lies outside its cone). Solver: extended
+position based dynamics (XPBD) with 16 substeps a frame: hard joints and limits, the muscles as
+compliant springs, floor contacts with friction. It replaces the plan's "Featherstone with 4
+substeps": hard limits and stiff springs stay stable at any frame time without a force integrator's
+step limits. Muscles: the design's table, the spine 600 N·m/rad (the table's 400 bent the torso 1.2
+times the targets), each damper critical for what its joint moves; a muscle hold that carries the
+weight below each joint (gravity compensation: the springs answer only to hits); a hit softens its
+chain by up to 0.8 (0.6 per joint further), held 0.05 s and eased back over 0.55 s. Each body's turn
+off its animation's also decays at 90 per second (tracking damping, half-softened by a hit): FNV's
+root body is an 8 kg ball of 4 cm and the spine body a 9 kg ball under 30 kg of chest, arms and
+head, and a joint's damper alone, capped by the lighter body, let the upper body swing for a second
+and a half whatever its size. M1 holds the root up by a capped spring toward the animated root (M2's
+balance replaces it). Lab results (FNV's own bodies and limits; the animation its bind pose): a chest
+hit of 0.3, 0.8 and 2 m/s turns the spine's top 6.2, 14.8 and 24.0 degrees (targets 6, 14, 25), the
+head 1.08, 1.08 and 0.92 times that, back under 2 degrees in 0.38, 0.67 and 0.68 s; nothing under
+the floor, the joints within 0.22 units. FNV's spine limits (each spine joint's plane at most 10
+degrees, Spine2 already at its limit in the bind pose) let the torso bend about 18 degrees over the
+pelvis; the rest of a big hit's 24 is the body leaning on its feet. At 2 m/s one foot is shoved and
+stays (M2's steps re-plant it). Videos: `tools/ragdoll-lab/scripts/np_video.py` renders
+`examples/np_frames.rs`'s frames.
+
 ### bdf710a: the get-up hoisted upside down, the stagger's slide, the head's nod, the launch along the ground (Patrick, 2026-11-17, clip 1456)
 
 On FNV's skeleton (`tests-data/fnv_skeleton.txt`) the get-up fixture now runs knock state 6 as the

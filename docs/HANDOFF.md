@@ -15,7 +15,9 @@ machinery runs.
   `crates/ragdoll-core/data/fnv_skeleton.txt` (moved there from the host's tests-data) and
   `ragdoll_core::np_skeleton` (parse, measure against the limits), checked against his bind-pose
   figures on the data and the host fixture. docs/GUNPLAY.md "New Physics".
-- **Next:** M1, `np_body` and `np_drive` with the lab's recoil tests and videos.
+- **M1:** `ragdoll-core::np_body` (XPBD, FNV's bodies and limits), `np_drive`, `np`; the lab's
+  `np_lab` recoil tests (6.2/14.8/24.0 degrees, back in 0.38-0.68 s) and videos
+  (`scripts/np_video.py`). Next: M2, balance and steps.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 
