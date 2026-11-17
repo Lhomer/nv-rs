@@ -112,19 +112,29 @@ pub struct Drive {
 pub struct Tracking {
     pub w: Vec<V3>,
     pub rate: Vec<f32>,
+    /// Bodies the floor holds up but does not grip (no friction): an animated walk's feet,
+    /// which go where the walk puts them.
+    pub slip: Vec<usize>,
 }
 
-/// What holds the root body up this frame: a spring and damper toward a pose (world, metres), each
-/// at most `max_force` (N) and `max_torque` (N·m).
+/// A pull on a body this frame (the root's support, a swinging foot's carry): a spring and damper
+/// toward a pose (its centre of mass, world, metres; its rotation) moving at `v` (m/s): up and down
+/// `kp`, `kd`, at most `max_force` (N); across `kp_h`, `kd_h`, at most `max_force_h`; its turn
+/// `kp_turn`, `kd_turn`, at most `max_torque` (N·m).
 #[derive(Clone, Copy, Debug)]
 pub struct Support {
+    pub body: usize,
     pub x: V3,
+    pub v: V3,
     pub q: Q,
     pub kp: f32,
     pub kd: f32,
+    pub max_force: f32,
+    pub kp_h: f32,
+    pub kd_h: f32,
+    pub max_force_h: f32,
     pub kp_turn: f32,
     pub kd_turn: f32,
-    pub max_force: f32,
     pub max_torque: f32,
 }
 
@@ -346,16 +356,17 @@ impl Model {
 
     /// One frame of `dt` (s): the bodies under gravity, held by the joints and their widened
     /// limits (`targets`: each joint's animated relative rotation), driven by `drives`, the root
-    /// held by `support`, standing on the floor at height `floor` (metres).
+    /// held by `pulls` (the root's support, a swinging foot), standing on the floor at height
+    /// `floor` (metres).
     pub fn step(
         &self,
         states: &mut [State],
         drives: &[Drive],
-        support: Option<&Support>,
+        pulls: &[Support],
         floor: f32,
         dt: f32,
     ) -> StepReport {
-        self.step_tracked(states, drives, support, None, floor, dt)
+        self.step_tracked(states, drives, pulls, None, floor, dt)
     }
 
     /// [`Model::step`] with each body's turn tracked to its animation's (`tracking`).
@@ -363,7 +374,7 @@ impl Model {
         &self,
         states: &mut [State],
         drives: &[Drive],
-        support: Option<&Support>,
+        pulls: &[Support],
         tracking: Option<&Tracking>,
         floor: f32,
         dt: f32,
@@ -435,10 +446,11 @@ impl Model {
                 }
                 self.pin(states, def);
             }
-            if let Some(sp) = support {
+            for sp in pulls {
                 self.support(states, sp, h);
             }
-            self.floor(states, &prev, floor);
+            let slip: &[usize] = tracking.map_or(&[], |t| &t.slip);
+            self.floor(states, &prev, floor, slip);
             // Velocities from the moves.
             for (s, p) in states.iter_mut().zip(&prev) {
                 s.v = scale(sub(s.x, p.x), 1.0 / h);
@@ -463,13 +475,16 @@ impl Model {
                 }
             }
             // The support's damping, the floor's sliding friction.
-            if let Some(sp) = support {
-                let r = self.root;
+            for sp in pulls {
+                let r = sp.body;
                 self.damp_turn(states, r, None, sp.kd_turn, h);
-                let k = (sp.kd * self.bodies[r].inv_mass * h).min(1.0);
-                states[r].v = scale(states[r].v, 1.0 - k);
+                let m = self.bodies[r].inv_mass * h;
+                let (kv, kh) = ((sp.kd * m).min(1.0), (sp.kd_h * m).min(1.0));
+                let rel = sub(states[r].v, sp.v);
+                let dv = [-rel[0] * kh, -rel[1] * kh, -rel[2] * kv];
+                states[r].v = add(states[r].v, dv);
             }
-            self.friction(states, floor, h);
+            self.friction(states, floor, h, slip);
         }
         for (i, def) in self.bodies.iter().enumerate() {
             for e in def.ends {
@@ -637,17 +652,22 @@ impl Model {
         }
     }
 
-    /// The root held toward the support's pose: a capped spring.
+    /// A body pulled toward its pull's pose: capped springs, up and down and across.
     fn support(&self, states: &mut [State], sp: &Support, h: f32) {
-        let r = self.root;
+        let r = sp.body;
         let d = sub(sp.x, states[r].x);
-        let c = length(d);
-        if c > 1e-7 && sp.kp > 0.0 {
-            let n = scale(d, 1.0 / c);
-            let w = self.bodies[r].inv_mass;
-            let alpha = 1.0 / (sp.kp * h * h);
-            let lambda = (c / (w + alpha)).min(sp.max_force * h * h);
-            states[r].x = add(states[r].x, scale(n, lambda * w));
+        let w = self.bodies[r].inv_mass;
+        for (part, kp, most) in [
+            ([0.0, 0.0, d[2]], sp.kp, sp.max_force),
+            ([d[0], d[1], 0.0], sp.kp_h, sp.max_force_h),
+        ] {
+            let c = length(part);
+            if c > 1e-7 && kp > 0.0 {
+                let n = scale(part, 1.0 / c);
+                let alpha = 1.0 / (kp * h * h);
+                let lambda = (c / (w + alpha)).min(most * h * h);
+                states[r].x = add(states[r].x, scale(n, lambda * w));
+            }
         }
         if sp.kp_turn > 0.0 {
             let c = qlog(qmul(sp.q, qconj(states[r].q)));
@@ -667,8 +687,9 @@ impl Model {
 
     /// The capsules kept above the floor; a contact that has not slid past the static friction is
     /// held where it was.
-    fn floor(&self, states: &mut [State], prev: &[State], floor: f32) {
+    fn floor(&self, states: &mut [State], prev: &[State], floor: f32, slip: &[usize]) {
         for (i, def) in self.bodies.iter().enumerate() {
+            let grips = !slip.contains(&i);
             for e in def.ends {
                 let local = sub(e, def.com);
                 let centre = add(states[i].x, qrot(states[i].q, local));
@@ -689,7 +710,7 @@ impl Model {
                 let slide = sub(now, was);
                 let slide = [slide[0], slide[1], 0.0];
                 let s = length(slide);
-                if s > 1e-7 && s < FRICTION.0 * depth {
+                if grips && s > 1e-7 && s < FRICTION.0 * depth {
                     let t = scale(slide, -1.0 / s);
                     let r = sub([now[0], now[1], now[2] - def.radius], states[i].x);
                     let w = self.point_weight(states, i, r, t);
@@ -700,8 +721,11 @@ impl Model {
     }
 
     /// The floor's sliding friction on the velocities of the bodies touching it.
-    fn friction(&self, states: &mut [State], floor: f32, h: f32) {
+    fn friction(&self, states: &mut [State], floor: f32, h: f32, slip: &[usize]) {
         for (i, def) in self.bodies.iter().enumerate() {
+            if slip.contains(&i) {
+                continue;
+            }
             for e in def.ends {
                 let local = sub(e, def.com);
                 let centre = add(states[i].x, qrot(states[i].q, local));
@@ -1003,19 +1027,24 @@ mod tests {
             .collect();
         let r = m.root;
         let support = Support {
+            body: r,
             x: s[r].x,
+            v: [0.0; 3],
             q: s[r].q,
             kp: 20000.0,
             kd: 1500.0,
+            max_force: 4000.0,
+            kp_h: 20000.0,
+            kd_h: 1500.0,
+            max_force_h: 4000.0,
             kp_turn: 2000.0,
             kd_turn: 150.0,
-            max_force: 4000.0,
             max_torque: 1000.0,
         };
         let floor = lowest_point(&m, &s);
         let mut rep = StepReport::default();
         for _ in 0..120 {
-            rep = m.step(&mut s, &drives, Some(&support), floor, 1.0 / 60.0);
+            rep = m.step(&mut s, &drives, &[support], floor, 1.0 / 60.0);
         }
         for ((r1, t1), (r0, t0)) in m.node_worlds(&s).iter().zip(&nodes) {
             assert!(length(sub(*t1, *t0)) < 1.0, "{:?} vs {:?}", t1, t0);
@@ -1050,7 +1079,7 @@ mod tests {
             .collect();
         let mut rep = StepReport::default();
         for _ in 0..180 {
-            rep = m.step(&mut s, &drives, None, 0.0, 1.0 / 60.0);
+            rep = m.step(&mut s, &drives, &[], 0.0, 1.0 / 60.0);
         }
         let lowest = m
             .bodies
@@ -1132,7 +1161,7 @@ mod tests {
         for _ in 0..30 {
             let w = qrot(s[calf].q, axle[0]);
             s[calf].w = add(s[calf].w, scale(w, 3.0));
-            m.step(&mut s, &drives, None, -10.0, 1.0 / 60.0);
+            m.step(&mut s, &drives, &[], -10.0, 1.0 / 60.0);
             let rel = m.relative(&s)[knee];
             let Measure::Hinge { angle } = m.measure(knee, rel) else {
                 panic!()

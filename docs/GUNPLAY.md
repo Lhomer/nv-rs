@@ -544,6 +544,34 @@ pelvis; the rest of a big hit's 24 is the body leaning on its feet. At 2 m/s one
 stays (M2's steps re-plant it). Videos: `tools/ragdoll-lab/scripts/np_video.py` renders
 `examples/np_frames.rs`'s frames.
 
+**M2, balance and steps** (`ragdoll-core::np_balance`). Each frame: the whole body's centre of mass
+and its velocity against the animation's, the capture point (`com + v/ω₀`), the support (the hull of
+the planted feet's soles). Standing, the root's support holds the body across only while the
+capture point is inside the feet (the ankles' and hips' reach: 900 N; 15% of that once it is out),
+so a push past the feet makes it drift and step: the foot that reaches past the capture point
+without crossing the other, landing 8 cm beyond it, at most 65 cm, over 0.3 s on an arc 8 cm high
+(its leg's muscles relaxed under the foot's pull), pressed onto its spot until it stands; a landed
+foot is held where it stands (a friction-strong pull: the leg's muscles pulled it back under the
+hip) and no other step starts until it does. While the balance is engaged the legs' targets are the
+animation's bent onto the footing (`flinch::leg_ik`): the hips lowered as the feet spread, each
+ankle where its foot stands or lands (the animation's straight stance leg held the hips up and the
+stepped foot hung in the air). Past three catching steps still outside, it falls (M4 hands it to
+the game's ragdoll). Caught, one slow stance step puts the feet back on the animation's stance (the
+foot landing off its animated place by what the other foot is), and the body's move against its
+animation (the shift: the planted feet's middle against the animated feet's) is handed to the actor
+(`Np::take_move`: the game moves its reference; the lab moves its animation). Moving (the animation
+walks or runs it): its feet go where the walk puts them (the floor holds them up without gripping),
+its legs at 4 times the standing springs (at the table's values the hips trailed a walk by 20
+degrees); knocked off its path, the path follows the body for a second (the walk's own steps gather
+it, the support's damper against the walk's velocity brings it back in line), and knocked past what
+steps can take (its capture point 0.7 m off), it falls. Lab results on FNV's ragdoll: a 0.3 m/s chest
+hit takes no step; 0.8 m/s one catching step back (caught by 0.55 s, the actor moved 28 units back,
+standing again with its feet on the animation's stance by 2.4 s); 2 m/s one long step (45 units),
+standing by 2.8 s; never a fall; a side push of 0.8 m/s steps out with the near foot, 18 units, the
+legs never crossing; hit while walking (101 units a second) at 0.8 and 2 m/s it recoils 14.2 and 19.5
+degrees and the walk carries on, every node within 9.2 units of the walk 1.5 s after the hit. The
+walk is a procedural gait on FNV's skeleton standing in for the game's walk cycle.
+
 ### bdf710a: the get-up hoisted upside down, the stagger's slide, the head's nod, the launch along the ground (Patrick, 2026-11-17, clip 1456)
 
 On FNV's skeleton (`tests-data/fnv_skeleton.txt`) the get-up fixture now runs knock state 6 as the

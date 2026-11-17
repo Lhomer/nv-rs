@@ -22,16 +22,69 @@ fn main() {
             ));
         }
     }
+    if which == "m2" || which == "all" {
+        for v in [0.8f32, 2.0] {
+            let r = run(
+                &format!("New Physics M2: chest hit {v} m/s, a catching step"),
+                &chest_hit(v),
+                3.5,
+            );
+            scenarios.push((
+                format!("np_m2_push_{}", format!("{v}").replace('.', "_")),
+                r,
+                0.2,
+            ));
+        }
+        let side = vec![NpHit {
+            at: 0.2,
+            body: "Bip01 Spine2",
+            offset: [-8.0, 0.0, 4.0],
+            speed: 0.8,
+            dir: [1.0, 0.0, 0.0],
+        }];
+        scenarios.push((
+            "np_m2_side_0_8".into(),
+            run("New Physics M2: side push 0.8 m/s", &side, 3.0),
+            0.2,
+        ));
+        let w = walk(101.0, 0.35);
+        for v in [0.8f32, 2.0] {
+            let hits = vec![NpHit {
+                at: 1.0,
+                body: "Bip01 Spine2",
+                offset: [0.0, 8.0, 4.0],
+                speed: v,
+                dir: [0.0, -1.0, 0.0],
+            }];
+            let r = run_on(
+                &format!("New Physics M2: hit {v} m/s while walking"),
+                &hits,
+                3.0,
+                &w,
+            );
+            scenarios.push((
+                format!("np_m2_walk_{}", format!("{v}").replace('.', "_")),
+                r,
+                1.0,
+            ));
+        }
+    }
     for (file, run, hit_at) in scenarios {
         let rc = recoil(&run, hit_at);
         let summary = format!(
-            "peak {:.1} deg (spine top), head {:.1}, back under 2 deg after {:.2} s",
-            rc.world_peak, rc.head_peak, rc.back
+            "peak {:.1} deg (spine top), head {:.1}",
+            rc.world_peak, rc.head_peak
         );
+        let phases = ["standing", "stepping", "recovering", "falling"];
         let json = frames_json(&run, |f| {
             format!(
-                "t {:.2} s   spine top {:5.1} deg   head {:5.1} deg   |   {}",
-                f.t, f.spine_world, f.head, summary
+                "t {:.2} s  spine {:4.1} deg  {}  steps {}  moved {:.0} u  |  {}",
+                f.t,
+                f.spine_world,
+                phases[f.phase as usize],
+                f.steps,
+                ragdoll_core::flinch::length(f.moved),
+                summary
             )
         });
         let path = format!("{out}/{file}.json");

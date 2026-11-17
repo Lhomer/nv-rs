@@ -17,7 +17,9 @@ machinery runs.
   figures on the data and the host fixture. docs/GUNPLAY.md "New Physics".
 - **M1:** `ragdoll-core::np_body` (XPBD, FNV's bodies and limits), `np_drive`, `np`; the lab's
   `np_lab` recoil tests (6.2/14.8/24.0 degrees, back in 0.38-0.68 s) and videos
-  (`scripts/np_video.py`). Next: M2, balance and steps.
+  (`scripts/np_video.py`).
+- **M2:** `ragdoll-core::np_balance` (capture point, support, catching and stance steps, the
+  footing IK, the walk's path); the lab's step and walking-hit tests and videos. Next: M3, the host.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 

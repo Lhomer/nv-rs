@@ -28,11 +28,11 @@ def camera(yaw, pitch, dist, target):
     n = math.sqrt(sum(x * x for x in r))
     r = [x / n for x in r]
     u = [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]]
-    return eye, f, r, u
+    return eye, f, r, u, target
 
 
 def project(cam, p):
-    eye, f, r, u = cam
+    eye, f, r, u = cam[:4]
     d = [p[i] - eye[i] for i in range(3)]
     z = sum(d[i] * f[i] for i in range(3))
     if z < 1.0:
@@ -46,9 +46,11 @@ def project(cam, p):
 def draw_frame(cam, floor, frame, font, hits=()):
     img = Image.new("RGB", (W, H), (30, 33, 40))
     d = ImageDraw.Draw(img, "RGBA")
-    # The floor's grid (game units, 20 apart).
-    for i in range(-6, 7):
-        for a, b in (((i * 20, -120, floor), (i * 20, 120, floor)), ((-120, i * 20, floor), (120, i * 20, floor))):
+    # The floor's grid (game units, 20 apart), around the view's target.
+    cx, cy = round(cam[4][0] / 20) * 20, round(cam[4][1] / 20) * 20
+    for i in range(-8, 9):
+        for a, b in (((cx + i * 20, cy - 160, floor), (cx + i * 20, cy + 160, floor)),
+                     ((cx - 160, cy + i * 20, floor), (cx + 160, cy + i * 20, floor))):
             pa, pb = project(cam, a), project(cam, b)
             if pa and pb:
                 d.line([(pa[0], pa[1]), (pb[0], pb[1])], fill=(70, 75, 85), width=1)
@@ -89,14 +91,19 @@ def main():
         title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
     except OSError:
         font = title_font = ImageFont.load_default()
-    cam = camera(math.radians(62), math.radians(10), 200.0, (0.0, 0.0, 52.0))
     hits = data.get("hits", [])
+    yaw = math.radians(data.get("yaw", 62))
     frames = data["frames"]
     with tempfile.TemporaryDirectory() as tmp:
         n = 0
         # Real speed, then a quarter speed (each frame four times).
         for speed, label in ((1, "real speed"), (4, "1/4 speed")):
+            focus = None
             for fr in frames:
+                # The view follows the actor (smoothly), its height fixed.
+                fx, fy = fr.get("focus", [0, 0, 0])[0:2]
+                focus = (fx, fy) if focus is None else (focus[0] + (fx - focus[0]) * 0.2, focus[1] + (fy - focus[1]) * 0.2)
+                cam = camera(yaw, math.radians(10), 220.0, (focus[0], focus[1], 52.0))
                 img = draw_frame(cam, data["floor"], fr, font, hits)
                 ImageDraw.Draw(img).text((10, 10), f"{data['name']}   ({label})", fill=(255, 220, 120), font=title_font)
                 for _ in range(speed):

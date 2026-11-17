@@ -43,7 +43,7 @@ ragdoll: the 18 bodies and 17 joint limits of `skeleton.nif` (`crates/ragdoll-co
 the skeleton's bind pose. Its tests are the design's targets; videos:
 
 ```
-cargo run --release --example np_frames -- OUT m1
+cargo run --release --example np_frames -- OUT all     # m1 recoils, m2 steps and walking hits
 python3 -I scripts/np_video.py OUT/np_m1_recoil_0_8.json OUT/np_m1_recoil_0_8.mp4
 ```
 
