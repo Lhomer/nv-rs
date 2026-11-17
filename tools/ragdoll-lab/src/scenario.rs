@@ -1723,11 +1723,13 @@ mod plank {
     /// 4 degrees and is back within 1 by 0.8 s; and it is never a plank.
     #[test]
     fn a_hit_bends_the_body_not_a_plank() {
+        // (The least bends since 19-43-08: the body takes `active::KICK_SHARE` of a hit, over
+        // `active::HIT_TIME`'s 0.12 s rise, so less of it is in by 0.15 s.)
         for (spec, least) in [
-            ("hits=9mm@chest", 3.0),
-            ("hits=9mm@head", 3.0),
-            ("hits=9mm@pelvis", 2.5),
-            ("hits=44@head", 8.0),
+            ("hits=9mm@chest", 1.0),
+            ("hits=9mm@head", 1.0),
+            ("hits=9mm@pelvis", 0.8),
+            ("hits=44@head", 4.0),
         ] {
             let r = run(spec);
             eprintln!("{spec}: {r:?}");
@@ -1769,7 +1771,8 @@ mod plank {
     }
 
     /// e) When the body's capture point leaves its support (the feet's reach), a catch step starts
-    /// within 0.25 s.
+    /// within 0.25 s. (Since the body takes `active::KICK_SHARE` of a hit, a staggering hit's
+    /// steps start with the hit, before its capture point leaves: that counts as followed.)
     #[test]
     fn a_step_follows_the_capture_point() {
         let mut left_any = false;
@@ -1824,6 +1827,9 @@ mod plank {
             if sim.stats.decisions.iter().any(|d| d == "Knockdown") {
                 continue;
             }
+            if stepped_at.is_some_and(|s| s <= 0.05) {
+                left_any = true;
+            }
             if let Some(l) = left_at {
                 left_any = true;
                 let s = stepped_at.unwrap_or(f32::MAX);
@@ -1835,7 +1841,7 @@ mod plank {
         }
         assert!(
             left_any,
-            "no hit moved the capture point out of the support"
+            "no hit moved the capture point out of the support, nor stepped with the hit"
         );
     }
 }
@@ -2342,6 +2348,8 @@ mod locomotion {
     /// animation is never read stale; it is over within 3.5 s of the first hit.
     #[test]
     fn a_small_hit_rides_on_the_walk() {
+        /// A leg's swing (rad/s) at most.
+        const STEP_LEG_SPIN: f32 = 12.0;
         for (spec, turn, r) in runs() {
             assert!(!r.fell, "{spec}: fell");
             assert!(
@@ -2359,11 +2367,23 @@ mod locomotion {
                 "{spec}: turned {:.2} rad/s against the animation's {turn:.2}",
                 r.yaw_rate
             );
+            // A leg swings on the steps' own pose, or is lifted off the floor over the walk's
+            // feet (`active::lift_feet`): a person's step, not the reaction's offset the spin
+            // bound holds (the 0c1fbbf lab swung them up to 11.5 rad/s).
+            let leg = ["Thigh", "Calf", "Foot"]
+                .iter()
+                .any(|l| r.spin_bone.contains(l));
+            let bound = if leg {
+                STEP_LEG_SPIN
+            } else {
+                ragdoll_core::active::SPIN_MOST + 0.5
+            };
             assert!(
-                r.bone_spin <= ragdoll_core::active::SPIN_MOST + 0.5,
-                "{spec}: {} turned {:.1} rad/s off its animation",
+                r.bone_spin <= bound,
+                "{spec}: {} turned {:.1} rad/s off its animation (steps {})",
                 r.spin_bone,
-                r.bone_spin
+                r.bone_spin,
+                r.steps
             );
             assert_eq!(r.base_stale, 0, "{spec}: the animation read stale");
             assert!(
@@ -2392,13 +2412,15 @@ mod locomotion {
         assert_eq!(put_back, 0);
     }
 
-    /// The bounds never take a standing flinch's size away (d0f4192's clips drew none at all:
-    /// that was the write put back before the world was drawn, not the bounds): 9mm to .45-70 hits
-    /// at the chest, clavicle, head, side and pelvis, unarmed, pistol and rifle, turn their bones
-    /// as far with the bounds as without (a bone flipped over past 90 degrees without them aside),
-    /// and never faster than the spin bound (a bound letting go caught up at it before).
+    /// A standing flinch, the speed (Patrick's 19-43-08 clip, 0c1fbbf: a 0.32 m/s 9mm turned the
+    /// torso 20 to 27 degrees, the arms and head spun at 12 rad/s, and the bounds held most bones
+    /// every frame, a stiff deep bend): 9mm to .45-70 hits at the chest, clavicle, head, side and
+    /// pelvis, unarmed, pistol and rifle, turn the torso no more than the push's turn
+    /// (`active::offset_most`: 8 degrees at 0.3 m/s, 20 at 0.75), no bone faster than
+    /// `active::SPIN_MOST` off its animation, the bounds seldom holding, and still visibly.
     #[test]
-    fn the_bounds_keep_a_standing_flinch() {
+    fn a_standing_flinch_is_held_to_its_push() {
+        use ragdoll_core::active::{offset_most, SPIN_MOST};
         for armed in ["0", "pistol", "rifle"] {
             for hit in [
                 "9mm@chest",
@@ -2415,18 +2437,46 @@ mod locomotion {
                     let mut sim = Sim::new(GroundKind::Flat);
                     sim.limit_off = off;
                     let r = run(&mut sim, &spec, Tuning::GAME).unwrap();
-                    (r.flinch, r.bone_spin)
+                    (r, sim.stats.clone())
                 };
-                let ((with, spin), (without, _)) = (flinch(false), flinch(true));
-                eprintln!("{armed} {hit}: {with:.1} degrees with the bounds, {without:.1} without");
-                if without < 90.0 {
+                let ((r, s), (_, free)) = (flinch(false), flinch(true));
+                let most = offset_most(s.react_v).0.to_degrees();
+                eprintln!(
+                    "{armed:6} {hit:14} v {:.2}: torso {:.1} (free {:.1}, most {most:.1}) any {:.1} \
+                     spin {:.1} ({}) held {} steps {} fell {}",
+                    s.react_v,
+                    s.torso_turn,
+                    free.torso_turn,
+                    s.flinch,
+                    r.bone_spin,
+                    r.spin_bone,
+                    s.limited,
+                    s.steps,
+                    s.fell
+                );
+                if s.fell {
+                    continue;
+                }
+                assert!(
+                    s.torso_turn <= most + 1.0,
+                    "{armed} {hit}: the torso {:.1} degrees, at most {most:.1}",
+                    s.torso_turn
+                );
+                assert!(s.flinch >= 2.0, "{armed} {hit}: {:.1} degrees", s.flinch);
+                // The drawn torso's turn never changes faster than the spin bound.
+                assert!(
+                    s.turn_jump <= SPIN_MOST.to_degrees() * crate::sim::STEP + 0.3,
+                    "{armed} {hit}: the torso's turn {:.1} degrees in a frame",
+                    s.turn_jump
+                );
+                if s.steps == 0 {
                     assert!(
-                        with >= without * 0.95,
-                        "{armed} {hit}: {with:.1} < {without:.1}"
+                        r.bone_spin <= SPIN_MOST + 0.5,
+                        "{armed} {hit}: {} {:.1} rad/s",
+                        r.spin_bone,
+                        r.bone_spin
                     );
                 }
-                assert!(with >= 5.0, "{armed} {hit}: {with:.1} degrees");
-                assert!(spin <= 12.0, "{armed} {hit}: {spin:.1} rad/s");
             }
         }
     }
@@ -2522,5 +2572,168 @@ mod perk_pushes {
         assert!(bump(4.0, true).2 >= 1, "steps");
         assert_eq!(bump(8.0, true).0, Some(Reaction::Knockdown));
         assert!(bump(8.0, true).3, "knocked over");
+    }
+}
+
+#[cfg(test)]
+/// The floor (Patrick's 19-43-08 clip, 0c1fbbf: a .44's catch step moved the Fiend's reference 3
+/// units down with its feet, and she sank upright, hips below the ground): a flinch, a catch step
+/// and a reaction yielding to the AI's walk never put a foot or the pelvis under the floor, the
+/// pelvis never more than `active::PELVIS_DROP_FLINCH` under its animation (a flinch) nor
+/// `active::PELVIS_DROP_STEP` (stepping), the reference never moved up or down by the steps.
+mod floor {
+    use super::*;
+    use crate::sim::Sim;
+    use ragdoll_core::active::{PELVIS_DROP_FLINCH, PELVIS_DROP_STEP};
+
+    fn run_on(ground: GroundKind, spec: &str) -> Sim {
+        let mut sim = Sim::new(ground);
+        run(&mut sim, &Spec::parse(spec).unwrap(), Tuning::GAME).unwrap();
+        let s = &sim.stats;
+        eprintln!(
+            "{ground:?} {spec:72} steps {} pelvis drop {:.1} (flinch {:.1}, stepping {:.1}) foot \
+             drop {:.1} under floor {:.1} reference dz {:.1}",
+            s.steps,
+            s.pelvis_drop,
+            s.flinch_pelvis_drop,
+            s.step_pelvis_drop,
+            s.foot_drop,
+            s.under_floor,
+            s.reference_dz
+        );
+        sim
+    }
+
+    const FLINCHES: [&str; 4] = [
+        "armed=pistol&hits=9mm@chest",
+        "hits=10mm@chest",
+        "armed=rifle&hits=44@spine1/40",
+        "hits=9mm@pelvis",
+    ];
+    const STEPS: [&str; 3] = [
+        "hits=44@chest",
+        "armed=pistol&hits=44@chest",
+        "hits=4570@chest",
+    ];
+    const YIELDS: [&str; 2] = [
+        "armed=pistol&hits=10mm@lclavicle&move=0.2&walk=40&turn=180&turnby=180",
+        "hits=44@chest&move=0.4&walk=23&turn=120&turnby=150",
+    ];
+
+    fn check(sim: &Sim, spec: &str) {
+        let s = &sim.stats;
+        if s.fell {
+            return; // its ragdoll's (the knockdown's own checks)
+        }
+        assert!(
+            s.under_floor <= 0.5,
+            "{spec}: {:.1} units under the floor",
+            s.under_floor
+        );
+        assert!(
+            s.foot_drop <= 0.5,
+            "{spec}: a foot {:.1} under its animation",
+            s.foot_drop
+        );
+        assert!(
+            s.flinch_pelvis_drop <= PELVIS_DROP_FLINCH + 0.05,
+            "{spec}: the pelvis {:.1} under its animation",
+            s.flinch_pelvis_drop
+        );
+        assert!(
+            s.step_pelvis_drop <= PELVIS_DROP_STEP + 0.05,
+            "{spec}: the pelvis {:.1} under its animation stepping",
+            s.step_pelvis_drop
+        );
+        assert!(
+            s.reference_dz <= 0.01,
+            "{spec}: the reference moved {:.1} up or down",
+            s.reference_dz
+        );
+    }
+
+    #[test]
+    fn a_flinch_stays_on_the_floor() {
+        for spec in FLINCHES {
+            let sim = run_on(GroundKind::Flat, spec);
+            check(&sim, spec);
+        }
+    }
+
+    #[test]
+    fn a_catch_step_stays_on_the_floor() {
+        let mut stepped = 0;
+        for ground in [GroundKind::Flat, GroundKind::Slope, GroundKind::Uneven] {
+            for spec in STEPS {
+                let sim = run_on(ground, spec);
+                stepped += (sim.stats.steps > 0) as u32;
+                check(&sim, spec);
+            }
+        }
+        assert!(stepped >= 3, "no catch steps taken ({stepped})");
+    }
+
+    #[test]
+    fn a_yield_stays_on_the_floor() {
+        for spec in YIELDS {
+            let sim = run_on(GroundKind::Flat, spec);
+            check(&sim, spec);
+        }
+    }
+
+    /// A reaction yielding to its AI's walk and turn hands back with no jump: the torso's turn
+    /// off its animation (the host's `drawn_turn`) never changes more than 5 degrees in a frame
+    /// (Patrick's 19-43-08 clip: 42.6 degrees for one frame at the yield, then none).
+    #[test]
+    fn a_yield_eases_back_with_no_jump() {
+        let mut specs: Vec<String> = YIELDS.iter().map(|s| s.to_string()).collect();
+        for hit in ["9mm@chest", "10mm@head", "44@head"] {
+            for armed in ["0", "pistol"] {
+                specs.push(format!(
+                    "armed={armed}&hits={hit}&move=0.3&walk=40&turn=180&turnby=180"
+                ));
+            }
+        }
+        for spec in &specs {
+            let sim = run_on(GroundKind::Flat, spec);
+            let s = &sim.stats;
+            eprintln!(
+                "{spec}: turn jump {:.2} degrees yielding, {:.2} over the reaction",
+                s.yield_turn_jump, s.turn_jump
+            );
+            assert!(
+                s.yield_turn_jump <= 5.0,
+                "{spec}: the torso's turn jumped {:.1} degrees in a frame as it yielded",
+                s.yield_turn_jump
+            );
+            // Never past the spin bound in a frame, over the whole reaction.
+            assert!(
+                s.turn_jump
+                    <= ragdoll_core::active::SPIN_MOST.to_degrees() * crate::sim::STEP + 0.3,
+                "{spec}: {:.1} degrees in a frame",
+                s.turn_jump
+            );
+        }
+    }
+
+    /// A step's move of the reference is applied once: the actor goes across with the feet's
+    /// middle (the sum of its moves is where the feet's middle went), the shown pelvis never
+    /// jumps with it (the pelvis's offset takes the move back the same frame).
+    #[test]
+    fn a_steps_reference_move_is_applied_once() {
+        for spec in STEPS {
+            let sim = run_on(GroundKind::Flat, spec);
+            let s = &sim.stats;
+            if s.steps == 0 || s.fell {
+                continue;
+            }
+            let moved = sub(sim.pos, s.start);
+            assert!(moved[2].abs() <= 0.01, "{spec}: {moved:?}");
+            assert!(
+                s.pelvis_jump <= 3.0,
+                "{spec}: the pelvis jumped {:.1} units",
+                s.pelvis_jump
+            );
+        }
     }
 }

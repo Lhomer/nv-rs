@@ -425,15 +425,14 @@ impl Stepping {
         }
     }
 
-    /// Where the reference goes when a foot lands: the feet's middle across, its height changed
-    /// as the feet's middle height changed since the start (stairs, slopes).
+    /// Where the reference goes when a foot lands: the feet's middle across, at the height it
+    /// stands (the game's character controller keeps it on its floor; stairs and slopes are
+    /// its). It followed the feet's middle height down (0c1fbbf): a foot planted a few units
+    /// low (the navmesh lies under the collision floor) moved the actor and its controller into
+    /// the floor, and it sank upright to the waist (Patrick's 19-43-08 clip, the Fiend's .44).
     pub fn follow_feet(&self) -> V3 {
         let middle = scale_mid(self.planted);
-        [
-            middle[0],
-            middle[1],
-            self.reference_z0 + (middle[2] - self.feet_z0),
-        ]
+        [middle[0], middle[1], self.reference_z0]
     }
 
     /// The feet's targets now: each planted foot where it stands, the swinging one on its arc.
@@ -563,6 +562,37 @@ mod tests {
         assert_eq!(s.steps[0].from, [5.0, 0.0, 0.0]);
         assert_eq!(s.steps[0].to, [5.0, -10.0, 0.0]);
         assert_eq!(s.reference, [0.0; 3]);
+    }
+
+    /// A foot landing lower than the feet stood (a step planted a few units low) moves the
+    /// reference across with the feet, never down: its height stays (Patrick's 19-43-08 clip:
+    /// the reference followed the feet down 3 units and the actor sank to the waist).
+    #[test]
+    fn the_reference_keeps_its_height_when_a_foot_lands_low() {
+        let feet = [[-8.0, 0.0, 8.0], [8.0, 0.0, 8.0]];
+        let reference = [0.0, 0.0, 8157.3];
+        let mut s = Stepping::new(
+            [0.0, -1.0, 0.0],
+            1.0,
+            0,
+            feet,
+            vec![(1, [8.0, -20.0, 1.0])],
+            1.0,
+            reference,
+            Outcome::Caught,
+            0.0,
+        );
+        let mut landed = None;
+        for _ in 0..200 {
+            if let Some(l) = s.advance(1.0 / 60.0) {
+                landed = Some(l);
+                break;
+            }
+        }
+        assert!(landed.is_some());
+        let to = s.follow_feet();
+        assert_eq!(to[2], reference[2]);
+        assert!((to[1] - -10.0).abs() < 1e-3, "{to:?}");
     }
 
     fn feet() -> [V3; 2] {

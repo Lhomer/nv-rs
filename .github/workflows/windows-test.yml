@@ -8,20 +8,14 @@ name: Windows test room
 # On a claude/** branch a second job publishes it at a stable link, the rolling prerelease tagged
 # windows-test (its files replaced by each successful build):
 # https://github.com/Lhomer/nv-rs/releases/download/windows-test/nv-rs-windows-room.zip
+#
+# Built for every push, as Play's package is (no paths filter): Launcher.exe's "Launch physics
+# tester" waits for the tester of Play's newest build (scripts/updater/src/update.rs
+# `tester_step`), so a push only Play built (a docs change) left it waiting for a tester that
+# never came.
 on:
   push:
     branches: ['claude/**']
-    paths:
-      - 'crates/**'
-      - 'viewer/**'
-      - 'scripts/**'
-      - 'distribution/**'
-      - 'vendor/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'docs/WINDOWS-ROOM.md'
-      - '.github/workflows/windows-test.yml'
   workflow_dispatch:
 permissions:
   contents: read

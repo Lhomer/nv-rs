@@ -22,6 +22,16 @@
 use crate::flinch::{add, dot, length, scale, sub, unit, M3, V3};
 use crate::UNITS_PER_METRE;
 
+/// A two-handed weapon's support hand held on its grip while the body is handed back: fully
+/// until the body's weight in the shown pose is down to this, then eased off with it (followed
+/// all the way, the hand came off the grip mid-hand-back and back: a wobble).
+pub const GRIP_LET_GO: f32 = 0.35;
+
+/// The grip hold's weight for the body's weight in the shown pose `w` ([`GRIP_LET_GO`]).
+pub fn grip_weight(w: f32) -> f32 {
+    (w / GRIP_LET_GO).clamp(0.0, 1.0)
+}
+
 /// A hand's thickness (game units): the wrist rests this far off the surface.
 pub const HAND: f32 = crate::flinch::BRACE_HAND;
 /// How close to its rest on the surface a reaching hand counts as touching (game units), and how

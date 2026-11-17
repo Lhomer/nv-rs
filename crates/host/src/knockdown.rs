@@ -50,7 +50,8 @@
 //!   navmesh point up to 200 units away, next to other actors and 20 units over the floor, and
 //!   the physics threw them apart.) For [`WATCH`] after that ([`watch_get_up`]) its controller's
 //!   stored push and the pushes other characters give it are zeroed for [`HOLD_PUSH`], its rising
-//!   speed and its bones' are held to [`MAX_RISE`], and its position, velocity, overlaps and any
+//!   speed is held to [`MAX_RISE`] and its bones' to [`BONE_FLING_RISE`] (a fling, never the
+//!   get-up's own rise), and its position, velocity, overlaps and any
 //!   depenetration are logged every [`WATCH_STEP`].
 //! - **Once:** an actor knocked down in the last [`KNOCK_COOLDOWN`] or got up in the last
 //!   [`UP_COOLDOWN`] is not knocked again, the game's own blast knock-down
@@ -164,6 +165,9 @@ pub const WATCH: Duration = Duration::from_secs(2);
 pub const WATCH_STEP: Duration = Duration::from_millis(200);
 pub const HOLD_PUSH: Duration = Duration::from_millis(600);
 pub const MAX_RISE: f32 = 60.0;
+/// A getting-up ragdoll's bone is held only rising faster than this (game units a second): a
+/// fling, never the get-up animation's own rise.
+pub const BONE_FLING_RISE: f32 = 400.0;
 pub const FOLLOW_FOR: Duration = Duration::from_secs(12);
 
 // --- The game's words. -------------------------------------------------------------------------
@@ -995,6 +999,15 @@ pub fn knock_down(
     // Given right away, where the game gives its own blast's push: KnockExplosion has just set the
     // bones moving under physics (`bhkWorld::SetMotion`), knock state 2.
     let given = if state == 2 {
+        // The ragdoll starts from the pose that was shown (the reaction's going over), not the
+        // animation's the bodies were keyframed to (Patrick's 19-43-08 clip: 0.14 s of going over
+        // drawn, then a pop into a heap).
+        let moved = start_from_shown(e, actor);
+        if moved > 0 {
+            note(format!(
+                "{who}: the ragdoll starts from the pose shown: {moved} bodies moved onto it"
+            ));
+        }
         give_launch(e, actor, launch, speed)
     } else {
         0
@@ -1434,6 +1447,7 @@ const ACTOR_3D: u32 = 0x0043_fcd0;
 /// Game units per Havok unit (a float), a node's world translation.
 const HK_TO_GAME: u32 = 0x011b_1864;
 const WORLD_TRANSLATION: u32 = 0x8c;
+const WORLD_ROTATION: u32 = 0x68;
 /// `PathingLocation(const NiPoint3&, TESObjectREFR*)`, its position, `ResolveToClosestNavmeshAndTriangle`,
 /// `IsValidLocation(radius)`.
 const PATHING_LOCATION_AT: u32 = 0x006d_ce10;
@@ -1543,6 +1557,153 @@ struct Launch {
 }
 
 static LAUNCHES: Mutex<Vec<Launch>> = Mutex::new(Vec::new());
+
+/// The `hkpRigidBody`'s position (its transform's translation, Havok units) and rotation (its
+/// sweep's end rotation, a quaternion x, y, z, w: `crate::phys_blend`'s), and
+/// `hkpRigidBody::setPositionAndRotation`, queued while the world is locked (`00ca8960`).
+const BODY_TRANSLATION: u32 = 0x120;
+const BODY_ROTATION: u32 = 0x160;
+const BODY_SET_POSITION_AND_ROTATION: u32 = 0x00ca_8960;
+
+/// Each ragdoll body of `actor` moved by its bone's move from the pose it is in now (the
+/// animation's, which the keyframed bodies followed) to the one last shown
+/// (`crate::active_ragdoll::shown_world`): the ragdoll goes on from what was drawn. Answers how
+/// many bodies were moved.
+fn start_from_shown(e: &mut Engine, actor: u32) -> usize {
+    let shown = crate::active_ragdoll::shown_world(actor);
+    if shown.is_empty() {
+        return 0;
+    }
+    let scale = hk_scale(e);
+    let mut moved = 0;
+    for (node, body) in bodies(e, actor) {
+        let Some(&(_, rot_s, at_s)) = shown.iter().find(|s| s.0 == node) else {
+            continue;
+        };
+        let now = (
+            read9(e, node + WORLD_ROTATION),
+            read3(e, node + WORLD_TRANSLATION),
+        );
+        let held = (
+            [0, 4, 8, 12].map(|o| e.mem.f32(body + BODY_ROTATION + o)),
+            read3(e, body + BODY_TRANSLATION),
+        );
+        let Some((q, p)) = body_onto_shown((rot_s, at_s), now, held, scale) else {
+            continue;
+        };
+        e.with_stack(48, |e, frame| {
+            let at = (frame.addr() + 15) & !15;
+            for (i, x) in p.into_iter().enumerate() {
+                e.mem.set_f32(at + 4 * i as u32, x);
+            }
+            e.mem.set_f32(at + 12, 0.0);
+            for (i, x) in q.into_iter().enumerate() {
+                e.mem.set_f32(at + 16 + 4 * i as u32, x);
+            }
+            e.call(BODY_SET_POSITION_AND_ROTATION, &args![body, at, at + 16]);
+        });
+        moved += 1;
+    }
+    moved
+}
+
+/// A body (`body`: its rotation quaternion x, y, z, w and position, Havok units) moved with its
+/// node from the world `now` (rotation, position: game units) to `shown`: the node's world turn
+/// and move put on it, whatever its offset from the node. `scale`: game units per Havok unit.
+fn body_onto_shown(
+    shown: ([f32; 9], [f32; 3]),
+    now: ([f32; 9], [f32; 3]),
+    body: ([f32; 4], [f32; 3]),
+    scale: f32,
+) -> Option<([f32; 4], [f32; 3])> {
+    let all = shown.0.iter().chain(&shown.1).chain(&now.0).chain(&now.1);
+    if !all.chain(&body.0).chain(&body.1).all(|x| x.is_finite()) {
+        return None;
+    }
+    // The node's world turn from now to shown, put on the body's rotation and on its offset.
+    let turn = m3_mul(&shown.0, &m3_transpose(&now.0));
+    let rotation = m3_mul(&turn, &matrix_of(body.0));
+    let off = std::array::from_fn(|k| body.1[k] - now.1[k] / scale);
+    let off = m3_apply(&turn, off);
+    let p = std::array::from_fn(|k| shown.1[k] / scale + off[k]);
+    Some((quaternion_of(&rotation), p))
+}
+
+/// The rotation matrix (row-major, as `NiMatrix3` holds it) of a Havok quaternion (x, y, z, w),
+/// and back.
+fn matrix_of(q: [f32; 4]) -> [f32; 9] {
+    let n = q.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+    let [x, y, z, w] = q.map(|v| v / n);
+    [
+        1.0 - 2.0 * (y * y + z * z),
+        2.0 * (x * y - w * z),
+        2.0 * (x * z + w * y),
+        2.0 * (x * y + w * z),
+        1.0 - 2.0 * (x * x + z * z),
+        2.0 * (y * z - w * x),
+        2.0 * (x * z - w * y),
+        2.0 * (y * z + w * x),
+        1.0 - 2.0 * (x * x + y * y),
+    ]
+}
+
+fn quaternion_of(m: &[f32; 9]) -> [f32; 4] {
+    let trace = m[0] + m[4] + m[8];
+    let q = if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        [
+            (m[7] - m[5]) / s,
+            (m[2] - m[6]) / s,
+            (m[3] - m[1]) / s,
+            0.25 * s,
+        ]
+    } else if m[0] > m[4] && m[0] > m[8] {
+        let s = (1.0 + m[0] - m[4] - m[8]).sqrt() * 2.0;
+        [
+            0.25 * s,
+            (m[1] + m[3]) / s,
+            (m[2] + m[6]) / s,
+            (m[7] - m[5]) / s,
+        ]
+    } else if m[4] > m[8] {
+        let s = (1.0 + m[4] - m[0] - m[8]).sqrt() * 2.0;
+        [
+            (m[1] + m[3]) / s,
+            0.25 * s,
+            (m[5] + m[7]) / s,
+            (m[2] - m[6]) / s,
+        ]
+    } else {
+        let s = (1.0 + m[8] - m[0] - m[4]).sqrt() * 2.0;
+        [
+            (m[2] + m[6]) / s,
+            (m[5] + m[7]) / s,
+            0.25 * s,
+            (m[3] - m[1]) / s,
+        ]
+    };
+    let n = q.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+    q.map(|v| v / n)
+}
+
+fn m3_mul(a: &[f32; 9], b: &[f32; 9]) -> [f32; 9] {
+    std::array::from_fn(|i| {
+        let (r, c) = (i / 3, i % 3);
+        (0..3).map(|k| a[3 * r + k] * b[3 * k + c]).sum()
+    })
+}
+
+fn m3_transpose(a: &[f32; 9]) -> [f32; 9] {
+    std::array::from_fn(|i| a[3 * (i % 3) + i / 3])
+}
+
+fn m3_apply(m: &[f32; 9], v: [f32; 3]) -> [f32; 3] {
+    std::array::from_fn(|r| m[3 * r] * v[0] + m[3 * r + 1] * v[1] + m[3 * r + 2] * v[2])
+}
+
+fn read9(e: &Engine, at: u32) -> [f32; 9] {
+    std::array::from_fn(|i| e.mem.f32(at + 4 * i as u32))
+}
 
 /// The launch added to every bone of `actor`'s ragdoll: the same velocity, `speed` game units a
 /// second along `direction`. Answers the bones given it.
@@ -1838,13 +1999,21 @@ fn pelvis_of(e: &Engine, bones: &[(u32, u32)]) -> Option<[f32; 3]> {
     })
 }
 
-/// The ground under the body (`near` its pelvis, `low` its lowest bone's height): the walkable
-/// floor there (the game's navmesh triangle under the pelvis, `ResolveToClosestNavmeshAndTriangle`,
+/// The ground under the body (`near` its pelvis, `low` its lowest bone's height): the collision
+/// floor there (`crate::active_ragdoll::floor_under`, the body's own bones passed), else the
+/// walkable floor (the game's navmesh triangle under the pelvis, `ResolveToClosestNavmeshAndTriangle`,
 /// when within [`GROUND_REACH`] across and between [`GROUND_BELOW`] under and [`BONE_RADIUS`]
 /// over the lowest bone); else the lowest bone less [`BONE_RADIUS`] (a bone lies on the ground:
 /// the down cast the ragdoll itself made). Answers the height and how it was found.
 fn ground_under(e: &mut Engine, actor: u32, near: [f32; 3], low: f32) -> (f32, &'static str) {
     let from_bones = low - BONE_RADIUS;
+    // The collision floor first (the navmesh lies several units under it: a get-up set on the
+    // navmesh's 8150 was pushed out of the floor to 8157, Patrick's 19-43-08 clip).
+    if let Some(z) = crate::active_ragdoll::floor_under(e, [near[0], near[1], low])
+        .filter(|z| *z >= low - GROUND_BELOW && *z <= low + BONE_RADIUS)
+    {
+        return (z, "the collision floor under the pelvis");
+    }
     match navmesh_point(e, actor, [near[0], near[1], low]) {
         Some(at)
             if ((at[0] - near[0]).powi(2) + (at[1] - near[1]).powi(2)).sqrt() <= GROUND_REACH
@@ -2021,10 +2190,12 @@ fn watch_get_up(
             }
         }
     }
-    // The ragdoll's bones while the get-up blends: none may fly up. A keyframed body (the get-up
-    // animation moving it) is the animation's: held, it kept the shown body lying through the
-    // get-up and popped it upright at its end (Patrick's 18-21-05 clip: 19 bones held at state 5).
-    let most_up = MAX_RISE / scale;
+    // The ragdoll's bones while the get-up blends: none may be flung up (a depenetration's
+    // throw), but the get-up's own rise is the animation's, whether it keyframes the bodies or
+    // drives them: held to MAX_RISE, the torso stayed down while the legs rose, a stiff plank
+    // hinging at the knees that snapped upright at the end (Patrick's 18-21-05 clip: 19 bones
+    // held at state 5; 19-43-08, the driven bodies).
+    let most_up = BONE_FLING_RISE / scale;
     let mut bones_held = 0;
     for (_, body) in bodies(e, g.actor) {
         if keyframed(e, body) {
@@ -2062,7 +2233,7 @@ fn watch_get_up(
                 "; clamp: rising {v:.0} held to {MAX_RISE}"
             )),
             if bones_held > 0 {
-                format!("; clamp: {bones_held} bones rising held")
+                format!("; clamp: {bones_held} bones flung up held to {BONE_FLING_RISE}")
             } else {
                 String::new()
             },
@@ -2139,9 +2310,18 @@ fn hold_bones(e: &mut Engine, actor: u32, scale: f32, arms_only: bool) {
     let mut fastest = 0.0f32;
     let most = MAX_BONE_SPEED / scale;
     let arm_spin = ragdoll_core::tuning::get().arm_ragdoll_spin;
-    for (node, body) in bodies(e, actor) {
+    let all = bodies(e, actor);
+    // The collision floor under the body: a bone under it is being pushed out by the physics,
+    // never held there (Patrick's 19-43-08 clip: the clamp held feet and calves in the floor).
+    let floor = pelvis_of(e, &all).and_then(|p| crate::active_ragdoll::floor_under(e, p));
+    let mut under = 0;
+    for (node, body) in all {
         let arm = is_arm_node(e, node);
         if arms_only && !arm {
+            continue;
+        }
+        if floor.is_some_and(|f| read3(e, node + WORLD_TRANSLATION)[2] < f - UNDER_FLOOR) {
+            under += 1;
             continue;
         }
         let at = e.call(LINEAR_VELOCITY, &args![body]).u32();
@@ -2180,12 +2360,20 @@ fn hold_bones(e: &mut Engine, actor: u32, scale: f32, arms_only: bool) {
     if clamped > 0 {
         note(format!(
             "{}: clamp: {clamped} bones held (fastest {fastest:.0} units/s, at most {MAX_BONE_SPEED} \
-             and spin {MAX_BONE_SPIN}, arms {arm_spin}){}",
+             and spin {MAX_BONE_SPIN}, arms {arm_spin}){}{}",
             describe(e, actor),
-            if arms_only { " (lying: arms only)" } else { "" }
+            if arms_only { " (lying: arms only)" } else { "" },
+            if under > 0 {
+                format!("; {under} under the floor left to the physics")
+            } else {
+                String::new()
+            }
         ));
     }
 }
+
+/// How far under the collision floor (game units) a ragdoll bone's node is taken for in it.
+const UNDER_FLOOR: f32 = 2.0;
 
 /// Whether a ragdoll bone's node is an arm's (a clavicle, an upper arm, a forearm, a hand).
 fn is_arm_node(e: &Engine, node: u32) -> bool {
@@ -2357,6 +2545,50 @@ fn land(e: &mut Engine, actor: u32, aggressor: u32, drop: f32) {
 
 #[cfg(test)]
 mod tests {
+    /// The ragdoll's first pose is the one last shown (Patrick's 19-43-08 clip: a pop into a
+    /// heap): a body, whatever its offset from its bone, moved by its bone's turn and move from
+    /// the animated pose to the shown one lies where the shown bone puts it.
+    #[test]
+    fn the_ragdoll_starts_from_the_pose_shown() {
+        let turn = |axis: [f32; 3], a: f32| {
+            let s = (a / 2.0).sin();
+            matrix_of([axis[0] * s, axis[1] * s, axis[2] * s, (a / 2.0).cos()])
+        };
+        let scale = 7.0;
+        let anim = (turn([0.0, 0.0, 1.0], 0.4), [100.0, 50.0, 8150.0]);
+        let shown = (
+            m3_mul(&turn([1.0, 0.0, 0.0], 0.9), &anim.0),
+            [112.0, 47.0, 8141.0],
+        );
+        // The body's offset from its bone (a capsule's centre along it, turned a little).
+        let (off_r, off_t) = (turn([0.0, 1.0, 0.0], 0.3), [3.0, 0.0, 10.0]);
+        let body_of = |node: ([f32; 9], [f32; 3])| {
+            let r = m3_mul(&node.0, &off_r);
+            let t = m3_apply(&node.0, off_t);
+            (
+                quaternion_of(&r),
+                std::array::from_fn(|k| (node.1[k] + t[k]) / scale),
+            )
+        };
+        let (q, p) = body_onto_shown(shown, anim, body_of(anim), scale).unwrap();
+        let (want_q, want_p) = body_of(shown);
+        let (r, want_r) = (matrix_of(q), matrix_of(want_q));
+        for k in 0..9 {
+            assert!((r[k] - want_r[k]).abs() < 1e-4, "{r:?} {want_r:?}");
+        }
+        for k in 0..3 {
+            assert!((p[k] - want_p[k]).abs() < 1e-3, "{p:?} {want_p:?}");
+        }
+        // Shown as animated: nothing moves.
+        let (q0, p0) = body_onto_shown(anim, anim, body_of(anim), scale).unwrap();
+        let (bq, bp) = body_of(anim);
+        assert!(q0
+            .iter()
+            .zip(bq)
+            .all(|(a, b)| (a - b).abs() < 1e-4 || (a + b).abs() < 1e-4));
+        assert!(p0.iter().zip(bp).all(|(a, b)| (a - b).abs() < 1e-4));
+    }
+
     use super::*;
 
     /// The explosion's origin is behind the hit at the pelvis's height, its way rising at most

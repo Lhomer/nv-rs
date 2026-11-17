@@ -486,6 +486,89 @@ for the shot, the hit's round and the breakdown; a knocked-down actor's fall dam
 attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
 patches (#624) and the knockdown's companion refusal were not on the path.
 
+### 0c1fbbf: bodies into the floor, a heap, a plank get-up, a snap, too fast (Patrick, 2026-11-16, 19-43-08 clip)
+
+The reactions showed in 0c1fbbf (`drawn_offset` non-zero on every hit), but the tuning was set
+while they were invisible. Worst first, and what changed:
+
+- **The sink.** The .44's catch step moved the Fiend's reference with the feet's middle height
+  (`balance::Stepping::follow_feet`: 8157.3 down to 8154.3), and `knockdown::place` put the actor
+  and its character controller there, into the floor; she sank upright to the waist. A foot
+  planted from the navmesh (about 7 units under the collision floor) is enough to do it.
+  - `follow_feet` keeps the reference's height: the steps move it across only; the controller
+    keeps it on its floor (stairs and slopes are the game's).
+  - No step is planted under the height its foot stood at; the ankle over the floor is measured
+    by the collision cast (`active_ragdoll::floor_under`), never the navmesh.
+  - The shown pose is held off the floor after it is composed:
+    - the pelvis at most 4 units under its animation in a flinch, 8 while stepping
+      (`active::hold_pelvis_up`);
+    - each foot's target never under its animated place nor its collision floor plus its ankle
+      (`active::feet_on_floor`);
+    - a shown foot under that is lifted by the leg's IK from the hip (`active::lift_feet`).
+  - `unwrite` brings the rigs' world transforms back to the game's own locals (`update(root)`),
+    so nothing between the draw and the next animation update reads our pose.
+  - The pose log's `heights` (root, `Bip01 NonAccum` and pelvis world height over the reference,
+    as drawn) and `feet_over_floor` (each foot over the collision floor under it).
+  - (a), the step's move counted twice: the host's `placed`/`lag` take-back is consistent with
+    the root's world read the same frame; the lab test below checks the move is applied once.
+- **The heap.** The game's ragdoll started from the pose its bodies were keyframed to, the
+  animation's, while 0.14 s of going over had been drawn. At the switch
+  (`knockdown::start_from_shown`) each ragdoll body is moved by its bone's turn and move from the
+  animated pose to the one last drawn (`active_ragdoll::shown_world`), whatever its offset from
+  the bone (`hkpRigidBody::setPositionAndRotation`, `00ca8960`); the launch goes on top. The
+  ragdoll's bone clamp (`hold_bones`) leaves a bone under the collision floor to the physics.
+- **The plank get-up.** The get-up watch held every free ragdoll body rising faster than 60
+  units a second; the get-up drives its bodies (not only keyframes them), so the torso stayed
+  down while the legs rose, then snapped upright. It now holds only a fling, faster than 400
+  (`knockdown::BONE_FLING_RISE`); the controller's own rise is still held to 60. Nothing is
+  written while the knock state is not 0 (`active_ragdoll::may_write`, tested).
+- **The snap and the stiff bend.**
+  - `Limit` pulled a bounded offset back at 3 rad/s even while the body's own offset was easing
+    to nothing: at the yield it was left 42.6 degrees off, dropped in one frame. An offset
+    shrinking toward its animation now follows as fast as it shrinks, up to the spin bound.
+  - The body takes 0.6 of a hit's momentum (`active::KICK_SHARE`): at full, a 0.32 m/s 9mm bent a
+    pistol-armed torso 30 degrees and the bounds held it 328 times in the lab (123 in the clip).
+  - A two-handed weapon's support hand stays on its grip until the body's weight is down to 0.35,
+    then eases off (`brace::grip_weight`; followed all the way, it came 5 mm off the grip).
+- **Too fast.**
+  - The per-hit turn (`active::offset_most`): 8 degrees at 0.3 m/s, 20 at 0.75, on a line
+    between (4 to 75); the yaw never more than that.
+  - The spin bound on the shown offsets (`active::SPIN_MOST`): 6 rad/s (was 20); the ragdoll's
+    hand-over keeps 20 (`HANDOVER_SPIN`).
+  - The onset (`active::HIT_TIME`): 0.12 s (was 0.04). 0.1 left a rifle brace's arm at 6.6 rad/s.
+
+Lab, 0c1fbbf against this (the same runs; the floor numbers are the shown pose's):
+
+| Run | torso turn (deg) | fastest arm (rad/s) | bounds held | foot under its animation | torso turn's most change in a frame (yield) |
+|---|---|---|---|---|---|
+| pistol, 9mm chest (0.32 m/s) | 30.2 → 5.0 | 10.7 → 1.5 | 328 → 0 | 2.4 → 0 | 2.8 → 1.1 |
+| 10mm head, pistol (0.53) | 22.7 → 13.5 | 4.7 → 4.6 | 0 → 12 | 1.8 → 0 | 3.6 → 2.9 |
+| .44 head (0.79) | 38.8 → 21.1 | 3.2 → 3.2 | 0 → 13 | 2.0 → 0 | 6.6 → 5.6 |
+| .45-70 chest (1.40) | 37.4 → 22.3 | 3.6 → 2.9 | 0 → 18 | 1.9 → 0 | 7.7 → 5.7 |
+| 10mm clavicle, then a walk and turn | 18.3 → 8.8 | 3.5 → 3.0 | 0 → 13 | 6.6 → 0 | 3.2 (3.1) → 2.7 (2.7) |
+| .44 head, then a walk and turn | 38.8 → 21.1 | 3.2 → 3.2 | 0 → 15 | 4.7 → 0 | 6.6 (4.5) → 5.6 (3.2) |
+
+The pelvis was at most 3.4 units under its animation (stepping, a .45-70), and no foot or pelvis
+went under the lab's floor. The lab's floors and navmesh are the same surface, so the reference
+never moved up or down in it before either: the game's mismatch is covered by
+`balance::the_reference_keeps_its_height_when_a_foot_lands_low`. Not run in the game here.
+
+- Tests:
+  - lab `scenario::floor`: a flinch, a catch step (flat, slope, uneven) and a yield never put a
+    foot or the pelvis under the floor, the pelvis never more than 4 or 8 under its animation, the
+    reference's height never moved; a step's move is applied once; a yield's torso turn never
+    changes more than 5 degrees in a frame;
+  - lab `a_standing_flinch_is_held_to_its_push` (was `the_bounds_keep_a_standing_flinch`): the
+    torso within the push's turn, no bone but a leg faster than the spin bound, the torso's turn
+    never faster than it in a frame, still visible;
+  - core: `the_reference_keeps_its_height_when_a_foot_lands_low`, `a_sunk_foot_is_lifted_onto_its_floor`;
+  - host: `knockdown::the_ragdoll_starts_from_the_pose_shown` (a body with an offset from its
+    bone ends where the shown bone puts it), `active_ragdoll::nothing_is_written_while_knocked_down`.
+- Changed lab expectations, said: the plank test's least bends within 0.15 s (1, 1, 0.8 and 4
+  degrees: less is in by then with the slower, smaller kick); the capture-point test counts a
+  staggering hit's steps starting with the hit; a leg's swing is bounded at 12 rad/s (a step,
+  or the feet lifted over a walk; 0c1fbbf swung them up to 11.5), not by the reaction's bound.
+
 ### 00262dd still drew no reactions; a spin in the air; a get-up shown lying (Patrick, 2026-11-16, 18-21-05 clip)
 
 The 9mm and .44 hits showed only the plain idle, though the pose log had the body active in

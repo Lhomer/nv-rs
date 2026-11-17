@@ -214,6 +214,19 @@ pub struct Rig {
     /// count of those (the pose log's `drawn_skin`).
     pub drawn_seen: Option<(f32, f32, u32, u32, u32)>,
     pub drawn_skin: (u32, u32, u32),
+    /// The heights as drawn (game units, the pose log's `heights`): the root's, `Bip01
+    /// NonAccum`'s and the pelvis's world height over the actor's reference, and each foot's
+    /// over the collision floor under it ([`floor_under`]; `None` where the cast found none).
+    pub heights: [f32; 3],
+    pub foot_heights: [Option<f32>; 2],
+    /// Each foot's collision floor (where it was cast from, its height), cast again once the
+    /// foot moves on; each foot's ankle over its floor as the push's steps measured it (0 where
+    /// it was not: the floor itself is the bound then).
+    pub ground: [Option<(V3, f32)>; 2],
+    pub ankle: [f32; 2],
+    /// Each bone's world as last drawn (node, rotation, position): where the game's ragdoll
+    /// starts from when the body goes over into it (`crate::knockdown`).
+    pub shown_world: Vec<(u32, M3, V3)>,
 }
 
 /// How much deeper than the animation (game units) a shown forearm or hand may be in the torso
@@ -492,6 +505,16 @@ pub fn blocked(e: &mut Engine, actor: u32) -> Option<String> {
     None
 }
 
+/// Whether a reaction may be written into `actor`'s bones: never while it is knocked down,
+/// in its ragdoll or getting up (any knock state but 0), dying or dead, or has no process. Its
+/// rig goes then; the game's ragdoll and get-up have the bones (Patrick's 19-43-08 clip).
+fn may_write(e: &Engine, actor: u32) -> bool {
+    let process = e.mem.u32(actor + PROCESS);
+    process != 0
+        && e.mem.u8(process + KNOCK_STATE) == 0
+        && !matches!(e.mem.u32(actor + LIFE_STATE), 1 | 2)
+}
+
 fn can_flinch(e: &mut Engine, actor: u32) -> bool {
     blocked(e, actor).is_none()
 }
@@ -612,6 +635,11 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         drawn_warned: false,
         drawn_seen: None,
         drawn_skin: (0, 0, 0),
+        heights: [0.0; 3],
+        foot_heights: [None; 2],
+        ground: [None; 2],
+        ankle: [0.0; 2],
+        shown_world: Vec::new(),
     });
     true
 }
@@ -787,11 +815,22 @@ pub fn unwrite(e: &mut Engine) {
             write3(e, node + LOCAL_TRANSLATION, t);
         }
     }
-    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
-    for rig in rigs.iter_mut() {
-        for bone in rig.bones.iter_mut() {
-            bone.written = None;
+    let mut roots = Vec::new();
+    {
+        let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+        for rig in rigs.iter_mut() {
+            if rig.bones.iter().any(|b| b.written.is_some()) && rig.root != 0 {
+                roots.push(rig.root);
+            }
+            for bone in rig.bones.iter_mut() {
+                bone.written = None;
+            }
         }
+    }
+    // Their world transforms brought back to the game's own locals too: nothing between this
+    // draw and the next animation update (the controller, keyframed bodies) reads our pose.
+    for root in roots {
+        update(e, root);
     }
 }
 
@@ -1063,11 +1102,7 @@ pub fn apply(e: &mut Engine) {
         }
         // In its ragdoll (knocked down) or dead: the ragdoll owns the bones now; nothing is
         // written back (that would fight it), the rig just goes.
-        let process = e.mem.u32(rig.actor + PROCESS);
-        if process == 0
-            || e.mem.u8(process + KNOCK_STATE) != 0
-            || matches!(e.mem.u32(rig.actor + LIFE_STATE), 1 | 2)
-        {
+        if !may_write(e, rig.actor) {
             continue;
         }
         if !can_flinch(e, rig.actor) {
@@ -1314,6 +1349,10 @@ pub fn apply(e: &mut Engine) {
                         None => animated,
                     },
                 };
+                // Never into the floor: at least the animation's own foot, and the collision
+                // floor plus the ankle where it was found.
+                let floor = [0, 1].map(|i| floor_bound(&rig, i, animated[i][2]));
+                let at = active::feet_on_floor(at, animated, floor);
                 vec![(l, at[0]), (r, at[1])]
             }
             _ => Vec::new(),
@@ -1551,7 +1590,7 @@ pub fn apply(e: &mut Engine) {
                     put.push(PutArm {
                         side: 0,
                         goal: grip.1,
-                        w: phys_w.clamp(0.0, 1.0),
+                        w: hands::grip_weight(phys_w),
                         turn: Some((grip.0, 1.0)),
                         planted: false,
                     });
@@ -1684,6 +1723,34 @@ pub fn apply(e: &mut Engine) {
         // What is left of a dropped body's last pose, on top.
         if let Some(fade) = &rig.fade {
             fade.on(&mut shown, &mut pelvis_offset);
+        }
+        // The pelvis never drawn more than a few units under its animation (beyond the steps'
+        // move the root's world does not show yet, `lag`): Patrick's 19-43-08 clip.
+        pelvis_offset = add(
+            lag,
+            active::hold_pelvis_up(sub(pelvis_offset, lag), rig.balance.is_some()),
+        );
+        // No shown foot under its animated one, nor under its collision floor plus its ankle
+        // (`active::lift_feet`): the legs turned up from the hips.
+        if rig.fall.is_none() {
+            let mut legs = Vec::new();
+            let mut low = Vec::new();
+            for side in 0..2u8 {
+                if let (Some(t), Some(c), Some(f)) = (
+                    bone_of(&rig, Role::Thigh, side),
+                    bone_of(&rig, Role::Calf, side),
+                    bone_of(&rig, Role::Foot, side),
+                ) {
+                    let i = side as usize;
+                    let floor = floor_bound(&rig, i, anim[f].1[2]).unwrap_or(f32::MIN);
+                    legs.push((t, c, f));
+                    low.push((anim[f].1[2] + lag[2]).max(floor));
+                }
+            }
+            if !legs.is_empty() {
+                let at = shown_positions(&rig, &anim, &shown, pi, pelvis_offset);
+                active::lift_feet(&mut shown, &at, &legs, &low, forward);
+            }
         }
         let mut offsets = offsets_of(&rig.bones, &anim, &shown);
         // Anything not believable (a body gone wrong, an offset that is no rotation, a pelvis
@@ -1833,6 +1900,18 @@ pub fn apply(e: &mut Engine) {
             }
         }
         update(e, root);
+        drawn_heights(e, &mut rig, root, pi);
+        rig.shown_world = rig
+            .bones
+            .iter()
+            .map(|b| {
+                (
+                    b.node,
+                    read9(e, b.node + WORLD_ROTATION),
+                    read3(e, b.node + WORLD_TRANSLATION),
+                )
+            })
+            .collect();
         // The nodes the drawing is checked on (`after_draw`): the pelvis, the spine's top, the
         // head, with their animated world.
         rig.drawn_ref = [Role::Pelvis, Role::Spine, Role::Head]
@@ -1897,6 +1976,49 @@ pub fn apply(e: &mut Engine) {
     }
 }
 
+/// The lowest a foot `i` may be shown for its collision floor: the floor plus its ankle, only for
+/// a floor under its animated ankle `animated` (game units; a table top or a step over the foot
+/// is not its floor).
+fn floor_bound(rig: &Rig, i: usize, animated: f32) -> Option<f32> {
+    rig.ground[i]
+        .filter(|g| g.1 <= animated + 1.0)
+        .map(|g| g.1 + rig.ankle[i])
+}
+
+/// How far a foot moves on (game units, across) before the floor under it is cast for again.
+const GROUND_RECAST: f32 = 6.0;
+
+/// The heights as drawn ([`Rig::heights`], [`Rig::foot_heights`]), read from the nodes after the
+/// write: the root's, `Bip01 NonAccum`'s (the pelvis node's parent) and the pelvis's over the
+/// reference, each foot's over the collision floor under it.
+fn drawn_heights(e: &mut Engine, rig: &mut Rig, root: u32, pi: usize) {
+    let reference = read3(e, rig.actor + REFR_POSITION)[2];
+    let pelvis = rig.bones[pi].node;
+    let non_accum = e.mem.u32(pelvis + PARENT);
+    let z = |e: &Engine, node: u32| {
+        if node == 0 {
+            0.0
+        } else {
+            read3(e, node + WORLD_TRANSLATION)[2] - reference
+        }
+    };
+    rig.heights = [z(e, root), z(e, non_accum), z(e, pelvis)];
+    for side in 0..2u8 {
+        let i = side as usize;
+        let Some(f) = bone_of(rig, Role::Foot, side) else {
+            continue;
+        };
+        let at = read3(e, rig.bones[f].node + WORLD_TRANSLATION);
+        let stale = rig.ground[i].map_or(true, |(from, _)| {
+            length(sub([at[0], at[1], 0.0], [from[0], from[1], 0.0])) > GROUND_RECAST
+        });
+        if stale {
+            rig.ground[i] = floor_under(e, at).map(|z| (at, z));
+        }
+        rig.foot_heights[i] = rig.ground[i].map(|g| at[2] - g.1);
+    }
+}
+
 /// The body's most spread: the largest distance of a bone's centre from the pelvis's (m;
 /// `active::Body::check` drops the body past `active::MAX_SPREAD`).
 fn spread_of_body(b: &active::Body, pi: usize) -> f32 {
@@ -1915,7 +2037,7 @@ pub fn sample_fields(actor: u32) -> String {
     let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     match rigs.iter().find(|r| r.actor == actor) {
         Some(r) => format!(
-            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"spin\":{},\"spin_bone\":{},\"settling\":{},\"yielded\":{},\"limited\":{},\"ai_speed\":{},\"drawn_offset\":{},\"drawn_turn\":{},\"drawn_skin\":[{},{},{}],\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{}}}",
+            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"spin\":{},\"spin_bone\":{},\"settling\":{},\"yielded\":{},\"limited\":{},\"ai_speed\":{},\"drawn_offset\":{},\"drawn_turn\":{},\"drawn_skin\":[{},{},{}],\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{},\"heights\":[{},{},{}],\"feet_over_floor\":[{},{}]}}",
             r.body.is_some(),
             room_events::num(r.pelvis_now),
             room_events::num(r.jump_now),
@@ -1941,9 +2063,24 @@ pub fn sample_fields(actor: u32) -> String {
             room_events::num(r.drift_most),
             r.jumps,
             room_events::num(r.fade.as_ref().map_or(0.0, |f| f.left())),
+            room_events::num(r.heights[0]),
+            room_events::num(r.heights[1]),
+            room_events::num(r.heights[2]),
+            r.foot_heights[0].map_or("null".to_string(), room_events::num),
+            r.foot_heights[1].map_or("null".to_string(), room_events::num),
         ),
         None => "\"body\":null".to_string(),
     }
+}
+
+/// Each bone of `actor`'s reaction as it was last drawn (node, world rotation, world position):
+/// none when it has no rig.
+pub fn shown_world(actor: u32) -> Vec<(u32, M3, V3)> {
+    RIGS.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|r| r.actor == actor)
+        .map_or_else(Vec::new, |r| r.shown_world.clone())
 }
 
 /// Whether an actor is reacting now (a rig the pose layer writes): the clips sample it every
@@ -2376,6 +2513,10 @@ fn balance_frame(
         }
         let (hip, ankle) = (add(hip0, shift), add(ankle0, shift));
         let target = add(ankle, scale(sub(feet[side as usize], ankle), s.weight));
+        // Never into the floor (`active::feet_on_floor`): at least the animated ankle.
+        let i = side as usize;
+        let floor = floor_bound(rig, i, ankle0[2]);
+        let target = active::feet_on_floor([target; 2], [ankle0; 2], [floor; 2])[0];
         // The knee forward whichever way the push goes (`leg_ik`: never bent backwards).
         let Some((r1, m, level)) = leg_ik(hip0, knee0, ankle0, hip, target, facing(e, rig)) else {
             continue;
@@ -2519,14 +2660,14 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
     let start = feet;
     drop(rigs);
     interrupt_attack(e, actor, "pushed past its feet");
-    // Each foot's ankle over its ground (the navmesh's height is the ground's; the foot bone is
-    // the ankle): kept for its steps.
-    let ankle: [f32; 2] = [0, 1].map(|f| {
-        ground_point(e, actor, start[f])
-            .map(|g| start[f][2] - g[2])
+    // Each foot's ankle over its collision floor (the foot bone is the ankle; never the
+    // navmesh's height, several units under it): kept for its steps.
+    let measured: [Option<f32>; 2] = [0, 1].map(|f| {
+        floor_under(e, start[f])
+            .map(|g| start[f][2] - g)
             .filter(|h| (0.0..=25.0).contains(h))
-            .unwrap_or(8.0 * scale_)
     });
+    let ankle = measured.map(|h| h.unwrap_or(8.0 * scale_));
     // The steps on the world (`ragdoll_core::obstacle::resolve`, the lab's too): floors, walls,
     // ledges, a waist-high obstacle or a wall the body meets along the push (a railing's gaps let
     // a foot's knee-height ray through, not the body), and low obstacles a swinging foot catches.
@@ -2641,6 +2782,11 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
         return;
     }
     let reference = read3(e, actor + REFR_POSITION);
+    // No step planted under the height its foot stood at (a floor found low, the navmesh's):
+    // the reference keeps its height, so the feet do (`Stepping::follow_feet`).
+    for (f, to) in steps.iter_mut() {
+        to[2] = to[2].max(start[*f][2]);
+    }
     let count = steps.len();
     let lengths: Vec<String> = steps
         .iter()
@@ -2668,6 +2814,8 @@ pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggres
         clock(),
     );
     rig.balance = Some(stepping);
+    // The floor's own bound on the shown feet only where the ankle was measured over it.
+    rig.ankle = measured.map(|h| h.unwrap_or(0.0));
     if against_wall && rig.brace.is_none() {
         // No arm to brace with (`start_brace` made none): nothing reaches.
         rig.brace = Some(Brace {
@@ -2745,6 +2893,16 @@ fn ground_point(e: &mut Engine, actor: u32, at: V3) -> Option<V3> {
         }
     }
     crate::knockdown::navmesh_point(e, actor, at)
+}
+
+/// The collision floor's height under `at` (game units): the game's ray cast straight down from
+/// a little above it, never the navmesh (which lies several units under the collision floor:
+/// feet planted on it went into the floor, Patrick's 19-43-08 clip).
+pub(crate) fn floor_under(e: &mut Engine, at: V3) -> Option<f32> {
+    let from = [at[0], at[1], at[2] + FLOOR_FROM];
+    cast_world(e, from, [0.0, 0.0, -1.0], FLOOR_RANGE)
+        .filter(|hit| hit[2] <= at[2] + FLOOR_FROM - 5.0)
+        .map(|hit| hit[2])
 }
 
 /// How far ahead of `at` along `dir` (flat) a wall is (game units), within `range`.
@@ -3450,6 +3608,27 @@ mod tests {
 
     /// The tests of the write's put-back share [`WRITTEN`]: one at a time.
     static SERIAL: Mutex<()> = Mutex::new(());
+
+    /// Nothing is written while the actor is knocked down, in its ragdoll or getting up (any
+    /// knock state), dying or dead: the game's ragdoll and get-up have the bones.
+    #[test]
+    fn nothing_is_written_while_knocked_down() {
+        let mut e = Engine::new();
+        e.mem.map(0x9000, 0x1000);
+        let (actor, process) = (0x9000u32, 0x9400u32);
+        assert!(!may_write(&e, actor), "no process");
+        e.mem.set_u32(actor + PROCESS, process);
+        assert!(may_write(&e, actor));
+        for knock in [1u8, 2, 3, 4, 5, 0xff] {
+            e.mem.set_u8(process + KNOCK_STATE, knock);
+            assert!(!may_write(&e, actor), "knock state {knock}");
+        }
+        e.mem.set_u8(process + KNOCK_STATE, 0);
+        for life in [1u32, 2] {
+            e.mem.set_u32(actor + LIFE_STATE, life);
+            assert!(!may_write(&e, actor), "life state {life}");
+        }
+    }
 
     /// After the draw every bone written gets back the game's own local (what it held when read),
     /// so the game's next frame never starts from the reaction's write (Patrick's 14-16-02 clip:

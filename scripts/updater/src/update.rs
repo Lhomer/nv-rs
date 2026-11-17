@@ -30,6 +30,44 @@ pub const TESTER_TAG: &str = "windows-test";
 pub const TESTER_LATEST: &str = "windows-latest.txt";
 pub const TESTER_FOLDER: &str = "nv-rs-physics-tester";
 
+/// What the launcher does for the physics tester before starting it ([`tester_step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TesterStep {
+    /// The installed tester is the newest: it starts.
+    Start,
+    /// The release's tester is the newest and not installed: it is installed, then starts.
+    Update,
+    /// The release's tester is not the newest build yet (it is built after Play, about 15
+    /// minutes later): the launcher waits for it ([`TESTER_WAIT`]).
+    Wait,
+}
+
+/// How long the launcher waits for the newest build's physics tester (s), and how often it looks.
+pub const TESTER_WAIT: u64 = 30 * 60;
+pub const TESTER_LOOK: u64 = 20;
+
+/// What to do for the physics tester: `installed` its installed commit (`has_it`: its Play.exe is
+/// there), `published` the commit on its release (`windows-latest.txt`), `newest` the newest Play
+/// build's commit (Play's `latest.txt`, when it was read). The tester's release lags Play's by its
+/// build (Patrick, 0c1fbbf: the launcher started f9eac18's tester as the newest, Play's 0c1fbbf
+/// already out): while it does, the launcher waits for it, never starting an older one as the
+/// newest.
+pub fn tester_step(
+    installed: Option<&str>,
+    has_it: bool,
+    published: &str,
+    newest: Option<&str>,
+) -> TesterStep {
+    if newest.is_some_and(|n| !n.eq_ignore_ascii_case(published)) {
+        return TesterStep::Wait;
+    }
+    if has_it && installed.is_some_and(|i| i.eq_ignore_ascii_case(published)) {
+        TesterStep::Start
+    } else {
+        TesterStep::Update
+    }
+}
+
 /// Where the physics tester is installed for the Play install `install`: a folder of its own beside
 /// it (`<install's parent>\nv-rs-physics-tester`), so its programs, `userdata` and saves never mix
 /// with Play's, and the place passes the same checks as Play's (not in Documents or AppData).
@@ -551,7 +589,39 @@ mod tests {
             Path::new("nv-rs").join("nv-rs-physics-tester")
         );
         assert_eq!(TESTER_TAG, "windows-test");
+        assert!(TESTER_LOOK < TESTER_WAIT);
         assert_eq!(TESTER_LATEST, "windows-latest.txt");
         assert!(safe_asset_name(TESTER_LATEST));
+    }
+
+    /// The tester's release behind the newest Play build (Patrick, 0c1fbbf: f9eac18's tester was
+    /// started as the newest): the launcher waits for it, whatever is installed; once it is out,
+    /// it is installed unless it is the installed one.
+    #[test]
+    fn the_tester_waits_for_the_newest_build() {
+        let (old, new) = ("f9eac18", "0c1fbbf");
+        assert_eq!(
+            tester_step(Some(old), true, old, Some(new)),
+            TesterStep::Wait
+        );
+        assert_eq!(tester_step(None, false, old, Some(new)), TesterStep::Wait);
+        assert_eq!(
+            tester_step(Some(old), true, new, Some(new)),
+            TesterStep::Update
+        );
+        assert_eq!(
+            tester_step(Some(new), false, new, Some(new)),
+            TesterStep::Update
+        );
+        assert_eq!(
+            tester_step(Some(new), true, new, Some(new)),
+            TesterStep::Start
+        );
+        assert_eq!(
+            tester_step(Some(new), true, &new.to_uppercase(), None),
+            TesterStep::Start
+        );
+        // Play's newest not read: the release's is taken as the newest.
+        assert_eq!(tester_step(Some(old), true, new, None), TesterStep::Update);
     }
 }

@@ -7,6 +7,28 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (0c1fbbf: the floor, the heap, the get-up, the snap, the speed; the tester's update)
+
+- **Now:**
+  - Core: `balance::Stepping::follow_feet` keeps the reference's height; `active::hold_pelvis_up`,
+    `feet_on_floor`, `lift_feet`; `offset_most` (8 degrees at 0.3 m/s, 20 at 0.75), `SPIN_MOST` 6
+    (the hand-over's `HANDOVER_SPIN` 20), `HIT_TIME` 0.12, `KICK_SHARE` 0.6; `Limit` follows a
+    shrinking offset up to the spin bound; `brace::grip_weight`.
+  - Host: `active_ragdoll::floor_under` (collision only), `drawn_heights` and the pose log's
+    `heights` / `feet_over_floor`, `shown_world`, `may_write`; `unwrite` updates the roots;
+    `knockdown::start_from_shown` (the ragdoll from the pose drawn), `hold_bones` leaves bones
+    under the floor alone, the get-up holds only flung bones (`BONE_FLING_RISE`), `ground_under`
+    asks the collision floor first.
+  - Launcher: `update::tester_step` and the wait for the newest build's tester; windows-test.yml
+    builds every push.
+  - Lab: `scenario::floor`, `a_standing_flinch_is_held_to_its_push`, the stats `pelvis_drop`,
+    `foot_drop`, `under_floor`, `reference_dz`, `torso_turn`, `turn_jump`, `yield_turn_jump`.
+  - Docs: docs/GUNPLAY.md "0c1fbbf: bodies into the floor", docs/WINDOWS-ROOM.md.
+  - Core, lab, host and launcher tests pass; the Windows checks are clean. Not run in the game.
+- **Patrick:** 0c1fbbf's 19-43-08 clip: a waist-deep sink after a .44's step, a knockdown popping
+  into a heap, a plank get-up, a stiff bend and a snap at the yield, arms and head at 12 rad/s;
+  and the launcher started f9eac18's tester when 0c1fbbf was out.
+
 ### Claude, 2026-11-17 (00262dd still drew nothing: written before the world pass now)
 
 - **Now:**

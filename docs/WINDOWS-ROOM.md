@@ -34,6 +34,11 @@ package). Unzip it anywhere outside `Program Files` (a short path, such as `C:\n
   the Play install (`<Play's folder>\..\nv-rs-physics-tester`: its own programs, `userdata` and
   saves; Play's are not touched), and starts it. Play's own updates (`latest.txt`) are as before.
   Without internet it starts the installed room, if there is one.
+  - The room is built after Play's package, about 15 minutes later. When `windows-latest.txt` is
+    not yet the commit of Play's newest build (Play's `latest.txt`), the launcher waits for it
+    (looking every 20 s, at most 30 minutes) instead of starting the older one as the newest
+    (Patrick, 0c1fbbf: f9eac18's tester was started). Closing its window starts the newest one
+    there is then. The room is built for every push now, as Play is, so it always comes.
 - **Launcher.exe** (in the room's own zip): looks for a newer build on the `windows-test` release. If there
   is one it offers to update: the download is checked against its SHA-256, and `userdata` is never
   touched. Then it starts the room. It updates the folder it is in.
@@ -117,8 +122,10 @@ Beside each clip a `.json` sidecar of the same name holds:
   it means the write never reached the drawing), `drawn_skin` (of those three, how many the skin
   lists, how many of them are the rig's own nodes, and how many bones the skin lists), `spread` (the body's farthest bone from the pelvis, m; the body is dropped past
   2.5), `drift` and `drift_most` (reads a later game pass moved, and the most, in tolerances),
-  `jumps` (animation jumps the reaction yielded to) and `fade` (how much of a dropped body's way back is left);
-  `null` when it is not reacting.
+  `jumps` (animation jumps the reaction yielded to), `fade` (how much of a dropped body's way back
+  is left), `heights` (the root's, `Bip01 NonAccum`'s and the pelvis's world height over the
+  actor's reference, as drawn, game units) and `feet_over_floor` (each foot's height over the
+  collision floor under it, `null` where the cast found none); `null` when it is not reacting.
 
 The clips need the Vulkan renderer (the default; Settings.cmd's Renderer). With "Direct3D 9" the
 game is drawn by Windows' Direct3D, whose frames the recorder does not see: the clip comes out

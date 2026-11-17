@@ -58,7 +58,13 @@ pub const MAX_BEND: f32 = 1.2;
 pub const BEND_ROOM: f32 = 1.5;
 /// A hit's momentum goes in over this long (s), eased in and out (no jump in any velocity or
 /// acceleration), while the joints carry it along the chain.
-pub const HIT_TIME: f32 = 0.04;
+/// 0.12 s: a 90 to 120 ms rise (Patrick's 19-43-08 clip: 0.04 s threw the arms and head at 12
+/// rad/s).
+pub const HIT_TIME: f32 = 0.12;
+/// The share of a hit's momentum the standing body takes (the rest goes into the ground
+/// through the feet): at full, a 0.32 m/s 9mm bent a pistol-armed torso 30 degrees and the
+/// bounds held it every frame, a stiff deep bend (Patrick's 19-43-08 clip).
+pub const KICK_SHARE: f32 = 0.6;
 /// A hit's push reaches each bone after its distance from the impact at this speed (m/s): it
 /// travels up and down the body.
 pub const HIT_WAVE: f32 = 5.0;
@@ -328,21 +334,93 @@ pub fn yields(moved: f32, turned: f32) -> bool {
 }
 
 /// The most a reaction's offset may be for its push `v` (m/s: the most of its hits'): each bone's
-/// world turn off its animation (rad), its yaw about the vertical (rad), and the pelvis's offset
-/// (game units; the body's, not the steps'). A 0.53 m/s flinch: 0.67 rad, 6.5 degrees of yaw, 6.2
-/// units.
+/// world turn off its animation (rad: 8 degrees at 0.3 m/s, 20 at 0.75, along a line between, at
+/// least [`TURN_LEAST`] and at most 75 degrees; Patrick's 19-43-08 clip: a 0.32 m/s 9mm turned the
+/// torso 20 to 27 degrees), its yaw about the vertical (rad, never more than the turn), and the
+/// pelvis's offset (game units; the body's, not the steps'). A 0.53 m/s flinch: 14 degrees, 6.5
+/// degrees of yaw, 6.2 units.
 pub fn offset_most(v: f32) -> (f32, f32, f32) {
     let v = v.clamp(0.0, 3.0);
-    (
-        (0.3 + 0.7 * v).min(1.3),
-        (0.06 + 0.1 * v).min(0.3),
-        2.0 + 8.0 * v,
-    )
+    let turn = (TURN_AT_SLOW + (v - SLOW) * (TURN_AT_FAST - TURN_AT_SLOW) / (FAST - SLOW))
+        .clamp(TURN_LEAST, 75.0)
+        .to_radians();
+    (turn, (0.06 + 0.1 * v).min(0.3).min(turn), 2.0 + 8.0 * v)
 }
 
-/// The fastest a bone's shown offset from its animation may change (rad/s): the clip's upper
-/// body turned 3 to 4 times round in under a second.
-pub const SPIN_MOST: f32 = 20.0;
+/// [`offset_most`]'s turn: [`TURN_AT_SLOW`] degrees at [`SLOW`] m/s, [`TURN_AT_FAST`] at [`FAST`],
+/// never under [`TURN_LEAST`].
+pub const SLOW: f32 = 0.3;
+pub const FAST: f32 = 0.75;
+pub const TURN_AT_SLOW: f32 = 8.0;
+pub const TURN_AT_FAST: f32 = 20.0;
+pub const TURN_LEAST: f32 = 4.0;
+
+/// The most the shown pelvis may drop under its animated height (game units): a flinch, and
+/// while catch steps carry it. Patrick's 19-43-08 clip (0c1fbbf): a .44's step sank the Fiend
+/// upright, hips below the ground.
+pub const PELVIS_DROP_FLINCH: f32 = 4.0;
+pub const PELVIS_DROP_STEP: f32 = 8.0;
+
+/// The shown pelvis's offset from its animation `offset` (game units) held up to
+/// [`PELVIS_DROP_FLINCH`] under it, [`PELVIS_DROP_STEP`] while `stepping` (never lifted: only a
+/// drop is held).
+pub fn hold_pelvis_up(offset: V3, stepping: bool) -> V3 {
+    let most = if stepping {
+        PELVIS_DROP_STEP
+    } else {
+        PELVIS_DROP_FLINCH
+    };
+    [offset[0], offset[1], offset[2].max(-most)]
+}
+
+/// Each foot's target `feet` (world, game units) never under its animated place `animated`
+/// (the animation's foot is on the floor) nor under its floor plus its ankle `floor` where the
+/// collision found one: a planted foot is never put into the floor (Patrick's 19-43-08 clip).
+pub fn feet_on_floor(feet: [V3; 2], animated: [V3; 2], floor: [Option<f32>; 2]) -> [V3; 2] {
+    [0, 1].map(|i| {
+        let low = floor[i].map_or(animated[i][2], |f| f.max(animated[i][2]));
+        [feet[i][0], feet[i][1], feet[i][2].max(low)]
+    })
+}
+
+/// The shown legs lifted off the floor: each leg (`legs`: thigh, calf and foot bones) whose ankle
+/// is shown (`at`: the shown joints, world, game units) under `low` (its animated ankle's
+/// height, or its collision floor plus its ankle where higher) turned by two-bone IK from its
+/// hip (`crate::flinch::leg_ik`, the knee forward along `forward`) so the ankle is at `low`,
+/// where it is across: the shown world rotations `shown` of its thigh and calf turned (the foot
+/// keeps its own). A planted foot never sinks into the floor under the body's lowered pelvis
+/// (Patrick's 19-43-08 clip). Answers how many legs were lifted.
+pub fn lift_feet(
+    shown: &mut [M3],
+    at: &[V3],
+    legs: &[(usize, usize, usize)],
+    low: &[f32],
+    forward: V3,
+) -> u32 {
+    let mut lifted = 0;
+    for (&(t, c, f), &low) in legs.iter().zip(low) {
+        let (hip, knee, ankle) = (at[t], at[c], at[f]);
+        if ankle[2] >= low - 0.01 {
+            continue;
+        }
+        let goal = [ankle[0], ankle[1], low];
+        let Some((r1, m, _)) = crate::flinch::leg_ik(hip, knee, ankle, hip, goal, forward) else {
+            continue;
+        };
+        shown[t] = crate::flinch::mul(&r1, &shown[t]);
+        shown[c] = crate::flinch::mul(&crate::flinch::mul(&r1, &m), &shown[c]);
+        lifted += 1;
+    }
+    lifted
+}
+
+/// The fastest a bone's shown offset from its animation may change (rad/s): a person's arm, 4 to 6
+/// rad/s (Patrick's 19-43-08 clip: the arms and head at 12 under a bound of 20; the 14-16-02
+/// clip's upper body turned 3 to 4 times round in under a second).
+pub const SPIN_MOST: f32 = 6.0;
+/// A bone's own motion about the pelvis handed over to the ragdoll at most this times its
+/// distance (rad/s, [`handover_velocities`]).
+pub const HANDOVER_SPIN: f32 = 20.0;
 /// How fast a bound pulls an offset beyond it back (rad/s, game units/s): an offset the bound
 /// meets out past it (a fall that did not happen ending) is brought in, never cut in a frame.
 pub const PULL_TURN: f32 = 3.0;
@@ -441,6 +519,12 @@ impl Limit {
             } else {
                 step_most
             };
+            // Coming back toward its animation is never held to the pull: as much as the offset
+            // shrinks, up to the spin bound (the hand-back eases it to nothing; held at the pull,
+            // its last frame jumped: Patrick's 19-43-08 clip, 42.6 degrees for one frame, then
+            // none). `was`: the offset as the body and its weight have it, before the bounds.
+            let shrink = length(qlog(self.before[i])) - length(qlog(was));
+            let most = most.max(shrink.min(step_most));
             let d = qlog(qmul(off, qconj(self.before[i])));
             let l = length(d);
             if l > most {
@@ -476,7 +560,7 @@ impl Limit {
 
 /// The velocities (m/s) the ragdoll takes over from the body (`host::knockdown`'s launch): the
 /// pelvis's held to `most_speed` (the hit's speed, a fall's), and each bone's own motion about the
-/// pelvis to [`SPIN_MOST`] times its distance from it. A body's arm spinning at 61 to 169 rad/s
+/// pelvis to [`HANDOVER_SPIN`] times its distance from it. A body's arm spinning at 61 to 169 rad/s
 /// before the switch flung the ragdoll about in the air (Patrick's 18-21-05 clip).
 pub fn handover_velocities(state: &[State], pelvis: usize, most_speed: f32) -> Vec<V3> {
     let Some(p) = state.get(pelvis) else {
@@ -499,7 +583,7 @@ pub fn handover_velocities(state: &[State], pelvis: usize, most_speed: f32) -> V
         .map(|s| {
             let own = sub(s.v, pv);
             let r = length(sub(s.com, p.com));
-            let cap = SPIN_MOST * r;
+            let cap = HANDOVER_SPIN * r;
             let ol = length(own);
             let own = if ol > cap && ol > 0.0 {
                 scale(own, cap / ol)
@@ -1517,7 +1601,8 @@ impl Body {
             let point = if b == i { at } else { add(a, scale(ab, t)) };
             let local = qrot(qconj(s.q), sub(point, s.com));
             let delay = d[b] / tuning::get().hit_wave.max(0.1);
-            self.pushes.push((b, scale(dir, p * share), local, -delay));
+            self.pushes
+                .push((b, scale(dir, p * share * KICK_SHARE), local, -delay));
         }
         for (d, add_) in self.dip.iter_mut().zip(dips) {
             // A dip weakens a motor (up to 0.9); a negative one makes it stronger (an armed body's
@@ -2381,7 +2466,7 @@ mod tests {
         assert!((length(v[0]) - 1.5).abs() < 1e-4);
         let r = length(sub(state[1].com, state[0].com));
         assert!(
-            (length(sub(v[1], v[0])) - SPIN_MOST * r).abs() < 1e-3,
+            (length(sub(v[1], v[0])) - HANDOVER_SPIN * r).abs() < 1e-3,
             "{:?}",
             v[1]
         );
@@ -2559,7 +2644,15 @@ mod tests {
     fn a_hit_travels_and_settles() {
         let mut body = Body::from_pose(&figure(), 1.0 / 60.0);
         let t = targets(&body);
-        body.hit(20.0, [0.0, 1.0, 0.0], [0.2, 0.0, 0.95], 0.4, &[0.0; 8], &[]);
+        // The same push into the body whatever share of the hit it takes.
+        body.hit(
+            20.0 / KICK_SHARE,
+            [0.0, 1.0, 0.0],
+            [0.2, 0.0, 0.95],
+            0.4,
+            &[0.0; 8],
+            &[],
+        );
         let mut arm: Vec<f32> = Vec::new();
         let mut spine: Vec<f32> = Vec::new();
         let mut biggest_jump = 0.0f32;
@@ -2580,7 +2673,8 @@ mod tests {
         };
         let (arm_peak, arm_at) = onset(&arm);
         let (spine_peak, spine_at) = onset(&spine);
-        assert!(arm_peak > 0.5, "the struck arm moves: {arm_peak}");
+        // (A little under 0.5 m/s since the push goes in over 0.12 s: the motors take some.)
+        assert!(arm_peak > 0.4, "the struck arm moves: {arm_peak}");
         assert!(spine_peak > 0.1, "the spine turns: {spine_peak}");
         assert!(
             arm_at < spine_at,
@@ -2668,5 +2762,26 @@ mod tests {
         let t = hinge_limit(u, leaned, axis, ELBOW_FLEX, ELBOW_LEAN).expect("leaned too far");
         let (_, lean) = hinge_angles(u, qrot(t, leaned), axis);
         assert!((lean - ELBOW_LEAN).abs() < 1e-3);
+    }
+
+    /// A shown ankle under its floor is lifted onto it by the leg's IK (the thigh and calf
+    /// turned, the foot's own kept), across where it was; one on or over it is left.
+    #[test]
+    fn a_sunk_foot_is_lifted_onto_its_floor() {
+        use crate::flinch::{apply_m, IDENTITY};
+        let (hip, knee, ankle) = ([0.0, 0.0, 90.0], [0.0, 3.0, 50.0], [0.0, 0.0, 6.0]);
+        let mut shown = vec![IDENTITY; 3];
+        let at = [hip, knee, ankle];
+        let fwd = [0.0, 1.0, 0.0];
+        assert_eq!(lift_feet(&mut shown, &at, &[(0, 1, 2)], &[10.0], fwd), 1);
+        let knee2 = add(hip, apply_m(&shown[0], sub(knee, hip)));
+        let ankle2 = add(knee2, apply_m(&shown[1], sub(ankle, knee)));
+        assert!((ankle2[2] - 10.0).abs() < 0.2, "{ankle2:?}");
+        assert!(ankle2[0].abs() < 0.2 && ankle2[1].abs() < 0.2, "{ankle2:?}");
+        assert_eq!(shown[2], IDENTITY);
+        // On its floor already: nothing turned.
+        let mut same = vec![IDENTITY; 3];
+        assert_eq!(lift_feet(&mut same, &at, &[(0, 1, 2)], &[5.0], fwd), 0);
+        assert_eq!(same, vec![IDENTITY; 3]);
     }
 }

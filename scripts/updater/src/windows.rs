@@ -147,6 +147,11 @@ impl Status {
         }
     }
 
+    /// Whether the window was closed (by the player, or [`Status::close`]).
+    fn closed(&self) -> bool {
+        STATUS_WINDOW.load(Ordering::Relaxed) == 0
+    }
+
     fn close(&self) {
         let window = STATUS_WINDOW.load(Ordering::Relaxed);
         if window != 0 {
@@ -565,17 +570,71 @@ fn tester(play_install: &Path) {
         .ok()
         .and_then(|text| update::installed_commit(&text));
     let has_it = dir.join("Play.exe").is_file();
-    let (repo, _) = crate::channel();
+    let (repo, play_tag) = crate::channel();
     let status = Status::show("Looking for the newest physics tester...");
-    let latest = fetch_text(&crate::asset_url(
-        repo,
-        update::TESTER_TAG,
-        update::TESTER_LATEST,
-    ))
-    .and_then(|text| {
-        update::parse_latest(&text)
-            .ok_or_else(|| format!("the release's {} is not readable", update::TESTER_LATEST))
-    });
+    let read_tester = || {
+        fetch_text(&crate::asset_url(
+            repo,
+            update::TESTER_TAG,
+            update::TESTER_LATEST,
+        ))
+        .and_then(|text| {
+            update::parse_latest(&text)
+                .ok_or_else(|| format!("the release's {} is not readable", update::TESTER_LATEST))
+        })
+    };
+    // The newest Play build: the tester is built after it (about 15 minutes later) and must be
+    // that build's, never an older one started as the newest (Patrick, 0c1fbbf: f9eac18's).
+    let newest = fetch_text(&crate::asset_url(repo, play_tag, crate::latest_name()))
+        .ok()
+        .and_then(|text| update::parse_latest(&text))
+        .map(|l| l.commit);
+    let mut latest = read_tester();
+    let mut waited = false;
+    if let Ok(published) = &latest {
+        if update::tester_step(
+            installed.as_deref(),
+            has_it,
+            &published.commit,
+            newest.as_deref(),
+        ) == update::TesterStep::Wait
+        {
+            let want = newest.as_deref().unwrap_or_default();
+            let since = std::time::Instant::now();
+            loop {
+                let left = update::TESTER_WAIT.saturating_sub(since.elapsed().as_secs());
+                status.set(&format!(
+                    "The physics tester of the newest build ({}) is still being built (it comes                      about 15 minutes after Play's). Waiting for it: {} min left.\n\nClose this                      window to start the newest one there is now ({}).",
+                    short(want),
+                    left.div_ceil(60),
+                    latest.as_ref().map_or("none", |l| short(&l.commit))
+                ));
+                if left == 0 || status.closed() {
+                    break;
+                }
+                // Looked for every TESTER_LOOK seconds; the window's close seen within a second.
+                for _ in 0..update::TESTER_LOOK {
+                    if status.closed() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                if let Ok(now) = read_tester() {
+                    let done = now.commit.eq_ignore_ascii_case(want);
+                    latest = Ok(now);
+                    if done {
+                        break;
+                    }
+                }
+            }
+            waited = true;
+        }
+    }
+    let status = if waited && status.closed() {
+        Status::show("Looking for the newest physics tester...")
+    } else {
+        status
+    };
     let latest = match latest {
         Ok(latest) => latest,
         Err(why) => {

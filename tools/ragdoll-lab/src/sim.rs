@@ -321,6 +321,24 @@ pub struct Stats {
     /// move of its offset in a frame (units, the steps' own moves of the actor aside), and the
     /// fastest any bone's offset from its animation turned (rad/s) and which.
     pub pelvis_most: f32,
+    /// The floor (Patrick's 19-43-08 clip), standing: the most the shown pelvis was under its
+    /// animation (units; before any step, and once a step was taken), a shown foot under its
+    /// animation, a shown foot or the pelvis under the floor there, and the reference's height
+    /// moved.
+    pub pelvis_drop: f32,
+    /// The most the torso (pelvis, spine, neck, head) was turned off its animation (degrees), and
+    /// the body's push (the most of its hits', m/s).
+    pub torso_turn: f32,
+    /// The most that turn changed in a frame (degrees: the host's `drawn_turn` jumping).
+    pub turn_jump: f32,
+    /// ... while it yields to its AI's walk and once handed back (degrees).
+    pub yield_turn_jump: f32,
+    pub react_v: f32,
+    pub flinch_pelvis_drop: f32,
+    pub step_pelvis_drop: f32,
+    pub foot_drop: f32,
+    pub under_floor: f32,
+    pub reference_dz: f32,
     pub pelvis_jump: f32,
     pub bone_spin: f32,
     pub spin_bone: usize,
@@ -513,6 +531,7 @@ pub struct Sim {
     /// ([`Stats::pelvis_jump`], [`Stats::bone_spin`]).
     pub own_moved: V3,
     offsets_before: Option<[active::Q; COUNT]>,
+    torso_before: Option<f32>,
     /// The steps' own moves of the actor not yet left out of the body's carry.
     pub own_carry: V3,
     was_holding: bool,
@@ -597,6 +616,7 @@ impl Sim {
             aim_pass: false,
             own_moved: [0.0; 3],
             offsets_before: None,
+            torso_before: None,
             own_carry: [0.0; 3],
             was_holding: false,
             raw: [IDENT_XF; COUNT],
@@ -687,6 +707,7 @@ impl Sim {
         self.velocity = None;
         self.anim_pelvis = None;
         self.offsets_before = None;
+        self.torso_before = None;
         self.own_moved = [0.0; 3];
         self.acceleration = None;
         self.note("reset: standing at the start".into());
@@ -1132,6 +1153,7 @@ impl Sim {
         if self.rig.body.is_some() && self.rig.shown_w < 0.999 {
             self.rig.body = None;
         }
+        self.stats.react_v = self.stats.react_v.max(v);
         self.rig.react_v = if self.rig.body.is_some() {
             self.rig.react_v.max(v)
         } else {
@@ -1878,6 +1900,8 @@ impl Sim {
             }
             let (hip, ankle) = (add(hip0, shift), add(ankle0, shift));
             let target = add(ankle, scale(sub(feet[side as usize], ankle), s.weight));
+            // Never into the floor (`active::feet_on_floor`, the host's too).
+            let target = active::feet_on_floor([target; 2], [ankle0; 2], [None; 2])[0];
             // The knee forward whichever way the push goes (`leg_ik`: never bent backwards).
             let Some((r1, m, level)) = leg_ik(hip0, knee0, ankle0, hip, target, self.anim_facing())
             else {
@@ -2118,6 +2142,8 @@ impl Sim {
                         None => animated,
                     },
                 };
+                // Never into the floor (the host's too): at least the animation's own foot.
+                let planted = active::feet_on_floor(planted, animated, [None; 2]);
                 let origin = self.rig.origin;
                 let to_body = |p: V3| scale(sub(p, origin), m);
                 let feet: Vec<(usize, V3)> = vec![
@@ -2321,6 +2347,22 @@ impl Sim {
             let mut off = sub(pelvis, anim[mq::PELVIS].1);
             fade.on(&mut rots, &mut off);
             pelvis = add(anim[mq::PELVIS].1, off);
+        }
+        // The pelvis never more than a few units under its animation (the host's too).
+        if self.rig.fall.is_none() && !self.limit_off {
+            let off = sub(pelvis, anim[mq::PELVIS].1);
+            pelvis = add(
+                anim[mq::PELVIS].1,
+                active::hold_pelvis_up(off, self.rig.balance.is_some()),
+            );
+            // A shown foot never under its animated one (`active::lift_feet`, the host's too).
+            let at: Vec<V3> = self.place(&rots, pelvis).iter().map(|x| x.1).collect();
+            let legs = [
+                (mq::L_THIGH, mq::L_CALF, mq::L_FOOT),
+                (mq::R_THIGH, mq::R_CALF, mq::R_FOOT),
+            ];
+            let low = [anim[mq::L_FOOT].1[2], anim[mq::R_FOOT].1[2]];
+            active::lift_feet(&mut rots, &at, &legs, &low, self.anim_facing());
         }
         let mut out = self.place(&rots, pelvis);
         // The free arms' wrists (before the brace's IK: where a released hand goes back to).
@@ -2616,7 +2658,7 @@ impl Sim {
                 self.grip_hold = true;
             }
         }
-        self.grip_hold.then_some(shown_w.clamp(0.0, 1.0))
+        self.grip_hold.then_some(hands::grip_weight(shown_w))
     }
 
     /// Where a released brace hand goes back to in the pose `pose` (rotation and wrist): a
@@ -2788,6 +2830,30 @@ impl Sim {
         // The reaction's offset over the animation (the pelvis's; each bone's turn).
         let off = sub(self.posed[p].1, anim[p].1);
         self.stats.pelvis_most = self.stats.pelvis_most.max(length(off));
+        // The floor (Patrick's 19-43-08 clip): the pelvis under its animation, the feet under
+        // theirs and under the floor (their ankles over it as the animation stands), the
+        // reference's height moved by the steps.
+        if self.rig.fall.is_none() {
+            self.stats.pelvis_drop = self.stats.pelvis_drop.max(-off[2]);
+            if self.stats.steps > 0 {
+                self.stats.step_pelvis_drop = self.stats.step_pelvis_drop.max(-off[2]);
+            } else {
+                self.stats.flinch_pelvis_drop = self.stats.flinch_pelvis_drop.max(-off[2]);
+            }
+            for f in [mq::L_FOOT, mq::R_FOOT] {
+                self.stats.foot_drop = self.stats.foot_drop.max(anim[f].1[2] - self.posed[f].1[2]);
+                if let Some(g) = world::ground_point(&self.world, self.posed[f].1) {
+                    self.stats.under_floor = self.stats.under_floor.max(g[2] - self.posed[f].1[2]);
+                }
+            }
+            if let Some(g) = world::ground_point(&self.world, self.posed[p].1) {
+                self.stats.under_floor = self.stats.under_floor.max(g[2] - self.posed[p].1[2]);
+            }
+            self.stats.reference_dz = self
+                .stats
+                .reference_dz
+                .max((self.pos[2] - self.stats.start[2]).abs());
+        }
         if let Some((a0, _)) = self.anim_pelvis {
             let off0 = sub(before[p].1, a0);
             let own = std::mem::take(&mut self.own_moved);
@@ -2824,6 +2890,7 @@ impl Sim {
             let base = *self.release_off.get_or_insert(off);
             self.stats.release_rise = self.stats.release_rise.max(off - base);
         }
+        let mut torso_now = 0.0f32;
         for b in 0..COUNT {
             if mq::role_side(b).0.is_arm() {
                 let turn = mul(&transpose(&before[b].0), &self.posed[b].0);
@@ -2843,7 +2910,24 @@ impl Sim {
                 &self.posed[b].0,
             )));
             self.stats.flinch = self.stats.flinch.max(off.to_degrees());
+            if matches!(
+                mq::role_side(b).0,
+                Role::Pelvis | Role::Spine | Role::Neck | Role::Head
+            ) {
+                self.stats.torso_turn = self.stats.torso_turn.max(off.to_degrees());
+                torso_now = torso_now.max(off.to_degrees());
+            }
         }
+        // The host's `drawn_turn` (the torso's most turn off its animation) from frame to frame.
+        if let Some(t0) = self.torso_before {
+            let j = (torso_now - t0).abs();
+            self.stats.turn_jump = self.stats.turn_jump.max(j);
+            // Yielding to the AI's walk, and once handed back.
+            if self.rig.yield_at.is_some() || (self.rig.body.is_none() && self.stats.hits > 0) {
+                self.stats.yield_turn_jump = self.stats.yield_turn_jump.max(j);
+            }
+        }
+        self.torso_before = Some(torso_now);
         if self.armed {
             let h = mq::R_HAND;
             let off = length(rotation_vector(&mul(
@@ -2992,6 +3076,7 @@ impl Sim {
         self.velocity = None;
         self.anim_pelvis = None;
         self.offsets_before = None;
+        self.torso_before = None;
         self.own_moved = [0.0; 3];
         self.acceleration = None;
         self.last_knock = Some(self.t);
