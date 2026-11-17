@@ -293,11 +293,13 @@ pub fn install(e: &mut Engine) {
     let t = crate::gunplay::tuning();
     eprintln!(
         "Knockdown: bKnockdowns={} iKnockdownThreshold={} iHitForce={} bKnockdownCompanions={} \
-         (each decision on a living character is logged as Knockdown: lines)",
+         bNewPhysics={} (each decision on a living character is logged as Knockdown: lines; New \
+         Physics is being built: nothing uses it yet, the current reactions run)",
         u8::from(t.knockdowns),
         t.knockdown_threshold,
         t.hit_force,
-        u8::from(t.knockdown_companions)
+        u8::from(t.knockdown_companions),
+        u8::from(t.new_physics)
     );
     e.register(UPDATE_KNOCK_STATE, |e, a| {
         if crate::gunplay::is_on() && a[0] != 0 && hold_get_up(e, a[0], a[1]) {

@@ -7,6 +7,16 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (New Physics approved: M0, the joint limits and the switch)
+
+- **Now:** Patrick approved the New Physics design (with M6, downed but active, emergent). M0:
+  `[nv-rs Gunplay] bNewPhysics` (off; Settings > Gameplay "New Physics", change function
+  `7e060220`), read by nothing yet; the 17 joint limits Patrick extracted from `skeleton.nif` in
+  `crates/ragdoll-core/data/fnv_skeleton.txt` (moved there from the host's tests-data) and
+  `ragdoll_core::np_skeleton` (parse, measure against the limits), checked against his bind-pose
+  figures on the data and the host fixture. docs/GUNPLAY.md "New Physics".
+- **Next:** M1, `np_body` and `np_drive` with the lab's recoil tests and videos.
+
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 
 - **Now:** the FNV get-up fixture runs knock state 6 as the game does (the animation late, ks1 on

@@ -24,6 +24,7 @@ pub mod brace;
 pub mod condition;
 pub mod flinch;
 pub mod knock;
+pub mod np_skeleton;
 pub mod obstacle;
 pub mod one_hand;
 pub mod perks;

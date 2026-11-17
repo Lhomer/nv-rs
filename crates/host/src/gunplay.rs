@@ -171,6 +171,10 @@ pub struct Tuning {
     /// it; 1 as b44a964 did, at the first-person set-up and left in the bones (drawn a frame late,
     /// the frame's drawing not joined).
     pub reaction_draw: i32,
+    /// `bNewPhysics`: New Physics, the one balance controller in place of the layered reactions
+    /// (docs/GUNPLAY.md "New Physics"); off by default, the current reactions then run as they do.
+    /// Nothing reads it yet (milestone M0: the switch and the joint limits).
+    pub new_physics: bool,
 }
 
 impl Tuning {
@@ -197,6 +201,7 @@ impl Tuning {
         hit_reactions: 100,
         balance: 100,
         reaction_draw: 0,
+        new_physics: false,
     };
 
     /// Sets `key` (a [`KEYS`] key) to `value`; false for a key that isn't one or a value out of
@@ -230,6 +235,7 @@ impl Tuning {
             "ihitreactions" => self.hit_reactions = value,
             "ibalance" => self.balance = value,
             "ireactiondraw" => self.reaction_draw = value,
+            "bnewphysics" => self.new_physics = value != 0,
             _ => return false,
         }
         true
@@ -259,6 +265,7 @@ impl Tuning {
             "ihitreactions" => self.hit_reactions,
             "ibalance" => self.balance,
             "ireactiondraw" => self.reaction_draw,
+            "bnewphysics" => i32::from(self.new_physics),
             _ => return None,
         })
     }
@@ -297,7 +304,7 @@ impl Default for Tuning {
 }
 
 /// The keys of [`SECTION`]: key, its environment variable, lowest and highest value.
-pub const KEYS: [(&str, &str, i32, i32); 21] = [
+pub const KEYS: [(&str, &str, i32, i32); 22] = [
     ("iRecoil", "NV_GUNPLAY_RECOIL", 0, 300),
     ("iRecoilRecovery", "NV_GUNPLAY_RECOVERY", 0, 100),
     ("iSway", "NV_GUNPLAY_SWAY", 0, 300),
@@ -329,6 +336,7 @@ pub const KEYS: [(&str, &str, i32, i32); 21] = [
     ("iHitReactions", "NV_GUNPLAY_HIT_REACTIONS", 0, 200),
     ("iBalance", "NV_GUNPLAY_BALANCE", 0, 200),
     ("iReactionDraw", "NV_GUNPLAY_REACTION_DRAW", 0, 1),
+    ("bNewPhysics", "NV_GUNPLAY_NEW_PHYSICS", 0, 1),
 ];
 
 /// A value of `key` as the file or a variable holds it: `1`/`0` for a `b` key, a whole number for
@@ -1424,7 +1432,7 @@ fn unplace_pose(e: &mut Engine, placed: &Placed) {
 
 /// The rows' change functions, after the graphics rows' (`0x7e06_0010` to `0x7e06_0050`), in the
 /// platform's area that no exe or platform code uses.
-pub const CHANGE_FNS: [u32; 14] = [
+pub const CHANGE_FNS: [u32; 15] = [
     0x7e06_0060,
     0x7e06_0070,
     0x7e06_0080,
@@ -1445,6 +1453,8 @@ pub const CHANGE_FNS: [u32; 14] = [
     0x7e06_0200,
     // Balance.
     0x7e06_0210,
+    // New Physics.
+    0x7e06_0220,
 ];
 
 /// A row of the Settings menu's Display page.
@@ -1478,10 +1488,12 @@ pub enum Row {
     HitReactions,
     /// A meter of `iBalance` (0 Off to 200%), on the Gameplay page.
     Balance,
+    /// Off / On: `bNewPhysics`, on the Gameplay page.
+    NewPhysics,
 }
 
 /// The rows, in the order they are made.
-pub const ROWS: [Row; 14] = [
+pub const ROWS: [Row; 15] = [
     Row::Enabled,
     Row::Recoil,
     Row::Sway,
@@ -1496,6 +1508,7 @@ pub const ROWS: [Row; 14] = [
     Row::ImpactStacking,
     Row::HitReactions,
     Row::Balance,
+    Row::NewPhysics,
 ];
 
 impl Row {
@@ -1516,6 +1529,7 @@ impl Row {
             Row::ImpactStacking => (SECTION, "iImpactStacking"),
             Row::HitReactions => (SECTION, "iHitReactions"),
             Row::Balance => (SECTION, "iBalance"),
+            Row::NewPhysics => (SECTION, "bNewPhysics"),
         }
     }
 
@@ -1539,7 +1553,8 @@ impl Row {
             | Row::BulletSpeed
             | Row::ImpactStacking
             | Row::HitReactions
-            | Row::Balance => GAMEPLAY,
+            | Row::Balance
+            | Row::NewPhysics => GAMEPLAY,
             _ => DISPLAY,
         }
     }
@@ -1554,9 +1569,12 @@ impl Row {
             Row::BulletSpeed => Some((5, 36)),
             Row::ImpactStacking => Some((50, 19)),
             Row::HitReactions | Row::Balance => Some((10, 21)),
-            Row::Enabled | Row::HitStop | Row::Knockdowns | Row::Ballistics | Row::Penetration => {
-                None
-            }
+            Row::Enabled
+            | Row::HitStop
+            | Row::Knockdowns
+            | Row::Ballistics
+            | Row::Penetration
+            | Row::NewPhysics => None,
         }
     }
 
@@ -1622,6 +1640,7 @@ impl Row {
             Row::HitReactions => format!("Hit Reactions: {value}%"),
             Row::Balance if value == 0 => "Balance: Off".to_string(),
             Row::Balance => format!("Balance: {value}%"),
+            Row::NewPhysics => "New Physics".to_string(),
         }
     }
 }
@@ -1717,7 +1736,7 @@ pub fn install_change_fns(e: &mut Engine) {
         change(e, ROWS[N], Ptr::new(a[0]));
         Ret::default()
     }
-    let fns: [AbiFn; 14] = [
+    let fns: [AbiFn; 15] = [
         row_fn::<0>,
         row_fn::<1>,
         row_fn::<2>,
@@ -1732,6 +1751,7 @@ pub fn install_change_fns(e: &mut Engine) {
         row_fn::<11>,
         row_fn::<12>,
         row_fn::<13>,
+        row_fn::<14>,
     ];
     for (address, f) in CHANGE_FNS.into_iter().zip(fns) {
         e.register(address, f);
@@ -1897,6 +1917,7 @@ mod tests {
             hit_reactions: 0,
             balance: 0,
             reaction_draw: 1,
+            new_physics: true,
         };
         for (row, key) in rows.iter().zip(KEYS) {
             assert_eq!(row.switch, key.1, "{row:?}");

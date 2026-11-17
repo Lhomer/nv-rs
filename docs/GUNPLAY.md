@@ -486,6 +486,39 @@ for the shot, the hit's round and the breakdown; a knocked-down actor's fall dam
 attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
 patches (#624) and the knockdown's companion refusal were not on the path.
 
+### New Physics (Patrick approved the design 2026-11-17)
+
+One balance controller in place of the layered reactions (the drawn flinch, catch steps, knockdown
+thresholds), on FNV's own skeleton's bodies and joints: recoil, stagger steps, gather steps when
+running, a fall into the game's ragdoll, and (M6) downed but still fighting, every pose emerging
+from the physics and the AI, never staged. A separate option, off by default: Settings > Gameplay
+"New Physics", `[nv-rs Gunplay] bNewPhysics` (`NV_GUNPLAY_NEW_PHYSICS`). Off, the current reactions
+run as they do, and their fixes keep landing. Milestones: M0 the joint limits and the switch; M1
+the body and drive (`ragdoll-core::np_body`, `np_drive`) with the lab's recoil tests and videos; M2
+balance and steps; M3 the host behind the switch, the game's stagger animation suppressed; M4 the
+fall and get-up; M5 in-game metrics and tuning; M6 downed but active.
+
+**M0.** The switch (nothing reads it yet: 0 and 1 play the same; the run's first `Knockdown:` line
+says `bNewPhysics=`). The joint limits, supplied by Patrick from `skeleton.nif` (not read from the
+game's `bhk` constraints): `crates/ragdoll-core/data/fnv_skeleton.txt` (moved from the host's
+tests-data, one file for the host's skeleton fixture, the lab and New Physics), its CONSTRAINTS
+section: the 17 joints (14 `bhkMalleableConstraint`s at strength 0.9 wrapping 8 ragdoll and 6
+limited hinge constraints, the spine's 3 plain ragdoll ones), child and parent body, pivots and
+axes in each body's frame, limits in radians as stored. `ragdoll_core::np_skeleton` parses the
+nodes, the 18 bodies (81 kg) and the joints, and measures a joint against its limits from its
+bodies' world rotations: a ragdoll joint's cone (the twist axes apart), plane (A's twist axis out
+of B's plane) and twist; a hinge's angle (B's zero reference to A's about A's axle). Checked on the
+data's bind pose and on the host's fixture (the tree laid out by the engine's update), within 0.1
+degrees of each other and of Patrick's figures: the knees 69.9, the ankles 2.5, the elbows -4.5,
+the wrists -2.5 and 1.5; the cones of the thighs 3.2, the spine 3.9, 3.7 and 10.0 (Spine2 at its
+plane limit), the head 0, the upper arms 3.6. What the data has that New Physics must allow for:
+- the neck lies 20 degrees out of its 6.8 degree cone and below its plane's -3.3 (Havok pulls it
+  in at the switch to the ragdoll);
+- the legs', spine's, neck's and head's pivots meet within 0.2 game units in the bind pose, the
+  arms' do not: the shoulder's 1.1 apart, the elbow's 2.2 (its pivot 19.6 units along the upper arm,
+  the elbow node 17.4), the wrist's 2.0; and the arms' hinge axles are 15 degrees apart. The
+  bodies themselves sit on their nodes (within 0.12, the data's rounding).
+
 ### bdf710a: the get-up hoisted upside down, the stagger's slide, the head's nod, the launch along the ground (Patrick, 2026-11-17, clip 1456)
 
 On FNV's skeleton (`tests-data/fnv_skeleton.txt`) the get-up fixture now runs knock state 6 as the
@@ -1934,6 +1967,7 @@ line; a bad variable stops the start.
 | `iDetailsKey` | `NV_GUNPLAY_DETAILS_KEY` | 37 | a DirectInput key code (Settings > Controls "Detailed Stats Key") |
 | `iHitReactions` | `NV_GUNPLAY_HIT_REACTIONS` | 100 | 0-200 (0 off; Settings > Gameplay "Hit Reactions", in 10s) |
 | `iBalance` | `NV_GUNPLAY_BALANCE` | 100 | 0-200 (0 off; Settings > Gameplay "Balance", in 10s) |
+| `bNewPhysics` | `NV_GUNPLAY_NEW_PHYSICS` | 0 | 0/1 (Settings > Gameplay "New Physics"; nothing uses it yet) |
 
 ### In-game Settings menu
 
@@ -1953,7 +1987,8 @@ How the Off / On row behaves:
 - Turned On again in the same run, they act again.
 - Saved Off, the next start installs nothing, and the row is gone until `bWeightyCombat=1`.
 
-The rows' change functions are at `7e060060` to `7e0600a0`. `CreateMenuElements` (`007cc6e0`) is
+The rows' change functions are at `7e060060` to `7e0600a0`. The Gameplay page's New Physics row
+(Off / On, `bNewPhysics`) changes at `7e060220`. `CreateMenuElements` (`007cc6e0`) is
 shared with the Field of View and graphics rows: `fixes::install` registers one function that makes
 the rows of each that is on.
 

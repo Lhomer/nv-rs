@@ -1,6 +1,7 @@
 # FNV meshes\characters\_male\skeleton.nif: derived data only (node names, parents, local transforms,
-# which node each ragdoll rigid body hangs from, its mass and capsule, its constraint partner), for
-# the host's tests (`crate::rig_fixture::fnv_skeleton`). No meshes, no game bytes.
+# which node each ragdoll rigid body hangs from, its mass and capsule, its constraint partner and the
+# constraints' limits): the host's skeleton fixture (`host::rig_fixture::fnv_skeleton`) and New
+# Physics' joint limits (`ragdoll_core::np_skeleton`). No meshes, no game bytes.
 # NODES: i|depth|name|parent|type|tx,ty,tz|rows as stored in the NIF (the transpose of the matrix the
 # game applies to a column vector)|quat w,x,y,z (of the stored rows)|scale|collision->body
 0|0|Scene Root||BSFadeNode|0,0,0|1 0 0;0 1 0;0 0 1|1,0,0,0|1|
@@ -89,3 +90,30 @@
 301|Bip01 R UpperArm|8|4|1.9637,-0.4427,14.6625|0.9652,0.0025,-0.2449,0.0914|1.3993,-0,0|capsule r0.2661 p1(2.8124,-0,0) p2(-0.0138,-0,0)|Malleable->Bip01 Spine2
 313|Bip01 R Forearm|8|3|4.1468,-0.5417,13.4883|0.9582,0.1158,-0.254,0.062|1.155,-0,0|capsule r0.232 p1(2.309,-0,0) p2(0.001,-0,0)|Malleable->Bip01 R UpperArm
 325|Bip01 R Hand|8|2|6.3333,-0.0483,12.1904|-0.5517,0.1462,0.1707,0.8032|0.4826,0.0233,0.0189|capsule r0.4803 p1(0.6668,0.0233,0.0189) p2(0.2984,0.0233,0.0189)|Malleable->Bip01 R Forearm
+# CONSTRAINTS (Patrick, 2026-11-17, from the same skeleton.nif; the 17 ragdoll joints and their limits,
+# for New Physics' joint limits, `ragdoll_core::np_skeleton`): child (entities[0], body A)|parent
+# (entities[1], body B)|kind (MRD bhkMalleableConstraint wrapping a ragdoll constraint, MLH malleable
+# wrapping a limited hinge, RD a plain bhkRagdollConstraint)|malleable strength (0.9 for all 14; the
+# NIF 20.2.0.7 stores no tau or damping; - for none)|pivot A|pivot B (Havok units in each body's
+# local frame, x7 = game units)|axes in each body's local frame (ragdoll: twist t, plane pl, motor m;
+# hinge: axle ax, perp2AxleIn1 p1, perp2AxleIn2 p2, p1 the zero-angle reference)|limits (radians as
+# stored; ragdoll cone, plane min,max, twist min,max; hinge angle min,max, the angle the turn from
+# p1B to p1A about the axle). All: max friction 100, motors off. A body's frame is its node's world
+# transform (plain bhkRigidBody; checked within 0.04 degrees).
+Bip01 L Thigh|Bip01 NonAccum|MRD|0.9|0,0,0|0,.997,0|tA 1,.003,-.017;plA .017,0,1;mA .003,-1,0;tB -.007,.01,-1;plB -.017,-1,-.01;mB -1,.017,.007|cone 0.7854;plane -0.8796,0.5236;twist -0.1745,0.1745
+Bip01 L Calf|Bip01 L Thigh|MLH|0.9|0,0,0|4.563,0,0|axA 0,0,1;p1A 1,0,0;p2A 0,1,0;axB 0,0,1;p1B .161,-.987,0;p2B .987,.161,0|angle -0.8727,1.5237
+Bip01 L Foot|Bip01 L Calf|MLH|0.9|0,0,0|4.124,0,0|axA 0,0,1;p1A 0,1,0;p2A -1,0,0;axB 0,0,1;p1B -.1,.995,0;p2B -.995,-.1,0|angle -0.5959,0.0628
+Bip01 R Thigh|Bip01 NonAccum|MRD|0.9|0,0,0|0,-.997,0|tA 1,.017,-.003;plA .003,0,1;mA .017,-1,0;tB .007,.01,-1;plB .025,-1,-.01;mB -1,-.025,-.007|cone 0.7854;plane -0.5236,0.5236;twist -0.1745,0.1745
+Bip01 R Calf|Bip01 R Thigh|MLH|0.9|0,0,0|4.563,0,0|axA 0,0,1;p1A 1,0,0;p2A 0,1,0;axB 0,0,1;p1B .161,-.987,0;p2B .987,.161,0|angle -0.8727,1.5237
+Bip01 R Foot|Bip01 R Calf|MLH|0.9|0,0,0|4.124,0,0|axA 0,0,1;p1A 0,1,0;p2A -1,0,0;axB 0,0,1;p1B -.1,.995,0;p2B -.995,-.1,0|angle -0.5959,0.0628
+Bip01 Spine|Bip01 NonAccum|RD|-|0,0,0|.214,0,.889|tA .998,-.068,0;plA .068,.998,0;mA 0,0,1;tB .018,0,1;plB 1,0,-.018;mB 0,1,0|cone 0.3142;plane -0.1745,0.1745;twist -0.1745,0.1745
+Bip01 Spine1|Bip01 Spine|RD|-|0,0,0|1.068,-.001,0|tA .998,-.065,0;plA .065,.998,0;mA 0,0,1;tB .999,-.047,0;plB .047,.999,0;mB 0,0,1|cone 0.3142;plane -0.1745,0.1745;twist -0.1745,0.1745
+Bip01 Spine2|Bip01 Spine1|RD|-|0,0,0|1.292,-.002,0|tA 1,0,0;plA 0,1,0;mA 0,0,1;tB 1,.02,0;plB -.02,1,0;mB 0,0,1|cone 0.3142;plane -0.1745,0.1745;twist -0.1745,0.1745
+Bip01 Neck1|Bip01 Spine2|MRD|0.9|0,0,0|2.46,.001,0|tA .998,-.057,.032;plA .058,.998,-.026;mA -.031,.028,.999;tB .743,.669,.032;plB -.668,.744,-.026;mB -.041,-.002,.999|cone 0.1188;plane -0.0582,0.1121;twist 0,0
+Bip01 Head|Bip01 Neck1|MRD|0.9|0,0,0|.799,0,0|tA 1,0,0;plA 0,.004,-1;mA 0,1,.004;tB .968,-.252,0;plB .001,.004,-1;mB .252,.968,.004|cone 0.3768;plane -0.2618,0.2618;twist -0.6981,0.6981
+Bip01 L UpperArm|Bip01 Spine2|MRD|0.9|0,0,0|1.985,-.406,1.986|tA 1,0,0;plA 0,1,0;mA 0,0,1;tB -.495,-.077,.865;plB .435,-.884,.171;mB .752,.461,.471|cone 1.309;plane -1.309,0.0873;twist -0.1745,0.1745
+Bip01 L Forearm|Bip01 L UpperArm|MLH|0.9|0,0,0|2.799,0,0|axA 0,0,1;p1A 1,0,0;p2A 0,1,0;axB .03,.264,.964;p1B .988,-.156,.012;p2B .154,.952,-.265|angle -2.2689,0
+Bip01 L Hand|Bip01 L Forearm|MLH|0.9|0,0,0|2.31,0,0|axA 0,0,1;p1A 1,0,0;p2A 0,1,0;axB .046,.967,-.25;p1B .995,-.022,.095;p2B .086,-.253,-.964|angle -0.6109,0.7854
+Bip01 R UpperArm|Bip01 Spine2|MRD|0.9|0,0,0|1.985,-.406,-1.986|tA 1,0,0;plA 0,1,0;mA 0,0,1;tB -.495,-.077,-.865;plB .435,-.884,-.171;mB -.752,-.461,.471|cone 1.309;plane -1.309,0.0873;twist -0.1745,0.1745
+Bip01 R Forearm|Bip01 R UpperArm|MLH|0.9|0,0,0|2.799,0,0|axA 0,0,1;p1A 1,0,0;p2A 0,1,0;axB -.03,-.264,.964;p1B .988,-.156,-.012;p2B .154,.952,.265|angle -2.2689,0
+Bip01 R Hand|Bip01 R Forearm|MLH|0.9|0,0,0|2.31,0,0|axA 0,0,1;p1A 1,0,0;p2A 0,1,0;axB -.095,-.952,-.29;p1B .982,-.042,-.182;p2B .161,-.302,.939|angle -0.6109,0.7854

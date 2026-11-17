@@ -547,12 +547,12 @@ pub fn mannequin() -> Vec<Node> {
 }
 
 /// FNV's own skeleton (`meshes\characters\_male\skeleton.nif`, the male and female humans'), from
-/// its derived data (`tests-data/fnv_skeleton.txt`: node names, parents, local transforms, which
+/// its derived data (`crates/ragdoll-core/data/fnv_skeleton.txt`: node names, parents, local transforms, which
 /// node each ragdoll body hangs from): every `NiNode` as the file lays them out, the rows as stored
 /// read as the transpose of the matrix the game applies (the left thigh at -X, as the left thigh's
 /// body is). No body on `Bip01 Pelvis`; the root body on `Bip01 NonAccum`, the spine its sibling.
 pub fn fnv_skeleton() -> Vec<Node> {
-    let text = include_str!("../tests-data/fnv_skeleton.txt");
+    let text = include_str!("../../ragdoll-core/data/fnv_skeleton.txt");
     let mut nodes: Vec<Node> = Vec::new();
     for line in text.lines() {
         if line.starts_with("# RIGID BODIES") {
@@ -590,6 +590,54 @@ pub fn fnv_skeleton() -> Vec<Node> {
         });
     }
     nodes
+}
+
+/// New Physics' joint limits on the fixture (`ragdoll_core::np_skeleton`, the 17 constraints of the
+/// same skeleton): every joint measured from its two body nodes' worlds as the engine's update
+/// lays the tree out agrees with the skeleton data's own bind pose within 0.1 degrees, inside its
+/// limits but for the neck (20 degrees out of its 6.8 cone, as the data has it).
+#[test]
+fn the_joint_limits_on_the_fnv_skeleton_fixture() {
+    use ragdoll_core::np_skeleton::{Measure, Skeleton};
+    let sk = Skeleton::fnv();
+    let bind = sk.bind_worlds();
+    let mut f = Fixture::new(
+        fnv_skeleton(),
+        Ground {
+            collision: Some(0.0),
+            navmesh: -8.0,
+        },
+    );
+    f.animate();
+    let as_vec = |m: Measure| match m {
+        Measure::Ragdoll { cone, plane, twist } => [cone, plane, twist],
+        Measure::Hinge { angle } => [angle, 0.0, 0.0],
+    };
+    for j in &sk.joints {
+        let (a, b) = (f.world(&j.child).unwrap().0, f.world(&j.parent).unwrap().0);
+        let here = j.measure(&a, &b);
+        let there = j.measure(
+            &bind[sk.node(&j.child).unwrap()].r,
+            &bind[sk.node(&j.parent).unwrap()].r,
+        );
+        for (x, y) in as_vec(here).iter().zip(as_vec(there)) {
+            assert!(
+                (x - y).abs().to_degrees() < 0.1,
+                "{}: {here:?} on the fixture, {there:?} in the data",
+                j.child
+            );
+        }
+        let out = j.outside(here).to_degrees();
+        if j.child == "Bip01 Neck1" {
+            assert!((out - 16.7).abs() < 0.6, "the neck {out:.1} out");
+        } else {
+            assert!(
+                out < 0.05,
+                "{} {out:.2} degrees outside its limits",
+                j.child
+            );
+        }
+    }
 }
 
 /// The fixture's tree is FNV's: the left thigh's joint at -X over the actor's left, the ragdoll's
