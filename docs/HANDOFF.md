@@ -19,7 +19,10 @@ machinery runs.
   `np_lab` recoil tests (6.2/14.8/24.0 degrees, back in 0.38-0.68 s) and videos
   (`scripts/np_video.py`).
 - **M2:** `ragdoll-core::np_balance` (capture point, support, catching and stance steps, the
-  footing IK, the walk's path); the lab's step and walking-hit tests and videos. Next: M3, the host.
+  footing IK, the walk's path); the lab's step and walking-hit tests and videos.
+- **M3:** `host::new_physics` behind `bNewPhysics` (claim at `HitMe`, the game's own reaction
+  skipped, the write/update/read-back/put-back, the actor moved with its steps); fixture tests.
+  Next: M4, the fall to the game's ragdoll and the get-up.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 

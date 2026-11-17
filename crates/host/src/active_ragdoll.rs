@@ -935,6 +935,7 @@ static WRITTEN: Mutex<Vec<(u32, (M3, V3))>> = Mutex::new(Vec::new());
 /// moving the write past that was taken for the animation, the offset put on itself: Patrick's
 /// 14-16-02 clip, the upper body spinning round the waist and a snap at the end).
 pub fn unwrite(e: &mut Engine) {
+    crate::new_physics::unwrite(e);
     let written = std::mem::take(&mut *WRITTEN.lock().unwrap_or_else(|p| p.into_inner()));
     for (node, (rot, t)) in written {
         if node != 0 {
@@ -1717,6 +1718,8 @@ fn yield_now(rig: &mut Rig, why: &str) {
 /// reacting actor's physical body stepped toward its animation and its bones posed (module
 /// documentation).
 pub fn apply(e: &mut Engine) {
+    // New Physics' actors first (`crate::new_physics`: its own write, the same point).
+    crate::new_physics::apply(e);
     let dt = {
         let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
         let dt = last.map_or(0.0, |t| t.elapsed().as_secs_f32());
@@ -4872,6 +4875,11 @@ pub fn falling(actor: u32) -> bool {
 
 /// The actor's 3D's world transforms brought up to its bones' local ones (`NiAVObject::Update`
 /// with an update data of no time and no controllers).
+/// [`update`] for `crate::new_physics`.
+pub(crate) fn update_tree(e: &mut Engine, root: u32) {
+    update(e, root);
+}
+
 fn update(e: &mut Engine, root: u32) {
     // No controller runs (time 0, `bUpdateControllers` false), and no collision object keyframes
     // its body from the node nor sets the node from its body: the thread block's mode word that
@@ -4896,6 +4904,7 @@ const NODES_ONLY: u32 = 3;
 /// Everything dropped (a load, a new game, the main menu): the nodes go with the game.
 pub fn clear() {
     RIGS.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    crate::new_physics::clear();
     crate::down_log::clear();
     crate::one_hand::clear();
     *LAST.lock().unwrap_or_else(|p| p.into_inner()) = None;

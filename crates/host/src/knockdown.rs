@@ -293,8 +293,8 @@ pub fn install(e: &mut Engine) {
     let t = crate::gunplay::tuning();
     eprintln!(
         "Knockdown: bKnockdowns={} iKnockdownThreshold={} iHitForce={} bKnockdownCompanions={} \
-         bNewPhysics={} (each decision on a living character is logged as Knockdown: lines; New \
-         Physics is being built: nothing uses it yet, the current reactions run)",
+         bNewPhysics={} (each decision on a living character is logged as Knockdown: lines; with \
+         New Physics on, its actors' lines are [np ...])",
         u8::from(t.knockdowns),
         t.knockdown_threshold,
         t.hit_force,
@@ -316,10 +316,38 @@ pub fn install(e: &mut Engine) {
     });
     e.register(HIT_ME, |e, a| {
         let queued = e.call(AI_THREAD, &[]).bool();
+        // New Physics takes the actor before the game's hit runs, so its own reaction is not
+        // played: the crippled-limb idle's setting cleared around it (`HitMe_ov2` and
+        // `KnockExplosion` check `crate::new_physics::owns`).
+        let np = !queued && crate::new_physics::claim(e, a[0]);
+        let cripple = np.then(|| {
+            let was = e.mem.u8(crate::new_physics::CRIPPLE_IDLE);
+            e.mem.set_u8(crate::new_physics::CRIPPLE_IDLE, 0);
+            was
+        });
         actor_hit_me(e, Ptr::new(a[0]), Ptr::new(a[1]), a[2] as u8);
+        if let Some(was) = cripple {
+            e.mem.set_u8(crate::new_physics::CRIPPLE_IDLE, was);
+        }
         if !queued {
             after_hit(e, a[0], a[1]);
         }
+        Ret::default()
+    });
+    e.register(crate::new_physics::HIT_ME_OV2, |e, a| {
+        // The game's physical hit reaction: not for an actor New Physics has.
+        if crate::gunplay::is_on() && crate::new_physics::owns(a[0]) {
+            return Ret::default();
+        }
+        engine::units::fallout_ai::actor_p3::actor_hit_me_ov2(
+            e,
+            Ptr::new(a[0]),
+            Ptr::new(a[1]),
+            f32::from_bits(a[2]),
+            f32::from_bits(a[3]),
+            a[4],
+            a[5],
+        );
         Ret::default()
     });
 }
@@ -328,7 +356,29 @@ pub fn install(e: &mut Engine) {
 /// documentation). Each decision on a living character is logged ([`note`]).
 fn after_hit(e: &mut Engine, target: u32, hit: u32) {
     let t = crate::gunplay::tuning();
-    if !crate::gunplay::is_on() || !t.knockdowns || hit == 0 || target == 0 {
+    if !crate::gunplay::is_on() || hit == 0 || target == 0 {
+        return;
+    }
+    // New Physics' actor: the hit's momentum is its (Hit Force applied); no knockdown, stagger or
+    // flinch of the current reactions, and the controller's stored push cleared.
+    if crate::new_physics::owns(target) && e.mem.u32(hit + HIT_TARGET) == target {
+        let Measured {
+            p,
+            point,
+            direction,
+            ..
+        } = measure_hit(e, target, hit);
+        crate::new_physics::hit(
+            e,
+            target,
+            p * t.hit_force.max(0) as f32 / 100.0,
+            point,
+            direction,
+        );
+        clear_stored_push(e, target);
+        return;
+    }
+    if !t.knockdowns {
         return;
     }
     let player = e.global::<u32>(PLAYER);
@@ -2390,7 +2440,7 @@ fn node_name(e: &Engine, node: u32) -> Vec<u8> {
 }
 
 /// The node named `name` in `actor`'s 3D (the rig's way of finding its bones), when there is one.
-fn named_node(e: &mut Engine, actor: u32, name: &[u8]) -> Option<u32> {
+pub(crate) fn named_node(e: &mut Engine, actor: u32, name: &[u8]) -> Option<u32> {
     let root = e.call(ACTOR_3D, &args![actor]).u32();
     let mut stack = vec![root];
     let mut seen = 0;
@@ -3027,7 +3077,7 @@ fn brace_ground(e: &mut Engine, g: &mut GetUp, scale: f32) {
 /// `characterInteractionCallback`, `00c6f500`, every frame one walks into the knocked-down actor's
 /// standing capsule, with a 0.01 s time, a hundredfold velocity) cleared; its size (game units a
 /// second, roughly) when there was one.
-fn clear_stored_push(e: &mut Engine, actor: u32) -> Option<f32> {
+pub(crate) fn clear_stored_push(e: &mut Engine, actor: u32) -> Option<f32> {
     let controller = e.call(CHAR_CONTROLLER, &args![actor]).u32();
     if controller == 0 {
         return None;

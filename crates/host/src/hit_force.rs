@@ -294,6 +294,10 @@ pub fn install(e: &mut Engine) {
     });
     e.register(KNOCK_EXPLOSION, |e, a| {
         // An actor knocked down by the knockdowns a moment ago gets no second push.
+        // Nor one New Physics has (`HitMe`'s own knock-backs): its fall is its own (M4).
+        if crate::gunplay::is_on() && crate::new_physics::owns(a[1]) {
+            return Ret::default();
+        }
         if crate::gunplay::is_on() && crate::knockdown::recently_knocked(a[1]) {
             crate::knockdown::note_duplicate(e, a[1]);
             return Ret::default();

@@ -173,7 +173,7 @@ pub struct Tuning {
     pub reaction_draw: i32,
     /// `bNewPhysics`: New Physics, the one balance controller in place of the layered reactions
     /// (docs/GUNPLAY.md "New Physics"); off by default, the current reactions then run as they do.
-    /// Nothing reads it yet (milestone M0: the switch and the joint limits).
+    /// [`crate::new_physics`] reads it at each hit.
     pub new_physics: bool,
 }
 

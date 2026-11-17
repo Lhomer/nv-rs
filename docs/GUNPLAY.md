@@ -572,6 +572,32 @@ legs never crossing; hit while walking (101 units a second) at 0.8 and 2 m/s it 
 degrees and the walk carries on, every node within 9.2 units of the walk 1.5 s after the hit. The
 walk is a procedural gait on FNV's skeleton standing in for the game's walk cycle.
 
+**M3, in the game** (`crates/host/src/new_physics.rs`). With `bNewPhysics=1`, `Actor::HitMe`'s
+wrapper (`crate::knockdown`) offers the hit's target to New Physics before the game's hit runs: a
+living character other than the player, middle-high process or higher, standing, whose 3D has FNV's
+18 bodies' nodes (by name) is taken (`[np take]`); anything else keeps the current reactions. For
+an actor it has, the game's own reaction is not played: `Actor::HitMe_ov2` (`008a4af0`, the
+physical hit reaction) is skipped, the crippled-limb idle's setting (`011df760`) cleared around
+`HitMe`, `KnockExplosion` from `HitMe` refused (`crate::hit_force`), and the controller's stored
+push cleared; the hit's momentum (the knockdowns' measure, Hit Force applied) goes to the body
+nearest the impact (`[np hit]`), with no knockdown, stagger or flinch of the current reactions (and
+whatever `bKnockdowns` says). Each frame at the draw's start (`crate::active_ragdoll::apply`, the same
+write point): the body nodes' worlds as the game's update left them are the animation; the
+controller steps on them (the floor at the actor's reference); each body is written as its node's
+local, solved from its parent's world as written (the nodes between bodies, NonAccum's parent and
+the clavicles, kept as animated), the tree updated; read back (drawn against simulated); after the
+draw the game's locals are put back. A step's move is the actor's: its reference and controller set
+on it (`knockdown::place`). Standing calm 1.5 s after its last hit and within 1.5 units of its
+animation, it is let go (`[np reaction]`: the spine top's peak, catching steps, the move, the
+read-back); dead or knocked down (the game's ragdoll), it is let go at once. Fixture tests on FNV's
+skeleton through the real write, update, read-back and put-back
+(`new_physics_fixture_tests.rs`): a 0.8 m/s chest hit draws exactly what it simulates (0.000
+degrees, 0.000 units), puts the animation back exactly, peaks the spine's top at 14.8 degrees, takes
+one catching step and moves the actor 28 units back, nothing under the floor, the current reactions
+never touching it; 0.3 m/s takes no step (6.8 degrees); off, nothing is taken. Not run in the game.
+There is no stagger animation group in the game to suppress (the research found none: the visible
+stagger is `HitMe_ov2`'s physical reaction and the crippled-limb idle).
+
 ### bdf710a: the get-up hoisted upside down, the stagger's slide, the head's nod, the launch along the ground (Patrick, 2026-11-17, clip 1456)
 
 On FNV's skeleton (`tests-data/fnv_skeleton.txt`) the get-up fixture now runs knock state 6 as the
@@ -2020,7 +2046,7 @@ line; a bad variable stops the start.
 | `iDetailsKey` | `NV_GUNPLAY_DETAILS_KEY` | 37 | a DirectInput key code (Settings > Controls "Detailed Stats Key") |
 | `iHitReactions` | `NV_GUNPLAY_HIT_REACTIONS` | 100 | 0-200 (0 off; Settings > Gameplay "Hit Reactions", in 10s) |
 | `iBalance` | `NV_GUNPLAY_BALANCE` | 100 | 0-200 (0 off; Settings > Gameplay "Balance", in 10s) |
-| `bNewPhysics` | `NV_GUNPLAY_NEW_PHYSICS` | 0 | 0/1 (Settings > Gameplay "New Physics"; nothing uses it yet) |
+| `bNewPhysics` | `NV_GUNPLAY_NEW_PHYSICS` | 0 | 0/1 (Settings > Gameplay "New Physics"; being built) |
 
 ### In-game Settings menu
 
