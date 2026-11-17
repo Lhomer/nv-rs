@@ -7,6 +7,20 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (a45deed: the flinch drawn over the game's animation, slides, launch, get-up)
+
+- **Now:** the physical body is made still against its animation (`make_body(.., &anim, &anim, ..)`;
+  the lab's too): made from the last frame's pose, the game's hit or stagger animation starting
+  under the hit became the body's motion, spun the torso off and cancelled the flinch.
+  `active_ragdoll_mock_tests.rs` runs the host's own path on a mock engine (flinch, twist,
+  stagger, jumps, catch steps' follow, get-up blend). The follow of the feet is eased over 0.3 s;
+  `drawn_delta` is the pelvis's and feet's slide. The launch is the hit's speed, set, not added.
+  The get-up floor is `knock::get_up_floor`, the lying check uses it, the bones are held to 400
+  units/s through the whole get-up, and the drawn pose blends from the ragdoll into the game's get-up
+  animation (`begin_get_up_blend`, knock state 6). docs/GUNPLAY.md "a45deed". Not run in the game.
+- **Patrick:** the drawn flinch never showed; first-sample spikes; the follow's slide; the
+  anti-materiel launch too fast; the get-up's floor, handstand and snap.
+
 ### Claude, 2026-11-17 (merge slaterain/nv-rs main up to d3a855e)
 
 - **Now:** a regular merge of the 38 commits after 04e62ba (#647 to #675). Conflicts, both sides

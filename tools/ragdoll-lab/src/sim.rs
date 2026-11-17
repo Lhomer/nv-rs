@@ -348,6 +348,8 @@ pub struct Stats {
     pub got_up_pelvis: f32,
     pub nudges: u32,
     pub get_up_fastest: f32,
+    /// The most any bone is over the pelvis while it gets up (game units; a handstand shows here).
+    pub get_up_over_pelvis: f32,
     /// Each frame from the first hit: the time since it (s), the spine's top turned off its
     /// animation (degrees), its twist about the vertical (degrees, signed), the head's turn.
     pub spine_trace: Vec<(f32, f32, f32, f32)>,
@@ -2937,7 +2939,8 @@ impl Sim {
         }
     }
 
-    /// The physical body made from the pose shown now, moving as it moved (nothing jumps).
+    /// The physical body made from the pose shown now, still against its animation (its motion is
+    /// carried).
     fn ensure_body(&mut self) {
         if self.rig.body.is_some() {
             return;
@@ -2964,7 +2967,10 @@ impl Sim {
                     pos,
                     apply_m(&rot, scale(sub(mq::end(b), mq::JOINT[b]), self.scale)),
                 );
-                let (r0, p0) = self.posed_before[b];
+                // Still against its animation, as the host's: the animation's own motion is
+                // carried (`Body::carry`), never taken for the body's (the game's stagger starting
+                // under the hit spun the host's torso: Patrick's a45deed clips).
+                let (r0, p0) = self.posed[b];
                 active::Bone {
                     parent: self.body_parents[b],
                     role: mq::role_side(b).0,
@@ -3274,6 +3280,71 @@ impl Sim {
         let pelvis = sub(anim[mq::PELVIS].1, [0.0, 0.0, shin]);
         self.posed = self.place(&rots, pelvis);
         self.knock_down(self.anim_facing(), 0.0, "dropped kneeling");
+    }
+
+    /// The body dropped lying on its back, its hips folded up 60 degrees (an anti-materiel hit's
+    /// fold over an obstacle, landed face up: Patrick's a45deed clip got up through a handstand).
+    pub fn drop_face_up_fold(&mut self) {
+        let anim = self.anim();
+        let right = unit(cross(self.anim_facing(), [0.0, 0.0, 1.0])).unwrap_or([1.0, 0.0, 0.0]);
+        let back = rotation(scale(right, -std::f32::consts::FRAC_PI_2));
+        let fold = rotation(scale(right, -std::f32::consts::FRAC_PI_3));
+        let mut rots: [M3; COUNT] = std::array::from_fn(|b| mul(&back, &anim[b].0));
+        for b in [
+            mq::L_THIGH,
+            mq::R_THIGH,
+            mq::L_CALF,
+            mq::R_CALF,
+            mq::L_FOOT,
+            mq::R_FOOT,
+        ] {
+            rots[b] = mul(&fold, &rots[b]);
+        }
+        let floor = anim[mq::L_FOOT].1[2] - 6.0 * self.scale;
+        let pelvis = [
+            anim[mq::PELVIS].1[0],
+            anim[mq::PELVIS].1[1],
+            floor + 9.0 * self.scale,
+        ];
+        self.posed = self.place(&rots, pelvis);
+        self.knock_down(
+            self.anim_facing(),
+            0.0,
+            "dropped face up, folded at the hips",
+        );
+    }
+
+    /// The body dropped sitting on the ground, its legs straight out ahead, its torso leaning back
+    /// 15 degrees (Patrick's a45deed clip: seated, it went half up in 3 frames).
+    pub fn drop_seated(&mut self) {
+        let anim = self.anim();
+        let right = unit(cross(self.anim_facing(), [0.0, 0.0, 1.0])).unwrap_or([1.0, 0.0, 0.0]);
+        let legs = rotation(scale(right, std::f32::consts::FRAC_PI_2));
+        let lean = rotation(scale(right, -15f32.to_radians()));
+        let mut rots: [M3; COUNT] = std::array::from_fn(|b| anim[b].0);
+        for b in [
+            mq::L_THIGH,
+            mq::R_THIGH,
+            mq::L_CALF,
+            mq::R_CALF,
+            mq::L_FOOT,
+            mq::R_FOOT,
+        ] {
+            rots[b] = mul(&legs, &rots[b]);
+        }
+        for (b, r) in rots.iter_mut().enumerate() {
+            if !mq::role_side(b).0.is_leg() && b != mq::PELVIS {
+                *r = mul(&lean, r);
+            }
+        }
+        let floor = anim[mq::L_FOOT].1[2] - 6.0 * self.scale;
+        let pelvis = [
+            anim[mq::PELVIS].1[0],
+            anim[mq::PELVIS].1[1],
+            floor + 8.0 * self.scale,
+        ];
+        self.posed = self.place(&rots, pelvis);
+        self.knock_down(self.anim_facing(), 0.0, "dropped seated");
     }
 
     fn knock_down(&mut self, direction: V3, body_speed: f32, why: &str) {
@@ -3640,6 +3711,11 @@ impl Sim {
             let p = add(from[b].1, scale(sub(anim[b].1, from[b].1), k));
             self.posed[b] = (world[b], p);
         }
+        // The most any bone is over the pelvis while it rises (a handstand: Patrick's a45deed clip).
+        let over = (0..COUNT)
+            .map(|b| self.posed[b].1[2] - self.posed[mq::PELVIS].1[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        self.stats.get_up_over_pelvis = self.stats.get_up_over_pelvis.max(over);
         // The get-up's fastest bone (units a second; Patrick's 08-21-49 clip: yanked flat in
         // four frames).
         if dt > 0.0 {

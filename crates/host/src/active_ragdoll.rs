@@ -232,6 +232,8 @@ pub struct Rig {
     /// The pose log's `drawn_delta` and `drawn_length` (units), and the animated joints the frame
     /// before.
     pub drawn_delta: f32,
+    /// Each drawn bone's move beyond its animation's the frame before ([`Rig::drawn_delta`]).
+    pub moves_before: Vec<V3>,
     pub drawn_length: f32,
     pub anim_before: Vec<V3>,
     /// The bone whose drawn length is most off (the pose log's `drawn_length_bone`), whether that
@@ -248,6 +250,16 @@ pub struct Rig {
     /// the computed one was said this reaction.
     pub shown_turn: f32,
     pub turn_before: Option<(f32, f32)>,
+    /// The drawn flinch now (the pose log's `flinch_env`, `flinch_deg`): the most envelope of its
+    /// hits' flinches (0 to 1) and its turn at the spine's top as drawn (degrees, with the body's
+    /// weight).
+    pub flinch_env: f32,
+    pub flinch_deg: f32,
+    /// The actor's follow of its feet ([`follow_feet`]): the whole move (game units), how far into
+    /// it (s, of [`FEET_FOLLOW`]) and how much of it is made (0 to 1). Never in one frame.
+    pub follow: Option<(V3, f32, f32)>,
+    /// The drawn get-up's blend from the ragdoll's last pose ([`begin_get_up_blend`]).
+    pub getup: Option<GetUpBlend>,
     pub turn_warned: bool,
     /// How much each shown foot is lifted (`active::lift_amount`, game units).
     pub lift_low: [f32; 2],
@@ -690,6 +702,7 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         shown_world: Vec::new(),
         rebased: 0,
         drawn_delta: 0.0,
+        moves_before: Vec::new(),
         drawn_length: 0.0,
         anim_before: Vec::new(),
         drawn_length_bone: None,
@@ -699,6 +712,10 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         torso_keep: active::BODY_TORSO_SHARE,
         shown_turn: 0.0,
         turn_before: None,
+        flinch_env: 0.0,
+        flinch_deg: 0.0,
+        follow: None,
+        getup: None,
         turn_warned: false,
         lift_low: [0.0; 2],
     });
@@ -1107,7 +1124,9 @@ pub fn after_draw(e: &mut Engine) {
     let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     for rig in rigs.iter_mut() {
         if rig.drawn_ref.is_empty() {
-            rig.turn_before = None;
+            // Nothing written this frame: drawn as its animation, and as computed (none off it).
+            // The next frame written is held against that, the reaction's first one too.
+            rig.turn_before = Some((0.0, 0.0));
             continue;
         }
         rig.drawn_ref.clear();
@@ -1154,6 +1173,258 @@ pub fn after_draw(e: &mut Engine) {
 /// Frames a reaction shown off its animation but drawn on it before it is said.
 const DRAWN_MISSING_SAID: u32 = 30;
 
+// --- The get-up's blend from the ragdoll (Patrick's a45deed clips: at knock state 6 the game's
+// get-up animation took the bones from the ragdoll's pose in 2 to 4 frames, a seated body half up
+// in 3, the legs flung into a handstand). -------------------------------------------------------
+
+/// The get-up's blend: the ragdoll's last pose (each rig bone's world rotation and joint, the
+/// rig's order), and once its first frame has the animation, each bone's offset from it, the
+/// pelvis's, how long it takes and how far in it is.
+#[derive(Clone, Debug)]
+pub struct GetUpBlend {
+    from: Vec<(M3, V3)>,
+    off: Vec<active::Q>,
+    pelvis: V3,
+    len: f32,
+    t: f32,
+}
+
+/// The get-up's blend at least (s), and the most any bone is drawn moving through it (game units a
+/// second, `crate::knockdown::BONE_FLING_RISE`): a far bone makes it longer.
+pub const GET_UP_BLEND_LEAST: f32 = 0.3;
+pub const GET_UP_BONE_MOST: f32 = 400.0;
+
+/// How long the get-up's blend takes for its farthest bone `most` units from the animation's first
+/// frame (s): [`GET_UP_BLEND_LEAST`] at least, and the eased blend's fastest along its bones' arcs
+/// never over [`GET_UP_BONE_MOST`].
+pub fn get_up_blend_len(most: f32) -> f32 {
+    let most = if most.is_finite() { most.max(0.0) } else { 0.0 };
+    // A bone turned with the body goes round an arc, at most a quarter turn's (pi / 2 times the
+    // chord); the eased blend's fastest is 1.5 times its mean.
+    GET_UP_BLEND_LEAST.max(1.5 * std::f32::consts::FRAC_PI_2 * most / GET_UP_BONE_MOST)
+}
+
+/// The last ragdoll pose of each knocked-down actor: its 3D root, its rig bones' nodes (the rig's
+/// order) and their world rotations and joints as last read.
+struct RagdollPose {
+    actor: u32,
+    root: u32,
+    nodes: Vec<u32>,
+    last: Vec<(M3, V3)>,
+}
+
+static RAGDOLL_POSES: Mutex<Vec<RagdollPose>> = Mutex::new(Vec::new());
+
+/// Keeps `actor`'s ragdoll pose as it is drawn now (`crate::knockdown`, each frame of knock states
+/// 1 to 5), for the get-up's blend.
+pub fn note_ragdoll_pose(e: &mut Engine, actor: u32) {
+    let root = e.call(ACTOR_3D, &args![actor]).u32();
+    if root == 0 {
+        return;
+    }
+    let known = RAGDOLL_POSES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|p| p.actor == actor && p.root == root)
+        .map(|p| p.nodes.clone());
+    let nodes = match known {
+        Some(n) => n,
+        None => {
+            let bones = find_bones(e, root);
+            if bones.is_empty() {
+                return;
+            }
+            bones.iter().map(|b| b.node).collect()
+        }
+    };
+    let last: Vec<(M3, V3)> = nodes
+        .iter()
+        .map(|&n| {
+            (
+                read9(e, n + WORLD_ROTATION),
+                read3(e, n + WORLD_TRANSLATION),
+            )
+        })
+        .collect();
+    let mut poses = RAGDOLL_POSES.lock().unwrap_or_else(|p| p.into_inner());
+    poses.retain(|p| p.actor != actor);
+    if poses.len() >= 16 {
+        poses.remove(0);
+    }
+    poses.push(RagdollPose {
+        actor,
+        root,
+        nodes,
+        last,
+    });
+}
+
+/// The game's get-up animation has `actor`'s bones (knock state 6), alive.
+fn get_up_animating(e: &Engine, actor: u32) -> bool {
+    let process = e.mem.u32(actor + PROCESS);
+    process != 0
+        && e.mem.u8(process + KNOCK_STATE) == 6
+        && !matches!(e.mem.u32(actor + LIFE_STATE), 1 | 2)
+}
+
+/// The game's get-up animation took `actor`'s bones (knock state 6, `crate::knockdown`): its drawn
+/// pose eases from the ragdoll's last ([`note_ragdoll_pose`]) into the animation over
+/// [`get_up_blend_len`] (no bone faster than [`GET_UP_BONE_MOST`]), written as the reactions are
+/// and put back after the draw. Nothing without a kept pose or a rig.
+pub fn begin_get_up_blend(e: &mut Engine, actor: u32) {
+    let root = e.call(ACTOR_3D, &args![actor]).u32();
+    let pose = {
+        let mut poses = RAGDOLL_POSES.lock().unwrap_or_else(|p| p.into_inner());
+        let at = poses
+            .iter()
+            .position(|p| p.actor == actor && p.root == root);
+        at.map(|i| poses.remove(i))
+    };
+    let Some(pose) = pose else {
+        return;
+    };
+    if !ensure_rig(e, actor) {
+        return;
+    }
+    let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(rig) = rigs.iter_mut().find(|r| r.actor == actor && r.root == root) else {
+        return;
+    };
+    let from: Option<Vec<(M3, V3)>> = rig
+        .bones
+        .iter()
+        .map(|b| {
+            pose.nodes
+                .iter()
+                .position(|&n| n == b.node)
+                .map(|i| pose.last[i])
+        })
+        .collect();
+    let Some(from) = from else {
+        return;
+    };
+    rig.body = None;
+    rig.fade = None;
+    rig.flinches.clear();
+    rig.balance = None;
+    rig.brace = None;
+    rig.fall = None;
+    rig.getup = Some(GetUpBlend {
+        from,
+        off: Vec::new(),
+        pelvis: [0.0; 3],
+        len: GET_UP_BLEND_LEAST,
+        t: 0.0,
+    });
+}
+
+/// Whether the rig's ragdoll pose `at` (world joints) faces up (`knock::faces_up`); `None` without
+/// the bones to tell.
+fn faces_up_at(rig: &Rig, at: &[V3]) -> Option<bool> {
+    let top = (0..rig.bones.len())
+        .rev()
+        .find(|&i| rig.bones[i].role == Role::Spine)?;
+    let head = bone_of(rig, Role::Head, 2)?;
+    let l = bone_of(rig, Role::UpperArm, 0)?;
+    let r = bone_of(rig, Role::UpperArm, 1)?;
+    Some(ragdoll_core::knock::faces_up(
+        at[top], at[head], at[l], at[r],
+    ))
+}
+
+/// One frame of the get-up's blend ([`begin_get_up_blend`]): the drawn pose the animation's `anim`
+/// with what is left of the ragdoll's laid on it, written into the bones (put back after the
+/// draw). False once it is over.
+#[allow(clippy::too_many_arguments)]
+fn write_get_up_blend(
+    e: &mut Engine,
+    rig: &mut Rig,
+    anim: &[(M3, V3)],
+    parents: &[pose::Xf],
+    pi: usize,
+    root: u32,
+    dt: f32,
+    written_now: &mut Vec<(u32, (M3, V3))>,
+) -> bool {
+    let n = rig.bones.len();
+    let Some(mut gb) = rig.getup.take() else {
+        return false;
+    };
+    if gb.from.len() != n || anim.len() != n {
+        return false;
+    }
+    if gb.off.is_empty() {
+        let from_r: Vec<M3> = gb.from.iter().map(|f| f.0).collect();
+        let anim_r: Vec<M3> = anim.iter().map(|a| a.0).collect();
+        gb.off = active::Fade::offsets(&from_r, &anim_r);
+        gb.pelvis = sub(gb.from[pi].1, anim[pi].1);
+        let most = (0..n)
+            .map(|b| length(sub(gb.from[b].1, anim[b].1)))
+            .fold(0.0, f32::max);
+        gb.len = get_up_blend_len(most);
+        let from_at: Vec<V3> = gb.from.iter().map(|f| f.1).collect();
+        let anim_at: Vec<V3> = anim.iter().map(|a| a.1).collect();
+        let face = |up: Option<bool>| match up {
+            Some(true) => "face up",
+            Some(false) => "face down",
+            None => "face unknown",
+        };
+        let (body, starts) = (faces_up_at(rig, &from_at), faces_up_at(rig, &anim_at));
+        note(format!(
+            "{}: get-up blend: from the ragdoll's pose ({}) into the get-up animation's first \
+             frame ({}{}) over {:.2} s, its farthest bone {most:.0} units off, the pelvis {:.0}",
+            describe(e, rig.actor),
+            face(body),
+            face(starts),
+            if body.is_some() && starts.is_some() && body != starts {
+                ": the game chose a get-up of the other side"
+            } else {
+                ""
+            },
+            gb.len,
+            length(gb.pelvis)
+        ));
+    }
+    gb.t += dt;
+    let left = 1.0 - active::ease(gb.t / gb.len);
+    let mut shown: Vec<M3> = anim.iter().map(|a| a.0).collect();
+    for (s, off) in shown.iter_mut().zip(&gb.off) {
+        let r = active::qslerp(active::Q_ID, *off, left);
+        *s = active::m_from_q(active::qnorm(active::qmul(r, active::qfrom_m(s))));
+    }
+    let pelvis_offset = scale(gb.pelvis, left);
+    let going = gb.t < gb.len;
+    let offsets = offsets_of(&rig.bones, anim, &shown);
+    let shown_at = shown_positions(rig, anim, &shown, pi, pelvis_offset);
+    for b in 0..n {
+        let bone = &rig.bones[b];
+        let base = bone.pose.unwrap_or_default();
+        let shift = if bone.role == Role::Pelvis {
+            Some(pelvis_offset)
+        } else if moves_root(bone.role, bone.parent.is_none(), bone.phys.is_some()) {
+            Some(sub(shown_at[b], anim[b].1))
+        } else {
+            None
+        };
+        let (rot, t) = pose::local_for(&parents[b], base, &offsets[b], shift);
+        if rot.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite()) {
+            let bone = &mut rig.bones[b];
+            write9(e, bone.node + LOCAL_ROTATION, &rot);
+            write3(e, bone.node + LOCAL_TRANSLATION, t);
+            bone.written = Some((rot, t));
+            if let Some(raw) = bone.raw {
+                written_now.push((bone.node, raw));
+            }
+        }
+    }
+    update(e, root);
+    if going {
+        rig.getup = Some(gb);
+    }
+    going
+}
+
 /// The reaction yields to its animation now (`active::YIELD_BACK`): its body handed back
 /// quickly, a brace's hands let go, the steps end. Once a hit.
 fn yield_now(rig: &mut Rig, why: &str) {
@@ -1195,13 +1466,19 @@ pub fn apply(e: &mut Engine) {
         if root != rig.root {
             continue; // its 3D was made again: the old nodes are not ours
         }
-        // In its ragdoll (knocked down) or dead: the ragdoll owns the bones now; nothing is
-        // written back (that would fight it), the rig just goes.
-        if !may_write(e, rig.actor) {
-            continue;
-        }
-        if !can_flinch(e, rig.actor) {
-            continue; // nothing of it is written: the animation has it
+        // The game's get-up animation has the bones (knock state 6) while the drawn pose blends
+        // from the ragdoll's last ([`begin_get_up_blend`]): written over it, nothing else.
+        let getting_up = rig.getup.is_some() && get_up_animating(e, rig.actor);
+        if !getting_up {
+            rig.getup = None;
+            // In its ragdoll (knocked down) or dead: the ragdoll owns the bones now; nothing is
+            // written back (that would fight it), the rig just goes.
+            if !may_write(e, rig.actor) {
+                continue;
+            }
+            if !can_flinch(e, rig.actor) {
+                continue; // nothing of it is written: the animation has it
+            }
         }
         // The pose under the offset: what the animation wrote, or (while the bone still holds
         // what was written, also after the game's ragdoll-controller pass wrote it back a hair
@@ -1294,6 +1571,12 @@ pub fn apply(e: &mut Engine) {
         let Some(pi) = bone_of(&rig, Role::Pelvis, 2) else {
             continue;
         };
+        if getting_up {
+            if write_get_up_blend(e, &mut rig, &anim, &parents, pi, root, dt, &mut written_now) {
+                keep.push(rig);
+            }
+            continue;
+        }
         // A dropped body's way back to the animation goes on (`ragdoll_core::active::Fade`).
         if let Some(fade) = rig.fade.as_mut() {
             if !fade.advance(dt) {
@@ -1311,7 +1594,14 @@ pub fn apply(e: &mut Engine) {
                     rig.drift = 0;
                     rig.drift_most = 0.0;
                     rig.jumps = 0;
-                    let mut body = make_body(e, &rig, &anim, &before, dt);
+                    // Made still against its animation: the animation's own motion is carried
+                    // (`Body::carry`), never taken for the body's (made from the last frame's
+                    // pose, the game's hit or stagger animation starting under the hit spun the
+                    // torso about 10 rad/s with its muscles slack, 140 degrees off in 8 frames:
+                    // the drawn flinch cancelled and a 13-15 degree first frame in Patrick's
+                    // a45deed clips).
+                    let _ = &before;
+                    let mut body = make_body(e, &rig, &anim, &anim, dt);
                     // A new body is drawn as the animation: its torso share starts where it holds.
                     rig.torso_keep = if rig.brace.is_some() {
                         1.0
@@ -1554,6 +1844,8 @@ pub fn apply(e: &mut Engine) {
         let armed = rig.armed;
         let brace_now = rig.brace;
         let mut phys_w = 0.0f32;
+        rig.flinch_env = 0.0;
+        rig.flinch_deg = 0.0;
         if let Some(body) = rig.body.as_mut() {
             let mut targets = active::Targets {
                 rot: target.iter().map(active::qfrom_m).collect(),
@@ -1666,6 +1958,16 @@ pub fn apply(e: &mut Engine) {
                 w,
                 rig.torso_keep,
             );
+            rig.flinch_env = rig
+                .flinches
+                .iter()
+                .map(|f| f.envelope())
+                .fold(0.0, f32::max);
+            let at_top: V3 = rig
+                .flinches
+                .iter()
+                .fold([0.0; 3], |acc, f| add(acc, f.turn(1.0, false)));
+            rig.flinch_deg = length(at_top).to_degrees() * w.clamp(0.0, 1.0);
             let sim = add(scale(pose[pi].1, UNITS_PER_METRE), origin);
             let mut off = scale(sub(sim, pelvis_target), w);
             // Handed back, it only settles (`active::Settle`): never shown gaining on the
@@ -2126,22 +2428,41 @@ pub fn apply(e: &mut Engine) {
                 )
             })
             .collect();
-        // The pose log's `drawn_delta` (the most a drawn bone moved this frame beyond its
-        // animation's own move and the steps' move of the actor, units) and `drawn_length` (the
-        // most a drawn bone's length is off its animation's, units).
+        // The pose log's `drawn_delta` (a slide: how much the drawn pelvis's or a foot's move this
+        // frame, beyond its animation's own move and the steps' move of the actor, differs from its
+        // move the frame before, units: the actor following its feet in one frame slid 7.8; a
+        // flinch's turn, which moves the upper body about the hips, is the turn check's
+        // (`after_draw`), and a stepping leg swings as its step does) and `drawn_length` (the most
+        // a drawn bone's length is off its animation's, units).
         let anim_at: Vec<V3> = anim.iter().map(|a| a.1).collect();
         rig.drawn_delta = 0.0;
-        // The steps' own move of the actor this frame (`Rig::own_total`: the reference following
-        // the feet moves the animation, the drawn body is held where it was).
-        let own_move = sub(rig.own_total, rig.own_total_before);
-        rig.own_total_before = rig.own_total;
+        // The steps' own move of the actor that the animation shows this frame (`Rig::own_total`
+        // less what the root's world does not show yet, `lag`: the reference following the feet
+        // moves the animation when the root shows it, the drawn body held where it was).
+        let own_shown = sub(rig.own_total, lag);
+        let own_move = sub(own_shown, rig.own_total_before);
+        rig.own_total_before = own_shown;
+        let mut moves = vec![[0.0f32; 3]; n];
         if rig.shown_world.len() == n && rig.anim_before.len() == n {
+            let stepping = rig.balance.is_some();
             for b in 0..n {
                 let drawn = sub(shown_world[b].2, rig.shown_world[b].2);
                 let own = sub(sub(anim_at[b], rig.anim_before[b]), own_move);
-                rig.drawn_delta = rig.drawn_delta.max(length(sub(drawn, own)));
+                moves[b] = sub(drawn, own);
+                let where_it_stands = match rig.bones[b].role {
+                    Role::Pelvis => true,
+                    Role::Foot => !stepping,
+                    _ => false,
+                };
+                if !where_it_stands {
+                    continue;
+                }
+                if let Some(m0) = rig.moves_before.get(b) {
+                    rig.drawn_delta = rig.drawn_delta.max(length(sub(moves[b], *m0)));
+                }
             }
         }
+        rig.moves_before = moves;
         let (length_off, length_bone) = (0..n)
             .filter_map(|b| {
                 let p = rig.bones[b].parent?;
@@ -2316,7 +2637,7 @@ pub fn sample_fields(actor: u32) -> String {
     let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     match rigs.iter().find(|r| r.actor == actor) {
         Some(r) => format!(
-            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"spin\":{},\"spin_bone\":{},\"settling\":{},\"yielded\":{},\"limited\":{},\"ai_speed\":{},\"drawn_offset\":{},\"drawn_turn\":{},\"drawn_skin\":[{},{},{}],\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{},\"heights\":[{},{},{}],\"feet_over_floor\":[{},{}],\"drawn_delta\":{},\"drawn_length\":{},\"drawn_length_bone\":{},\"rebased\":{}}}",
+            "\"body\":{{\"active\":{},\"pelvis_offset\":{},\"pelvis_jump\":{},\"yaw_rate\":{},\"spin\":{},\"spin_bone\":{},\"settling\":{},\"yielded\":{},\"limited\":{},\"ai_speed\":{},\"drawn_offset\":{},\"drawn_turn\":{},\"drawn_skin\":[{},{},{}],\"spread\":{},\"drift\":{},\"drift_most\":{},\"jumps\":{},\"fade\":{},\"heights\":[{},{},{}],\"feet_over_floor\":[{},{}],\"drawn_delta\":{},\"drawn_length\":{},\"drawn_length_bone\":{},\"rebased\":{},\"flinch_env\":{},\"flinch_deg\":{},\"computed_turn\":{}}}",
             r.body.is_some(),
             room_events::num(r.pelvis_now),
             room_events::num(r.jump_now),
@@ -2355,6 +2676,9 @@ pub fn sample_fields(actor: u32) -> String {
                     .map_or("none", |b| b.0)
             ),
             r.rebased,
+            room_events::num(r.flinch_env),
+            room_events::num(r.flinch_deg),
+            room_events::num(r.shown_turn),
         ),
         None => "\"body\":null".to_string(),
     }
@@ -2745,6 +3069,55 @@ fn actor_scale(e: &mut Engine, actor: u32) -> f32 {
     }
 }
 
+/// How long the actor's follow of its feet takes (s, [`follow_feet`]).
+const FEET_FOLLOW: f32 = 0.3;
+
+/// This frame's part of the actor's follow of its feet ([`Rig::follow`]): the reference moved by
+/// it, the steps' pelvis shift (or, the steps over, the rig's) taking it back, so nothing drawn
+/// moves; the root's world shows it a frame later ([`Rig::placed`]).
+fn follow_feet(
+    e: &mut Engine,
+    rig: &mut Rig,
+    steps: Option<&mut crate::balance::Stepping>,
+    root_at: V3,
+    dt: f32,
+) {
+    let Some((whole, t, made)) = rig.follow else {
+        return;
+    };
+    let t = t + dt.max(0.0);
+    let now = active::ease(t / FEET_FOLLOW);
+    let part = scale(whole, now - made);
+    rig.follow = (now < 1.0).then_some((whole, t, now));
+    if length(part) <= 1e-6 {
+        return;
+    }
+    let reference = read3(e, rig.actor + REFR_POSITION);
+    let to = add(reference, part);
+    crate::knockdown::place(e, rig.actor, to);
+    rig.own_moved = add(rig.own_moved, part);
+    rig.own_total = add(rig.own_total, part);
+    // Any earlier move the root's world has not shown yet goes with this one.
+    let waiting = rig
+        .placed
+        .map_or([0.0; 3], |(was, m, _)| sub(m, sub(root_at, was)));
+    rig.placed = Some((root_at, add(waiting, part), Instant::now()));
+    match steps {
+        Some(s) => {
+            s.reference = to;
+            s.shift = sub(s.shift, part);
+        }
+        None => {
+            rig.shift = sub(rig.shift, part);
+            // An easing out of the shift eases out from where it is now.
+            if let Some((from, since, over)) = rig.shift_back.as_mut() {
+                let still = 1.0 - active::ease(since.elapsed().as_secs_f32() / *over);
+                *from = sub(*from, scale(part, 1.0 / still.max(0.05)));
+            }
+        }
+    }
+}
+
 /// Stage 2's frame for a rig with catch steps under way ([`crate::balance`]): the steps advanced
 /// (a landed foot moves the reference with the feet), the pelvis carried over the feet, the legs
 /// placed by two-bone IK on their targets, the arms out. Answers each bone's world-space rotation
@@ -2764,6 +3137,7 @@ fn balance_frame(
     use crate::balance::Outcome;
     let mut out: Vec<Option<M3>> = vec![None; rig.bones.len()];
     let Some(mut s) = rig.balance.take() else {
+        follow_feet(e, rig, None, root_at, dt);
         return out;
     };
     rig.shift_back = None;
@@ -2813,17 +3187,12 @@ fn balance_frame(
             to[1],
             to[2].clamp(reference[2] - 60.0, reference[2] + 60.0),
         ];
+        // The actor follows over [`FEET_FOLLOW`], a part each frame (`follow_feet`): moved 8 units
+        // in one frame it slid 15 pixels for a frame (Patrick's a45deed clip, drawn 7.8 units off).
+        // A follow under way is taken in with it (the reference is where it has got to), eased
+        // again from here.
         let moved = sub(to, reference);
-        crate::knockdown::place(e, actor, to);
-        rig.own_moved = add(rig.own_moved, moved);
-        rig.own_total = add(rig.own_total, moved);
-        // Any earlier move the root's world has not shown yet goes with this one.
-        let waiting = rig
-            .placed
-            .map_or([0.0; 3], |(was, m, _)| sub(m, sub(root_at, was)));
-        rig.placed = Some((root_at, add(waiting, moved), Instant::now()));
-        s.reference = to;
-        s.shift = sub(s.shift, moved);
+        rig.follow = Some((moved, 0.0, 0.0));
         note(format!(
             "{}: {} foot lands at ({:.0}, {:.0}, {:.0}), step {} of {}; the actor follows the feet \
              {:.0} units",
@@ -2837,6 +3206,7 @@ fn balance_frame(
             length(moved)
         ));
     }
+    follow_feet(e, rig, Some(&mut s), root_at, dt);
     // The animated pose at the reference as moved (the root's world may not show it yet).
     let ahead = rig
         .placed
@@ -3999,7 +4369,7 @@ mod tests {
     use super::*;
 
     /// The tests of the write's put-back share [`WRITTEN`]: one at a time.
-    static SERIAL: Mutex<()> = Mutex::new(());
+    pub(super) static SERIAL: Mutex<()> = Mutex::new(());
 
     /// The update brought to a written skeleton runs no controller and keyframes no collision
     /// body: time 0, controllers off, the collision mode word at 3 through it, put back after.
@@ -4241,3 +4611,7 @@ mod tests {
         assert_eq!(read3(&e, node + LOCAL_TRANSLATION), game.1);
     }
 }
+
+#[cfg(test)]
+#[path = "active_ragdoll_mock_tests.rs"]
+mod mock_tests;

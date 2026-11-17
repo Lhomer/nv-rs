@@ -486,6 +486,67 @@ for the shot, the hit's round and the breakdown; a knocked-down actor's fall dam
 attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
 patches (#624) and the knockdown's companion refusal were not on the path.
 
+### a45deed: still no reactions, first-frame spikes, a slide, a fast launch, a handstand get-up (Patrick, 2026-11-17, 12-02-59 and 12-04-38 clips)
+
+- **The flinch never reached the screen.** A host test on a mock engine
+  (`active_ragdoll_mock_tests.rs`: a 20-bone biped node tree, the game's calls answered by doubles,
+  `hit`, then `apply`, the nodes read back, `after_draw`, `unwrite` each frame) drew it in full over
+  a still animation (6.5 degrees at 0.32 m/s, 14.3 at 0.79, 14 of twist on a clavicle hit). Over the
+  game's own hit or stagger animation starting under the hit it drew 1.8: the physical body was
+  made from the last frame's pose (`make_body(..., &before)`), so the animation's own change that
+  frame became the body's motion, and `Body::carry` carried the animation's motion on top every
+  frame after. The torso spun about 10 rad/s with its muscles slack from the hit, 140 degrees off
+  its target in 8 frames; the kept quarter of it (`BODY_TORSO_SHARE`) cancelled the flinch, and its
+  first frame was the 13 to 15 degree first sample. The body is now made still against its
+  animation (the lab's too). Over the stagger: 14.5 degrees at 0.17 s, no spike. Tests:
+  `the_drawn_flinch_reaches_the_spine_tops_node` (at least 5 and 12 degrees at 0.08 to 0.14 s, at
+  most 1.2 times 6 and 14, under 2 by 0.6 s), `a_clavicle_hit_twists_the_drawn_torso` (at least 6),
+  `the_drawn_flinch_shows_over_the_games_stagger`.
+- **Pose log:** `flinch_env`, `flinch_deg` (the flinch's turn at the spine's top as computed),
+  `computed_turn` (the pose as written; `drawn_turn` is what the drawing got).
+- **Jumps:** the turn check is seeded from the animation (drawn 0, computed 0) on a reaction's first
+  written frame. `no_drawn_frame_jumps_from_its_neighbours`: each frame's drawn turn moves at most
+  1 degree beyond the computed pose's move, and the computed pose no faster than 1.25 times
+  `SPIN_MOST`, the first frame included, also over the stagger.
+- **The slide:** the actor follows its feet over `FEET_FOLLOW` (0.3 s, eased), a part each frame,
+  the steps' pelvis shift taking each part back, instead of 8 to 11 units in one frame. The steps'
+  own move counts in `drawn_delta` when the root shows it (a frame later), not when it is set.
+  `drawn_delta` is now a slide: how much the drawn pelvis's or a foot's move this frame differs from
+  its move the frame before (a 14 degree flinch moves the head about 2.5 units a frame and is the
+  turn check's; a stepping leg's swing is left out). `catch_steps_follow_the_feet_without_a_slide`
+  (1.1 m/s, a step and an 11 unit follow): `drawn_delta` at most 0.5, `drawn_length` 0, the pelvis
+  at most 1.3 units a frame. The thigh's `drawn_length` 3.44 came in the follow's frame; not
+  reproduced on the mock.
+- **The anti-materiel launch:** the launch is the hit's own speed (`launch_v = min(stack, this
+  hit)`), set as the bodies' velocity (`knock::launch_velocity`: the hit's speed along the launch
+  and each bone's own motion about the pelvis), never added to the body's speed nor to
+  `KnockExplosion`'s push (5.7 m/s for a 4.30 m/s hit, then 6.9 a frame later). New log line: the
+  pelvis's velocity 0.1 s after the switch, against the hit's (at most 1.05 times).
+- **The floor and the get-up:**
+  - The get-up's floor is `knock::get_up_floor`: the collision floor whenever it is within 15 units
+    of the navmesh (cast from the lowest bone and the pelvis), never under where it stood on the
+    same floor (navmesh 8249, stood 8259: set 10 units in, lifted out sitting over 1.85 s).
+  - The lying check uses that same floor. The allowed line says the pelvis over which floor, the
+    spine-to-head tilt, lying or not ("held too long, not lying"), face up or down.
+  - Through the whole get-up (knock states 3, 5 and 6), not only its first 0.3 s, no bone the physics
+    drives goes faster than 400 units a second any way, and the controller does not slide.
+  - The game takes the bones from the ragdoll at once in state 5 to 6 (`00c9bdf0` keyframes them to
+    the get-up animation), the snap into a crouch. The drawn pose now blends from the ragdoll's last
+    pose (kept each frame of states 1 to 5) into the animation over `get_up_blend_len` (at least
+    0.3 s, longer for a far bone, so no bone is drawn faster than 400 units a second along its
+    arc), written as the reactions are and put back after the draw.
+  - The game picks its get-up animation itself (`GetIdleToPlay` in state 3); the blend's line says
+    when its first frame faces the other way from the ragdoll ("the game chose a get-up of the
+    other side").
+  - Mock test `the_get_up_blends_from_the_ragdoll_without_a_snap` (a body on its back, the
+    animation standing: starts on the ragdoll's pose, at most 400 units a second, ends on the
+    animation).
+  - Lab: `a_face_up_fold_gets_up_without_a_handstand` (let up lying, pelvis 8.8 over the floor; no
+    bone over the pelvis by more than 42 units while rising; fastest bone 127 units/s; standing at
+    2.90 s) and `a_seated_slump_gets_up_smoothly` (let up lying, 10.4; fastest 118 units/s;
+    standing at 2.95 s).
+- Not run in the game.
+
 ### 3a9805e: reactions too small to see, a flopping get-up (Patrick, 2026-11-17, 08-21-49 clip)
 
 No pop and no yield (one re-base at 12.857), the reactions drawn (`drawn_offset` matching

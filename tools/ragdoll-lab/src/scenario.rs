@@ -3126,4 +3126,63 @@ mod get_up {
             assert!(s.get_up_fastest <= 400.0, "{:.0} units/s", s.get_up_fastest);
         }
     }
+
+    /// The body on its feet again within the hold's most and a few seconds, as each drop below
+    /// asks; its stats.
+    fn get_up_after(drop: fn(&mut Sim)) -> (bool, f32, crate::sim::Stats) {
+        let mut sim = Sim::new(GroundKind::Flat);
+        sim.reset();
+        drop(&mut sim);
+        let mut t = 0.0;
+        while !sim.standing() && t < HOLD_SECONDS + 4.0 {
+            sim.step();
+            t += STEP;
+        }
+        (sim.standing(), t, sim.stats.clone())
+    }
+
+    /// Face up, folded at the hips (an anti-materiel hit's fold, Patrick's a45deed clip: he got up
+    /// through a handstand, the legs swung straight up): no bone ever over the pelvis by more than
+    /// 60 units while it rises, none faster than 400 units a second.
+    #[test]
+    fn a_face_up_fold_gets_up_without_a_handstand() {
+        let (up, t, s) = get_up_after(Sim::drop_face_up_fold);
+        eprintln!(
+            "face-up fold: standing {up} at {t:.2} s, let up lying {:?} (pelvis {:.1} over the \
+             floor), {} nudges, the most a bone was over the pelvis rising {:.1} units, fastest \
+             bone {:.0} units/s",
+            s.got_up_lying, s.got_up_pelvis, s.nudges, s.get_up_over_pelvis, s.get_up_fastest
+        );
+        assert!(up, "never got up");
+        assert!(
+            s.get_up_over_pelvis <= 60.0,
+            "{:.1} units over the pelvis",
+            s.get_up_over_pelvis
+        );
+        assert!(s.get_up_fastest <= 400.0, "{:.0} units/s", s.get_up_fastest);
+    }
+
+    /// Seated on the ground, the legs out ahead (Patrick's a45deed clip: half up in 3 frames): let
+    /// up only lying or after the hold's most, and no bone faster than 400 units a second.
+    #[test]
+    fn a_seated_slump_gets_up_smoothly() {
+        let (up, t, s) = get_up_after(Sim::drop_seated);
+        eprintln!(
+            "seated: standing {up} at {t:.2} s, let up lying {:?} (pelvis {:.1} over the floor), \
+             {} nudges, the most a bone was over the pelvis rising {:.1} units, fastest bone {:.0} \
+             units/s",
+            s.got_up_lying, s.got_up_pelvis, s.nudges, s.get_up_over_pelvis, s.get_up_fastest
+        );
+        assert!(up, "never got up");
+        assert!(
+            s.got_up_lying == Some(true) || t >= HOLD_SECONDS,
+            "let up seated"
+        );
+        assert!(
+            s.get_up_over_pelvis <= 60.0,
+            "{:.1} units over the pelvis",
+            s.get_up_over_pelvis
+        );
+        assert!(s.get_up_fastest <= 400.0, "{:.0} units/s", s.get_up_fastest);
+    }
 }

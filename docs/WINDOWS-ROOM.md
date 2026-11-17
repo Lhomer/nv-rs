@@ -130,7 +130,10 @@ Beside each clip a `.json` sidecar of the same name holds:
   game units: a pop at the hit shows here),
   `drawn_length` (the most a drawn bone's length is off its animation's, game units: 0 unless a
   bone is stretched) and `drawn_length_bone` (which), and `rebased` (leg-only animation jumps at a hit re-based instead of yielded
-  to); `null` when it is not reacting.
+  to), `flinch_env` (the drawn flinch's envelope now, 0 to 1), `flinch_deg` (its turn at the spine's
+  top as computed, degrees) and `computed_turn` (the most the pelvis, the spine's top or the head is
+  turned off its animation in the pose as written, degrees: `drawn_turn` is what the drawing got);
+  `null` when it is not reacting.
 
 The clips need the Vulkan renderer (the default; Settings.cmd's Renderer). With "Direct3D 9" the
 game is drawn by Windows' Direct3D, whose frames the recorder does not see: the clip comes out

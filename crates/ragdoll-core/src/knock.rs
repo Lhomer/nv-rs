@@ -76,10 +76,53 @@ pub const NUDGES: u32 = 3;
 /// Whether a still ragdoll lies: its pelvis `pelvis_over_floor` game units over the floor (at
 /// `scale`), the line from its spine `spine` to its head `head` within [`LYING_TILT`] of level.
 pub fn lying(pelvis_over_floor: f32, spine: [f32; 3], head: [f32; 3], scale: f32) -> bool {
+    pelvis_over_floor <= LYING_PELVIS * scale.max(0.25) && tilt(spine, head) <= LYING_TILT
+}
+
+/// How far the line from `spine` to `head` is off level (degrees, 0 to 90).
+pub fn tilt(spine: [f32; 3], head: [f32; 3]) -> f32 {
     let d = [head[0] - spine[0], head[1] - spine[1], head[2] - spine[2]];
     let flat = (d[0] * d[0] + d[1] * d[1]).sqrt();
-    let tilt = d[2].abs().atan2(flat).to_degrees();
-    pelvis_over_floor <= LYING_PELVIS * scale.max(0.25) && tilt <= LYING_TILT
+    d[2].abs().atan2(flat).to_degrees()
+}
+
+/// How close two floors must be to be the same floor (game units, [`get_up_floor`]): the navmesh
+/// lies several units under the collision floor.
+pub const SAME_FLOOR: f32 = 15.0;
+
+/// Which floor a knocked-down body gets up on, and its height (game units): the collision floor
+/// `collision` whenever there is one within [`SAME_FLOOR`] of the navmesh's `navmesh` (or no
+/// navmesh), else the navmesh, else `bones` (the lowest bone less its radius); and never under
+/// `stood`, where the actor stood, when that is within [`SAME_FLOOR`] of it (the same floor).
+/// Patrick's a45deed clip: set on the navmesh's 8249 with the floor where he stood at 8259, the
+/// body was set 10 units into the ground and lifted out over 1.85 s, sitting upright.
+pub fn get_up_floor(
+    collision: Option<f32>,
+    navmesh: Option<f32>,
+    bones: f32,
+    stood: Option<f32>,
+) -> (f32, &'static str) {
+    let (z, why) = match (collision, navmesh) {
+        (Some(c), Some(n)) if (c - n).abs() <= SAME_FLOOR => (c, "the collision floor"),
+        (Some(c), None) => (c, "the collision floor"),
+        (_, Some(n)) => (n, "the navmesh floor"),
+        (None, None) => (bones, "the lowest bone, less its radius"),
+    };
+    match stood {
+        Some(s) if s > z && s - z <= SAME_FLOOR => (s, "where it stood (the same floor, higher)"),
+        _ => (z, why),
+    }
+}
+
+/// Whether a lying body faces up: its front (from its spine `spine` to its head `head`, across
+/// from its left shoulder `left` to its right `right`: up the body crossed with left to right) has
+/// its height over 0.
+pub fn faces_up(spine: [f32; 3], head: [f32; 3], left: [f32; 3], right: [f32; 3]) -> bool {
+    let up = [head[0] - spine[0], head[1] - spine[1], head[2] - spine[2]];
+    let across = [right[0] - left[0], right[1] - left[1], right[2] - left[2]];
+    // up x across: a body standing facing +Y (its left at -X) gives +Y.
+    let front_z = up[0] * across[1] - up[1] * across[0];
+    front_z > 0.0
 }
 
 /// The way a body that does not lie leans (flat, unit: from its spine toward its head), along
@@ -322,6 +365,25 @@ pub fn launch_speed(speed: f32) -> f32 {
     }
 }
 
+/// A ragdoll bone's velocity at the launch (game units a second): its own motion about the pelvis
+/// `own` (the reacting body's, already held to the hand-over's bounds) and the whole body's at the
+/// launch's `speed` along `direction` (unit). The launch is the body's speed, never added to a
+/// speed it already had nor to `KnockExplosion`'s push (Patrick's a45deed clip: a 4.30 m/s hit
+/// flew at 5.7 m/s, 6.9 a frame later).
+pub fn launch_velocity(own: [f32; 3], direction: [f32; 3], speed: f32) -> [f32; 3] {
+    let s = if speed.is_finite() {
+        speed.max(0.0)
+    } else {
+        0.0
+    };
+    let v = [0, 1, 2].map(|i| own[i] + direction[i] * s);
+    if v.iter().all(|x| x.is_finite()) {
+        v
+    } else {
+        direction.map(|x| x * s)
+    }
+}
+
 /// The launch's direction: the hit's, lifted by [`LIFT`] (the tuning's), of unit length, rising
 /// at most [`LIFT`] over the hit's own rise (none for a hit going down) before the length is
 /// made one, and at most [`MOST_RISE`] after. Patrick's 08-21-49 clip: an anti-materiel hit at
@@ -354,6 +416,67 @@ pub fn launch_direction(direction: [f32; 3]) -> [f32; 3] {
 
 /// The launch's direction rises at most this much (its unit vector's z, [`launch_direction`]).
 pub const MOST_RISE: f32 = 0.45;
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    /// The get-up's floor: the collision floor over a navmesh within 15 units, never under where
+    /// it stood on the same floor (Patrick's a45deed clip: navmesh 8249, stood 8259); a far floor
+    /// (a fall from a ledge) is its own.
+    #[test]
+    fn the_get_up_floor_is_the_collision_floor_and_never_under_the_stand() {
+        assert_eq!(
+            get_up_floor(Some(8257.0), Some(8249.0), 8240.0, None).0,
+            8257.0
+        );
+        assert_eq!(
+            get_up_floor(None, Some(8249.0), 8240.0, Some(8259.0)).0,
+            8259.0
+        );
+        assert_eq!(
+            get_up_floor(Some(8300.0), Some(8249.0), 8240.0, None).0,
+            8249.0
+        );
+        assert_eq!(
+            get_up_floor(None, Some(8100.0), 8090.0, Some(8259.0)).0,
+            8100.0
+        );
+        assert_eq!(get_up_floor(None, None, 8240.0, None).0, 8240.0);
+    }
+
+    /// Face up or face down from the shoulders and the spine: a body on its back (head toward
+    /// +Y, its left at +X, as lying face up after falling backward) faces up.
+    #[test]
+    fn a_body_on_its_back_faces_up() {
+        let (spine, head) = ([0.0, 0.0, 5.0], [0.0, 30.0, 5.0]);
+        assert!(faces_up(spine, head, [10.0, 20.0, 5.0], [-10.0, 20.0, 5.0]));
+        assert!(!faces_up(
+            spine,
+            head,
+            [-10.0, 20.0, 5.0],
+            [10.0, 20.0, 5.0]
+        ));
+    }
+
+    /// The launch sets the body's speed: a pelvis (no own motion) moves at the hit's speed, a
+    /// bone turning about it keeps that on top, whatever the body or the explosion had before.
+    #[test]
+    fn the_launch_is_the_hits_speed_not_added() {
+        let d: [f32; 3] = [0.0, -0.9, 0.436];
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let d = d.map(|x| x / l);
+        let pelvis = launch_velocity([0.0; 3], d, 301.0);
+        let speed = (pelvis[0].powi(2) + pelvis[1].powi(2) + pelvis[2].powi(2)).sqrt();
+        assert!((speed - 301.0).abs() < 0.01, "{speed}");
+        let head = launch_velocity([0.0, 0.0, 30.0], d, 301.0);
+        assert!((head[2] - pelvis[2] - 30.0).abs() < 1e-3);
+        assert_eq!(
+            launch_velocity([f32::NAN; 3], d, 100.0),
+            d.map(|x| x * 100.0)
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
