@@ -7,6 +7,17 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (quick start: straight to the main menu)
+
+- **Now:** `quick_start` lists every start-up screen (`STARTUP`, tested): the `sIntroSequence`
+  movies skipped; `LoadingMenu::MakeLoadScreenList` (`0078a5a0`, now called through its address
+  in the engine crate, `overridable.tsv`) cut to its last screen on the first load (the four
+  logo, legal and title screens dropped, `Main` kept); the buttons released once the title music
+  has started; one line at the menu with what was skipped and the time. docs/FIXES.md.
+  Host and repo-hygiene tests pass; not run in the game.
+- **Patrick:** click Play and land on the main menu: no title cards, logos, legal screens, intro
+  movie or press-any-key; quick start on by default; the menu's background and music kept.
+
 ### Claude, 2026-11-17 (3a9805e: reactions too small to see, the get-up)
 
 - **Now:**

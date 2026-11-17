@@ -255,6 +255,8 @@ const DECAL_TARGET: u32 = 0x011a_9bd0;
 // ----- callees outside this file, by exe address -----
 
 /// Tests / sets bit `bit` of the 16-bit word at `this + 0x222`.
+/// `LoadingMenu::MakeLoadScreenList` (`0078a5a0`), called through its address.
+const MAKE_LOAD_SCREEN_LIST: u32 = 0x0078_a5a0;
 const FLAG_TEST: u32 = 0x0045_8110;
 const FLAG_SET: u32 = 0x0045_8080;
 /// Milliseconds (`timeGetTime` wrapper).
@@ -946,7 +948,8 @@ pub fn fn_00788ab0(e: &mut Engine, this: Ptr<LoadingMenu>, location: u32) {
         fn_0078aec0(e, this);
     }
     e.set(this, LoadingMenu::pLocation, Ptr::new(location));
-    loading_menu_make_load_screen_list(e, this);
+    // Through its address: a fix may override it (nv-rs quick start).
+    e.call(MAKE_LOAD_SCREEN_LIST, &args![this]);
     e.set(this, LoadingMenu::pLocation, Ptr::new(location));
     let swap = now(e);
     e.set(this, LoadingMenu::uiNextBackgroundSwap, swap);
@@ -1256,7 +1259,8 @@ pub fn loading_menu_create_impl(e: &mut Engine, this: Ptr<LoadingMenu>, location
             let property = slide_property(e, slide_two, false);
             e.set(this, LoadingMenu::pSlide2TSP, Ptr::new(property));
         }
-        loading_menu_make_load_screen_list(e, this);
+        // Through its address: a fix may override it (nv-rs quick start).
+        e.call(MAKE_LOAD_SCREEN_LIST, &args![this]);
         if e.mem.u8(INITIAL_LOAD) == 0 {
             fn_0078a280(e, this, 0);
             fn_0078a9f0(e, this);
