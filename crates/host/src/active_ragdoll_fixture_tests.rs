@@ -73,10 +73,18 @@ pub(crate) fn walked(
         rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, reference);
         f.animate();
         apply(&mut f.e);
+        read_drawn(&mut f.e);
         let drawn_pelvis = f.world("Bip01 Pelvis").unwrap().1;
         let root_now = read3(&f.e, root + WORLD_TRANSLATION);
-        if let Some((p0, r0)) = before {
-            let own = sub(sub(drawn_pelvis, p0), sub(root_now, r0));
+        // The drawn pelvis's move in the world this frame beyond the AI's walk (the actor's own
+        // move by its AI; the reaction's follow of the feet moves the root, never the drawing).
+        if let Some((p0, _)) = before {
+            let ai = if walking {
+                [speed * dt, 0.0, 0.0]
+            } else {
+                [0.0; 3]
+            };
+            let own = sub(sub(drawn_pelvis, p0), ai);
             out.pop = out.pop.max(length(own));
         }
         before = Some((drawn_pelvis, root_now));
@@ -169,6 +177,19 @@ pub(crate) fn flinched(
     point: V3,
     seconds: f32,
 ) -> Vec<Drawn> {
+    flinched_as(nodes, v, dir, point, seconds, false)
+}
+
+/// [`flinched`], `armed` (its weapon drawn, the hit below the stagger: it keeps its aim, as the
+/// game's armed targets do).
+pub(crate) fn flinched_as(
+    nodes: Vec<rig_fixture::Node>,
+    v: f32,
+    dir: V3,
+    point: V3,
+    seconds: f32,
+    armed: bool,
+) -> Vec<Drawn> {
     let mut f = Fixture::new(
         nodes,
         Ground {
@@ -176,6 +197,9 @@ pub(crate) fn flinched(
             navmesh: -8.0,
         },
     );
+    if armed {
+        f.e.register_double(IS_WEAPON_DRAWN, |_, _| 1u32.into_ret());
+    }
     clear();
     *WRITTEN.lock().unwrap_or_else(|p| p.into_inner()) = Vec::new();
     let top = ["Bip01 Spine2", "Bip01 Spine1", "Bip01 Spine"]
@@ -188,7 +212,7 @@ pub(crate) fn flinched(
     after_draw(&mut f.e);
     unwrite(&mut f.e);
     let mass = 80.0;
-    hit(&mut f.e, ACTOR, v * mass, mass, point, dir, false);
+    hit(&mut f.e, ACTOR, v * mass, mass, point, dir, armed);
     let start = Instant::now();
     let mut out = Vec::new();
     while start.elapsed().as_secs_f32() < seconds {
@@ -196,6 +220,8 @@ pub(crate) fn flinched(
         f.animate();
         let anim: Vec<M3> = checked.iter().map(|n| f.world(n).unwrap().0).collect();
         apply(&mut f.e);
+        // The world pass: what the skin draws with, read as the game's frame reads it.
+        read_drawn(&mut f.e);
         let now: Vec<M3> = checked.iter().map(|n| f.world(n).unwrap().0).collect();
         let d = mul(&now[1], &transpose(&anim[1]));
         let rv = ragdoll_core::flinch::rotation_vector(&d);
@@ -210,6 +236,17 @@ pub(crate) fn flinched(
             .iter()
             .find(|r| r.actor == ACTOR)
             .map_or((0.0, 0.0), |r| (r.shown_turn, r.flinch_deg));
+        after_draw(&mut f.e);
+        let skin_turn = RIGS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|r| r.actor == ACTOR)
+            .map_or(0.0, |r| r.drawn_turn);
+        assert!(
+            (skin_turn - drawn).abs() <= 0.05,
+            "the skin's read ({skin_turn:.2}) is not the nodes' ({drawn:.2})"
+        );
         out.push(Drawn {
             t: start.elapsed().as_secs_f32(),
             top: length(rv).to_degrees(),
@@ -218,15 +255,14 @@ pub(crate) fn flinched(
             computed,
             flinch,
         });
-        after_draw(&mut f.e);
         unwrite(&mut f.e);
     }
     clear();
     out
 }
 
-/// The drawn flinch on a tree: at least 0.8 times the flinch's own turn at the spine's top (6 and
-/// 14 degrees for 0.32 and 0.79 m/s through the chest), a clavicle hit twisting it at least 6
+/// The drawn flinch on a tree: at least 0.8 times the flinch's own turn at the spine's top (6, 14
+/// and 25 degrees for 0.32, 0.79 and 2 m/s through the chest), a clavicle hit twisting it at least 6
 /// degrees, the first frame after the hit within a degree of the animation, and no frame's drawn
 /// turn more than a degree beyond the computed pose's change.
 pub(crate) fn check_flinch(nodes: &[rig_fixture::Node]) {
@@ -251,7 +287,7 @@ pub(crate) fn check_flinch(nodes: &[rig_fixture::Node]) {
         (s, l, r)
     };
     let (spine, l_clav, _) = chest(nodes);
-    for (v, least) in [(0.32f32, 6.0f32), (0.79, 14.0)] {
+    for (v, least) in [(0.32f32, 6.0f32), (0.79, 14.0), (2.0, 25.0)] {
         let s = flinched(
             nodes.to_vec(),
             v,
@@ -271,6 +307,20 @@ pub(crate) fn check_flinch(nodes: &[rig_fixture::Node]) {
         let trace = trace.join("\n");
         let peak = s.iter().map(|x| x.top).fold(0.0, f32::max);
         let flinch = s.iter().map(|x| x.flinch).fold(0.0, f32::max);
+        let back = s
+            .iter()
+            .filter(|x| x.top >= 2.0)
+            .map(|x| x.t)
+            .fold(0.0, f32::max);
+        let beyond_most = s
+            .windows(2)
+            .map(|w| ((w[1].drawn - w[0].drawn) - (w[1].computed - w[0].computed)).abs())
+            .fold(0.0, f32::max);
+        eprintln!(
+            "RESULT flinch {v} m/s: spine top peak {peak:.1} deg (flinch {flinch:.1}, {:.0}%), first frame {:.2} deg, drawn vs computed per frame at most {beyond_most:.2} deg, under 2 deg after {back:.2} s",
+            100.0 * peak / flinch.max(1e-3),
+            s[0].drawn
+        );
         assert!(
             peak >= 0.8 * least,
             "{v} m/s: the spine's top drawn {peak:.1} degrees, want {least}:\n{trace}"
@@ -303,6 +353,7 @@ pub(crate) fn check_flinch(nodes: &[rig_fixture::Node]) {
         0.4,
     );
     let twist = s.iter().map(|x| x.yaw.abs()).fold(0.0, f32::max);
+    eprintln!("RESULT clavicle twist {twist:.1} deg");
     assert!(
         twist >= 6.0,
         "a clavicle hit twisted the spine's top {twist:.1} degrees"
@@ -316,4 +367,279 @@ fn the_flinch_is_drawn_on_an_fnv_shaped_tree() {
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     check_flinch(&rig_fixture::mannequin());
+}
+
+/// The flinch's checks on FNV's own skeleton (`rig_fixture::fnv_skeleton`).
+#[test]
+fn the_flinch_is_drawn_on_fnvs_skeleton() {
+    let _one = super::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    check_flinch(&rig_fixture::fnv_skeleton());
+}
+
+/// The walked Ganger on FNV's own skeleton.
+#[test]
+fn a_walked_actor_neither_sinks_nor_pops_on_fnvs_skeleton() {
+    let _one = super::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let w = walked(rig_fixture::fnv_skeleton(), 1.1, 0.55, 101.0, 2.2);
+    eprintln!(
+        "RESULT walked: pelvis off while walked {:.1}, foot under the floor {:.1}, drawn_length {:.2}, drawn_delta {:.2}, pelvis pop {:.2} units/frame",
+        w.pelvis_while_walked, w.foot_under, w.stretch, w.delta, w.pop
+    );
+    let trace = w.trace.join("\n");
+    assert!(
+        w.pelvis_while_walked <= 8.0,
+        "pelvis {:.1} off while walked:\n{trace}",
+        w.pelvis_while_walked
+    );
+    assert!(
+        w.foot_under <= 3.0,
+        "a foot {:.1} under the floor:\n{trace}",
+        w.foot_under
+    );
+    assert!(
+        w.stretch <= 1.0,
+        "a bone {:.2} off its length:\n{trace}",
+        w.stretch
+    );
+    assert!(
+        w.pop <= 2.0,
+        "the pelvis popped {:.2} in a frame:\n{trace}",
+        w.pop
+    );
+}
+
+/// [`flinched`] with the game's own hit animation starting under the hit: from the second frame
+/// after it, the spine's root turned `jump` degrees back at once (a new animation group's first
+/// frame), held. The spine's top read against that animation.
+pub(crate) fn flinched_over_a_jump(
+    nodes: Vec<rig_fixture::Node>,
+    v: f32,
+    jump: f32,
+    seconds: f32,
+) -> Vec<Drawn> {
+    let mut f = Fixture::new(
+        nodes,
+        Ground {
+            collision: Some(0.0),
+            navmesh: -8.0,
+        },
+    );
+    clear();
+    *WRITTEN.lock().unwrap_or_else(|p| p.into_inner()) = Vec::new();
+    let spine = f.node("Bip01 Spine").expect("a spine");
+    let spine_i = f.at.iter().position(|&a| a == spine).unwrap();
+    let rest = f.nodes[spine_i].r;
+    let top = f.node("Bip01 Spine2").expect("a spine top");
+    f.animate();
+    apply(&mut f.e);
+    after_draw(&mut f.e);
+    unwrite(&mut f.e);
+    let chest = f.world("Bip01 Spine1").unwrap().1;
+    let mass = 80.0;
+    hit(
+        &mut f.e,
+        ACTOR,
+        v * mass,
+        mass,
+        add(chest, [0.0, 8.0, 0.0]),
+        [0.0, -1.0, 0.0],
+        false,
+    );
+    let start = Instant::now();
+    let mut out = Vec::new();
+    let mut frame = 0;
+    while start.elapsed().as_secs_f32() < seconds {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        frame += 1;
+        f.animate();
+        if frame >= 2 {
+            // Back about the world's side axis, carried into the spine's parent frame.
+            let up = rig_fixture::read9(
+                &f.e,
+                f.e.mem.u32(spine + rig_fixture::PARENT) + rig_fixture::WORLD_ROTATION,
+            );
+            let turn = ragdoll_core::flinch::rotation([-jump.to_radians(), 0.0, 0.0]);
+            let local = mul(&mul(&transpose(&up), &mul(&turn, &up)), &rest);
+            rig_fixture::write9(&mut f.e, spine + rig_fixture::LOCAL_ROTATION, &local);
+            f.update();
+        }
+        let anim = rig_fixture::read9(&f.e, top + rig_fixture::WORLD_ROTATION);
+        apply(&mut f.e);
+        let now = rig_fixture::read9(&f.e, top + rig_fixture::WORLD_ROTATION);
+        let rv = ragdoll_core::flinch::rotation_vector(&mul(&now, &transpose(&anim)));
+        let (computed, flinch) = RIGS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|r| r.actor == ACTOR)
+            .map_or((0.0, 0.0), |r| (r.shown_turn, r.flinch_deg));
+        out.push(Drawn {
+            t: start.elapsed().as_secs_f32(),
+            top: length(rv).to_degrees(),
+            yaw: rv[2].to_degrees(),
+            drawn: length(rv).to_degrees(),
+            computed,
+            flinch,
+        });
+        after_draw(&mut f.e);
+        unwrite(&mut f.e);
+    }
+    clear();
+    out
+}
+
+/// The game's hit animation starting under the hit (a 30 degree jump of the spine in a frame, as
+/// a new animation group's first frame) does not take the drawn flinch away: on FNV's skeleton the
+/// spine's top is still drawn at least 0.8 times the flinch's 14 degrees (0.79 m/s) over it.
+#[test]
+fn the_flinch_survives_the_games_hit_animation_on_fnvs_skeleton() {
+    let _one = super::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let s = flinched_over_a_jump(rig_fixture::fnv_skeleton(), 0.79, 30.0, 0.7);
+    let trace: Vec<String> = s
+        .iter()
+        .map(|x| {
+            format!(
+                "{:.3}: top {:.1} computed {:.1} flinch {:.1}",
+                x.t, x.top, x.computed, x.flinch
+            )
+        })
+        .collect();
+    let trace = trace.join("\n");
+    let peak = s.iter().map(|x| x.top).fold(0.0, f32::max);
+    assert!(
+        peak >= 0.8 * 14.0,
+        "drawn {peak:.1} over the game's hit animation:\n{trace}"
+    );
+}
+
+/// An armed actor hit below the stagger (it keeps its aim: the game's Gangers and the tester's
+/// target) on FNV's skeleton: the spine's top still drawn at least 0.8 times 6 and 14 degrees.
+#[test]
+fn an_armed_actor_flinches_on_fnvs_skeleton() {
+    let _one = super::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let nodes = rig_fixture::fnv_skeleton();
+    let mut f = Fixture::new(
+        nodes.clone(),
+        Ground {
+            collision: Some(0.0),
+            navmesh: -8.0,
+        },
+    );
+    f.animate();
+    let chest = f.world("Bip01 Spine1").unwrap().1;
+    drop(f);
+    for (v, least) in [(0.32f32, 6.0f32), (0.79, 14.0)] {
+        let s = flinched_as(
+            nodes.clone(),
+            v,
+            [0.0, -1.0, 0.0],
+            add(chest, [0.0, 8.0, 0.0]),
+            0.6,
+            true,
+        );
+        let trace: Vec<String> = s
+            .iter()
+            .map(|x| {
+                format!(
+                    "{:.3}: top {:.1} computed {:.1} flinch {:.1}",
+                    x.t, x.top, x.computed, x.flinch
+                )
+            })
+            .collect();
+        let peak = s.iter().map(|x| x.top).fold(0.0, f32::max);
+        assert!(
+            peak >= 0.8 * least,
+            "{v} m/s armed: drawn {peak:.1}:\n{}",
+            trace.join("\n")
+        );
+    }
+}
+
+/// MOCKED update (not the game's): the update leaves `Bip01 Spine` and everything under it as it
+/// was (as a node the game's update skips would be). The write check sets those worlds itself:
+/// on FNV's skeleton the spine's top is still drawn at least 0.8 times 14 degrees for 0.79 m/s.
+#[test]
+fn the_write_reaches_the_spine_when_the_update_skips_it_on_fnvs_skeleton() {
+    let _one = super::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let nodes = rig_fixture::fnv_skeleton();
+    let mut f = Fixture::new(
+        nodes.clone(),
+        Ground {
+            collision: Some(0.0),
+            navmesh: -8.0,
+        },
+    );
+    f.animate();
+    let chest = f.world("Bip01 Spine1").unwrap().1;
+    let spine = f.node("Bip01 Spine").unwrap();
+    // The update with the spine's subtree left out.
+    let skipped: Vec<u32> =
+        f.at.iter()
+            .copied()
+            .filter(|&n| {
+                let mut a = n;
+                for _ in 0..16 {
+                    if a == spine {
+                        return true;
+                    }
+                    a = f.e.mem.u32(a + rig_fixture::PARENT);
+                    if a == 0 {
+                        break;
+                    }
+                }
+                false
+            })
+            .collect();
+    let order: Vec<u32> =
+        f.at.iter()
+            .copied()
+            .filter(|n| !skipped.contains(n))
+            .collect();
+    clear();
+    *WRITTEN.lock().unwrap_or_else(|p| p.into_inner()) = Vec::new();
+    f.e.register_double(0x00a5_9c60, move |e, _| {
+        rig_fixture::update_worlds(e, &order);
+        0u32.into_ret()
+    });
+    let top = f.node("Bip01 Spine2").unwrap();
+    apply(&mut f.e);
+    after_draw(&mut f.e);
+    unwrite(&mut f.e);
+    hit(
+        &mut f.e,
+        ACTOR,
+        0.79 * 80.0,
+        80.0,
+        add(chest, [0.0, 8.0, 0.0]),
+        [0.0, -1.0, 0.0],
+        false,
+    );
+    let start = Instant::now();
+    let mut peak = 0.0f32;
+    while start.elapsed().as_secs_f32() < 0.5 {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        f.animate();
+        let anim = rig_fixture::read9(&f.e, top + rig_fixture::WORLD_ROTATION);
+        apply(&mut f.e);
+        let now = rig_fixture::read9(&f.e, top + rig_fixture::WORLD_ROTATION);
+        peak = peak.max(rig_fixture::degrees_between(&now, &anim));
+        after_draw(&mut f.e);
+        unwrite(&mut f.e);
+        f.animate();
+    }
+    clear();
+    assert!(
+        peak >= 0.8 * 14.0,
+        "the spine's top drawn {peak:.1} degrees"
+    );
 }

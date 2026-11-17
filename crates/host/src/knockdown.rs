@@ -1301,10 +1301,15 @@ fn bowling(e: &mut Engine, followed: &[Followed]) {
         let Some(pelvis) = pelvis_of(e, &bones) else {
             continue;
         };
-        let pelvis_body = bones.iter().find_map(|&(node, body)| {
-            let name = e.mem.u32(node + NODE_NAME);
-            (name != 0 && e.mem.cstr(name).eq_ignore_ascii_case(b"Bip01 Pelvis")).then_some(body)
-        });
+        // Its pelvis's body, else FNV's root body on `Bip01 NonAccum` (no body on the pelvis).
+        let body_named = |e: &Engine, want: &[u8]| {
+            bones.iter().find_map(|&(node, body)| {
+                let name = e.mem.u32(node + NODE_NAME);
+                (name != 0 && e.mem.cstr(name).eq_ignore_ascii_case(want)).then_some(body)
+            })
+        };
+        let pelvis_body =
+            body_named(e, b"Bip01 Pelvis").or_else(|| body_named(e, b"Bip01 NonAccum"));
         let Some(v) = pelvis_body.and_then(|b| linear(e, b)) else {
             continue;
         };
@@ -1489,6 +1494,8 @@ const PUSH_COUNT: u32 = 0x590;
 /// The controller's linear velocity (a Havok vector, `00807080`), a node's name.
 const CONTROLLER_VELOCITY: u32 = 0x0080_7080;
 const NODE_NAME: u32 = 0x08;
+/// A node's parent (`NiAVObject::m_parent`).
+const PARENT: u32 = 0x18;
 /// The ground brace (stage 3): for this long after the knock-down, while the pelvis is more than
 /// this over the lowest bone (units) and dropping faster than this (units/s), the arm bones are
 /// steered this share a frame toward (m/s forward along the fall, m/s down).
@@ -1585,6 +1592,10 @@ struct Launch {
 /// hit's speed.
 const LAUNCH_LOG_AFTER: f32 = 0.1;
 const LAUNCH_MOST: f32 = 1.05;
+/// Tests: each launch's velocity line (what was read, its speed, the hit's; units/s).
+#[cfg(test)]
+pub(crate) static LAUNCH_SAID: Mutex<Vec<(&'static str, f32, f32)>> = Mutex::new(Vec::new());
+
 /// How long from the switch the launch is held to the hit's speed (s).
 const LAUNCH_HELD: f32 = 0.25;
 
@@ -1609,13 +1620,21 @@ fn start_from_shown(e: &mut Engine, actor: u32) -> usize {
     let scale = hk_scale(e);
     let mut moved = 0;
     for (node, body) in bodies(e, actor) {
-        let Some(&(_, rot_s, at_s)) = shown.iter().find(|s| s.0 == node) else {
-            continue;
+        // A body on a node the rig does not write (FNV's root body on `Bip01 NonAccum`) moves with
+        // the rig's node under it (the pelvis), as a rigid piece: left on the animation while the
+        // bodies round it went to the pose shown, its constraints were torn at the switch.
+        let (lead, rot_s, at_s) = match shown.iter().find(|s| s.0 == node) {
+            Some(&(n, r, p)) => (n, r, p),
+            None => match shown.iter().find(|s| e.mem.u32(s.0 + PARENT) == node) {
+                Some(&(n, r, p)) => (n, r, p),
+                None => continue,
+            },
         };
-        let now = (
-            read9(e, node + WORLD_ROTATION),
-            read3(e, node + WORLD_TRANSLATION),
+        let now_lead = (
+            read9(e, lead + WORLD_ROTATION),
+            read3(e, lead + WORLD_TRANSLATION),
         );
+        let now = now_lead;
         let held = (
             [0, 4, 8, 12].map(|o| e.mem.f32(body + BODY_ROTATION + o)),
             read3(e, body + BODY_TRANSLATION),
@@ -1860,11 +1879,18 @@ fn launches(e: &mut Engine) {
                     l.said = true;
                     // Its pelvis body, else the mean of its bodies (none hangs from the pelvis in
                     // the game: the line was never written on a7a2d15).
-                    let pelvis = bones
-                        .iter()
-                        .find(|b| is_pelvis(e, b.0))
-                        .and_then(|&(_, b)| linear(e, b))
-                        .map(|v| (v.map(|x| x * scale), "pelvis"))
+                    let named = |e: &Engine, want: &[u8]| {
+                        bones
+                            .iter()
+                            .find(|b| node_name(e, b.0).eq_ignore_ascii_case(want))
+                            .map(|b| b.1)
+                    };
+                    let pelvis = named(e, b"Bip01 Pelvis")
+                        .map(|b| (b, "pelvis"))
+                        .or_else(|| {
+                            named(e, b"Bip01 NonAccum").map(|b| (b, "root body (NonAccum)"))
+                        })
+                        .and_then(|(b, what)| linear(e, b).map(|v| (v.map(|x| x * scale), what)))
                         .or_else(|| {
                             let vs: Vec<[f32; 3]> =
                                 bones.iter().filter_map(|&(_, b)| linear(e, b)).collect();
@@ -1880,8 +1906,13 @@ fn launches(e: &mut Engine) {
                     if let Some((v, what)) = pelvis {
                         let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
                         let share = speed / l.speed.max(1e-3);
+                        #[cfg(test)]
+                        LAUNCH_SAID
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .push((what, speed, l.speed));
                         note(format!(
-                            "{}: the {what} velocity {LAUNCH_LOG_AFTER} s after the switch: \
+                            "{}: [target launch] the {what} velocity {LAUNCH_LOG_AFTER} s after the switch: \
                              {speed:.0} units/s ({:.2} m/s), {share:.2} x the hit's {:.2} m/s{}",
                             describe(e, l.actor),
                             speed / 70.0,
@@ -2180,7 +2211,7 @@ fn get_ups(e: &mut Engine) {
         g.placed = Some((Instant::now(), at));
         g.next_log = 0.0;
         note(format!(
-            "{}: get-up allowed after {:.1} s ({}; {lying_inputs}): the body's pelvis at ({:.0}, \
+            "{}: [target get-up] allowed after {:.1} s ({}; {lying_inputs}): the body's pelvis at ({:.0}, \
              {:.0}, {:.0}), ground {ground:.0} ({ground_why}); set at ({:.0}, {:.0}, {:.0}), {:.0} \
              units from it ({}); bones, controller velocity and stored push zeroed",
             describe(e, g.actor),
@@ -2243,10 +2274,10 @@ fn node_at(e: &Engine, bones: &[(u32, u32)], name: &[u8]) -> Option<[f32; 3]> {
 }
 
 /// Where the knocked-down body's pelvis is, and how it was found (Patrick's a7a2d15 clips: no
-/// ragdoll body hangs from `Bip01 Pelvis` in the game, so every get-up read "pelvis NaN" and was
-/// set on the lowest bone): its own body when it has one; else between its thighs' bodies (the
-/// hips, what the ragdoll moves); else the `Bip01 Pelvis` node found by name in its 3D, as the
-/// rig finds it. The bodies' node names are said once a run.
+/// ragdoll body hangs from `Bip01 Pelvis` in FNV's skeleton, so every get-up read "pelvis NaN" and
+/// was set on the lowest bone): its own body when it has one; else the root body on
+/// `Bip01 NonAccum` (FNV's: the pelvis sits at its origin); else between its thighs' bodies; else
+/// the `Bip01 Pelvis` node found by name in its 3D, as the rig finds it. The bodies' node names are said once a run.
 fn pelvis_pos(
     e: &mut Engine,
     actor: u32,
@@ -2269,6 +2300,11 @@ fn pelvis_pos(
     }
     if let Some(p) = pelvis_of(e, bones) {
         return Some((p, "its pelvis body"));
+    }
+    // FNV's skeleton: the root body hangs from `Bip01 NonAccum`, the pelvis's parent at its own
+    // place (0.0002 units off).
+    if let Some(p) = node_at(e, bones, b"Bip01 NonAccum") {
+        return Some((p, "its root body (Bip01 NonAccum)"));
     }
     if let (Some(l), Some(r)) = (
         node_at(e, bones, b"Bip01 L Thigh"),
@@ -2576,8 +2612,14 @@ fn watch_get_up(
                     set_velocity(e, SET_LINEAR_VELOCITY, body, nv);
                     bones_held += 1;
                 }
-            } else if v[2] > most_up {
-                set_velocity(e, SET_LINEAR_VELOCITY, body, [v[0], v[1], most_up]);
+            } else if v[2] > FLUNG_UP_MOST / scale {
+                // Landed (the watch begins once it lies): rising no faster than `FLUNG_UP_MOST`.
+                set_velocity(
+                    e,
+                    SET_LINEAR_VELOCITY,
+                    body,
+                    [v[0], v[1], FLUNG_UP_MOST / scale],
+                );
                 bones_held += 1;
             }
         }
@@ -2592,7 +2634,7 @@ fn watch_get_up(
     if due || (alarm && t >= g.next_log - WATCH_STEP.as_secs_f32() / 2.0) {
         g.next_log = t + WATCH_STEP.as_secs_f32();
         note(format!(
-            "{}: get-up +{t:.2} s (knock state {state}): at ({:.0}, {:.0}, {:.0}), moved off its spot \
+            "{}: [target no-fling] get-up +{t:.2} s (knock state {state}): at ({:.0}, {:.0}, {:.0}), moved off its spot \
              {across:.0} across and {:.0} up (depenetration); controller velocity ({:.0}, {:.0}, \
              {:.0}) units/s{}{}{}{}",
             describe(e, g.actor),

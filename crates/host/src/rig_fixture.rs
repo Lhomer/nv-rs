@@ -86,6 +86,17 @@ const PATHING: u32 = BASE + 0xc_5000;
 pub const ACTOR_ID: u32 = 0x0012_3456;
 const IS_SELF: u32 = 0x7200_0000;
 const NOTHING: u32 = 0x7200_0010;
+/// The skinned geometry: its vtable, its skin instance (`+0xbc`), the skin's data (`+0x08`) and
+/// bone list (`+0x14`), the data's bone count (`+0x44`).
+const GEOMETRY: u32 = BASE + 0xc_6000;
+const GEOMETRY_VTABLE: u32 = BASE + 0xc_6100;
+const SKIN: u32 = BASE + 0xc_6200;
+const SKIN_DATA_AT: u32 = BASE + 0xc_6300;
+const SKIN_BONE_LIST: u32 = BASE + 0xc_6400;
+const GEOMETRY_SKIN: u32 = 0xbc;
+const SKIN_DATA: u32 = 0x08;
+const SKIN_BONES: u32 = 0x14;
+const SKIN_DATA_BONES: u32 = 0x44;
 /// `IsNode` and `IsGeometry` (vtable `+0x0c`, `+0x18`).
 const IS_NODE_SLOT: u32 = 0x0c;
 const IS_GEOMETRY_SLOT: u32 = 0x18;
@@ -140,7 +151,7 @@ impl Fixture {
         }
         // The node walk: a node is its own children array; its children are the nodes whose
         // parent it is.
-        let kids: Vec<Vec<u32>> = (0..nodes.len())
+        let mut kids: Vec<Vec<u32>> = (0..nodes.len())
             .map(|i| {
                 (0..nodes.len())
                     .filter(|&c| nodes[c].parent == Some(i))
@@ -148,6 +159,26 @@ impl Fixture {
                     .collect()
             })
             .collect();
+        // The body's skinned geometry under the root, its skin listing every `Bip01` node (what
+        // the drawing skins with: `crate::active_ragdoll`'s read at the world pass).
+        let skinned: Vec<u32> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.name.starts_with("Bip01 "))
+            .map(|(i, _)| at[i])
+            .collect();
+        e.mem.set_u32(GEOMETRY, GEOMETRY_VTABLE);
+        e.mem.set_u32(GEOMETRY + GEOMETRY_SKIN, SKIN);
+        e.mem.set_u32(SKIN + SKIN_DATA, SKIN_DATA_AT);
+        e.mem.set_u32(SKIN + SKIN_BONES, SKIN_BONE_LIST);
+        e.mem
+            .set_u32(SKIN_DATA_AT + SKIN_DATA_BONES, skinned.len() as u32);
+        for (k, b) in skinned.iter().enumerate() {
+            e.mem.set_u32(SKIN_BONE_LIST + 4 * k as u32, *b);
+        }
+        e.mem.set_u32(GEOMETRY_VTABLE + IS_NODE_SLOT, NOTHING);
+        e.mem.set_u32(GEOMETRY_VTABLE + IS_GEOMETRY_SLOT, IS_SELF);
+        kids[0].push(GEOMETRY);
         let index = at.clone();
         let kids2 = kids.clone();
         let find = move |node: u32| index.iter().position(|&a| a == node);
@@ -473,4 +504,81 @@ pub fn mannequin() -> Vec<Node> {
         });
     }
     out
+}
+
+/// FNV's own skeleton (`meshes\characters\_male\skeleton.nif`, the male and female humans'), from
+/// its derived data (`tests-data/fnv_skeleton.txt`: node names, parents, local transforms, which
+/// node each ragdoll body hangs from): every `NiNode` as the file lays them out, the rows as stored
+/// read as the transpose of the matrix the game applies (the left thigh at -X, as the left thigh's
+/// body is). No body on `Bip01 Pelvis`; the root body on `Bip01 NonAccum`, the spine its sibling.
+pub fn fnv_skeleton() -> Vec<Node> {
+    let text = include_str!("../tests-data/fnv_skeleton.txt");
+    let mut nodes: Vec<Node> = Vec::new();
+    for line in text.lines() {
+        if line.starts_with("# RIGID BODIES") {
+            break;
+        }
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split('|').collect();
+        if f.len() < 10 || f[4] != "NiNode" && f[4] != "BSFadeNode" {
+            continue;
+        }
+        let nums = |s: &str| -> Vec<f32> {
+            s.split([',', ' ', ';'])
+                .filter(|x| !x.is_empty())
+                .map(|x| x.parse::<f32>().expect("a number"))
+                .collect()
+        };
+        let t = nums(f[5]);
+        let rows = nums(f[6]);
+        let r: M3 = std::array::from_fn(|k| rows[(k % 3) * 3 + k / 3]);
+        let parent = (!f[3].is_empty()).then(|| {
+            nodes
+                .iter()
+                .position(|n| n.name == f[3])
+                .unwrap_or_else(|| panic!("{}'s parent {} not before it", f[2], f[3]))
+        });
+        nodes.push(Node {
+            name: f[2].to_string(),
+            parent,
+            r: ragdoll_core::pose::ortho(&r),
+            t: [t[0], t[1], t[2]],
+            s: f[8].parse().expect("a scale"),
+            body: !f[9].trim().is_empty(),
+        });
+    }
+    nodes
+}
+
+/// The fixture's tree is FNV's: the left thigh's joint at -X over the actor's left, the ragdoll's
+/// bodies where the file has them (its Havok positions times 7 near their nodes), no body on the
+/// pelvis.
+#[test]
+fn the_fnv_skeleton_is_laid_out_as_the_game_has_it() {
+    let nodes = fnv_skeleton();
+    assert_eq!(nodes.len(), 66, "the 65 NiNodes and the scene root");
+    assert_eq!(nodes.iter().filter(|n| n.body).count(), 18);
+    let f = Fixture::new(
+        nodes,
+        Ground {
+            collision: Some(0.0),
+            navmesh: -8.0,
+        },
+    );
+    let at = |n: &str| f.world(n).unwrap().1;
+    let l = at("Bip01 L Thigh");
+    assert!(
+        (l[0] + 6.98).abs() < 0.05 && (l[2] - 67.77).abs() < 0.1,
+        "{l:?}"
+    );
+    assert!((at("Bip01 R Thigh")[0] - 6.98).abs() < 0.05);
+    let spine = at("Bip01 Spine");
+    assert!(
+        (spine[2] - 73.96).abs() < 0.1 && spine[1] > 1.0,
+        "{spine:?}"
+    );
+    assert!(at("Bip01 Head")[2] > 100.0 && at("Bip01 L Foot")[2] < 12.0);
+    assert!(!f.nodes.iter().any(|n| n.name == "Bip01 Pelvis" && n.body));
 }

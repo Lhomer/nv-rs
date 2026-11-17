@@ -526,16 +526,19 @@ impl TorsoFlinch {
     /// `dt` on; false once it is over.
     pub fn advance(&mut self, dt: f32) -> bool {
         self.t += dt.max(0.0);
-        self.t < self.rise + TORSO_BACK
+        self.t < FLINCH_START + self.rise + TORSO_BACK
     }
 
     /// How much of it is drawn now (0 to 1): eased in over its rise, eased back after.
     pub fn envelope(&self) -> f32 {
-        if self.t < self.rise {
-            let s = (self.t / self.rise.max(1e-3)).clamp(0.0, 1.0);
+        // From one frame after the hit: the first frame drawn after it is the animation's
+        // (Patrick's a7a2d15 review: at most a degree on the first frame).
+        let t = (self.t - FLINCH_START).max(0.0);
+        if t < self.rise {
+            let s = (t / self.rise.max(1e-3)).clamp(0.0, 1.0);
             s * s * (3.0 - 2.0 * s)
         } else {
-            1.0 - ease((self.t - self.rise) / TORSO_BACK)
+            1.0 - ease((t - self.rise) / TORSO_BACK)
         }
     }
 
@@ -551,6 +554,10 @@ impl TorsoFlinch {
         scale(w, e)
     }
 }
+
+/// How long after its hit a flinch starts rising (s): a frame's time, so the first frame drawn after
+/// the hit is still the animation's.
+pub const FLINCH_START: f32 = 0.02;
 
 /// Where a bone is in the drawn flinch ([`draw_flinch`]): how far up the torso, whether it is the
 /// torso's own (its body turn kept at [`BODY_TORSO_SHARE`]; not an arm, carried), and whether it is

@@ -264,6 +264,15 @@ pub struct Rig {
     /// [`hold_write_to_shown`]: the pose log's `write_held`), and whether it was said.
     pub write_held: f32,
     pub write_warned: bool,
+    /// Over the reaction, for its summary line (`[target reaction]`): the drawn flinch's most
+    /// (degrees), the first frame's drawn turn after the hit, the most `drawn_delta` and
+    /// `drawn_length`, the most the pelvis was drawn off while its AI moved it, frames drawn.
+    pub flinch_peak: f32,
+    pub first_turn: Option<f32>,
+    pub delta_most: f32,
+    pub length_most: f32,
+    pub walked_most: f32,
+    pub drawn_frames: u32,
     pub turn_warned: bool,
     /// How much each shown foot is lifted (`active::lift_amount`, game units).
     pub lift_low: [f32; 2],
@@ -722,6 +731,12 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         getup: None,
         write_held: 0.0,
         write_warned: false,
+        flinch_peak: 0.0,
+        first_turn: None,
+        delta_most: 0.0,
+        length_most: 0.0,
+        walked_most: 0.0,
+        drawn_frames: 0,
         turn_warned: false,
         lift_low: [0.0; 2],
     });
@@ -851,6 +866,12 @@ pub fn hit(
     rig.length_warned = false;
     rig.write_warned = false;
     rig.write_held = 0.0;
+    rig.flinch_peak = 0.0;
+    rig.first_turn = None;
+    rig.delta_most = 0.0;
+    rig.length_most = 0.0;
+    rig.walked_most = 0.0;
+    rig.drawn_frames = 0;
     // The flinch drawn on the torso (`active::TorsoFlinch`): a bend along the push, a twist for an
     // off-centre hit, a nod for the head (Patrick's 08-21-49 clip: the body's own turn drew a
     // .44 at 4 degrees).
@@ -1149,7 +1170,7 @@ pub fn after_draw(e: &mut Engine) {
             if beyond > 1.0 && !rig.turn_warned {
                 rig.turn_warned = true;
                 note(format!(
-                    "{:08X}: drawn turn {d0:.1} -> {turn:.1} degrees while the pose computed went \
+                    "{:08X}: [target pop] drawn turn {d0:.1} -> {turn:.1} degrees while the pose computed went \
                      {s0:.1} -> {:.1} ({beyond:.1} beyond it in a frame; {:.2} s after the hit)",
                     rig.id,
                     rig.shown_turn,
@@ -1158,6 +1179,8 @@ pub fn after_draw(e: &mut Engine) {
             }
         }
         rig.turn_before = Some((turn, rig.shown_turn));
+        rig.drawn_frames += 1;
+        rig.first_turn.get_or_insert(turn);
         rig.drawn_offset = most;
         rig.drawn_turn = turn;
         rig.drawn_skin = (matched, same, skin);
@@ -1209,7 +1232,8 @@ pub fn get_up_blend_len(most: f32) -> f32 {
     let most = if most.is_finite() { most.max(0.0) } else { 0.0 };
     // A bone turned with the body goes round an arc, at most a quarter turn's (pi / 2 times the
     // chord); the eased blend's fastest is 1.5 times its mean.
-    GET_UP_BLEND_LEAST.max(1.5 * std::f32::consts::FRAC_PI_2 * most / GET_UP_BONE_MOST)
+    // A tenth under the bound: the frames' own timing varies.
+    GET_UP_BLEND_LEAST.max(1.5 * std::f32::consts::FRAC_PI_2 * most / (0.9 * GET_UP_BONE_MOST))
 }
 
 /// The last ragdoll pose of each knocked-down actor: its 3D root, its rig bones' nodes (the rig's
@@ -1380,7 +1404,7 @@ fn write_get_up_blend(
         };
         let (body, starts) = (faces_up_at(rig, &from_at), faces_up_at(rig, &anim_at));
         note(format!(
-            "{}: get-up blend: from the ragdoll's pose ({}) into the get-up animation's first \
+            "{}: [target get-up blend] from the ragdoll's pose ({}) into the get-up animation's first \
              frame ({}{}) over {:.2} s, its farthest bone {most:.0} units off, the pelvis {:.0}",
             describe(e, rig.actor),
             face(body),
@@ -1992,6 +2016,7 @@ pub fn apply(e: &mut Engine) {
                 .iter()
                 .fold([0.0; 3], |acc, f| add(acc, f.turn(1.0, false)));
             rig.flinch_deg = length(at_top).to_degrees() * w.clamp(0.0, 1.0);
+            rig.flinch_peak = rig.flinch_peak.max(rig.flinch_deg);
             let sim = add(scale(pose[pi].1, UNITS_PER_METRE), origin);
             let mut off = scale(sub(sim, pelvis_target), w);
             // Handed back, it only settles (`active::Settle`): never shown gaining on the
@@ -2230,6 +2255,7 @@ pub fn apply(e: &mut Engine) {
             if l > AI_PELVIS_MOST && l.is_finite() {
                 pelvis_offset = scale(pelvis_offset, AI_PELVIS_MOST / l);
             }
+            rig.walked_most = rig.walked_most.max(length(pelvis_offset));
         }
         // No shown foot under its animated one, nor under its collision floor plus its ankle
         // (`active::lift_feet`): the legs turned up from the hips. Not while the steps place
@@ -2554,6 +2580,8 @@ pub fn apply(e: &mut Engine) {
                 },
             );
         rig.drawn_length = length_off;
+        rig.delta_most = rig.delta_most.max(rig.drawn_delta);
+        rig.length_most = rig.length_most.max(length_off);
         rig.drawn_length_bone = length_bone.map(|b| rig.bones[b].role);
         if length_off > 0.5 && !rig.length_warned {
             rig.length_warned = true;
@@ -2633,6 +2661,28 @@ pub fn apply(e: &mut Engine) {
                 describe(e, rig.actor),
                 rig.drawn_most.0,
                 rig.drawn_most.1
+            ));
+            // The reaction's summary against the targets, one line (Patrick's clips: find it by
+            // `[target reaction]`).
+            note(format!(
+                "{}: [target reaction] drawn turn peak {:.1} degrees vs the flinch's {:.1} ({:.0}% of it, \
+                 want >= 80%); first frame {:.1} degrees (want <= 1); drawn_delta most {:.2} units \
+                 (want <= 2); drawn_length most {:.2} (want <= 1); pelvis off while its AI moved it \
+                 {:.1} (want <= 8); write held {:.1} degrees; {} frames drawn",
+                describe(e, rig.actor),
+                rig.drawn_most.1,
+                rig.flinch_peak,
+                if rig.flinch_peak > 0.1 {
+                    100.0 * rig.drawn_most.1 / rig.flinch_peak
+                } else {
+                    100.0
+                },
+                rig.first_turn.unwrap_or(0.0),
+                rig.delta_most,
+                rig.length_most,
+                rig.walked_most,
+                rig.write_held,
+                rig.drawn_frames
             ));
             continue;
         }
@@ -2722,19 +2772,77 @@ fn hold_write_to_shown(
             break;
         }
     }
-    let (after, _) = off_by(e, rig);
+    let (mut after, still) = off_by(e, rig);
+    // The update did not take the locals at all (its nodes left as they were): each bone still off
+    // has its world set, and its subtree's worlds worked out from it, here (what the drawing skins
+    // with), parents first.
+    let mut set_directly = 0;
+    if after > WRITE_TOLERANCE && after.is_finite() {
+        for (b, want) in shown.iter().enumerate().take(n) {
+            let node = rig.bones[b].node;
+            let d = mul(&read9(e, node + WORLD_ROTATION), &transpose(want));
+            if length(ragdoll_core::flinch::rotation_vector(&d)).to_degrees() <= WRITE_TOLERANCE {
+                continue;
+            }
+            let parent = read_world(e, e.mem.u32(node + PARENT));
+            let local = read_local(e, node);
+            let mut world = parent.then(&local);
+            world.r = *want;
+            if let Some(at) = wanted_at.get(b).copied().flatten() {
+                world.t = at;
+            }
+            set_subtree(e, node, world, 0);
+            set_directly += 1;
+        }
+        after = off_by(e, rig).0;
+    }
     rig.write_held = rig.write_held.max(before);
     if !rig.write_warned {
         rig.write_warned = true;
         note(format!(
-            "{}: the write came out of the update {before:.1} degrees off at {} ({corrected} \
-             locals solved from their parent nodes; {after:.1} left)",
+            "{}: [target drawn] the write came out of the update {before:.1} degrees off at {} ({corrected} \
+             locals solved from their parent nodes{}; {after:.1} left at {})",
             describe(e, rig.actor),
             BONES
                 .iter()
                 .find(|(_, r)| *r == rig.bones[worst].role)
+                .map_or("a bone", |x| x.0),
+            if set_directly > 0 {
+                format!(
+                    "; the update did not take them: {set_directly} worlds set directly with \
+                     their subtrees"
+                )
+            } else {
+                String::new()
+            },
+            BONES
+                .iter()
+                .find(|(_, r)| *r == rig.bones[still].role)
                 .map_or("a bone", |x| x.0)
         ));
+    }
+}
+
+/// `node`'s world set to `world`, and every node under it worked out from it with its own local
+/// (the update's own rule), at most [`MOST_DEPTH`] deep.
+fn set_subtree(e: &mut Engine, node: u32, world: pose::Xf, depth: u32) {
+    write9(e, node + WORLD_ROTATION, &world.r);
+    write3(e, node + WORLD_TRANSLATION, world.t);
+    e.mem.set_f32(node + WORLD_SCALE, world.s);
+    if depth >= MOST_DEPTH {
+        return;
+    }
+    let children = e.vcall(node, IS_NODE_SLOT, &[]).u32();
+    if children == 0 {
+        return;
+    }
+    let count = e.call(CHILD_COUNT, &args![children]).u32().min(64);
+    for i in 0..count {
+        let child = e.call(CHILD_AT, &args![children, i]).u32();
+        if child != 0 {
+            let w = world.then(&read_local(e, child));
+            set_subtree(e, child, w, depth + 1);
+        }
     }
 }
 

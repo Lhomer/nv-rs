@@ -486,6 +486,58 @@ for the shot, the hit's round and the breakdown; a knocked-down actor's fall dam
 attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
 patches (#624) and the knockdown's companion refusal were not on the path.
 
+### a7a2d15: fly-up on the get-up, a walked actor's sink and pop, the launch (Patrick, 2026-11-17, 1330 and 1332 clips)
+
+Tested on FNV's own skeleton: `crates/host/tests-data/fnv_skeleton.txt`, derived data of
+`meshes\characters\_male\skeleton.nif` (node names, parents, local transforms, which node each of the
+18 ragdoll bodies hangs from; no meshes, no game bytes). `rig_fixture.rs` lays it out in the engine's
+memory exactly as the file has it and answers the game's calls; the tests run the real write
+(`write9`/`write3` of the locals), `update`, the skin's read at the world pass (`read_drawn`),
+`after_draw`, the knockdown's lying check, pelvis lookup, floor, get-up blend and its hold.
+
+What FNV's skeleton has, and what assumed otherwise:
+- No body on `Bip01 Pelvis`: the root body is on `Bip01 NonAccum` (the pelvis's parent, at its own
+  place); `Bip01 Spine` is the pelvis's sibling under NonAccum. `pelvis_of` looked for a pelvis body:
+  every get-up read "pelvis NaN" and was set on the lowest bone. Now `pelvis_pos`: the pelvis body,
+  else the NonAccum body, else between the thighs, else the node by name.
+- `fit_spot` took the navmesh point's height for the get-up's spot (several units under the
+  collision floor): the actor was set 7 to 13 units into the ground, and the physics pushed the
+  bodies out (the handstand). It keeps the floor's height now.
+- The switch to the ragdoll moved each body onto the pose shown by its rig node; the NonAccum body
+  has none and was left on the animation, its constraints torn. It moves with the pelvis now.
+- The launch's own speed was added to each bone's (no pelvis body to take its motion from): a
+  4.35 m/s hit held 470 units/s. The bodies are set to the launch, then held to the hit's speed
+  for 0.25 s against the game's own push; the 0.1 s line reads the NonAccum body.
+- The planted feet were not carried once the body was handed back (an AI walking it away left a foot
+  31 units behind, the body dropped); the steps' lag counted the AI's walk (the pelvis 30 units
+  back). Both fixed; the pelvis is held to 8 units while the AI moves it; a drop and the return to
+  the animation fade instead of popping.
+- The get-up's blend: its from-pose kept only in knock states 1 and 2 (it was the animation's
+  already: "farthest bone 0"); the drawn body lifted so no joint goes under the floor; at most 400
+  units a second along a bone's arc. Every body rises at most 50 units a second once landed,
+  through states 1, 3, 5 and 6, the controller too.
+- The flinch: on FNV's skeleton the write delivers it in full (6.3, 13.6, 25.2 degrees at 0.32,
+  0.79, 2 m/s; 14 of twist on a clavicle hit; also armed and keeping its aim, and over a 30 degree
+  jump of the game's hit animation). The tree and the write are not what lost it in the game. A
+  write check holds each node's world after the update to the pose computed (re-solving a local
+  from the actual parent node, else setting the subtree's worlds directly: tested with a mocked
+  update that skips the spine) and says it (`[target drawn]`). The flinch starts a frame after the
+  hit: the first frame drawn is at most a degree.
+
+The pose log's proof lines (grep `[target`):
+- `[target get-up]`: the pelvis (its source and z), the floor (which), lying or not, face up or
+  down, where it was set.
+- `[target get-up blend]`: the blend's farthest bone and the pelvis's distance, its length.
+- `[target no-fling]`: each 0.1 s of the get-up, bones held to 400 units/s and rising to 50.
+- `[target launch]`: the root body's velocity 0.1 s after the switch against the hit's.
+- `[target drawn]`: a node the update left off the pose written.
+- `[target pop]`: a frame's drawn turn more than a degree beyond the computed change.
+- `[target reaction]`: each reaction's summary: drawn turn peak against the flinch (want 80% or
+  more), the first frame (want a degree or less), `drawn_delta` and `drawn_length` most, the pelvis
+  while its AI moved it (want 8 or less).
+
+Not run in the game.
+
 ### a45deed: still no reactions, first-frame spikes, a slide, a fast launch, a handstand get-up (Patrick, 2026-11-17, 12-02-59 and 12-04-38 clips)
 
 - **The flinch never reached the screen.** A host test on a mock engine

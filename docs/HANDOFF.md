@@ -7,6 +7,19 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (a7a2d15: FNV's skeleton fixture; get-up, walk, launch)
+
+- **Now:** `crates/host/tests-data/fnv_skeleton.txt` (FNV's skeleton.nif, derived data) and
+  `rig_fixture.rs` drive the real write, update, skin read-back and get-up path. Fixed: the pelvis
+  (no body on it in FNV: the NonAccum root body), the get-up spot's height (the navmesh's), the
+  NonAccum body at the switch, the launch added to the bones' own speed, the planted feet left behind
+  and the steps' lag counting the AI's walk, the blend's from-pose and floor, the fling holds. The
+  flinch reaches 97-101% on FNV's tree; a write check guards the update in the game. Pose-log proof
+  lines: `[target ...]` (docs/GUNPLAY.md "a7a2d15"). Not run in the game.
+- **Next (waiting for Patrick's approval):** the "New Physics" balance controller design.
+- **Patrick:** the 1330/1332 clips: fly-up on every get-up, the walked Ganger's sink and pop, no
+  flinch drawn, first-frame spikes, the launch at 470 units/s.
+
 ### Claude, 2026-11-17 (a45deed: the flinch drawn over the game's animation, slides, launch, get-up)
 
 - **Now:** the physical body is made still against its animation (`make_body(.., &anim, &anim, ..)`;

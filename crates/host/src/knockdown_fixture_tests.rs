@@ -192,6 +192,10 @@ fn the_get_up_finds_its_pelvis_sets_it_on_the_floor_and_blends() {
         run.blend_from
     );
     let v = fastest(&run.frames);
+    eprintln!(
+        "RESULT get-up: pelvis found {}, set at z {:.2}, blend from {:.1} units, fastest drawn bone {v:.0} u/s, fastest body rising {:.0} u/s, lowest drawn joint z {:.1}",
+        run.pelvis_found, set[2], run.blend_from, run.fastest_rise, run.lowest_drawn
+    );
     assert!(v <= 400.0, "a bone drawn at {v:.0} units/s in the get-up");
     assert!(
         run.fastest_rise <= 50.0 + 0.5,
@@ -202,5 +206,128 @@ fn the_get_up_finds_its_pelvis_sets_it_on_the_floor_and_blends() {
         run.lowest_drawn >= -3.0,
         "drawn {:.1} under the floor",
         run.lowest_drawn
+    );
+}
+
+/// The get-up on FNV's own skeleton (no body on the pelvis; the root body on `Bip01 NonAccum`).
+#[test]
+fn the_get_up_on_fnvs_skeleton() {
+    let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let run = get_up(rig_fixture::fnv_skeleton(), 9.0, -8.0, 0.0);
+    let set = run.set_at.expect("never let up");
+    assert!(run.pelvis_found, "no pelvis found");
+    assert!(
+        set[2].abs() < 0.5,
+        "set at z {:.1}, not on the collision floor at 0",
+        set[2]
+    );
+    assert!(
+        run.blend_from > 20.0,
+        "the blend starts {:.1} off the animation",
+        run.blend_from
+    );
+    let v = fastest(&run.frames);
+    eprintln!(
+        "RESULT get-up: pelvis found {}, set at z {:.2}, blend from {:.1} units, fastest drawn bone {v:.0} u/s, fastest body rising {:.0} u/s, lowest drawn joint z {:.1}",
+        run.pelvis_found, set[2], run.blend_from, run.fastest_rise, run.lowest_drawn
+    );
+    assert!(v <= 400.0, "a bone drawn at {v:.0} units/s in the get-up");
+    assert!(
+        run.fastest_rise <= 50.0 + 0.5,
+        "a body rising {:.0} units/s",
+        run.fastest_rise
+    );
+    assert!(
+        run.lowest_drawn >= -3.0,
+        "drawn {:.1} under the floor",
+        run.lowest_drawn
+    );
+}
+
+/// The launch on FNV's skeleton: a reacting body (a hit's active ragdoll) switched to the ragdoll
+/// at 4.35 m/s along the hit (`give_launch`), then the game's own knock-down push adding 170 units
+/// a second along it (`KnockExplosion`, a7a2d15 held 470 for a 304 units/s hit). The launch check
+/// (`launches`, each frame) holds the bodies' speed along it within 10% of the hit's through its
+/// window and says the root body's velocity 0.1 s after the switch, also within 10%.
+#[test]
+fn the_launch_is_the_hits_speed_on_fnvs_skeleton() {
+    let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let mut f = Fixture::new(
+        rig_fixture::fnv_skeleton(),
+        Ground {
+            collision: Some(0.0),
+            navmesh: -8.0,
+        },
+    );
+    crate::active_ragdoll::clear();
+    clear();
+    LAUNCH_SAID.lock().unwrap().clear();
+    f.animate();
+    crate::active_ragdoll::apply(&mut f.e);
+    let chest = f.world("Bip01 Spine1").unwrap().1;
+    let dir = [0.0f32, -1.0, 0.0];
+    let hit_v = 4.35f32;
+    crate::active_ragdoll::hit(&mut f.e, ACTOR, 0.6 * 80.0, 80.0, chest, dir, false);
+    for _ in 0..4 {
+        std::thread::sleep(Duration::from_millis(16));
+        f.animate();
+        crate::active_ragdoll::apply(&mut f.e);
+        crate::active_ragdoll::after_draw(&mut f.e);
+        crate::active_ragdoll::unwrite(&mut f.e);
+    }
+    f.set_knock_state(2);
+    let launch = ragdoll_core::knock::launch_direction(dir);
+    let speed = ragdoll_core::knock::launch_speed(hit_v);
+    give_launch(&mut f.e, ACTOR, launch, speed);
+    // The game's own push on top, after ours.
+    let extra = 170.0 / rig_fixture::HK;
+    let bodies_now = bodies(&mut f.e, ACTOR);
+    for &(_, b) in &bodies_now {
+        let v = linear(&mut f.e, b).unwrap();
+        set_velocity(
+            &mut f.e,
+            SET_LINEAR_VELOCITY,
+            b,
+            [0, 1, 2].map(|i| v[i] + launch[i] * extra),
+        );
+    }
+    LAUNCHES.lock().unwrap().push(Launch {
+        actor: ACTOR,
+        id: ACTOR_ID,
+        direction: launch,
+        speed,
+        frames: 0,
+        tries: 0,
+        at: Instant::now(),
+        said: false,
+        held_said: false,
+    });
+    let mut most = 0.0f32;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(350) {
+        launches(&mut f.e);
+        let along: Vec<f32> = f
+            .body_velocities()
+            .iter()
+            .map(|(_, v)| v[0] * launch[0] + v[1] * launch[1] + v[2] * launch[2])
+            .collect();
+        let mean = along.iter().sum::<f32>() / along.len() as f32;
+        if start.elapsed() > Duration::from_millis(20) {
+            most = most.max(mean);
+        }
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    crate::active_ragdoll::clear();
+    clear();
+    let said = LAUNCH_SAID.lock().unwrap().clone();
+    eprintln!("launch: hit {speed:.0} units/s, the most along it after the hold {most:.0}; the 0.1 s line {said:?}");
+    assert!(
+        most <= 1.1 * speed,
+        "{most:.0} units/s along the launch for a {speed:.0} hit"
+    );
+    let (what, v, _) = *said.first().expect("the 0.1 s velocity line said");
+    assert!(
+        (v / speed - 1.0).abs() <= 0.1,
+        "the {what} at {v:.0} units/s for a {speed:.0} hit"
     );
 }
