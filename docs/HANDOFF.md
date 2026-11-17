@@ -7,6 +7,25 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (3a9805e: reactions too small to see, the get-up)
+
+- **Now:**
+  - Core: `active::TorsoFlinch`, `torso_turn`, `side_twist`, `draw_flinch`, `flinch_places`,
+    `torso_keep`, `Limit::seed`, `offset_most` with room for the flinch; `brace::behind`;
+    `knock::launch_direction` held (`MOST_RISE`), `knock::lying`, `lean`, the nudges.
+  - Host: the flinch per hit, the brace's torso share, a new body's bounds seeded, the drawn-turn
+    jump said, `drawn_delta` without the steps' move, `drawn_length_bone`; no brace behind the
+    hips; the get-up's lying, nudges, and its first 0.3 s.
+  - Lab: `scenario::visible`, `scenario::get_up` (`Sim::drop_kneeling`), repeated hits in
+    `continuity`.
+  - Docs: docs/GUNPLAY.md "3a9805e: reactions too small to see".
+  - Core, lab, host and repo-hygiene tests pass; the Windows check is clean. Not run in the game.
+- **Patrick:** 3a9805e's 08-21-49 clip: no pop, but every reaction tiny (a .44 4.2 degrees);
+  drawn-turn blips on the first frame after hits; `drawn_delta` spikes at foot landings and a
+  3.35-unit `drawn_length`; a brace said behind the hips; an anti-materiel launch rising 0.73;
+  a kneeling slump let up and yanked flat.
+- **Open:** an armed weapon hand swings fast under repeated hits (lab); the `drawn_length` bone.
+
 ### Claude, 2026-11-17 (6b0cec2: the hit's pop, the railing brace, a creature far off)
 
 - **Now:**

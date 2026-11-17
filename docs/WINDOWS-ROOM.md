@@ -126,9 +126,10 @@ Beside each clip a `.json` sidecar of the same name holds:
   is left), `heights` (the root's, `Bip01 NonAccum`'s and the pelvis's world height over the
   actor's reference, as drawn, game units) and `feet_over_floor` (each foot's height over the
   collision floor under it, `null` where the cast found none), `drawn_delta` (the most a drawn
-  bone moved this frame beyond its animation's own move, game units: a pop at the hit shows here),
+  bone moved this frame beyond its animation's own move, the steps' move of the actor left out,
+  game units: a pop at the hit shows here),
   `drawn_length` (the most a drawn bone's length is off its animation's, game units: 0 unless a
-  bone is stretched) and `rebased` (leg-only animation jumps at a hit re-based instead of yielded
+  bone is stretched) and `drawn_length_bone` (which), and `rebased` (leg-only animation jumps at a hit re-based instead of yielded
   to); `null` when it is not reacting.
 
 The clips need the Vulkan renderer (the default; Settings.cmd's Renderer). With "Direct3D 9" the

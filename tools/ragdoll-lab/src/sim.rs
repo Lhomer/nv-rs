@@ -129,6 +129,10 @@ pub struct Fall {
 /// the brace and the fall.
 #[derive(Clone, Debug)]
 pub struct Rig {
+    /// The hits' flinches drawn on the torso (`active::TorsoFlinch`).
+    pub flinches: Vec<active::TorsoFlinch>,
+    /// How much of the body's own torso turn is drawn (`active::torso_keep`).
+    pub torso_keep: f32,
     pub springs: [Spring; COUNT],
     pub drop: f32,
     pub drop_speed: f32,
@@ -180,6 +184,8 @@ pub struct Rig {
 impl Rig {
     fn new(limbs: Limbs) -> Rig {
         Rig {
+            flinches: Vec::new(),
+            torso_keep: active::BODY_TORSO_SHARE,
             springs: [Spring::REST; COUNT],
             drop: 0.0,
             drop_speed: 0.0,
@@ -335,6 +341,16 @@ pub struct Stats {
     pub torso_turn: f32,
     /// The most that turn changed in a frame (degrees: the host's `drawn_turn` jumping).
     pub turn_jump: f32,
+    /// The get-up (Patrick's 08-21-49 clip): whether the body lay when it was let up (none: never
+    /// let up), its pelvis over the floor then (units), the nudges it took to topple, and the
+    /// fastest bone through the get-up (units a second).
+    pub got_up_lying: Option<bool>,
+    pub got_up_pelvis: f32,
+    pub nudges: u32,
+    pub get_up_fastest: f32,
+    /// Each frame from the first hit: the time since it (s), the spine's top turned off its
+    /// animation (degrees), its twist about the vertical (degrees, signed), the head's turn.
+    pub spine_trace: Vec<(f32, f32, f32, f32)>,
     /// Leg-only animation jumps at a hit re-based (`active::rebases`).
     pub rebased: u32,
     /// Continuity (Patrick's 21-16-09 clip): the most a drawn bone moved (units) and turned
@@ -556,6 +572,9 @@ pub struct Sim {
     pub own_moved: V3,
     offsets_before: Option<[active::Q; COUNT]>,
     torso_before: Option<f32>,
+    /// A still ragdoll's nudges to finish toppling (`knock::NUDGES`), and the last one's time.
+    nudges: u32,
+    nudge_at: f64,
     clean_before: Option<[Xf; COUNT]>,
     /// How much each shown foot is lifted (`active::lift_amount`).
     lift_low: [f32; 2],
@@ -647,6 +666,8 @@ impl Sim {
             own_moved: [0.0; 3],
             offsets_before: None,
             torso_before: None,
+            nudges: 0,
+            nudge_at: 0.0,
             clean_before: None,
             lift_low: [0.0; 2],
             own_carry: [0.0; 3],
@@ -1279,6 +1300,22 @@ impl Sim {
                 &takes,
             );
         }
+        // The flinch drawn on the torso (the host's too).
+        if self.rig.body.is_some() {
+            let role = mq::role_side(struck).0;
+            let head = matches!(role, Role::Head | Role::Neck);
+            let chest = self.posed[mq::SPINE2].1;
+            let facing = self.anim_facing();
+            self.rig.flinches.push(active::TorsoFlinch::new(
+                v,
+                direction,
+                point,
+                chest,
+                facing,
+                head,
+                role.is_arm().then_some(mq::role_side(struck).1),
+            ));
+        }
         self.stats.flinches += 1;
         self.note(format!(
             "flinch at {}: {p:.1} N s on {mass:.0} kg -> {v:.2} m/s (Hit Reactions {strength:.0}%), \
@@ -1506,7 +1543,20 @@ impl Sim {
         let limit = self.tune.brace_holds * self.tune.balance.max(1.0) / 100.0;
         let arms = self.rig.limbs.arm(0) || self.rig.limbs.arm(1);
         let (wall, top, kind) = self.brace_obstacle(dir);
-        if arms {
+        // An obstacle behind the torso: no brace is begun (nor said), unless the push is too much
+        // and the body goes over it (the host's too).
+        let anim = self.anim();
+        let behind = Surface::new(anim[mq::PELVIS].1, dir, wall, top)
+            .is_some_and(|s| hands::behind(anim[mq::PELVIS].1, self.anim_facing(), s.face));
+        if behind && v <= limit {
+            return;
+        }
+        if arms && !behind {
+            // The brace is the reaction now: the drawn flinch (begun with this hit) goes (the
+            // host's too; drawn on, it swung a rifle's grip from under the regripping hand).
+            self.rig.flinches.clear();
+            // Its torso drawn as the body has it at once (the body has barely moved yet).
+            self.rig.torso_keep = 1.0;
             self.rig.brace = Some(self.new_brace(dir, v, wall, top));
             self.stats.braced = true;
             self.stats.brace_kind = Some(if top.is_some() { "waist" } else { "wall" }.to_string());
@@ -2400,6 +2450,19 @@ impl Sim {
             // body, blended (`Body::shown`).
             let wanted: Vec<active::Q> = target.iter().map(active::qfrom_m).collect();
             let mut shown = body.shown(&wanted, shown_w);
+            // The drawn flinch on the torso (`active::draw_flinch`, the host's too).
+            self.rig.flinches.retain_mut(|f| f.advance(dt));
+            let roles: Vec<Role> = (0..COUNT).map(|b| mq::role_side(b).0).collect();
+            self.rig.torso_keep =
+                active::torso_keep(self.rig.torso_keep, self.rig.brace.is_some(), dt);
+            active::draw_flinch(
+                &mut shown,
+                &wanted,
+                &active::flinch_places(&roles),
+                &self.rig.flinches,
+                shown_w,
+                self.rig.torso_keep,
+            );
             let sim = add(scale(pose[mq::PELVIS].1, UNITS_PER_METRE), self.rig.origin);
             let mut off = scale(sub(sim, pelvis_target), shown_w);
             // Handed back: it only settles (`active::Settle`), its ceilings coming down with
@@ -2646,6 +2709,7 @@ impl Sim {
         self.measure(&before, dt);
         if self.rig.body.is_some() && shown_w <= 0.0 && !busy {
             self.rig.body = None;
+            self.rig.flinches.clear();
             self.rig.active = false;
             self.rig.shift = [0.0; 3];
             self.note("back in its animation".into());
@@ -2878,9 +2942,16 @@ impl Sim {
         if self.rig.body.is_some() {
             return;
         }
-        self.rig.limit.open();
+        // Its bounds from what was drawn the frame before (the host's too).
+        let drawn = self.offsets_before.map_or_else(Vec::new, |o| o.to_vec());
+        self.rig.limit.seed(&drawn, COUNT);
         self.rig.settle.open();
         self.rig.carry_from = None;
+        self.rig.torso_keep = if self.rig.brace.is_some() {
+            1.0
+        } else {
+            active::BODY_TORSO_SHARE
+        };
         self.own_carry = [0.0; 3];
         let m = 1.0 / UNITS_PER_METRE;
         let mass = self.mass();
@@ -3080,6 +3151,18 @@ impl Sim {
             self.stats.release_rise = self.stats.release_rise.max(off - base);
         }
         let mut torso_now = 0.0f32;
+        // The spine's top against its animation (the host's `drawn_turn` reads it), its twist
+        // about the vertical, and the head's, each frame from the first hit.
+        if let Some(h0) = self.stats.first_hit {
+            let off = |b: usize| mul(&self.posed[b].0, &transpose(&anim[b].0));
+            let s2 = off(mq::SPINE2);
+            let turn = length(rotation_vector(&s2)).to_degrees();
+            let yaw = active::heading_off(&s2, self.anim_facing()).to_degrees();
+            let head = length(rotation_vector(&off(mq::HEAD))).to_degrees();
+            self.stats
+                .spine_trace
+                .push(((self.t - h0) as f32, turn, yaw, head));
+        }
         for b in 0..COUNT {
             if mq::role_side(b).0.is_arm() {
                 let turn = mul(&transpose(&before[b].0), &self.posed[b].0);
@@ -3173,6 +3256,25 @@ impl Sim {
     }
 
     // --- The ragdoll (the host's `knockdown::knock_down`, the launch, the get-up). ---------------
+
+    /// The body dropped into its ragdoll kneeling (a test's: Patrick's 08-21-49 clip, a launch
+    /// that landed it on its feet and folded it onto its knees): the shins back along the floor,
+    /// the thighs and the torso upright, the pelvis lowered by the shins' length; no launch.
+    pub fn drop_kneeling(&mut self) {
+        let anim = self.anim();
+        let mut rots: [M3; COUNT] = std::array::from_fn(|b| anim[b].0);
+        let back = rotation(scale(
+            unit(cross(self.anim_facing(), [0.0, 0.0, 1.0])).unwrap_or([1.0, 0.0, 0.0]),
+            std::f32::consts::FRAC_PI_2,
+        ));
+        for b in [mq::L_CALF, mq::R_CALF, mq::L_FOOT, mq::R_FOOT] {
+            rots[b] = mul(&back, &rots[b]);
+        }
+        let shin = length(sub(anim[mq::L_FOOT].1, anim[mq::L_CALF].1));
+        let pelvis = sub(anim[mq::PELVIS].1, [0.0, 0.0, shin]);
+        self.posed = self.place(&rots, pelvis);
+        self.knock_down(self.anim_facing(), 0.0, "dropped kneeling");
+    }
 
     fn knock_down(&mut self, direction: V3, body_speed: f32, why: &str) {
         if let Err(why) = self.can_knock_now() {
@@ -3271,6 +3373,8 @@ impl Sim {
         self.own_moved = [0.0; 3];
         self.acceleration = None;
         self.last_knock = Some(self.t);
+        self.nudges = 0;
+        self.nudge_at = self.t;
         self.stats.fell = true;
         self.stats.fall.get_or_insert_with(|| why.to_string());
         self.state = State::Ragdoll {
@@ -3367,9 +3471,43 @@ impl Sim {
         } else {
             *still = 0;
         }
-        let lying = high - low <= LYING_HEIGHT * self.scale;
+        let _ = (low, high, LYING_HEIGHT);
+        // Lying: the pelvis near the floor and the torso near level (`knock::lying`, the host's
+        // too); a still body that does not lie is nudged along its lean to finish toppling.
+        let (pelvis, spine, head) = (
+            self.posed[mq::PELVIS].1,
+            self.posed[mq::SPINE1].1,
+            self.posed[mq::HEAD].1,
+        );
+        let floor = world::ground_point(&self.world, [pelvis[0], pelvis[1], pelvis[2] + 40.0])
+            .map_or(0.0, |g| g[2]);
+        let lying = ragdoll_core::knock::lying(pelvis[2] - floor, spine, head, self.scale);
         let held = (self.t - since) as f32 >= HOLD_SECONDS;
+        if *still >= STILL_FRAMES
+            && !lying
+            && !held
+            && self.nudges < ragdoll_core::knock::NUDGES
+            && (self.t - self.nudge_at) as f32 >= ragdoll_core::knock::NUDGE_EVERY
+        {
+            let facing = apply_m(&rotation([0.0, 0.0, self.heading]), FORWARD);
+            let way = ragdoll_core::knock::lean(spine, head, facing);
+            let v = vec(scale(way, ragdoll_core::knock::NUDGE_SPEED));
+            for b in [mq::SPINE1, mq::SPINE2, mq::NECK, mq::HEAD] {
+                if let Some(Some(h)) = bodies.get(b) {
+                    if let Some(rb) = self.world.bodies.get_mut(*h) {
+                        let now = rb.linvel();
+                        rb.set_linvel(now + v, true);
+                    }
+                }
+            }
+            self.nudges += 1;
+            self.nudge_at = self.t;
+            *still = 0;
+            self.stats.nudges += 1;
+        }
         if (*still >= STILL_FRAMES && lying) || held {
+            self.stats.got_up_lying = Some(lying);
+            self.stats.got_up_pelvis = pelvis[2] - floor;
             let handles: Vec<RigidBodyHandle> = bodies.iter().flatten().copied().collect();
             let pelvis = self.posed[mq::PELVIS].1;
             let at = world::ground_point(&self.world, [pelvis[0], pelvis[1], pelvis[2] + 40.0])
@@ -3483,6 +3621,7 @@ impl Sim {
         let k = (*t / GET_UP).clamp(0.0, 1.0);
         let k = active::ease(k);
         let anim = self.anim();
+        let was = self.posed;
         // Each bone's turn against its parent blended (not its world rotation: two bones blended
         // apart could take the joint between them the long way round, through a backward bend).
         let local = |pose: &[Xf; COUNT], b: usize| match mq::PARENT[b] {
@@ -3500,6 +3639,14 @@ impl Sim {
             };
             let p = add(from[b].1, scale(sub(anim[b].1, from[b].1), k));
             self.posed[b] = (world[b], p);
+        }
+        // The get-up's fastest bone (units a second; Patrick's 08-21-49 clip: yanked flat in
+        // four frames).
+        if dt > 0.0 {
+            for b in 0..COUNT {
+                let v = length(sub(self.posed[b].1, was[b].1)) / dt;
+                self.stats.get_up_fastest = self.stats.get_up_fastest.max(v);
+            }
         }
         if k >= 1.0 {
             self.state = State::Standing;

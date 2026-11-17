@@ -486,6 +486,72 @@ for the shot, the hit's round and the breakdown; a knocked-down actor's fall dam
 attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
 patches (#624) and the knockdown's companion refusal were not on the path.
 
+### 3a9805e: reactions too small to see, a flopping get-up (Patrick, 2026-11-17, 08-21-49 clip)
+
+No pop and no yield (one re-base at 12.857), the reactions drawn (`drawn_offset` matching
+`pelvis_offset`, `drawn_skin` [3,3,56]) but tiny: a .44 at 0.79 to 0.85 m/s drew the torso 4.2
+degrees and the pelvis 4 to 5 units (mostly the catch step, away from the camera), a 9mm at 0.32
+to 0.39 m/s 2.1 degrees and 0.7 units, with `offset_most` allowing 21 and 8.6. The lab's body
+turns the torso 5 to 6 degrees for the same 9mm: the game's kick chain gives less, and why is not
+measured here.
+
+- **A drawn flinch** (`active::TorsoFlinch`, `draw_flinch`): each hit draws a turn of the torso
+  on top of the physical body, the same in the game and the lab:
+  - a bend along the push of 6 degrees at 0.3 m/s, 14 at 0.8, 25 at 2 (`torso_turn`), up the
+    spine from 0.15 at the pelvis to all of it at its top, the neck and the head;
+  - a twist about the vertical by the hit's lever (an arm's hit at its shoulder): the struck
+    shoulder back 8 degrees at 0.3 m/s to 14 at 0.8 (`side_twist`; the body adds about one);
+  - a head hit's nod, 0.8 of the bend on the head;
+  - eased in over 0.1 to 0.12 s (as its size needs under the spin bound), back over 0.45 s; with
+    the hand-back's weight; the arms ride on the chest turned their own way (turned with it an
+    armed aim drifted 7 degrees and a regripping hand wobbled).
+  - The body's own torso turn is drawn at 0.25 under it (`BODY_TORSO_SHARE`, eased by
+    `torso_keep`), all of it while a brace holds; a brace clears the flinch it began with.
+  - `offset_most` leaves room for it (the turn 1.25 times the bend and twist together, the yaw 1.25
+    times the twist); `SPIN_MOST` is kept and holds every frame.
+- **The first frame after a hit**: a new body's bounds started empty (`Limit::open`), so its
+  first frame was never held; they now start from the offsets drawn the frame before
+  (`Limit::seed`). The lab cannot make the game's stale base: the host now says once a reaction
+  when the drawn turn changes more than a degree beyond the computed pose's in a frame.
+- **`drawn_delta`** leaves out the steps' own move of the actor (it reported the reference
+  following the feet as a pop); **`drawn_length_bone`** names the bone in the pose log, and the
+  log says it once a reaction past 0.5 units. The cause of the clip's 3.35 at a foot landing is
+  not found here (only the pelvis and a spine root have their translation written): the next
+  clip's bone will say.
+- **A brace behind the hips** is not begun or said (`brace::behind`), unless the push takes the
+  body over it.
+- **The launch** rises at most `LIFT` over the hit's own rise (none for a hit going down) and at
+  most 0.45 after (`knock::launch_direction`): the anti-materiel hit at (-0.16, -0.93, 0.33)
+  launched along (-0.11, -0.67, 0.73). (No ini key sets the lift: its 0.68 came on top of a
+  rising direction.)
+- **The get-up**: a still body lies only with its pelvis within 12 units of the collision floor and
+  its spine-to-head line within 35 degrees of level (`knock::lying`; the 70-unit span let a
+  kneeling slump up, pelvis 23 units over the floor). Still but not lying, it is nudged along its
+  lean at 0.8 m/s (every 0.6 s, at most three times), else it waits up to the hold's most.
+  Through the get-up's first 0.3 s (`GET_UP_BLEND`) no free bone goes faster than 400 units a
+  second any way, and the controller does not slide along the ground. Nothing is written into
+  the bones while knocked down.
+
+Lab:
+
+| Run | spine top at its peak (wanted) | 90% reached | back by |
+|---|---|---|---|
+| 9mm at the chest, 0.32 m/s, front and side, unarmed, pistol, rifle | 6.2 to 6.4 degrees (6.4) | 0.083 s | 0.42 to 0.43 s |
+| .44 at the chest, 0.79 m/s, front and either side | 12.7 to 13.4 (13.8) | 0.083 s | 0.45 to 0.48 s |
+| 9mm / .44 at a clavicle or upper arm | twist 8.3 to 8.5 / 14.3 to 14.6 degrees | | |
+| 9mm / .44 at the head | head 12.2 / 24.0, torso 7.4 / 14.7 | | |
+
+The fastest the spine's top turned in any of them: 3.5 rad/s. A body dropped kneeling (pelvis
+lowered by the shins) toppled by itself and was let up lying, its pelvis 8.9 units over the floor
+(10.6 at scale 1.2), the get-up's fastest bone 128 units a second.
+
+- Tests: lab `scenario::visible` (the peaks, the rise, the way back and the spin, front and side
+  at 0.32 and 0.79 m/s; the twist and the nod), `scenario::get_up` (a kneeling slump), the thin
+  rail's behind runs begin no brace, `continuity` with hits 1.1 s apart; core `the_drawn_flinch`,
+  `a_new_body_starts_from_what_was_drawn`, `the_launch_rises_little`, `only_a_body_on_the_ground_lies`.
+- Not yet: an armed body's weapon hand swings up to 6.7 units a frame under four 9mm hits 1.1 s
+  apart in the lab (3a9805e too); left out of the continuity runs. Not run in the game.
+
 ### 6b0cec2: a pop at the hit, an erratic railing brace, a creature drawn far off (Patrick, 2026-11-16, 21-16-09 clip)
 
 Patrick's tester clip, the game log only (the pose log stayed on his laptop): a Powder Ganger hit

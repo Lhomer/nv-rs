@@ -119,6 +119,16 @@ pub fn hand_may_brace(pelvis: V3, forward: V3, target: V3, face: Option<V3>) -> 
     !face.is_some_and(|f| ahead(f) < 0.0 && -ahead(f) <= BEHIND_HIPS)
 }
 
+/// Whether a brace's obstacle (its face at `face`) is behind the torso of a body whose pelvis is
+/// at `pelvis`, facing `forward`: no hand can brace on it, and the brace is not begun at all (it
+/// was announced with no hands and let go 11 ms later: Patrick's 08-21-49 clip).
+pub fn behind(pelvis: V3, forward: V3, face: V3) -> bool {
+    let Some(fwd) = unit([forward[0], forward[1], 0.0]) else {
+        return false;
+    };
+    dot([face[0] - pelvis[0], face[1] - pelvis[1], 0.0], fwd) < 0.0
+}
+
 /// A new brace's hand on `side` (`wanted`: the brace has it brace) from the brace before
 /// (`old`): a hand still planted keeps its plant (a second push while it holds is held by it;
 /// a new hand reached again from the plant, behind the back once), else a new reach.
@@ -941,6 +951,8 @@ mod tests {
             Some([0.0, -12.0, 70.0])
         ));
         assert!(hand_may_brace(pelvis, fwd, [5.0, 2.0, 70.0], None));
+        assert!(behind(pelvis, fwd, [0.0, -24.0, 70.0]));
+        assert!(!behind(pelvis, fwd, [0.0, 25.0, 70.0]));
         let mut planted = Hand::new(0);
         planted.phase = Phase::Planted {
             start: [0.0; 3],

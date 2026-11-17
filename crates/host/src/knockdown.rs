@@ -168,6 +168,9 @@ pub const MAX_RISE: f32 = 60.0;
 /// A getting-up ragdoll's bone is held only rising faster than this (game units a second): a
 /// fling, never the get-up animation's own rise.
 pub const BONE_FLING_RISE: f32 = 400.0;
+/// The get-up's start (s): no bone faster than [`BONE_FLING_RISE`] any way, the controller kept
+/// from sliding along the ground ([`watch_get_up`]).
+pub const GET_UP_BLEND: f32 = 0.3;
 pub const FOLLOW_FOR: Duration = Duration::from_secs(12);
 
 // --- The game's words. -------------------------------------------------------------------------
@@ -808,8 +811,8 @@ fn impact(e: &mut Engine, hit: u32, target: u32, aggressor: u32) -> ([f32; 3], [
 }
 
 /// Whether a knocked-down body may get up: still for long enough and lying, or held too long.
-pub fn may_get_up(still_frames: u32, height: f32, held: Duration) -> bool {
-    (still_frames >= STILL_FRAMES && height <= LYING_HEIGHT) || held >= HOLD_MAX
+pub fn may_get_up(still_frames: u32, lying: bool, held: Duration) -> bool {
+    (still_frames >= STILL_FRAMES && lying) || held >= HOLD_MAX
 }
 
 /// A velocity held to `most` (its length), and whether it was.
@@ -1047,6 +1050,8 @@ pub fn knock_down(
             next_log: 0.0,
             fall_dir: launch,
             braced: false,
+            nudges: 0,
+            nudge_at: Instant::now(),
         });
     }
     note(format!(
@@ -1817,6 +1822,9 @@ struct GetUp {
     /// The fall's direction (the launch's), and whether its arms braced on the ground.
     fall_dir: [f32; 3],
     braced: bool,
+    /// The nudges it took to finish toppling (`knock::NUDGES`), and when the last was.
+    nudges: u32,
+    nudge_at: Instant,
 }
 
 static GET_UPS: Mutex<Vec<GetUp>> = Mutex::new(Vec::new());
@@ -1921,8 +1929,67 @@ fn get_ups(e: &mut Engine) {
         } else {
             0
         };
+        // Lying: the pelvis near the collision floor and the spine-to-head line near level
+        // (`knock::lying`; the span alone let a kneeling slump up: Patrick's 08-21-49 clip).
+        let pelvis_at = pelvis_of(e, &bones);
+        let spine_at = node_at(e, &bones, b"Bip01 Spine1");
+        let head_at = node_at(e, &bones, b"Bip01 Head");
+        let floor = pelvis_at.and_then(|p| crate::active_ragdoll::floor_under(e, p));
+        let lies = match (pelvis_at, spine_at, head_at, floor) {
+            (Some(p), Some(sp), Some(h), Some(f)) => {
+                let size = e.call(GET_SCALE, &args![g.actor]).f64() as f32;
+                ragdoll_core::knock::lying(p[2] - f, sp, h, sane_scale(size))
+            }
+            // Without the bones or the floor to tell: the span, as before.
+            _ => height <= LYING_HEIGHT,
+        };
         let held = lying_since.elapsed();
-        if !may_get_up(g.still_frames, height, held) {
+        // Still but not lying (a kneeling slump): nudged along its lean to finish toppling.
+        if g.still_frames >= STILL_FRAMES
+            && !lies
+            && held < HOLD_MAX
+            && g.nudges < ragdoll_core::knock::NUDGES
+            && g.nudge_at.elapsed().as_secs_f32() >= ragdoll_core::knock::NUDGE_EVERY
+        {
+            if let (Some(sp), Some(h)) = (spine_at, head_at) {
+                let way = ragdoll_core::knock::lean(sp, h, g.fall_dir);
+                let k = ragdoll_core::knock::NUDGE_SPEED * 70.0 / hk_scale(e);
+                let mut moved = 0;
+                for &(node, body) in &bones {
+                    let name = e.mem.u32(node + NODE_NAME);
+                    let upper = name != 0 && {
+                        let n = e.mem.cstr(name);
+                        UPPER_BODY
+                            .iter()
+                            .any(|u| n.eq_ignore_ascii_case(u.as_bytes()))
+                    };
+                    if upper {
+                        if let Some(v) = linear(e, body) {
+                            set_velocity(
+                                e,
+                                SET_LINEAR_VELOCITY,
+                                body,
+                                [v[0] + way[0] * k, v[1] + way[1] * k, v[2]],
+                            );
+                            moved += 1;
+                        }
+                    }
+                }
+                g.nudges += 1;
+                g.nudge_at = Instant::now();
+                g.still_frames = 0;
+                note(format!(
+                    "{}: still but not lying (pelvis {:.0} over the floor): nudged along its \
+                     lean ({:.2}, {:.2}) to finish toppling, {moved} bones (nudge {})",
+                    describe(e, g.actor),
+                    pelvis_at.zip(floor).map_or(0.0, |(p, f)| p[2] - f),
+                    way[0],
+                    way[1],
+                    g.nudges
+                ));
+            }
+        }
+        if !may_get_up(g.still_frames, lies, held) {
             if !g.held_said {
                 g.held_said = true;
                 note(format!(
@@ -1987,6 +2054,24 @@ fn get_ups(e: &mut Engine) {
         keep.push(g);
     }
     *GET_UPS.lock().unwrap_or_else(|p| p.into_inner()) = keep;
+}
+
+/// The upper body's bones a nudge moves (`knock::lean`).
+const UPPER_BODY: [&str; 5] = [
+    "Bip01 Spine1",
+    "Bip01 Spine2",
+    "Bip01 Neck1",
+    "Bip01 Head",
+    "Bip01 Spine",
+];
+
+/// The world position of the ragdoll's bone node named `name`, when it has one.
+fn node_at(e: &Engine, bones: &[(u32, u32)], name: &[u8]) -> Option<[f32; 3]> {
+    bones.iter().find_map(|&(node, _)| {
+        let n = e.mem.u32(node + NODE_NAME);
+        (n != 0 && e.mem.cstr(n).eq_ignore_ascii_case(name))
+            .then(|| read3(e, node + WORLD_TRANSLATION))
+    })
 }
 
 /// The world position of the ragdoll's pelvis (the node named `Bip01 Pelvis`, `m_kName` at
@@ -2183,8 +2268,17 @@ fn watch_get_up(
         let at = e.call(CONTROLLER_VELOCITY, &args![controller]).u32();
         if at != 0 {
             velocity = read3(e, at).map(|x| x * scale);
-            if velocity[2] > MAX_RISE {
-                let held = [velocity[0], velocity[1], MAX_RISE];
+            // Through the get-up's start no slide along the ground (a depenetration slid him 10
+            // units at +0.21 s: Patrick's 08-21-49 clip), and never rising past MAX_RISE.
+            let blending = t < GET_UP_BLEND;
+            let across = (velocity[0] * velocity[0] + velocity[1] * velocity[1]).sqrt();
+            if velocity[2] > MAX_RISE || (blending && across > 1.0) {
+                let (x, y) = if blending {
+                    (0.0, 0.0)
+                } else {
+                    (velocity[0], velocity[1])
+                };
+                let held = [x, y, velocity[2].min(MAX_RISE)];
                 set_controller_velocity(e, controller, held);
                 clamped = Some(velocity[2]);
             }
@@ -2202,7 +2296,16 @@ fn watch_get_up(
             continue;
         }
         if let Some(v) = linear(e, body) {
-            if v[2] > most_up {
+            // Through the get-up's start (`GET_UP_BLEND`) no bone faster than the fling's bound
+            // any way (the game's get-up from lying yanked him flat in four frames: Patrick's
+            // 08-21-49 clip); after it, only rising.
+            if t < GET_UP_BLEND {
+                let (nv, held) = clamp_speed(v, most_up);
+                if held {
+                    set_velocity(e, SET_LINEAR_VELOCITY, body, nv);
+                    bones_held += 1;
+                }
+            } else if v[2] > most_up {
                 set_velocity(e, SET_LINEAR_VELOCITY, body, [v[0], v[1], most_up]);
                 bones_held += 1;
             }
@@ -2619,13 +2722,13 @@ mod tests {
     #[test]
     fn the_get_up_waits_for_a_still_lying_body() {
         let soon = Duration::from_millis(500);
-        assert!(!may_get_up(0, 20.0, soon), "moving");
+        assert!(!may_get_up(0, true, soon), "moving");
         assert!(
-            !may_get_up(STILL_FRAMES, 150.0, soon),
-            "upright against a wall"
+            !may_get_up(STILL_FRAMES, false, soon),
+            "kneeling, or upright against a wall"
         );
-        assert!(may_get_up(STILL_FRAMES, 30.0, soon));
-        assert!(may_get_up(0, 150.0, HOLD_MAX), "held too long");
+        assert!(may_get_up(STILL_FRAMES, true, soon));
+        assert!(may_get_up(0, false, HOLD_MAX), "held too long");
     }
 
     /// A bone's speed is held to its bound along its own direction; a NaN stops it.

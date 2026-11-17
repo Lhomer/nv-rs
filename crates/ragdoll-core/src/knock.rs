@@ -60,6 +60,43 @@ pub const POWER_ATTACK: f32 = 1.5;
 pub const STILL_SPEED: f32 = 30.0;
 pub const STILL_FRAMES: u32 = 20;
 pub const LYING_HEIGHT: f32 = 70.0;
+/// A still ragdoll lies ([`lying`]) only with its pelvis within [`LYING_PELVIS`] of the floor
+/// (game units, at scale 1) and its spine-to-head line within [`LYING_TILT`] of the horizontal
+/// (degrees). [`LYING_HEIGHT`]'s span alone let a kneeling slump get up: the game's get-up from
+/// lying yanked it flat in 4 frames (Patrick's 08-21-49 clip, the pelvis 23 units over the floor).
+pub const LYING_PELVIS: f32 = 12.0;
+pub const LYING_TILT: f32 = 35.0;
+/// A still body that does not lie is nudged along its lean to finish toppling ([`lean`]): its
+/// upper body this fast (m/s), every [`NUDGE_EVERY`] seconds, at most [`NUDGES`] times; then it
+/// waits up to the hold's most.
+pub const NUDGE_SPEED: f32 = 0.8;
+pub const NUDGE_EVERY: f32 = 0.6;
+pub const NUDGES: u32 = 3;
+
+/// Whether a still ragdoll lies: its pelvis `pelvis_over_floor` game units over the floor (at
+/// `scale`), the line from its spine `spine` to its head `head` within [`LYING_TILT`] of level.
+pub fn lying(pelvis_over_floor: f32, spine: [f32; 3], head: [f32; 3], scale: f32) -> bool {
+    let d = [head[0] - spine[0], head[1] - spine[1], head[2] - spine[2]];
+    let flat = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    let tilt = d[2].abs().atan2(flat).to_degrees();
+    pelvis_over_floor <= LYING_PELVIS * scale.max(0.25) && tilt <= LYING_TILT
+}
+
+/// The way a body that does not lie leans (flat, unit: from its spine toward its head), along
+/// which it is nudged to finish toppling; straight up, the way it faces `facing`.
+pub fn lean(spine: [f32; 3], head: [f32; 3], facing: [f32; 3]) -> [f32; 3] {
+    let d = [head[0] - spine[0], head[1] - spine[1]];
+    let l = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    if l > 2.0 {
+        return [d[0] / l, d[1] / l, 0.0];
+    }
+    let l = (facing[0] * facing[0] + facing[1] * facing[1]).sqrt();
+    if l > 1e-3 {
+        [facing[0] / l, facing[1] / l, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    }
+}
 pub const HOLD_SECONDS: f32 = 8.0;
 
 /// Strength's share of a swing: 0.68 at 1, 1.0 at 5, 1.4 at 10.
@@ -285,23 +322,79 @@ pub fn launch_speed(speed: f32) -> f32 {
     }
 }
 
-/// The launch's direction: the hit's, lifted by [`LIFT`], of unit length.
+/// The launch's direction: the hit's, lifted by [`LIFT`] (the tuning's), of unit length, rising
+/// at most [`LIFT`] over the hit's own rise (none for a hit going down) before the length is
+/// made one, and at most [`MOST_RISE`] after. Patrick's 08-21-49 clip: an anti-materiel hit at
+/// (-0.16, -0.93, 0.33) launched along (-0.11, -0.67, 0.73), an effective lift of about 0.68 on a
+/// hit already rising: he flew up a metre and landed on his feet.
 pub fn launch_direction(direction: [f32; 3]) -> [f32; 3] {
-    let d = [
-        direction[0],
-        direction[1],
-        direction[2] + tuning::get().lift,
-    ];
+    let z = direction[2] + tuning::get().lift;
+    let z = if z.is_finite() {
+        z.min(direction[2].max(0.0) + LIFT)
+    } else {
+        z
+    };
+    let d = [direction[0], direction[1], z];
     let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
     if l.is_nan() || l < 1e-3 {
-        [0.0, 0.0, 1.0]
-    } else {
-        d.map(|x| x / l)
+        return [0.0, 0.0, 1.0];
     }
+    let d = d.map(|x| x / l);
+    if d[2] <= MOST_RISE {
+        return d;
+    }
+    // Held to the most rise, the rest along the ground (straight up: none left along it).
+    let flat = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    if flat < 1e-6 {
+        return [0.0, 0.0, 1.0];
+    }
+    let k = (1.0 - MOST_RISE * MOST_RISE).sqrt() / flat;
+    [d[0] * k, d[1] * k, MOST_RISE]
 }
+
+/// The launch's direction rises at most this much (its unit vector's z, [`launch_direction`]).
+pub const MOST_RISE: f32 = 0.45;
 
 #[cfg(test)]
 mod tests {
+    /// Lying: the pelvis low and the torso near level; a kneeling slump (the pelvis 23 units up,
+    /// the torso upright) or one sitting (the torso level, the pelvis high) does not lie.
+    #[test]
+    fn only_a_body_on_the_ground_lies() {
+        assert!(lying(8.0, [0.0, 0.0, 10.0], [0.0, 40.0, 14.0], 1.0));
+        assert!(
+            !lying(23.0, [0.0, 0.0, 40.0], [0.0, 5.0, 75.0], 1.0),
+            "kneeling"
+        );
+        assert!(
+            !lying(8.0, [0.0, 0.0, 10.0], [0.0, 20.0, 45.0], 1.0),
+            "propped up"
+        );
+        assert!(
+            !lying(20.0, [0.0, 0.0, 22.0], [0.0, 40.0, 24.0], 1.0),
+            "on something"
+        );
+        let l = lean([0.0, 0.0, 40.0], [3.0, 4.0, 75.0], [0.0, 1.0, 0.0]);
+        assert!((l[0] - 0.6).abs() < 1e-5 && (l[1] - 0.8).abs() < 1e-5);
+    }
+
+    /// The launch rises at most LIFT over a rising hit, and at most 0.45 whatever the tuning;
+    /// a level hit is lifted by LIFT.
+    #[test]
+    fn the_launch_rises_little() {
+        let d = launch_direction([-0.16, -0.93, 0.33]);
+        assert!(d[2] <= MOST_RISE + 1e-5, "{d:?}");
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        assert!((l - 1.0).abs() < 1e-4);
+        let level = launch_direction([0.0, -1.0, 0.0]);
+        assert!(
+            (level[2] - LIFT / (1.0 + LIFT * LIFT).sqrt()).abs() < 1e-4,
+            "{level:?}"
+        );
+        let down = launch_direction([0.0, -0.9, -0.43]);
+        assert!(down[2] <= LIFT, "{down:?}");
+    }
+
     use super::*;
 
     /// Bodies by mass and stance: a human topples at about 1.4 m/s; a deathclaw, a giant and a

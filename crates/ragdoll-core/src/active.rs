@@ -392,7 +392,11 @@ pub fn offset_most(v: f32) -> (f32, f32, f32) {
     let turn = (TURN_AT_SLOW + (v - SLOW) * (TURN_AT_FAST - TURN_AT_SLOW) / (FAST - SLOW))
         .clamp(TURN_LEAST, 75.0)
         .to_radians();
-    (turn, (0.06 + 0.1 * v).min(0.3).min(turn), 2.0 + 8.0 * v)
+    // Room for the drawn flinch (`TorsoFlinch`: its bend and an off-centre hit's twist).
+    let (bend, twist) = (torso_turn(v), side_twist(v));
+    let turn = turn.max(1.25 * (bend * bend + twist * twist).sqrt());
+    let yaw = (0.06 + 0.1 * v).min(0.3).max(1.25 * twist).min(turn);
+    (turn, yaw, 2.0 + 8.0 * v)
 }
 
 /// [`offset_most`]'s turn: [`TURN_AT_SLOW`] degrees at [`SLOW`] m/s, [`TURN_AT_FAST`] at [`FAST`],
@@ -403,7 +407,240 @@ pub const TURN_AT_SLOW: f32 = 8.0;
 pub const TURN_AT_FAST: f32 = 20.0;
 pub const TURN_LEAST: f32 = 4.0;
 
-/// The most the shown pelvis may drop under its animated height (game units): a flinch, and
+// --- The drawn flinch of the torso (Patrick's 08-21-49 clip, 3a9805e). -------------------------
+
+/// The drawn torso's turn at the peak of a hit's flinch (rad, the spine's top against its
+/// animation) for its push `v` (m/s): 6 degrees at 0.3 m/s, 14 at 0.8, 25 at 2, on lines between
+/// (in proportion under 0.3), at most 30. The physical body's own turn was invisible in the game
+/// (a .44 at 0.8 m/s drew 4.2 degrees, a 9mm 2.1), and the clip's pushes run along the line of
+/// sight: the flinch is drawn on top of the body ([`TorsoFlinch`]).
+/// An off-centre hit's twist at its most (rad, [`SIDE_TWIST`]) for its push `v` (m/s).
+pub fn side_twist(v: f32) -> f32 {
+    let v = if v.is_finite() { v.max(0.0) } else { 0.0 };
+    let k = ((v - 0.3) / 0.5).clamp(0.0, 1.0);
+    ((SIDE_TWIST.0 + (SIDE_TWIST.1 - SIDE_TWIST.0) * k) * (v / 0.3).min(1.0)).to_radians()
+}
+
+pub fn torso_turn(v: f32) -> f32 {
+    let v = if v.is_finite() { v.max(0.0) } else { 0.0 };
+    let deg = if v <= 0.3 {
+        6.0 * v / 0.3
+    } else if v <= 0.8 {
+        6.0 + (v - 0.3) * 16.0
+    } else {
+        (14.0 + (v - 0.8) * (11.0 / 1.2)).min(30.0)
+    };
+    deg.to_radians()
+}
+
+/// A flinch's rise (s, eased; within it as its size needs, the spin bound kept) and its way back
+/// (s, eased): back within 0.5 to 0.6 s of the hit.
+pub const TORSO_RISE_LEAST: f32 = 0.1;
+pub const TORSO_RISE_MOST: f32 = 0.12;
+pub const TORSO_BACK: f32 = 0.45;
+/// An off-centre hit's twist about the vertical, its struck shoulder turned back (degrees at 0.3
+/// and 0.8 m/s; the body's own turn adds up to a degree: 8 to 15 drawn, for a hit [`SHOULDER_HALF`] across from the chest's centre or further; less
+/// nearer the middle), and a head hit's nod (a share of the torso's turn, on the head alone).
+pub const SIDE_TWIST: (f32, f32) = (8.0, 14.0);
+pub const SHOULDER_HALF: f32 = 12.0;
+pub const HEAD_NOD: f32 = 0.8;
+/// The physical body's own turn of the torso kept under the drawn flinch (a share): the flinch is
+/// the visible part, the body adds its motion (the arms', the legs').
+pub const BODY_TORSO_SHARE: f32 = 0.25;
+
+/// One hit's flinch drawn on the torso: a bend away along the push, a twist toward an off-centre
+/// hit's side, a nod for a head hit, eased in over its rise and back over [`TORSO_BACK`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TorsoFlinch {
+    /// The bend (a world rotation vector, rad), the twist about the vertical (rad), the head's nod
+    /// (a world rotation vector, rad), seconds since the hit, and the rise.
+    pub bend: V3,
+    pub twist: f32,
+    pub nod: V3,
+    pub t: f32,
+    pub rise: f32,
+}
+
+impl TorsoFlinch {
+    /// The flinch of a hit at `point` along `dir` (unit) pushing `v` m/s, the chest at `chest`,
+    /// the body facing `facing`; `head` when it struck the head or the neck, `arm` the side of the
+    /// arm it struck (0 left, 1 right: a clavicle, an upper arm...), whose shoulder is the lever.
+    pub fn new(
+        v: f32,
+        dir: V3,
+        point: V3,
+        chest: V3,
+        facing: V3,
+        head: bool,
+        arm: Option<u8>,
+    ) -> TorsoFlinch {
+        let up = [0.0, 0.0, 1.0];
+        let Some(flat) = unit([dir[0], dir[1], 0.0]) else {
+            return TorsoFlinch::default();
+        };
+        let Some(axis) = unit(cross(up, flat)) else {
+            return TorsoFlinch::default();
+        };
+        let a = torso_turn(v);
+        let bend = scale(axis, a);
+        // The hit's lever about the vertical through the chest (its offset across the push; an
+        // arm's hit at its shoulder): the struck side turned back along it; a push through the
+        // middle, or along the shoulders, twists nothing.
+        let r = match arm {
+            Some(side) => {
+                let right = unit(cross([facing[0], facing[1], 0.0], up)).unwrap_or([1.0, 0.0, 0.0]);
+                scale(
+                    right,
+                    if side == 0 {
+                        -SHOULDER_HALF
+                    } else {
+                        SHOULDER_HALF
+                    },
+                )
+            }
+            None => sub(point, chest),
+        };
+        let lever = cross([r[0], r[1], 0.0], flat)[2];
+        let f = if lever.is_finite() {
+            (lever.abs() / SHOULDER_HALF).min(1.0)
+        } else {
+            0.0
+        };
+        let twist = lever.signum() * side_twist(v) * f;
+        let nod = if head {
+            scale(axis, a * HEAD_NOD)
+        } else {
+            [0.0; 3]
+        };
+        let total = length(add(bend, [0.0, 0.0, twist]));
+        let rise = (1.6 * total / SPIN_MOST).clamp(TORSO_RISE_LEAST, TORSO_RISE_MOST);
+        TorsoFlinch {
+            bend,
+            twist,
+            nod,
+            t: 0.0,
+            rise,
+        }
+    }
+
+    /// `dt` on; false once it is over.
+    pub fn advance(&mut self, dt: f32) -> bool {
+        self.t += dt.max(0.0);
+        self.t < self.rise + TORSO_BACK
+    }
+
+    /// How much of it is drawn now (0 to 1): eased in over its rise, eased back after.
+    pub fn envelope(&self) -> f32 {
+        if self.t < self.rise {
+            let s = (self.t / self.rise.max(1e-3)).clamp(0.0, 1.0);
+            s * s * (3.0 - 2.0 * s)
+        } else {
+            1.0 - ease((self.t - self.rise) / TORSO_BACK)
+        }
+    }
+
+    /// The world turn (a rotation vector, rad) of a bone `level` of the way up the torso (the
+    /// pelvis 0.15, the spine's bones on to 1 at its top, the neck, the head and the arms 1), with
+    /// the nod for the head.
+    pub fn turn(&self, level: f32, head: bool) -> V3 {
+        let e = self.envelope();
+        let mut w = add(scale(self.bend, level), [0.0, 0.0, self.twist * level]);
+        if head {
+            w = add(w, self.nod);
+        }
+        scale(w, e)
+    }
+}
+
+/// Where a bone is in the drawn flinch ([`draw_flinch`]): how far up the torso, whether it is the
+/// torso's own (its body turn kept at [`BODY_TORSO_SHARE`]; not an arm, carried), and whether it is
+/// the head (it nods).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlinchBone {
+    pub level: f32,
+    pub torso: bool,
+    pub head: bool,
+}
+
+/// How much of the physical body's own torso turn is drawn (`keep`, [`draw_flinch`]) from the
+/// frame before, `dt` on: [`BODY_TORSO_SHARE`] while it reacts, all of it while a brace holds
+/// (`bracing`: the arms on the wall or the grip hang from the body's own chest), eased between at
+/// [`KEEP_RATE`] a second (no jump as a brace starts or ends).
+pub fn torso_keep(keep: f32, bracing: bool, dt: f32) -> f32 {
+    let target = if bracing { 1.0 } else { BODY_TORSO_SHARE };
+    let step = KEEP_RATE * dt.max(0.0);
+    let keep = if keep.is_finite() { keep } else { target };
+    keep + (target - keep).clamp(-step, step)
+}
+pub const KEEP_RATE: f32 = 4.0;
+
+/// Each bone's place in the drawn flinch by its role (`roles`, the rig's order: parents first): the
+/// pelvis 0.15 of the way, the spine's bones from 0.4 to its top at 1, the neck and the head at 1
+/// (the head nods); the arms and the legs none (the arms ride on the chest turned their own way:
+/// turned with it, an armed body's aim drifted 7 degrees and a regripping hand wobbled).
+pub fn flinch_places(roles: &[Role]) -> Vec<Option<FlinchBone>> {
+    let spines = roles.iter().filter(|r| **r == Role::Spine).count();
+    let mut k = 0;
+    roles
+        .iter()
+        .map(|r| match r {
+            Role::Pelvis => Some(FlinchBone {
+                level: 0.15,
+                torso: true,
+                head: false,
+            }),
+            Role::Spine => {
+                let level = if spines > 1 {
+                    0.4 + 0.6 * k as f32 / (spines - 1) as f32
+                } else {
+                    1.0
+                };
+                k += 1;
+                Some(FlinchBone {
+                    level,
+                    torso: true,
+                    head: false,
+                })
+            }
+            Role::Neck | Role::Head => Some(FlinchBone {
+                level: 1.0,
+                torso: true,
+                head: *r == Role::Head,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The drawn flinch put on the shown world rotations `shown` (over the targets `wanted`): each
+/// torso bone's own turn from the physical body kept at `keep` ([`torso_keep`]), then every bone
+/// `bones` places turned by the hits' flinches (`flinches`) at `w` (the body's weight in the shown
+/// pose: it goes with the hand-back).
+pub fn draw_flinch(
+    shown: &mut [Q],
+    wanted: &[Q],
+    bones: &[Option<FlinchBone>],
+    flinches: &[TorsoFlinch],
+    w: f32,
+    keep: f32,
+) {
+    for (b, place) in bones.iter().enumerate() {
+        let (Some(fb), Some(s), Some(t)) = (place, shown.get(b).copied(), wanted.get(b)) else {
+            continue;
+        };
+        let mut q = s;
+        if fb.torso && keep < 1.0 {
+            q = qslerp(*t, s, keep);
+        }
+        let turn = flinches
+            .iter()
+            .fold([0.0; 3], |acc, f| add(acc, f.turn(fb.level, fb.head)));
+        let turn = scale(turn, w.clamp(0.0, 1.0));
+        shown[b] = qnorm(qmul(qexp(turn), q));
+    }
+}
+
+/// The most the shown pelvis may drop under its animated height (game units): a flinch, and/// The most the shown pelvis may drop under its animated height (game units): a flinch, and
 /// while catch steps carry it. Patrick's 19-43-08 clip (0c1fbbf): a .44's step sank the Fiend
 /// upright, hips below the ground.
 pub const PELVIS_DROP_FLINCH: f32 = 4.0;
@@ -538,6 +775,21 @@ impl Limit {
         if let Some(b) = self.before.get_mut(i) {
             *b = short(qnorm(qmul(qmul(*b, from), qconj(to))));
         }
+    }
+
+    /// A new body's bounds, from the offsets drawn the frame before (`before`, each bone's shown
+    /// rotation over its animated one; none: drawn as the animation) for `n` bones: its first frame
+    /// is held to the spin bound from what was drawn (opened, a new body's first frame after a
+    /// hit was never held: Patrick's 08-21-49 clip, the drawn turn 0.3, then 3.0, then 1.2
+    /// degrees).
+    pub fn seed(&mut self, before: &[Q], n: usize) {
+        self.before = if before.len() == n {
+            before.iter().map(|q| short(qnorm(*q))).collect()
+        } else {
+            vec![Q_ID; n]
+        };
+        self.pelvis = None;
+        self.catching = vec![false; n];
     }
 
     /// Nothing kept (a new body).
@@ -2489,7 +2741,9 @@ mod tests {
     fn a_reactions_offsets_are_held_to_its_push() {
         let anim = vec![Q_ID; 3];
         let (angle, yaw, pelvis_most) = offset_most(0.53);
-        assert!((pelvis_most - 6.24).abs() < 1e-3 && angle < 0.7 && yaw < 0.12);
+        // (The yaw leaves room for an off-centre hit's drawn twist: `side_twist`.)
+        assert!((pelvis_most - 6.24).abs() < 1e-3 && angle < 0.7);
+        assert!((yaw - 1.25 * side_twist(0.53)).abs() < 1e-4 && yaw <= angle);
         let mut limit = Limit::default();
         let mut shown = vec![Q_ID; 3];
         let mut p = [0.0; 3];
@@ -2928,5 +3182,85 @@ mod tests {
         assert_eq!(too_far(&far, &anim, |i| i != 2).map(|f| f.0), Some(1));
         let nan = [[f32::NAN, 0.0, 0.0], [0.0, 0.0, 50.0], [10.0, 0.0, 90.0]];
         assert_eq!(too_far(&nan, &anim, |_| true).map(|f| f.0), Some(0));
+    }
+
+    /// The drawn flinch's peak by the push (6, 14 and 25 degrees at 0.3, 0.8 and 2 m/s), its rise
+    /// in 0.08 to 0.12 s, back by 0.6 s; an off-centre hit twists toward its side, 8 to 15
+    /// degrees, a head hit nods.
+    #[test]
+    fn the_drawn_flinch() {
+        assert!((torso_turn(0.3).to_degrees() - 6.0).abs() < 1e-3);
+        assert!((torso_turn(0.8).to_degrees() - 14.0).abs() < 1e-3);
+        assert!((torso_turn(2.0).to_degrees() - 25.0).abs() < 1e-3);
+        let (fwd, back) = ([0.0, 1.0, 0.0], [0.0, -1.0, 0.0]);
+        let chest = [0.0, 0.0, 100.0];
+        let f = TorsoFlinch::new(0.8, back, chest, chest, fwd, false, None);
+        assert!(
+            (TORSO_RISE_LEAST..=TORSO_RISE_MOST).contains(&f.rise),
+            "{}",
+            f.rise
+        );
+        assert_eq!(f.twist, 0.0);
+        let mut g = f;
+        let mut peak = 0.0f32;
+        let mut most_step = 0.0f32;
+        let mut last = 0.0f32;
+        while g.advance(1.0 / 60.0) {
+            let a = length(g.turn(1.0, false));
+            peak = peak.max(a);
+            most_step = most_step.max((a - last).abs() * 60.0);
+            last = a;
+        }
+        assert!(
+            (peak.to_degrees() - 14.0).abs() < 0.2,
+            "{}",
+            peak.to_degrees()
+        );
+        assert!(most_step <= SPIN_MOST + 0.1, "{most_step}");
+        assert!(g.t <= 0.6, "back by {}", g.t);
+        // A hit on the left shoulder (left of a body facing +Y is -X) pushed back: the left
+        // shoulder turns back, a turn about +Z... of 8 to 15 degrees.
+        let left = TorsoFlinch::new(0.53, back, [-14.0, 0.0, 100.0], chest, fwd, false, None);
+        let right = TorsoFlinch::new(0.53, back, [14.0, 0.0, 100.0], chest, fwd, false, None);
+        let arm = TorsoFlinch::new(0.32, back, [-4.0, 0.0, 100.0], chest, fwd, false, Some(0));
+        assert!(
+            arm.twist.to_degrees() >= 8.0,
+            "an arm hit: {}",
+            arm.twist.to_degrees()
+        );
+        assert!(arm.twist > 0.0, "the left shoulder back");
+        // From the side, along the shoulders: no twist.
+        let side = TorsoFlinch::new(
+            0.53,
+            [1.0, 0.0, 0.0],
+            [-14.0, 0.0, 100.0],
+            chest,
+            fwd,
+            false,
+            Some(0),
+        );
+        assert!(side.twist.abs() < 1e-4, "{}", side.twist);
+        assert!(
+            left.twist.to_degrees() >= 8.0 && left.twist.to_degrees() <= 15.0,
+            "{}",
+            left.twist.to_degrees()
+        );
+        assert!((left.twist + right.twist).abs() < 1e-5, "opposite sides");
+        let head = TorsoFlinch::new(0.32, back, [0.0, 0.0, 130.0], chest, fwd, true, None);
+        assert!(length(head.nod) > 0.0);
+    }
+
+    /// A new body's first frame is held from what was drawn before it: seeded with none (drawn as
+    /// the animation), an offset of half a radian comes in at the spin bound.
+    #[test]
+    fn a_new_body_starts_from_what_was_drawn() {
+        let anim = vec![Q_ID; 2];
+        let mut limit = Limit::default();
+        limit.seed(&[], 2);
+        let mut shown = vec![qexp([0.5, 0.0, 0.0]), Q_ID];
+        let mut p = [0.0; 3];
+        limit.hold(&mut shown, &anim, &mut p, 3.0, 1.0 / 60.0, |_| false);
+        let turned = length(qlog(shown[0]));
+        assert!((turned - SPIN_MOST / 60.0).abs() < 1e-4, "{turned}");
     }
 }

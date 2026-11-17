@@ -2439,7 +2439,8 @@ mod locomotion {
         };
         let (left, put_back) = (read("written"), read("1"));
         eprintln!("stale reads: write left {left}, put back {put_back}");
-        assert!(left >= 50, "{left}");
+        // (Dozens: 48 since the drawn flinch of 08-21-49; never any put back.)
+        assert!(left >= 30, "{left}");
         assert_eq!(put_back, 0);
     }
 
@@ -2859,6 +2860,12 @@ mod continuity {
             "armed=pistol&hits=10mm@lclavicle&move=0.2&walk=40&turn=180&turnby=180",
             "hits=10mm@head&move=0.3&walk=40&turn=180&turnby=180",
             "armed=pistol&hits=9mm@chest&readback=1&legjump=30",
+            // Hits 1.1 s apart (Patrick's 08-21-49 clip: the drawn turn blipped on the first frame
+            // after each). (An armed body's weapon hand swings up to 6.7 units a frame under four
+            // 9mm hits, as in 3a9805e: not yet held.)
+            "hits=9mm@chest*4~1.1",
+            "hits=44@chest*4~1.1",
+            "hits=9mm@chest*4~1.1&readback=1",
         ] {
             let sim = run_spec(spec);
             check(&sim, spec);
@@ -2907,6 +2914,9 @@ mod thin_rail {
                         [false, false],
                         "{spec}: a hand braced"
                     );
+                    // Not begun at all, nor said (Patrick's 08-21-49 clip: announced, then let go
+                    // 11 ms later), unless it goes over it.
+                    assert!(sim.stats.fell || !sim.stats.braced, "{spec}: a brace begun");
                 }
             }
         }
@@ -2936,5 +2946,184 @@ mod thin_rail {
             }
         }
         assert!(planted > 0, "no hand planted on the rail");
+    }
+}
+
+#[cfg(test)]
+/// Visible flinches (Patrick's 08-21-49 clip, 3a9805e: a .44 at 0.8 m/s drew the torso 4.2
+/// degrees, a 9mm 2.1; the pushes along the line of sight): the spine's top turns off its
+/// animation about 6 degrees at 0.32 m/s and 14 at 0.79 at its peak (no more than 1.2 times),
+/// reached in 0.08 to 0.12 s and back within 0.5 to 0.7 s; an off-centre hit twists the struck
+/// shoulder back 8 to 15 degrees; a head hit nods the head; never faster than the spin bound.
+mod visible {
+    use super::*;
+    use crate::sim::Sim;
+    use ragdoll_core::active::{torso_turn, SPIN_MOST};
+
+    pub struct Peak {
+        pub v: f32,
+        pub peak: f32,
+        pub at: f32,
+        pub reached: f32,
+        pub back: f32,
+        pub yaw: f32,
+        pub head: f32,
+        pub step: f32,
+    }
+
+    pub fn peak_of(spec: &str) -> Peak {
+        let mut sim = Sim::new(GroundKind::Flat);
+        run(&mut sim, &Spec::parse(spec).unwrap(), Tuning::GAME).unwrap();
+        let tr = &sim.stats.spine_trace;
+        let (at, peak) = tr.iter().fold(
+            (0.0, 0.0f32),
+            |b, &(t, d, _, _)| if d > b.1 { (t, d) } else { b },
+        );
+        let reached = tr
+            .iter()
+            .find(|x| x.1 >= 0.9 * peak)
+            .map_or(f32::NAN, |x| x.0);
+        let back = tr
+            .iter()
+            .filter(|x| x.0 > at && x.1 > (0.1 * peak).max(1.0))
+            .map(|x| x.0)
+            .fold(at, f32::max);
+        let yaw = tr
+            .iter()
+            .map(|x| x.2)
+            .fold(0.0f32, |b, y| if y.abs() > b.abs() { y } else { b });
+        let head = tr.iter().map(|x| x.3).fold(0.0f32, f32::max);
+        let step = tr
+            .windows(2)
+            .map(|w| (w[1].1 - w[0].1).abs() / (w[1].0 - w[0].0).max(1e-4))
+            .fold(0.0f32, f32::max)
+            .to_radians();
+        let p = Peak {
+            v: sim.stats.react_v,
+            peak,
+            at,
+            reached,
+            back,
+            yaw,
+            head,
+            step,
+        };
+        eprintln!(
+            "{spec:44} v {:.2}: spine top {:.1} deg (wanted {:.1}) at {:.3} s, 90% at {:.3} s, \
+             back by {:.2} s; twist {:.1}, head {:.1}; fastest {:.1} rad/s",
+            p.v,
+            p.peak,
+            torso_turn(p.v).to_degrees(),
+            p.at,
+            p.reached,
+            p.back,
+            p.yaw,
+            p.head,
+            p.step
+        );
+        p
+    }
+
+    /// Front and side hits at 0.32 (a 9mm) and 0.79 m/s (a .44), standing, armed and not.
+    #[test]
+    fn the_flinch_peaks_as_wanted() {
+        for armed in ["0", "pistol", "rifle"] {
+            for hit in [
+                "9mm@chest",
+                "9mm@chest/90",
+                "44@chest",
+                "44@chest/90",
+                "44@chest/-90",
+            ] {
+                let spec = format!("armed={armed}&hits={hit}");
+                let p = peak_of(&spec);
+                let want = torso_turn(p.v).to_degrees();
+                assert!(
+                    p.peak >= 0.9 * want && p.peak <= 1.2 * want,
+                    "{spec}: {:.1} degrees at its peak, {want:.1} wanted",
+                    p.peak
+                );
+                // Reached (90% of its peak) 0.08 to 0.12 s after the hit.
+                assert!(
+                    (0.08..=0.12).contains(&p.reached),
+                    "{spec}: 90% of its peak at {:.3} s",
+                    p.reached
+                );
+                assert!(p.back <= 0.7, "{spec}: back by {:.2} s", p.back);
+                assert!(p.step <= SPIN_MOST + 0.3, "{spec}: {:.1} rad/s", p.step);
+            }
+        }
+    }
+
+    /// A hit on a shoulder turns that shoulder back 8 to 15 degrees; a head hit nods the head
+    /// more than the torso turns.
+    #[test]
+    fn off_centre_and_head_hits_read() {
+        for hit in [
+            "9mm@lclavicle",
+            "44@lupperarm",
+            "44@rclavicle",
+            "9mm@rupperarm",
+        ] {
+            let p = peak_of(&format!("hits={hit}"));
+            assert!(
+                (8.0..=15.0).contains(&p.yaw.abs()),
+                "{hit}: twisted {:.1} degrees",
+                p.yaw
+            );
+        }
+        for hit in ["9mm@head", "44@head"] {
+            let p = peak_of(&format!("hits={hit}"));
+            assert!(
+                p.head > p.peak,
+                "{hit}: the head {:.1}, the torso {:.1}",
+                p.head,
+                p.peak
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+/// The get-up (Patrick's 08-21-49 clip, 3a9805e: an anti-materiel hit landed him on his feet and
+/// folded him onto his knees, the pelvis 23 units up; "still and lying" passed for that slump, and
+/// the game's get-up from lying yanked him flat in four frames): a kneeling slump is never let up
+/// as lying. It is nudged along its lean to finish toppling, or waits for the hold's most; it gets
+/// up lying, no bone faster than 400 units a second.
+mod get_up {
+    use super::*;
+    use crate::sim::Sim;
+    use ragdoll_core::knock::{HOLD_SECONDS, LYING_PELVIS};
+
+    #[test]
+    fn a_kneeling_slump_topples_before_it_gets_up() {
+        for scale in [1.0f32, 1.2] {
+            let mut sim = Sim::new(GroundKind::Flat);
+            sim.scale = scale;
+            sim.reset();
+            sim.drop_kneeling();
+            let mut t = 0.0;
+            while !sim.standing() && t < HOLD_SECONDS + 4.0 {
+                sim.step();
+                t += STEP;
+            }
+            let s = &sim.stats;
+            eprintln!(
+                "scale {scale}: let up lying {:?} (pelvis {:.1} over the floor) after {} nudges, \
+                 standing at {t:.2} s, fastest bone in the get-up {:.0} units/s",
+                s.got_up_lying, s.got_up_pelvis, s.nudges, s.get_up_fastest
+            );
+            assert!(sim.standing(), "never got up");
+            let held = t >= HOLD_SECONDS;
+            assert!(
+                s.got_up_lying == Some(true) || held,
+                "let up not lying: pelvis {:.1} over the floor",
+                s.got_up_pelvis
+            );
+            if s.got_up_lying == Some(true) {
+                assert!(s.got_up_pelvis <= LYING_PELVIS * scale + 0.01);
+            }
+            assert!(s.get_up_fastest <= 400.0, "{:.0} units/s", s.get_up_fastest);
+        }
     }
 }
