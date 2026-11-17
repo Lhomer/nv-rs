@@ -159,6 +159,9 @@ pub struct Rig {
     /// This frame's pelvis offset written (game units) and the body's most spread (a bone's
     /// distance from the pelvis, m): for the clips' samples ([`sample_fields`]).
     pub pelvis_now: f32,
+    /// The drawn pelvis's offset from its animation less the root's lag, and its speed (units,
+    /// units a second; `active::ease_offset`); none in a fall.
+    pelvis_eased: Option<(V3, V3)>,
     pub spread_now: f32,
     /// The game's own moves of the actor (its AI walking it) carried by the reaction ([`carry`]):
     /// the reference the frame before, and the steps' moves of it since (not the game's).
@@ -678,6 +681,7 @@ fn ensure_rig(e: &mut Engine, actor: u32) -> bool {
         drift_most: 0.0,
         jumps: 0,
         pelvis_now: 0.0,
+        pelvis_eased: None,
         spread_now: 0.0,
         carried: None,
         own_moved: [0.0; 3],
@@ -1124,7 +1128,7 @@ fn drawn_against(e: &mut Engine, bones: &[u32], refs: &[(u32, M3, V3)]) -> (f32,
 /// What each reacting actor is drawn with, as the world pass begins ([`world_pass`]): its pelvis,
 /// spine top and head as its skinned geometry's bones have them, against their animated world
 /// (`Rig::drawn_offset`, `drawn_turn`; the pose log's).
-fn read_drawn(e: &mut Engine) {
+pub(crate) fn read_drawn(e: &mut Engine) {
     let wanted: Vec<(u32, u32, Vec<(u32, M3, V3)>)> = {
         let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
         rigs.iter()
@@ -1149,7 +1153,7 @@ fn read_drawn(e: &mut Engine) {
 /// for a frame without one): `Rig::drawn_offset`, `drawn_turn`, the most over the reaction, and a
 /// reaction shown off its animation but drawn on it counted and said ([`DRAWN_MISSING_SAID`]).
 pub fn after_draw(e: &mut Engine) {
-    let _ = e;
+    crate::down_log::measure(e, get_up_anim_pelvis);
     let mut rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     for rig in rigs.iter_mut() {
         if rig.drawn_ref.is_empty() {
@@ -1218,7 +1222,20 @@ pub struct GetUpBlend {
     pelvis: V3,
     len: f32,
     t: f32,
+    /// Its farthest bone off the animation at its start (game units).
+    most: f32,
+    /// How long it has waited for the animation to arrive (s, [`GET_UP_ARRIVES`]).
+    waited: f32,
+    /// The animated joints last frame (the bodies' targets for `crate::knockdown`'s hold) and
+    /// this frame's.
+    anim_at: Vec<V3>,
+    anim_vel: Vec<V3>,
 }
+
+/// The animation has taken the bones once a joint is this far off the ragdoll's pose (game units);
+/// the blend starts then, or after [`GET_UP_ARRIVES`] seconds of knock state 6 whatever.
+pub const GET_UP_ARRIVED: f32 = 5.0;
+pub const GET_UP_ARRIVES: f32 = 0.75;
 
 /// The get-up's blend at least (s), and the most any bone is drawn moving through it (game units a
 /// second, `crate::knockdown::BONE_FLING_RISE`): a far bone makes it longer.
@@ -1292,6 +1309,50 @@ pub fn note_ragdoll_pose(e: &mut Engine, actor: u32) {
     });
 }
 
+/// Tests: whether the get-up blend of `actor` draws this frame (started, not over).
+#[cfg(test)]
+pub(crate) fn get_up_blending(actor: u32) -> bool {
+    let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    rigs.iter()
+        .find(|r| r.actor == actor)
+        .and_then(|r| r.getup.as_ref())
+        .is_some_and(|gb| !gb.off.is_empty())
+}
+
+/// Tests: how far off the animation the get-up blend of `actor` starts (its farthest bone, game
+/// units), once it has started; `None` before.
+#[cfg(test)]
+pub(crate) fn get_up_blend_from(actor: u32) -> Option<f32> {
+    let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    let gb = rigs.iter().find(|r| r.actor == actor)?.getup.as_ref()?;
+    (!gb.off.is_empty()).then_some(gb.most)
+}
+
+/// Where the game's get-up animation has `actor`'s bones (their nodes, the animated joint and its
+/// motion, game units and a second; the frame before's): what the ragdoll's bodies are driven to
+/// in knock state 6 (`crate::knockdown`'s hold). `None` before the animation has arrived.
+pub fn get_up_targets(actor: u32) -> Option<Vec<(u32, V3, V3)>> {
+    let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    let rig = rigs.iter().find(|r| r.actor == actor)?;
+    let gb = rig.getup.as_ref()?;
+    if gb.off.is_empty() || gb.anim_at.len() != rig.bones.len() {
+        return None;
+    }
+    Some(
+        rig.bones
+            .iter()
+            .enumerate()
+            .map(|(b, bone)| {
+                (
+                    bone.node,
+                    gb.anim_at[b],
+                    gb.anim_vel.get(b).copied().unwrap_or([0.0; 3]),
+                )
+            })
+            .collect(),
+    )
+}
+
 /// The game's get-up animation has `actor`'s bones (knock state 6), alive.
 fn get_up_animating(e: &Engine, actor: u32) -> bool {
     let process = e.mem.u32(actor + PROCESS);
@@ -1348,6 +1409,10 @@ pub fn begin_get_up_blend(e: &mut Engine, actor: u32) {
         pelvis: [0.0; 3],
         len: GET_UP_BLEND_LEAST,
         t: 0.0,
+        most: 0.0,
+        waited: 0.0,
+        anim_at: Vec::new(),
+        anim_vel: Vec::new(),
     });
 }
 
@@ -1386,7 +1451,30 @@ fn write_get_up_blend(
     if gb.from.len() != n || anim.len() != n {
         return false;
     }
+    // The animated pose's joints and their motion: what the bodies are driven to
+    // ([`get_up_targets`]).
+    let anim_now: Vec<V3> = anim.iter().map(|a| a.1).collect();
+    gb.anim_vel = if gb.anim_at.len() == n && dt > 0.0 {
+        (0..n)
+            .map(|b| scale(sub(anim_now[b], gb.anim_at[b]), 1.0 / dt))
+            .collect()
+    } else {
+        vec![[0.0; 3]; n]
+    };
+    gb.anim_at = anim_now;
     if gb.off.is_empty() {
+        // The game's animation takes the bones a few frames into knock state 6: until the
+        // animated pose is off the ragdoll's, it is the ragdoll's own (bdf710a's blend started
+        // there: "farthest bone 0 units off", a blend of nothing). Nothing is written meanwhile:
+        // the ragdoll draws itself.
+        let most_now = (0..n)
+            .map(|b| length(sub(gb.from[b].1, anim[b].1)))
+            .fold(0.0, f32::max);
+        gb.waited += dt;
+        if most_now <= GET_UP_ARRIVED && gb.waited < GET_UP_ARRIVES {
+            rig.getup = Some(gb);
+            return true;
+        }
         let from_r: Vec<M3> = gb.from.iter().map(|f| f.0).collect();
         let anim_r: Vec<M3> = anim.iter().map(|a| a.0).collect();
         gb.off = active::Fade::offsets(&from_r, &anim_r);
@@ -1395,6 +1483,7 @@ fn write_get_up_blend(
             .map(|b| length(sub(gb.from[b].1, anim[b].1)))
             .fold(0.0, f32::max);
         gb.len = get_up_blend_len(most);
+        gb.most = most;
         let from_at: Vec<V3> = gb.from.iter().map(|f| f.1).collect();
         let anim_at: Vec<V3> = anim.iter().map(|a| a.1).collect();
         let face = |up: Option<bool>| match up {
@@ -1420,50 +1509,191 @@ fn write_get_up_blend(
     }
     gb.t += dt;
     let left = 1.0 - active::ease(gb.t / gb.len);
-    let mut shown: Vec<M3> = anim.iter().map(|a| a.0).collect();
-    for (s, off) in shown.iter_mut().zip(&gb.off) {
-        let r = active::qslerp(active::Q_ID, *off, left);
-        *s = active::m_from_q(active::qnorm(active::qmul(r, active::qfrom_m(s))));
-    }
-    let mut pelvis_offset = scale(gb.pelvis, left);
     let going = gb.t < gb.len;
-    let offsets = offsets_of(&rig.bones, anim, &shown);
-    let mut shown_at = shown_positions(rig, anim, &shown, pi, pelvis_offset);
-    // Nothing drawn under the floor it was set on (its reference, on the collision floor): turned
-    // up about its hips from lying, the legs swung through the ground; the whole body is lifted
-    // by what the lowest joint lacks (it varies smoothly, so the lift does).
-    let floor = read3(e, rig.actor + REFR_POSITION)[2];
-    let lowest = shown_at.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min);
-    if lowest.is_finite() && lowest < floor {
-        pelvis_offset[2] += floor - lowest;
-        shown_at = shown_positions(rig, anim, &shown, pi, pelvis_offset);
-    }
-    for b in 0..n {
+    let _ = (parents, pi);
+    // What the game draws without the write (Patrick's bdf710a review: in knock state 6 the drawn
+    // nodes follow the ragdoll's bodies, which its motors drive onto the animation): the blend
+    // ends there, so nothing pops when it stops. Each bone's world rotation eased from the
+    // ragdoll's last pose to it; the pelvis's and a spine root's joints likewise; every other
+    // joint where its parent's world and its own length put it.
+    let target: Vec<(M3, V3)> = rig
+        .bones
+        .iter()
+        .map(|b| {
+            (
+                read9(e, b.node + WORLD_ROTATION),
+                read3(e, b.node + WORLD_TRANSLATION),
+            )
+        })
+        .collect();
+    let rot: Vec<M3> = (0..n)
+        .map(|b| {
+            active::m_from_q(active::qslerp(
+                active::qfrom_m(&target[b].0),
+                active::qfrom_m(&gb.from[b].0),
+                left,
+            ))
+        })
+        .collect();
+    let moves = |b: usize| {
         let bone = &rig.bones[b];
-        let base = bone.pose.unwrap_or_default();
-        let shift = if bone.role == Role::Pelvis {
-            Some(pelvis_offset)
-        } else if moves_root(bone.role, bone.parent.is_none(), bone.phys.is_some()) {
-            Some(sub(shown_at[b], anim[b].1))
+        bone.role == Role::Pelvis
+            || moves_root(bone.role, bone.parent.is_none(), bone.phys.is_some())
+    };
+    let joints: Vec<Option<V3>> = (0..n)
+        .map(|b| moves(b).then(|| add(target[b].1, scale(sub(gb.from[b].1, target[b].1), left))))
+        .collect();
+    // Every other joint where its parent and its length put it, eased onto where the game draws
+    // it by the blend's end (its body's node, which the bodies' lag keeps off its parent by up to
+    // a few units: written rigid to the end, the feet jumped 2.2 when the blend stopped).
+    let toward = &target;
+    let mut lift = 0.0f32;
+    for pass in 0..2 {
+        write_worlds(
+            e,
+            rig,
+            &rot,
+            &joints,
+            (toward, 1.0 - left),
+            lift,
+            written_now,
+        );
+        update(e, root);
+        // Nothing drawn under the floor it was set on (its reference, on the collision floor):
+        // turned up from lying, the legs swing through the ground; the body is lifted by what the
+        // lowest joint lacks (it varies smoothly, so the lift does).
+        let floor = read3(e, rig.actor + REFR_POSITION)[2];
+        let lowest = rig
+            .bones
+            .iter()
+            .map(|b| read3(e, b.node + WORLD_TRANSLATION)[2])
+            .fold(f32::INFINITY, f32::min);
+        if pass == 0 && lowest.is_finite() && lowest < floor {
+            lift = floor - lowest;
         } else {
-            None
-        };
-        let (rot, t) = pose::local_for(&parents[b], base, &offsets[b], shift);
-        if rot.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite()) {
-            let bone = &mut rig.bones[b];
-            write9(e, bone.node + LOCAL_ROTATION, &rot);
-            write3(e, bone.node + LOCAL_TRANSLATION, t);
-            bone.written = Some((rot, t));
-            if let Some(raw) = bone.raw {
-                written_now.push((bone.node, raw));
-            }
+            break;
         }
     }
-    update(e, root);
     if going {
         rig.getup = Some(gb);
     }
     going
+}
+
+/// The rig's bones written so their worlds are `rot` (each bone's world rotation) and, for the
+/// pelvis and a spine root, `joints` (their world joints, raised `lift`): each local solved from
+/// its parent's world as written (a rig parent's) or as it is (any other node), parents first;
+/// every other bone's translation its own (its length), plus the fraction `toward.1` of how far
+/// the world `toward.0` has its joint off where its parent there and its length put it (the
+/// game's drawing of bodies a few units apart, faded in; the bones' lengths otherwise kept).
+fn write_worlds(
+    e: &mut Engine,
+    rig: &mut Rig,
+    rot: &[M3],
+    joints: &[Option<V3>],
+    toward: (&[(M3, V3)], f32),
+    lift: f32,
+    written_now: &mut Vec<(u32, (M3, V3))>,
+) {
+    let n = rig.bones.len();
+    // The nodes above and between the rig's bones (FNV's `Bip01 NonAccum`, the root body's node;
+    // `Bip01 Neck`) keep the worlds the game drew them with through the update that follows (it
+    // works every node out from its local: the ragdoll's root went back onto the animation under
+    // the blend, and the drawing jumped when it ended): each local set from its world, put back
+    // after the draw with the rest.
+    let mut pinned: Vec<u32> = Vec::new();
+    for b in 0..n {
+        let bone = &rig.bones[b];
+        let mut chain: Vec<u32> = Vec::new();
+        if bone.parent.is_none() {
+            chain.push(e.mem.u32(bone.node + PARENT));
+        } else {
+            chain.extend(bone.between.iter().copied());
+        }
+        for node in chain {
+            if node == 0 || node == rig.root || pinned.contains(&node) {
+                continue;
+            }
+            pinned.push(node);
+            let parent = read_world(e, e.mem.u32(node + PARENT));
+            let now = read_world(e, node);
+            let r = pose::ortho(&mul(&transpose(&parent.r), &now.r));
+            let t = scale(
+                apply_m(&transpose(&parent.r), sub(now.t, parent.t)),
+                1.0 / parent.s.max(1e-3),
+            );
+            if !(r.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite())) {
+                continue;
+            }
+            let raw = (
+                read9(e, node + LOCAL_ROTATION),
+                read3(e, node + LOCAL_TRANSLATION),
+            );
+            if !written_now.iter().any(|w| w.0 == node) {
+                written_now.push((node, raw));
+            }
+            write9(e, node + LOCAL_ROTATION, &r);
+            write3(e, node + LOCAL_TRANSLATION, t);
+        }
+    }
+    let mut world: Vec<Option<pose::Xf>> = vec![None; n];
+    for b in 0..n {
+        let bone = &rig.bones[b];
+        let mut up = match bone.parent.and_then(|p| world[p]) {
+            Some(p) => p,
+            None => read_world(e, e.mem.u32(bone.node + PARENT)),
+        };
+        if bone.parent.is_some() {
+            for &node in &bone.between {
+                up = up.then(&read_local(e, node));
+            }
+        }
+        let own = read_local(e, bone.node);
+        let r = pose::ortho(&mul(&transpose(&up.r), &rot[b]));
+        let t = match joints[b] {
+            Some(at) => scale(
+                apply_m(&transpose(&up.r), sub(add(at, [0.0, 0.0, lift]), up.t)),
+                1.0 / up.s.max(1e-3),
+            ),
+            None => match toward.0.get(b) {
+                Some(&(_, at)) if toward.1 > 0.0 => {
+                    // Its parent as the target has it, and where that and its length put it.
+                    let mut there_up = match bone.parent.and_then(|p| toward.0.get(p)) {
+                        Some(&(r, t)) => pose::Xf { r, t, s: up.s },
+                        None => up,
+                    };
+                    if bone.parent.is_some() {
+                        for &node in &bone.between {
+                            there_up = there_up.then(&read_local(e, node));
+                        }
+                    }
+                    let off = sub(at, there_up.then(&own).t);
+                    add(
+                        own.t,
+                        scale(
+                            apply_m(&transpose(&up.r), scale(off, toward.1.min(1.0))),
+                            1.0 / up.s.max(1e-3),
+                        ),
+                    )
+                }
+                _ => own.t,
+            },
+        };
+        if !(r.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite())) {
+            world[b] = Some(up.then(&own));
+            continue;
+        }
+        write9(e, bone.node + LOCAL_ROTATION, &r);
+        write3(e, bone.node + LOCAL_TRANSLATION, t);
+        let bone = &mut rig.bones[b];
+        if bone.written.is_none() {
+            if let Some(raw) = bone.raw {
+                written_now.push((bone.node, raw));
+            }
+        }
+        bone.written = Some((r, t));
+        world[b] = Some(up.then(&pose::Xf { r, t, s: own.s }));
+    }
 }
 
 /// The reaction yields to its animation now (`active::YIELD_BACK`): its body handed back
@@ -2063,6 +2293,25 @@ pub fn apply(e: &mut Engine) {
             lag,
             active::hold_pelvis_up(sub(pelvis_offset, lag), rig.balance.is_some()),
         );
+        // Drawn eased onto it (`active::ease_offset`): the steps' shift and the physical body's
+        // lag behind it cancel while it steps, but handed back the body's part is held
+        // (`Settle`) and the shift's fast spring home showed at once (Patrick's bdf710a review:
+        // `drawn_delta` 4.5 on the stagger hits). A fall is the ragdoll's own, followed as it is.
+        if rig.fall.is_some() {
+            rig.pelvis_eased = None;
+        } else {
+            let (at, vel) = rig.pelvis_eased.unwrap_or(([0.0; 3], [0.0; 3]));
+            let eased = active::ease_offset(
+                at,
+                vel,
+                sub(pelvis_offset, lag),
+                active::pelvis_ease_accel(dt),
+                active::PELVIS_EASE_SPEED,
+                dt,
+            );
+            rig.pelvis_eased = Some(eased);
+            pelvis_offset = add(lag, eased.0);
+        }
         // A brace hand on its path, plant or way home: the shown arm put on it
         // (`brace::plant_arm`), solved from the arm as it was shown a frame before (the bones' last
         // write) on the shoulder where it is now, so it moves on from itself whatever the physical
@@ -2896,8 +3145,13 @@ fn spread_of_body(b: &active::Body, pi: usize) -> f32 {
 /// The clips' sample of an actor's reaction (`crate::room_record`): `"body":{...}` with whether
 /// its physical body is on, the pelvis offset written (game units), the body's most spread (m),
 /// the base drift (reads a later pass moved, the most in tolerances), the animation jumps eased
-/// in, and how much of a dropped body's fade is left; `"body":null` when it is not reacting.
+/// in, and how much of a dropped body's fade is left; `"body":null` when it is not reacting. Then
+/// `"down":{...}`, its drawn get-up (`crate::down_log`), `"down":null` when it is not down.
 pub fn sample_fields(actor: u32) -> String {
+    format!("{},{}", body_fields(actor), crate::down_log::field(actor))
+}
+
+fn body_fields(actor: u32) -> String {
     let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
     match rigs.iter().find(|r| r.actor == actor) {
         Some(r) => format!(
@@ -2996,23 +3250,45 @@ pub fn shown_world(actor: u32) -> Vec<(u32, M3, V3)> {
         .map_or_else(Vec::new, |r| r.shown_world.clone())
 }
 
-/// Whether an actor is reacting now (a rig the pose layer writes): the clips sample it every
-/// frame then.
+/// Whether an actor is reacting now (a rig the pose layer writes) or down or getting up
+/// (`crate::down_log`): the clips sample it every frame then.
 pub fn reacting(actor: u32) -> bool {
     RIGS.lock()
         .unwrap_or_else(|p| p.into_inner())
         .iter()
         .any(|r| r.actor == actor)
+        || crate::down_log::tracked(actor)
 }
 
-/// The actors reacting now (a rig the pose layer writes): the regular game's clips sample each
-/// every frame (`crate::room_record`).
+/// The actors reacting now (a rig the pose layer writes) or down or getting up: the regular
+/// game's clips sample each every frame (`crate::room_record`).
 pub fn reacting_actors() -> Vec<u32> {
-    RIGS.lock()
+    let mut all: Vec<u32> = RIGS
+        .lock()
         .unwrap_or_else(|p| p.into_inner())
         .iter()
         .map(|r| r.actor)
-        .collect()
+        .collect();
+    for actor in crate::down_log::actors() {
+        if !all.contains(&actor) {
+            all.push(actor);
+        }
+    }
+    all
+}
+
+/// Where the game's get-up animation has `actor`'s pelvis (world), once it has the bones, and
+/// whether the get-up's blend draws this frame (`crate::down_log`).
+fn get_up_anim_pelvis(actor: u32) -> (Option<V3>, bool) {
+    let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(rig) = rigs.iter().find(|r| r.actor == actor) else {
+        return (None, false);
+    };
+    let Some(gb) = rig.getup.as_ref().filter(|gb| !gb.off.is_empty()) else {
+        return (None, false);
+    };
+    let pi = rig.bones.iter().position(|b| b.role == Role::Pelvis);
+    (pi.and_then(|pi| gb.anim_at.get(pi).copied()), true)
 }
 
 /// Each bone's world offset over its animation: its parent's shown and animated rotations taken
@@ -3370,6 +3646,11 @@ fn follow_feet(
         .placed
         .map_or([0.0; 3], |(was, m, _)| sub(m, sub(root_at, was)));
     rig.placed = Some((root_at, add(waiting, part), Instant::now()));
+    // The drawn pelvis's eased offset takes it back with the shift, at once (eased, the root's
+    // move showed).
+    if let Some(eased) = rig.pelvis_eased.as_mut() {
+        eased.0 = sub(eased.0, part);
+    }
     match steps {
         Some(s) => {
             s.reference = to;
@@ -3501,7 +3782,13 @@ fn balance_frame(
             continue;
         }
         let (hip, ankle) = (add(hip0, shift), add(ankle0, shift));
-        let target = add(ankle, scale(sub(feet[side as usize], ankle), s.weight));
+        // Eased in and out (the planted foot's offset from its walking animation stops moving
+        // gently: linear, its 2.4 units a frame stopped dead as the steps ended, Patrick's
+        // bdf710a review's `drawn_delta` on a walking Ganger's stagger).
+        let target = add(
+            ankle,
+            scale(sub(feet[side as usize], ankle), active::ease(s.weight)),
+        );
         // Never into the floor (`active::feet_on_floor`): at least the animated ankle.
         let i = side as usize;
         let floor = floor_bound(rig, i, ankle0[2]);
@@ -4609,6 +4896,7 @@ const NODES_ONLY: u32 = 3;
 /// Everything dropped (a load, a new game, the main menu): the nodes go with the game.
 pub fn clear() {
     RIGS.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    crate::down_log::clear();
     crate::one_hand::clear();
     *LAST.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }

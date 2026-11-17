@@ -7,6 +7,18 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
+
+- **Now:** the FNV get-up fixture runs knock state 6 as the game does (the animation late, ks1 on
+  after "allowed", bodies driven, drawn nodes following them) and failed on bdf710a as clip 1456 did.
+  Fixed: the blend's from-pose and start, a world-to-world blend ending on the game's drawing, the
+  clamps only against the animation, the actor kept on its spot, the drawn get-up in the pose log
+  (`down_log.rs`, `[target get-up frames]`), the stagger's slide (eased pelvis offset and foot
+  weight), the head's nod (1.1x), the launch along the ground. docs/GUNPLAY.md "bdf710a". Not run in
+  the game.
+- **Next (waiting for Patrick's approval):** the "New Physics" design.
+- **Patrick:** a clip of the tester's AMR get-ups and the Test Range's walking Gangers.
+
 ### Claude, 2026-11-17 (a7a2d15: FNV's skeleton fixture; get-up, walk, launch)
 
 - **Now:** `crates/host/tests-data/fnv_skeleton.txt` (FNV's skeleton.nif, derived data) and

@@ -23,6 +23,7 @@ pub mod cell_entry_wait;
 pub mod cell_offsets;
 pub mod compact_menus;
 pub mod direct_files;
+pub mod down_log;
 pub mod draw_thread;
 pub mod equipment_stats;
 pub mod fixes;

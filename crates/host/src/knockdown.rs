@@ -1588,8 +1588,9 @@ struct Launch {
     held_said: bool,
 }
 
-/// When the pelvis's velocity after the switch is said (s): at most [`LAUNCH_MOST`] times the
-/// hit's speed.
+/// When the pelvis's velocity after the switch is said (s): along the ground at most
+/// [`LAUNCH_MOST`] times the hit's speed (a falling body's drop is not the launch: Patrick's
+/// bdf710a review read 1.91 times at 38.67 s from the fall).
 const LAUNCH_LOG_AFTER: f32 = 0.1;
 const LAUNCH_MOST: f32 = 1.05;
 /// Tests: each launch's velocity line (what was read, its speed, the hit's; units/s).
@@ -1854,6 +1855,44 @@ fn launches(e: &mut Engine) {
                 ));
             }
         }
+        // And along the ground: a falling body's drop takes off from its speed along the lifted
+        // launch, so that could hold the hit's while it slid on faster across (Patrick's bdf710a
+        // review: 1.91 times the hit read at 38.67 s, the line now along the ground).
+        let flat = {
+            let d = l.direction;
+            let h = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            (h > 1e-3).then(|| [d[0] / h, d[1] / h, 0.0])
+        };
+        if let Some(flat) = flat.filter(|_| l.at.elapsed().as_secs_f32() < LAUNCH_HELD) {
+            let across: Vec<f32> = bones
+                .iter()
+                .filter_map(|&(_, b)| linear(e, b))
+                .map(|v| v[0] * flat[0] + v[1] * flat[1])
+                .collect();
+            let ground = if across.is_empty() {
+                0.0
+            } else {
+                across.iter().sum::<f32>() / across.len() as f32 * scale
+            };
+            if ground > l.speed * LAUNCH_MOST {
+                let extra = (ground - l.speed) / scale;
+                for &(_, b) in &bones {
+                    if let Some(v) = linear(e, b) {
+                        let nv = [v[0] - flat[0] * extra, v[1] - flat[1] * extra, v[2]];
+                        set_velocity(e, SET_LINEAR_VELOCITY, b, nv);
+                    }
+                }
+                if !l.held_said {
+                    l.held_said = true;
+                    note(format!(
+                        "{}: the launch held to the hit's {:.0} units/s along the ground ({ground:.0}, \
+                         knock state {state})",
+                        describe(e, l.actor),
+                        l.speed
+                    ));
+                }
+            }
+        }
         if kept < l.speed * LAUNCH_KEPT && l.tries < LAUNCH_TRIES && !bones.is_empty() {
             l.tries += 1;
             let given = give_launch(e, l.actor, l.direction, l.speed);
@@ -1904,7 +1943,7 @@ fn launches(e: &mut Engine) {
                             })
                         });
                     if let Some((v, what)) = pelvis {
-                        let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                        let speed = (v[0] * v[0] + v[1] * v[1]).sqrt();
                         let share = speed / l.speed.max(1e-3);
                         #[cfg(test)]
                         LAUNCH_SAID
@@ -1913,7 +1952,8 @@ fn launches(e: &mut Engine) {
                             .push((what, speed, l.speed));
                         note(format!(
                             "{}: [target launch] the {what} velocity {LAUNCH_LOG_AFTER} s after the switch: \
-                             {speed:.0} units/s ({:.2} m/s), {share:.2} x the hit's {:.2} m/s{}",
+                             {speed:.0} units/s along the ground ({:.2} m/s), {share:.2} x the hit's \
+                             {:.2} m/s{}; {:.0} units/s {}",
                             describe(e, l.actor),
                             speed / 70.0,
                             l.speed / 70.0,
@@ -1921,7 +1961,9 @@ fn launches(e: &mut Engine) {
                                 " (over the hit's)"
                             } else {
                                 ""
-                            }
+                            },
+                            v[2].abs(),
+                            if v[2] < 0.0 { "falling" } else { "rising" }
                         ));
                     }
                 } else {
@@ -2012,12 +2054,24 @@ fn get_ups(e: &mut Engine) {
             continue;
         }
         let state = e.mem.u8(process + KNOCK_STATE) as i8;
+        // The pose log's drawn get-up, every frame down and getting up (`crate::down_log`).
+        let floor = g.placed.map_or(g.start[2], |(_, spot)| spot[2]);
+        let label = describe(e, g.actor);
+        crate::down_log::track(g.actor, &label, state, floor, || {
+            let mut find = |name: &[u8]| named_node(e, g.actor, name);
+            Some(crate::down_log::Nodes {
+                pelvis: find(b"Bip01 Pelvis")?,
+                head: find(b"Bip01 Head")?,
+                feet: [find(b"Bip01 L Foot")?, find(b"Bip01 R Foot")?],
+            })
+        });
         // The ragdoll's pose as drawn, kept until the game's get-up animation takes the bones
         // (knock state 6), then blended from (`crate::active_ragdoll::begin_get_up_blend`).
         // The ragdoll's own states only (2 flying, 1 down): from state 3 the get-up animation is
         // queued and the bones may already hold its pose (a7a2d15: the blend read "farthest bone
         // 0 units off" on all seven get-ups).
-        if matches!(state, 1 | 2) {
+        // Frozen when the get-up is allowed (bdf710a noted it again after `place`).
+        if matches!(state, 1 | 2) && !g.allowed {
             crate::active_ragdoll::note_ragdoll_pose(e, g.actor);
         } else if state == 6 && !g.blended {
             g.blended = true;
@@ -2592,23 +2646,38 @@ fn watch_get_up(
     // held at state 5; 19-43-08, the driven bodies).
     let most_up = BONE_FLING_RISE / scale;
     let mut bones_held = 0;
-    for (_, body) in bodies(e, g.actor) {
+    // Where the game's get-up animation drives the bodies (knock state 6, once it has the bones):
+    // a body is held only where it goes against that (bdf710a held every body to 50 units/s up
+    // while the game drove them up its animation: hoisted upside down, airborne, then a snap).
+    let targets = crate::active_ragdoll::get_up_targets(g.actor);
+    for (node, body) in bodies(e, g.actor) {
         if keyframed(e, body) {
             continue;
         }
         if let Some(v) = linear(e, body) {
-            // Through the whole get-up (knock states 3, 5 and 6, and its start) no bone faster
-            // than the fling's bound any way (the game's get-up from lying yanked him flat in four
-            // frames: Patrick's 08-21-49 clip; on a45deed 7 to 14 bones were flung up through
-            // state 6, the legs into a handstand); after it, only rising.
-            if t < GET_UP_BLEND || matches!(state, 3 | 5 | 6) {
-                // ... and none pushed up faster than `FLUNG_UP_MOST` (the depenetration's throw:
-                // a7a2d15's hips shooting up into a handstand at knock state 6).
-                let (nv, held) = clamp_speed(v, most_up);
-                let up = FLUNG_UP_MOST / scale;
-                let lifted = nv[2] > up;
-                let nv = [nv[0], nv[1], nv[2].min(up)];
-                if held || lifted {
+            if matches!(state, 3 | 5 | 6) {
+                let target = targets.as_ref().and_then(|ts| {
+                    ts.iter()
+                        .find(|x| x.0 == node)
+                        .or_else(|| ts.iter().find(|x| e.mem.u32(x.0 + PARENT) == node))
+                        .map(|x| (x.1, x.2))
+                });
+                let nv = match target {
+                    // Driven: only moving away from its animated joint, or rising more than
+                    // `RISING_BEYOND` faster than it, is taken off.
+                    Some((at, moves)) => {
+                        let p = read3(e, node + WORLD_TRANSLATION);
+                        hold_toward(v.map(|x| x * scale), p, at, moves)
+                            .map(|w| w.map(|x| x / scale))
+                    }
+                    // Not driven yet (states 3 and 5, the animation not arrived): only a fling
+                    // past the bound.
+                    None => {
+                        let (nv, held) = clamp_speed(v, most_up);
+                        held.then_some(nv)
+                    }
+                };
+                if let Some(nv) = nv {
                     set_velocity(e, SET_LINEAR_VELOCITY, body, nv);
                     bones_held += 1;
                 }
@@ -2624,19 +2693,34 @@ fn watch_get_up(
             }
         }
     }
-    let p = read3(e, g.actor + REFR_POSITION);
-    let off = [p[0] - spot[0], p[1] - spot[1], p[2] - spot[2]];
-    let across = (off[0] * off[0] + off[1] * off[1]).sqrt();
+    let mut p = read3(e, g.actor + REFR_POSITION);
+    let mut off = [p[0] - spot[0], p[1] - spot[1], p[2] - spot[2]];
+    let mut across = (off[0] * off[0] + off[1] * off[1]).sqrt();
     let radius = capsule(e, g.actor);
     let crowd = overlapping(e, g.actor, p, radius);
+    // Through the get-up (knock states 3, 5 and 6) the actor stays on its spot (Patrick's bdf710a
+    // review): moved off it (a depenetration's push) with no one there to step out of, it is put
+    // back across, its height kept.
+    let mut put_back = None;
+    if matches!(state, 3 | 5 | 6) && across > PUT_BACK_PAST && crowd.is_empty() {
+        put_back = Some(across);
+        place(e, g.actor, [spot[0], spot[1], p[2]]);
+        p = read3(e, g.actor + REFR_POSITION);
+        off = [p[0] - spot[0], p[1] - spot[1], p[2] - spot[2]];
+        across = (off[0] * off[0] + off[1] * off[1]).sqrt();
+    }
     let due = t >= g.next_log;
-    let alarm = clamped.is_some() || bones_held > 0 || cleared.is_some() || !crowd.is_empty();
+    let alarm = clamped.is_some()
+        || bones_held > 0
+        || cleared.is_some()
+        || !crowd.is_empty()
+        || put_back.is_some();
     if due || (alarm && t >= g.next_log - WATCH_STEP.as_secs_f32() / 2.0) {
         g.next_log = t + WATCH_STEP.as_secs_f32();
         note(format!(
             "{}: [target no-fling] get-up +{t:.2} s (knock state {state}): at ({:.0}, {:.0}, {:.0}), moved off its spot \
              {across:.0} across and {:.0} up (depenetration); controller velocity ({:.0}, {:.0}, \
-             {:.0}) units/s{}{}{}{}",
+             {:.0}) units/s{}{}{}{}{}",
             describe(e, g.actor),
             p[0],
             p[1],
@@ -2650,13 +2734,15 @@ fn watch_get_up(
             )),
             if bones_held > 0 {
                 format!(
-                    "; clamp: {bones_held} bones held to {BONE_FLING_RISE} units/s, rising to \
-                     {FLUNG_UP_MOST}"
+                    "; clamp: {bones_held} bones held (away from their animated joint, or rising \
+                     more than {RISING_BEYOND} units/s past it; {BONE_FLING_RISE} units/s before \
+                     the animation has them; lying, rising to {FLUNG_UP_MOST})"
                 )
             } else {
                 String::new()
             },
             cleared.map_or(String::new(), |c| format!("; stored push {c:.0} cleared")),
+            put_back.map_or(String::new(), |d| format!("; put back on its spot from {d:.1} across")),
             if crowd.is_empty() {
                 String::new()
             } else {
@@ -2672,6 +2758,39 @@ fn watch_get_up(
         ));
     }
     true
+}
+
+/// How far the actor may be moved off its spot through the get-up before it is put back (game
+/// units).
+pub const PUT_BACK_PAST: f32 = 0.5;
+
+/// How much faster than its animated joint a driven body may rise (game units a second).
+pub const RISING_BEYOND: f32 = 100.0;
+
+/// A body's velocity `v` (game units a second) at `p` driven toward its animated joint `at`
+/// (moving `moves`): what is left once its move away from the joint beyond the joint's own (a
+/// joint coming toward the body carries it along) and a rise more than [`RISING_BEYOND`] past
+/// the joint's are taken off; never a push toward the joint (the game's motors give that).
+/// `None` when it is left as it is (changed by under a unit a second).
+pub fn hold_toward(v: [f32; 3], p: [f32; 3], at: [f32; 3], moves: [f32; 3]) -> Option<[f32; 3]> {
+    let mut w = v;
+    let d = [at[0] - p[0], at[1] - p[1], at[2] - p[2]];
+    let dl = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if dl > 2.0 {
+        let n = [d[0] / dl, d[1] / dl, d[2] / dl];
+        let own = w[0] * n[0] + w[1] * n[1] + w[2] * n[2];
+        let least = (moves[0] * n[0] + moves[1] * n[1] + moves[2] * n[2]).min(0.0);
+        if own < least {
+            for i in 0..3 {
+                w[i] += (least - own) * n[i];
+            }
+        }
+    }
+    if w[2] > moves[2] + RISING_BEYOND {
+        w[2] = moves[2] + RISING_BEYOND;
+    }
+    let change = ((w[0] - v[0]).powi(2) + (w[1] - v[1]).powi(2) + (w[2] - v[2]).powi(2)).sqrt();
+    (change > 1.0).then_some(w)
 }
 
 /// The controller's velocity set to `v` (game units a second; `bhkCharacterProxy::SetLinearVelocity`).
@@ -3071,6 +3190,46 @@ mod tests {
         assert!((v[0] - 6.0).abs() < 1e-4 && (v[1] - 8.0).abs() < 1e-4);
         assert_eq!(clamp_speed([1.0, 2.0, 2.0], 10.0), ([1.0, 2.0, 2.0], false));
         assert_eq!(clamp_speed([f32::NAN, 0.0, 0.0], 10.0), ([0.0; 3], true));
+    }
+
+    /// Knock state 6 (Patrick's bdf710a review): a body driven onto its animated joint is held
+    /// only where it goes away from it beyond the joint's own motion, or rises more than
+    /// `RISING_BEYOND` past it; a still body is never pushed, a fast rise with its joint is left.
+    #[test]
+    fn a_driven_body_is_held_only_against_its_animation() {
+        let at = [0.0, 0.0, 50.0];
+        // Still, its joint rising away: left (the motors' job).
+        assert_eq!(
+            hold_toward([0.0; 3], [0.0, 0.0, 10.0], at, [0.0, 0.0, 300.0]),
+            None
+        );
+        // Rising with its joint at 300 a second: left.
+        assert_eq!(
+            hold_toward([0.0, 0.0, 320.0], [0.0, 0.0, 10.0], at, [0.0, 0.0, 300.0]),
+            None
+        );
+        // Rising 250 past it: held to 100 past.
+        let w = hold_toward([0.0, 0.0, 550.0], [0.0, 0.0, 10.0], at, [0.0, 0.0, 300.0]).unwrap();
+        assert!((w[2] - 400.0).abs() < 1e-3, "{w:?}");
+        // Going away from it sideways: that part off, the rest kept.
+        let w = hold_toward(
+            [0.0, -80.0, 120.0],
+            [0.0, 0.0, 10.0],
+            [0.0, 40.0, 10.0],
+            [0.0; 3],
+        )
+        .unwrap();
+        assert!(w[1].abs() < 1e-3 && (w[2] - 100.0).abs() < 1e-3, "{w:?}");
+        // Its joint coming toward it and it moving along: left.
+        assert_eq!(
+            hold_toward(
+                [0.0, -50.0, 0.0],
+                [0.0, 0.0, 10.0],
+                [0.0, 40.0, 10.0],
+                [0.0, -60.0, 0.0]
+            ),
+            None
+        );
     }
 }
 

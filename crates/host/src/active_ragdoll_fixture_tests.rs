@@ -17,6 +17,18 @@ pub(crate) struct Walked {
     pub trace: Vec<String>,
 }
 
+/// How the fixture's animation moves under the walked actor ([`walked_as`]).
+#[derive(Default, Clone, Copy)]
+pub(crate) struct Motion {
+    /// A walk cycle while its AI walks it: the thighs swinging 20 degrees either way and the
+    /// calves bending with them at a step a 0.55 s, the pelvis bobbing a unit.
+    pub gait: bool,
+    /// The game's stagger animation under the hit (units): from the second frame after it, its
+    /// first frame jumps the pelvis this far back along the hit and drops it a third of that, the
+    /// spine leaning 12 degrees, then over 0.6 s back to the walk.
+    pub stagger: f32,
+}
+
 /// A hit at `v` m/s from the front with its push (catch steps), then from `walk_from` seconds its
 /// AI walks it at `speed` units a second along +X (the reference and the root moved each frame),
 /// for `seconds`.
@@ -26,6 +38,40 @@ pub(crate) fn walked(
     walk_from: f32,
     speed: f32,
     seconds: f32,
+) -> Walked {
+    walked_as(nodes, v, walk_from, speed, seconds, Motion::default())
+}
+
+/// The node `name`'s local turned `deg` degrees about the world axis `axis` (carried into its
+/// parent's frame) from its animation's, and its local moved by the world offset `by`.
+fn pose_in_world(f: &mut Fixture, name: &str, axis: V3, deg: f32, by: V3) {
+    let Some(node) = f.node(name) else { return };
+    let up = rig_fixture::read9(
+        &f.e,
+        f.e.mem.u32(node + rig_fixture::PARENT) + rig_fixture::WORLD_ROTATION,
+    );
+    let a = deg.to_radians();
+    let turn = ragdoll_core::flinch::rotation([axis[0] * a, axis[1] * a, axis[2] * a]);
+    let local = rig_fixture::read9(&f.e, node + rig_fixture::LOCAL_ROTATION);
+    let local = mul(&mul(&transpose(&up), &mul(&turn, &up)), &local);
+    rig_fixture::write9(&mut f.e, node + rig_fixture::LOCAL_ROTATION, &local);
+    let t = rig_fixture::read3(&f.e, node + rig_fixture::LOCAL_TRANSLATION);
+    rig_fixture::write3(
+        &mut f.e,
+        node + rig_fixture::LOCAL_TRANSLATION,
+        add(t, apply_m(&transpose(&up), by)),
+    );
+    f.update();
+}
+
+/// [`walked`] over the animation `motion`.
+pub(crate) fn walked_as(
+    nodes: Vec<rig_fixture::Node>,
+    v: f32,
+    walk_from: f32,
+    speed: f32,
+    seconds: f32,
+    motion: Motion,
 ) -> Walked {
     let mut f = Fixture::new(
         nodes,
@@ -58,7 +104,9 @@ pub(crate) fn walked(
     let mut last = start;
     let mut out = Walked::default();
     let mut before: Option<(V3, V3)> = None;
+    let mut frame = 0u32;
     while start.elapsed().as_secs_f32() < seconds {
+        frame += 1;
         std::thread::sleep(std::time::Duration::from_millis(16));
         let t = start.elapsed().as_secs_f32();
         let dt = last.elapsed().as_secs_f32();
@@ -72,22 +120,62 @@ pub(crate) fn walked(
         }
         rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, reference);
         f.animate();
+        if motion.gait && walking {
+            let phase = (t - walk_from) * std::f32::consts::PI / 0.55;
+            let swing = 20.0 * phase.sin();
+            pose_in_world(
+                &mut f,
+                "Bip01 NonAccum",
+                [0.0, 1.0, 0.0],
+                0.0,
+                [0.0, 0.0, -(phase.cos()).abs()],
+            );
+            pose_in_world(&mut f, "Bip01 L Thigh", [0.0, 1.0, 0.0], swing, [0.0; 3]);
+            pose_in_world(&mut f, "Bip01 R Thigh", [0.0, 1.0, 0.0], -swing, [0.0; 3]);
+            pose_in_world(
+                &mut f,
+                "Bip01 L Calf",
+                [0.0, 1.0, 0.0],
+                -15.0 * (1.0 + phase.cos()),
+                [0.0; 3],
+            );
+            pose_in_world(
+                &mut f,
+                "Bip01 R Calf",
+                [0.0, 1.0, 0.0],
+                -15.0 * (1.0 - phase.cos()),
+                [0.0; 3],
+            );
+        }
+        if motion.stagger > 0.0 && frame >= 2 {
+            // The stagger's first frame at once, then easing back over 0.6 s.
+            let k = 1.0 - ((t - 0.032) / 0.6).clamp(0.0, 1.0);
+            let back = motion.stagger * k;
+            pose_in_world(
+                &mut f,
+                "Bip01 NonAccum",
+                [1.0, 0.0, 0.0],
+                0.0,
+                [0.0, back, -back / 3.0],
+            );
+            pose_in_world(&mut f, "Bip01 Spine", [1.0, 0.0, 0.0], 12.0 * k, [0.0; 3]);
+        }
+        let anim_pelvis = f.world("Bip01 Pelvis").unwrap().1;
         apply(&mut f.e);
         read_drawn(&mut f.e);
         let drawn_pelvis = f.world("Bip01 Pelvis").unwrap().1;
         let root_now = read3(&f.e, root + WORLD_TRANSLATION);
-        // The drawn pelvis's move in the world this frame beyond the AI's walk (the actor's own
-        // move by its AI; the reaction's follow of the feet moves the root, never the drawing).
-        if let Some((p0, _)) = before {
-            let ai = if walking {
-                [speed * dt, 0.0, 0.0]
-            } else {
-                [0.0; 3]
-            };
-            let own = sub(sub(drawn_pelvis, p0), ai);
-            out.pop = out.pop.max(length(own));
+        // The drawn pelvis's move in the world this frame beyond its animation's (the AI's walk
+        // of the actor among it; the reaction's follow of the feet moves the root, never the
+        // drawing).
+        let mut frame_pop = 0.0f32;
+        if let Some((p0, a0)) = before {
+            let own = sub(sub(drawn_pelvis, p0), sub(anim_pelvis, a0));
+            frame_pop = length(own);
+            out.pop = out.pop.max(frame_pop);
         }
-        before = Some((drawn_pelvis, root_now));
+        let _ = (root_now, dt);
+        before = Some((drawn_pelvis, anim_pelvis));
         for foot in ["Bip01 L Foot", "Bip01 R Foot"] {
             let z = f.world(foot).unwrap().1[2];
             out.foot_under = out.foot_under.max(-z);
@@ -104,14 +192,19 @@ pub(crate) fn walked(
             out.delta = out.delta.max(r.drawn_delta);
             out.stretch = out.stretch.max(r.drawn_length);
             out.trace.push(format!(
-                "{t:.3}: pelvis_offset {:.1} delta {:.2} length {:.2} feet z {:.1}/{:.1} steps {} yielded {}",
+                "{t:.3}: pop {frame_pop:.2} pelvis_offset {:.1} delta {:.2} length {:.2} feet z {:.1}/{:.1} steps {} yielded {} jump {:.1} jumps {} rebased {} fade {:.2} spread {:.2}",
                 r.pelvis_now,
                 r.drawn_delta,
                 r.drawn_length,
                 f.world("Bip01 L Foot").unwrap().1[2],
                 f.world("Bip01 R Foot").unwrap().1[2],
                 r.balance.is_some(),
-                r.yield_at.is_some()
+                r.yield_at.is_some(),
+                r.jump_now,
+                r.jumps,
+                r.rebased,
+                r.fade.as_ref().map_or(0.0, |f| f.left()),
+                r.spread_now
             ));
         }
         after_draw(&mut f.e);
@@ -409,6 +502,50 @@ fn a_walked_actor_neither_sinks_nor_pops_on_fnvs_skeleton() {
         w.pop <= 2.0,
         "the pelvis popped {:.2} in a frame:\n{trace}",
         w.pop
+    );
+}
+
+/// The Test Range's walking Ganger hit and staggered (Patrick's bdf710a review, clip 1456 at
+/// 34.3-34.5 s: `drawn_delta` 4.5 units on the stagger hits): on FNV's skeleton, walking with a
+/// walk cycle, the game's stagger animation jumping its pelvis 8 units back under the hit, the
+/// drawn pelvis and feet slide at most 2 units a frame (`drawn_delta`), no pop over 2, no foot
+/// more than 3 under the floor, no bone stretched past 1.
+#[test]
+fn a_walking_ganger_staggered_on_fnvs_skeleton() {
+    let _one = super::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let w = walked_as(
+        rig_fixture::fnv_skeleton(),
+        1.1,
+        0.0,
+        101.0,
+        2.0,
+        Motion {
+            gait: true,
+            stagger: 8.0,
+        },
+    );
+    eprintln!(
+        "RESULT walking Ganger staggered: pelvis off while walked {:.1}, foot under the floor {:.1}, drawn_length {:.2}, drawn_delta {:.2}, pelvis pop beyond the animation {:.2} units/frame",
+        w.pelvis_while_walked, w.foot_under, w.stretch, w.delta, w.pop
+    );
+    let trace = w.trace.join("\n");
+    assert!(w.delta <= 2.0, "drawn_delta {:.2}:\n{trace}", w.delta);
+    assert!(
+        w.pop <= 2.0,
+        "the pelvis popped {:.2} in a frame:\n{trace}",
+        w.pop
+    );
+    assert!(
+        w.foot_under <= 3.0,
+        "a foot {:.1} under the floor:\n{trace}",
+        w.foot_under
+    );
+    assert!(
+        w.stretch <= 1.0,
+        "a bone {:.2} off its length:\n{trace}",
+        w.stretch
     );
 }
 

@@ -316,24 +316,6 @@ impl Fixture {
         self.update();
     }
 
-    /// Every node's world as the ragdoll leaves it: the tree's standing pose turned by `turn`
-    /// (world) about the point `about`, then moved by `by` (the root's translation unchanged:
-    /// a ragdoll moves its bones, not the actor). The locals are left as the animation's.
-    pub fn ragdoll_pose(&mut self, turn: M3, about: V3, by: V3) {
-        self.animate();
-        for i in 1..self.nodes.len() {
-            let n = self.at[i];
-            let r = read9(&self.e, n + WORLD_ROTATION);
-            let p = read3(&self.e, n + WORLD_TRANSLATION);
-            write9(&mut self.e, n + WORLD_ROTATION, &mul(&turn, &r));
-            write3(
-                &mut self.e,
-                n + WORLD_TRANSLATION,
-                add(add(about, apply_m(&turn, sub(p, about))), by),
-            );
-        }
-    }
-
     /// The bodies' velocities (game units a second) by node name, as the doubles keep them.
     pub fn body_velocities(&self) -> Vec<(String, V3)> {
         let mut k = 0u32;
@@ -348,16 +330,74 @@ impl Fixture {
         out
     }
 
-    /// Every body's linear velocity set (game units a second).
-    pub fn set_body_velocities(&mut self, v: V3) {
-        let n = self.nodes.iter().filter(|n| n.body).count() as u32;
-        for k in 0..n {
-            write3(
-                &mut self.e,
-                BODIES + k * BODY_SIZE + 0x10,
-                scale(v, 1.0 / HK),
+    /// Every node's world (rotation, translation), in the list's order.
+    pub fn worlds(&self) -> Vec<(M3, V3)> {
+        self.at
+            .iter()
+            .map(|&n| {
+                (
+                    read9(&self.e, n + WORLD_ROTATION),
+                    read3(&self.e, n + WORLD_TRANSLATION),
+                )
+            })
+            .collect()
+    }
+
+    /// Every node's world set to `worlds` (the list's order; the root's kept), each local worked
+    /// out from its parent's new world (as the ragdoll's sync leaves a node it moves).
+    pub fn set_worlds(&mut self, worlds: &[(M3, V3)]) {
+        let at = self.at.clone();
+        for (&n, &(r, t)) in at.iter().zip(worlds).skip(1) {
+            let parent = self.e.mem.u32(n + PARENT);
+            let (pr, pt, ps) = (
+                read9(&self.e, parent + WORLD_ROTATION),
+                read3(&self.e, parent + WORLD_TRANSLATION),
+                self.e.mem.f32(parent + WORLD_SCALE),
             );
+            let lr = mul(&transpose(&pr), &r);
+            let lt = scale(apply_m(&transpose(&pr), sub(t, pt)), 1.0 / ps.max(1e-3));
+            write9(&mut self.e, n + LOCAL_ROTATION, &lr);
+            write3(&mut self.e, n + LOCAL_TRANSLATION, lt);
+            write9(&mut self.e, n + WORLD_ROTATION, &r);
+            write3(&mut self.e, n + WORLD_TRANSLATION, t);
         }
+    }
+
+    /// Every node's world set to `worlds`, the locals left as they are (as the ragdoll's sync
+    /// draws a node the animation has the local of).
+    pub fn set_worlds_only(&mut self, worlds: &[(M3, V3)]) {
+        let at = self.at.clone();
+        for (&n, (r, t)) in at.iter().zip(worlds).skip(1) {
+            write9(&mut self.e, n + WORLD_ROTATION, r);
+            write3(&mut self.e, n + WORLD_TRANSLATION, *t);
+        }
+    }
+
+    /// The indices (in the list) of the nodes a ragdoll body hangs from, in the bodies' order.
+    pub fn body_nodes(&self) -> Vec<usize> {
+        (0..self.nodes.len())
+            .filter(|&i| self.nodes[i].body)
+            .collect()
+    }
+
+    /// The `k`th body's linear velocity (game units a second), and set.
+    pub fn body_velocity(&self, k: usize) -> V3 {
+        scale(read3(&self.e, BODIES + k as u32 * BODY_SIZE + 0x10), HK)
+    }
+    pub fn set_body_velocity(&mut self, k: usize, v: V3) {
+        write3(
+            &mut self.e,
+            BODIES + k as u32 * BODY_SIZE + 0x10,
+            scale(v, 1.0 / HK),
+        );
+    }
+
+    /// The world (rotation, translation) of the node at `node`.
+    pub fn world_of(&self, node: u32) -> (M3, V3) {
+        (
+            read9(&self.e, node + WORLD_ROTATION),
+            read3(&self.e, node + WORLD_TRANSLATION),
+        )
     }
 
     /// The actor's reference position.

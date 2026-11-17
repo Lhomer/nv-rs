@@ -440,10 +440,12 @@ pub const TORSO_RISE_MOST: f32 = 0.12;
 pub const TORSO_BACK: f32 = 0.45;
 /// An off-centre hit's twist about the vertical, its struck shoulder turned back (degrees at 0.3
 /// and 0.8 m/s; the body's own turn adds up to a degree: 8 to 15 drawn, for a hit [`SHOULDER_HALF`] across from the chest's centre or further; less
-/// nearer the middle), and a head hit's nod (a share of the torso's turn, on the head alone).
+/// nearer the middle), and a head hit's nod (a share of the torso's turn, on the head alone: the
+/// head, carried by the torso's bend, turns 1.1 times the flinch; at 0.8 it turned 1.8 times,
+/// Patrick's bdf710a review, the target 0.8 to 1.2).
 pub const SIDE_TWIST: (f32, f32) = (8.0, 14.0);
 pub const SHOULDER_HALF: f32 = 12.0;
-pub const HEAD_NOD: f32 = 0.8;
+pub const HEAD_NOD: f32 = 0.1;
 /// The physical body's own turn of the torso kept under the drawn flinch (a share): the flinch is
 /// the visible part, the body adds its motion (the arms', the legs').
 pub const BODY_TORSO_SHARE: f32 = 0.25;
@@ -647,7 +649,56 @@ pub fn draw_flinch(
     }
 }
 
-/// The most the shown pelvis may drop under its animated height (game units): a flinch, and/// The most the shown pelvis may drop under its animated height (game units): a flinch, and
+/// How fast the drawn pelvis's offset from its animation may change its speed (game units a
+/// second squared, [`ease_offset`]): 0.83 units a frame's change of a frame's move at 60 frames a
+/// second, 1.45 at 45 (Patrick's bdf710a review: a stagger hit slid the pelvis 4.5 units a frame
+/// against the frame before, `drawn_delta`; the target is 2).
+pub const PELVIS_EASE_ACCEL: f32 = 3000.0;
+/// And at most this much a frame (game units) whatever the frame's time (a long frame would
+/// otherwise allow `PELVIS_EASE_ACCEL` dt^2).
+pub const PELVIS_EASE_FRAME: f32 = 1.2;
+
+/// And never faster than this (game units a second; 1.3 units a frame at 60 frames a second): a
+/// catch-up after the target ran ahead stays under the walked actor's 2 units a frame (Patrick's
+/// a7a2d15 review).
+pub const PELVIS_EASE_SPEED: f32 = 80.0;
+
+/// [`PELVIS_EASE_ACCEL`] for a frame of `dt` held to [`PELVIS_EASE_FRAME`] a frame.
+pub fn pelvis_ease_accel(dt: f32) -> f32 {
+    PELVIS_EASE_ACCEL.min(PELVIS_EASE_FRAME / (dt * dt).max(1e-6))
+}
+
+/// The drawn offset `at` (moving `vel`, units a second) moved over `dt` toward `target`, its speed
+/// changing by at most `accel` a second each second, never past `fastest`, and braking so it stops
+/// on the target (no overshoot): answers where it is and its speed.
+pub fn ease_offset(at: V3, vel: V3, target: V3, accel: f32, fastest: f32, dt: f32) -> (V3, V3) {
+    if dt <= 0.0 || !target.iter().all(|x| x.is_finite()) {
+        return (at, vel);
+    }
+    let d = sub(target, at);
+    let dl = length(d);
+    // The most that still stops on it: this frame's move and the braking after it within reach
+    // (`s dt + s^2 / 2a = d`).
+    let speed = (dl / dt)
+        .min(accel * ((dt * dt + 2.0 * dl / accel).sqrt() - dt))
+        .min(fastest);
+    let want = if dl > 1e-6 {
+        scale(d, speed / dl)
+    } else {
+        [0.0; 3]
+    };
+    let dv = sub(want, vel);
+    let dvl = length(dv);
+    let most = accel * dt;
+    let vel = if dvl > most {
+        add(vel, scale(dv, most / dvl))
+    } else {
+        want
+    };
+    (add(at, scale(vel, dt)), vel)
+}
+
+/// The most the shown pelvis may drop under its animated height (game units): a flinch, and
 /// while catch steps carry it. Patrick's 19-43-08 clip (0c1fbbf): a .44's step sank the Fiend
 /// upright, hips below the ground.
 pub const PELVIS_DROP_FLINCH: f32 = 4.0;
@@ -2708,6 +2759,43 @@ mod tests {
 
     /// One non-toppling hit's body is handed back from [`REACTION_MOST`] after it, busy or not; a
     /// fall's is not; before then the weight is the reaction's own.
+    /// The drawn pelvis's offset eased onto a target that reverses at once (bdf710a's stagger:
+    /// the steps' shift fast home while the body held it): its frame's move never changes by more
+    /// than `PELVIS_EASE_ACCEL` dt^2 against the frame before, it reaches the target and stops
+    /// there without overshooting.
+    #[test]
+    fn the_drawn_pelvis_is_eased_without_overshoot() {
+        let dt = 1.0 / 60.0;
+        let (mut at, mut vel) = ([0.0f32; 3], [0.0f32; 3]);
+        let mut moved_before: Option<V3> = None;
+        let mut most_change = 0.0f32;
+        let mut furthest = 0.0f32;
+        for frame in 0..120 {
+            // Out to 5 units at 3 a frame, then straight back to 0.
+            let target = if frame < 10 {
+                [0.0, -((frame as f32 * 3.0).min(5.0)), 0.0]
+            } else {
+                [0.0; 3]
+            };
+            let (now, v) = ease_offset(at, vel, target, PELVIS_EASE_ACCEL, PELVIS_EASE_SPEED, dt);
+            let moved = sub(now, at);
+            if let Some(m) = moved_before {
+                most_change = most_change.max(length(sub(moved, m)));
+            }
+            moved_before = Some(moved);
+            if frame >= 10 {
+                furthest = furthest.max(now[1]);
+            }
+            at = now;
+            vel = v;
+        }
+        let bound = PELVIS_EASE_ACCEL * dt * dt;
+        assert!(most_change <= bound + 1e-3, "{most_change} against {bound}");
+        assert!(length(vel) <= PELVIS_EASE_SPEED + 1e-3);
+        assert!(furthest <= 0.01, "overshot to {furthest}");
+        assert!(length(at) < 0.01 && length(vel) < 1.0, "{at:?} {vel:?}");
+    }
+
     #[test]
     fn a_reaction_is_handed_back_by_its_time() {
         let t = tuning::get();
@@ -3255,6 +3343,13 @@ mod tests {
         assert!((left.twist + right.twist).abs() < 1e-5, "opposite sides");
         let head = TorsoFlinch::new(0.32, back, [0.0, 0.0, 130.0], chest, fwd, true, None);
         assert!(length(head.nod) > 0.0);
+        // The head's whole turn (the torso's bend it rides on and its nod) 0.8 to 1.2 times the
+        // flinch.
+        let whole = length(add(head.bend, head.nod)) / length(head.bend);
+        assert!(
+            (0.8..=1.2).contains(&whole),
+            "the head turns {whole:.2} times the flinch"
+        );
     }
 
     /// A new body's first frame is held from what was drawn before it: seeded with none (drawn as

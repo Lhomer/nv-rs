@@ -486,6 +486,54 @@ for the shot, the hit's round and the breakdown; a knocked-down actor's fall dam
 attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
 patches (#624) and the knockdown's companion refusal were not on the path.
 
+### bdf710a: the get-up hoisted upside down, the stagger's slide, the head's nod, the launch along the ground (Patrick, 2026-11-17, clip 1456)
+
+On FNV's skeleton (`tests-data/fnv_skeleton.txt`) the get-up fixture now runs knock state 6 as the
+game does (`knockdown_fixture_tests.rs`, `game_get_up`): knock state 1 runs on 4 frames after the
+get-up is allowed, the animation arrives 2 frames into state 6, each body is driven onto its
+animated joint (its velocity pulled toward what reaches it in 0.08 s) and the drawn nodes follow
+the bodies (the animation's locals underneath), the actor nudged a unit a frame. It drives the real
+`get_ups`, write, update, skin read-back and put-back each frame. On bdf710a it fails as the clip
+did ("farthest bone 0 units off"; 9 to 14 bones "held to 400 units/s, rising to 50").
+- **The blend's from-pose** is frozen when the get-up is allowed (ks1 noted it again after `place`),
+  and its offsets wait for the animation: computed on the first frame the animated pose is more
+  than 5 units off it (at most 0.75 s). Nothing is written meanwhile.
+- **The blend is world to world**: from the ragdoll's last pose to what the game draws this frame
+  (the nodes as the bodies left them), each bone's world rotation eased, the pelvis's and a spine
+  root's joints likewise, and each other joint's distance from where its parent and length put it
+  (the bodies' few units apart) faded in, so it ends exactly on the game's drawing. The nodes over
+  and between the rig's bones (NonAccum, the root body's; `Bip01 Neck`) keep the worlds the game drew
+  through the update. Measured: from 36.7 units, at most 253 units/s, the pelvis at most 2.0 over the
+  animation's, a pop at its end of 0.48 units and 0.00 degrees beyond the animation.
+- **The clamps** (ks3/5/6) no longer fight the game's drive: once the animation has the bones a body
+  is held only where it moves away from its animated joint beyond the joint's own motion, or rises
+  more than 100 units/s past it (`hold_toward`, never a push toward it); before, only a fling past
+  400. None held in the fixture once the animation is in.
+- **The actor stays on its spot** in ks3/5/6: moved off it by more than half a unit with no one to
+  step out of, it is put back (`put back on its spot from ... across`).
+- **The pose log** has the drawn get-up every frame an actor is down or getting up
+  (`down_log.rs`): `"down":{"knock_state","pelvis_over_floor","head_over_floor","feet_over_floor",
+  "torso_up","anim_pelvis_over_floor"}`, the clips sampling it each frame; at the end a
+  `[target get-up frames]` note (the fixture: pelvis at most 1.2 over the animation's, 0 frames
+  upside down, the lowest of pelvis, head and feet 7.1 over the floor, the pelvis's largest move
+  beyond the animation outside the blend 0.1).
+- **The stagger's slide** (`drawn_delta` 4.5): handed back, the body's share of the pelvis is held
+  (`Settle`) while the steps' shift springs home at 6 Hz; it showed at once. The drawn pelvis offset
+  is now eased (`active::ease_offset`: 3000 units/s², at most 1.2 units a frame's change, 80 units/s,
+  braking onto it, no overshoot), the actor's follow of its feet passing through at once; the planted
+  foot's weight is eased (smoothstep) as the steps end. A walking Ganger with a walk cycle and the
+  game's stagger animation jumping its pelvis 8 units back: `drawn_delta` 1.22 (bdf710a 2.57), pop
+  1.35, no foot under the floor, `drawn_length` 0.
+- **The head's nod** is a tenth of the flinch (was 0.8): a head hit's head turns 1.1 times the
+  flinch with the torso's bend it rides on (was 1.8; the target 0.8 to 1.2).
+- **The launch** is held and said along the ground: the bodies' mean speed along the flat launch
+  direction held to 1.05 times the hit's for 0.25 s (a falling body's drop had hidden 540 units/s
+  for a 304 hit), and the 0.1 s line reads it along the ground with the fall apart: 307 units/s,
+  1.01 times the hit's 4.35 m/s, while falling 358.
+
+The fixture results are the fixture's (FNV's real node tree and bodies, the game's calls answered by
+doubles, the game's physics and get-up animation modelled); not run in the game.
+
 ### a7a2d15: fly-up on the get-up, a walked actor's sink and pop, the launch (Patrick, 2026-11-17, 1330 and 1332 clips)
 
 Tested on FNV's own skeleton: `crates/host/tests-data/fnv_skeleton.txt`, derived data of

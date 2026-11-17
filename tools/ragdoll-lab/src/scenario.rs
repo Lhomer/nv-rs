@@ -1749,7 +1749,9 @@ mod plank {
     /// a) to d) on the game's tree: 9mm at the chest, the head and the pelvis, and a .44 at the
     /// head. The joints hold (gap under 1 cm), nothing is dropped in 3 s, the body keeps together
     /// (spread under 1.1 m); the struck region bends within 0.15 s (3 degrees; the .44's neck and
-    /// head 8; a pelvis hit's torso lags its pelvis 2.5: 2.6 measured, short of the 3 asked) and
+    /// head 8, at least 2.5 since the head's nod is a tenth of the flinch: Patrick's bdf710a review
+    /// drew the head at 1.8 times the flinch, its target 0.8 to 1.2; a pelvis hit's torso lags its
+    /// pelvis 2.5: 2.6 measured, short of the 3 asked) and
     /// the spine more than the whole body tilts (1.5 times); the tilt about the ankles stays under
     /// 4 degrees and is back within 1 by 0.8 s; and it is never a plank.
     #[test]
@@ -1760,7 +1762,7 @@ mod plank {
             ("hits=9mm@chest", 1.0),
             ("hits=9mm@head", 1.0),
             ("hits=9mm@pelvis", 0.8),
-            ("hits=44@head", 4.0),
+            ("hits=44@head", 2.5),
         ] {
             let r = run(spec);
             eprintln!("{spec}: {r:?}");

@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::rig_fixture::{self, Fixture, Ground, ACTOR, ACTOR_ID};
-use ragdoll_core::flinch::{length, rotation, sub, IDENTITY};
+use ragdoll_core::flinch::{length, rotation, sub, IDENTITY, M3};
 
 /// One at a time with the reactions' own tests: the knockdowns' and the reactions' lists are the
 /// process's.
@@ -46,139 +46,353 @@ fn get_up_of() -> Option<GetUp> {
         .copied()
 }
 
-/// What a get-up did: the actor's reference once set, and each frame of the get-up's drawing
-/// (seconds, the drawn joints of every rig bone).
+/// One frame of a get-up as drawn: seconds, the knock state, the drawn joints of the rig's bones
+/// (the pelvis, the spine's top, the head, the feet), the animated pelvis and head (none before the
+/// animation arrives), the lowest drawn node of the whole skeleton (game units), the actor's
+/// reference.
+#[derive(Clone, Debug)]
+struct Frame {
+    t: f32,
+    state: u8,
+    drawn: Vec<[f32; 3]>,
+    pelvis: [f32; 3],
+    head: [f32; 3],
+    anim_pelvis: Option<[f32; 3]>,
+    anim_head: Option<[f32; 3]>,
+    anim: Option<Vec<[f32; 3]>>,
+    /// The same joints' drawn world rotations, and the animation's.
+    drawn_r: Vec<M3>,
+    anim_r: Option<Vec<M3>>,
+    lowest: f32,
+    reference: [f32; 3],
+    /// The get-up blend drew this frame.
+    blending: bool,
+}
+
+/// What a get-up did.
 struct Run {
     set_at: Option<[f32; 3]>,
     pelvis_found: bool,
     blend_from: f32,
-    frames: Vec<(f32, Vec<[f32; 3]>)>,
-    lowest_drawn: f32,
-    fastest_rise: f32,
+    frames: Vec<Frame>,
+    /// The clips' sample each frame (`active_ragdoll::sample_fields`) with the frame's drawn
+    /// pelvis z.
+    samples: Vec<(u8, f32, String)>,
 }
 
-/// The tree `nodes` lying on its back (its pelvis `over` units over the collision floor at 0, the
-/// navmesh `navmesh` under it), knocked down where it stood at (0, 0, `stood`); `get_ups` and the
-/// reactions' frames run until the get-up animation (standing) has drawn for a second.
-fn get_up(nodes: Vec<rig_fixture::Node>, over: f32, navmesh: f32, stood: f32) -> Run {
+/// The get-up animation at `tau` seconds into it (knock state 6, the animation's own time): the
+/// skeleton lying on its back, then pivoting up about its feet to standing over [`RISE`] seconds,
+/// at the reference `at` (every node's world).
+fn get_up_animation(f: &mut Fixture, at: [f32; 3], tau: f32) -> Vec<(M3, [f32; 3])> {
+    let root = f.at[0];
+    rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, at);
+    f.animate();
+    let standing = f.worlds();
+    let foot = f.world("Bip01 L Foot").unwrap().1;
+    let pivot = [at[0], foot[1], foot[2]];
+    // Lying, its pelvis is at the reference (the game aligns its get-up to the body in knock
+    // state 5): the pivot moved by what the lying pelvis lies off it.
+    let pelvis = f.world("Bip01 Pelvis").unwrap().1;
+    let lying = rotation([std::f32::consts::FRAC_PI_2, 0.0, 0.0]);
+    let pelvis0 = ragdoll_core::flinch::add(
+        pivot,
+        ragdoll_core::flinch::apply_m(&lying, sub(pelvis, pivot)),
+    );
+    let shift = [at[0] - pelvis0[0], at[1] - pelvis0[1], 0.0];
+    let pivot = ragdoll_core::flinch::add(pivot, shift);
+    let standing: Vec<(M3, [f32; 3])> = standing
+        .iter()
+        .map(|(r, t)| (*r, ragdoll_core::flinch::add(*t, shift)))
+        .collect();
+    let k = ragdoll_core::active::ease((tau / RISE).clamp(0.0, 1.0));
+    let turn = rotation([std::f32::consts::FRAC_PI_2 * (1.0 - k), 0.0, 0.0]);
+    // The root (the actor's node) stays where the actor is: the animation moves the bones under it.
+    let root_world = f.world_of(root);
+    standing
+        .iter()
+        .enumerate()
+        .map(|(i, (r, t))| {
+            if i == 0 {
+                return root_world;
+            }
+            (
+                ragdoll_core::flinch::mul(&turn, r),
+                ragdoll_core::flinch::add(
+                    pivot,
+                    ragdoll_core::flinch::apply_m(&turn, sub(*t, pivot)),
+                ),
+            )
+        })
+        .collect()
+}
+
+/// How long the fixture's get-up animation takes to stand (s), how many frames into knock state 6
+/// it arrives (the game's: 1 to 3), how many frames knock state 1 runs on after the get-up is
+/// allowed.
+const RISE: f32 = 1.5;
+const ARRIVES: u32 = 2;
+const STATE_1_AFTER: u32 = 4;
+/// How fast the game's motors drive a body onto its animated joint (s to get there).
+const DRIVE: f32 = 0.08;
+
+/// A get-up on the tree `nodes` as the game runs it (Patrick's bdf710a review):
+/// - the ragdoll lying on its back on the collision floor at 0 (the navmesh 8 under it), turned
+///   35 degrees off the way the get-up animation will lie, its bodies driving the nodes (the
+///   locals worked out from them);
+/// - `get_ups` each frame; knock state 1 runs on [`STATE_1_AFTER`] frames after the get-up is
+///   allowed, then 3 and 5 a frame each, then 6;
+/// - in 6 the bodies still drive the nodes until the animation arrives ([`ARRIVES`] frames late);
+///   from then the animation's locals are in the nodes and each body is driven onto its node's
+///   animated pose (its velocity set to get there in a frame, before `get_ups` may hold it, then
+///   moved by it), the drawn nodes following the bodies; after [`RISE`] it is standing, knock state
+///   0, the animation alone;
+/// - the reactions' frame each frame: the real write, update, skin read and put-back.
+fn game_get_up(nodes: Vec<rig_fixture::Node>) -> Run {
     let mut f = Fixture::new(
         nodes,
         Ground {
             collision: Some(0.0),
-            navmesh,
+            navmesh: -8.0,
         },
     );
     crate::active_ragdoll::clear();
     clear();
-    rig_fixture::write3(
-        &mut f.e,
-        ACTOR + rig_fixture::REFR_POSITION,
-        [0.0, 0.0, stood],
-    );
-    let pelvis_standing = f.world("Bip01 Pelvis").expect("a pelvis").1;
-    // On its back: turned a quarter about the side axis (its head toward -Y), the pelvis `over`
-    // units over the floor.
-    let back = rotation([std::f32::consts::FRAC_PI_2, 0.0, 0.0]);
-    f.ragdoll_pose(back, pelvis_standing, [0.0, 0.0, over - pelvis_standing[2]]);
+    let reference = [0.0f32, 0.0, 0.0];
+    rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, reference);
+    // The ragdoll: the animation's first frame turned 35 degrees about the pelvis and lifted 2.
+    let lying = get_up_animation(&mut f, reference, 0.0);
+    let pelvis_i = f
+        .nodes
+        .iter()
+        .position(|n| n.name == "Bip01 Pelvis")
+        .unwrap();
+    let about = lying[pelvis_i].1;
+    let yaw = rotation([0.0, 0.0, 35f32.to_radians()]);
+    let mut ragdoll: Vec<(M3, [f32; 3])> = lying
+        .iter()
+        .enumerate()
+        .map(|(i, (r, t))| {
+            if i == 0 {
+                return (*r, *t);
+            }
+            (
+                ragdoll_core::flinch::mul(&yaw, r),
+                ragdoll_core::flinch::add(
+                    ragdoll_core::flinch::add(
+                        about,
+                        ragdoll_core::flinch::apply_m(&yaw, sub(*t, about)),
+                    ),
+                    [0.0, 0.0, 2.0],
+                ),
+            )
+        })
+        .collect();
+    f.set_worlds(&ragdoll);
     f.set_knock_state(1);
-    knocked([0.0, 0.0, stood], 1.0);
+    knocked(reference, 1.0);
+    let bodies_at = f.body_nodes();
     let mut run = Run {
         set_at: None,
         pelvis_found: false,
         blend_from: 0.0,
         frames: Vec::new(),
-        lowest_drawn: f32::MAX,
-        fastest_rise: 0.0,
+        samples: Vec::new(),
     };
-    // Lying still until it is let up.
-    for _ in 0..60 {
-        get_ups(&mut f.e);
-        if let Some(g) = get_up_of() {
-            if let Some((_, at)) = g.placed {
-                run.set_at = Some(at);
-                break;
+    let start = Instant::now();
+    let mut last = start;
+    let mut state: u8 = 1;
+    let mut after_allowed = 0u32;
+    let mut in_6 = 0u32;
+    let mut arrived: Option<Instant> = None;
+    let mut done: Option<Instant> = None;
+    let mut first_blend_frame = true;
+    while start.elapsed() < Duration::from_secs(6) {
+        std::thread::sleep(Duration::from_millis(16));
+        let dt = last.elapsed().as_secs_f32();
+        last = Instant::now();
+        // The game's knock state.
+        if state == 1 && run.set_at.is_some() {
+            after_allowed += 1;
+            if after_allowed > STATE_1_AFTER {
+                state = 3;
+            }
+        } else if state == 3 {
+            state = 5;
+        } else if state == 5 {
+            state = 6;
+        } else if state == 6 {
+            in_6 += 1;
+            if in_6 > ARRIVES && arrived.is_none() {
+                arrived = Some(Instant::now());
+            }
+            if arrived.is_some_and(|a| a.elapsed().as_secs_f32() >= RISE) {
+                state = 0;
+                done = Some(Instant::now());
             }
         }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    let bones = bodies(&mut f.e, ACTOR);
-    run.pelvis_found = pelvis_pos(&mut f.e, ACTOR, &bones).is_some();
-    // The game's get-up: states 3 and 5 a frame each (the bodies still lying), then 6: the get-up
-    // animation (standing at the reference it was set at) has the locals, and the physics pushes
-    // the bodies up out of the floor (the depenetration a7a2d15 drew as a handstand).
-    for state in [3u8, 5] {
-        f.set_knock_state(state);
-        get_ups(&mut f.e);
-    }
-    let reference = f.reference();
-    f.set_knock_state(6);
-    let root = f.at[0];
-    rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, reference);
-    f.animate();
-    // The animated (standing) drawing, the drawn pose at 6's first frame.
-    let anim: Vec<[f32; 3]> = ragdoll_core::flinch::BONES
-        .iter()
-        .filter_map(|(n, _)| f.world(n).map(|w| w.1))
-        .collect();
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_millis(1100) {
-        std::thread::sleep(Duration::from_millis(16));
-        f.set_body_velocities([0.0, 0.0, 300.0]);
-        get_ups(&mut f.e);
-        let up = f
-            .body_velocities()
-            .iter()
-            .map(|(_, v)| v[2])
-            .fold(0.0, f32::max);
-        run.fastest_rise = run.fastest_rise.max(up);
-        f.animate();
-        crate::active_ragdoll::apply(&mut f.e);
-        let drawn: Vec<[f32; 3]> = ragdoll_core::flinch::BONES
-            .iter()
-            .filter_map(|(n, _)| f.world(n).map(|w| w.1))
-            .collect();
-        if run.frames.is_empty() {
-            run.blend_from = drawn
-                .iter()
-                .zip(&anim)
-                .map(|(a, b)| length(sub(*a, *b)))
-                .fold(0.0, f32::max);
+        if done.is_some_and(|d| d.elapsed() > Duration::from_millis(400)) {
+            break;
         }
-        run.lowest_drawn = drawn.iter().map(|p| p[2]).fold(run.lowest_drawn, f32::min);
-        run.frames.push((start.elapsed().as_secs_f32(), drawn));
+        f.set_knock_state(state);
+        let reference = f.reference();
+        // The animation's pose now (none before it arrives).
+        let anim = arrived.map(|a| {
+            let tau = a.elapsed().as_secs_f32();
+            get_up_animation(&mut f, reference, tau)
+        });
+        // The game's physics: a driven body's motor pulls its velocity toward what reaches its
+        // animated joint in [`DRIVE`] seconds (half the way a frame; its velocity, which nv-rs may
+        // have held last frame, kept); then each body moves by its velocity, a driven one turning
+        // onto its animated rotation. Lying, the bodies are still.
+        for (k, &i) in bodies_at.iter().enumerate() {
+            let v = match (&anim, state) {
+                (Some(a), 6) => {
+                    let need = scale_v(sub(a[i].1, ragdoll[i].1), 1.0 / DRIVE);
+                    let was = f.body_velocity(k);
+                    [0, 1, 2].map(|c| was[c] + (need[c] - was[c]) * 0.5)
+                }
+                _ => [0.0; 3],
+            };
+            f.set_body_velocity(k, v);
+            ragdoll[i].1 = ragdoll_core::flinch::add(ragdoll[i].1, scale_v(v, dt));
+            if let (Some(a), 6) = (&anim, state) {
+                ragdoll[i].0 = a[i].0;
+            }
+        }
+        // The nodes: in the ragdoll the bodies drive them (and their locals), the animation's
+        // own rule for a node with no body; in 6 once the animation is in, the animation's locals
+        // with the bodies' worlds drawn; in 0 the animation alone.
+        match (&anim, state) {
+            (Some(a), 0) => {
+                f.set_worlds(a);
+                ragdoll = a.clone();
+            }
+            (Some(a), 6) => {
+                f.set_worlds(a);
+                let mut drawn = a.clone();
+                for &i in &bodies_at {
+                    drawn[i] = ragdoll[i];
+                }
+                // A node with no body under a body's node follows it with its animated local.
+                follow_bodies(&mut f, &mut drawn, &bodies_at);
+                f.set_worlds_only(&drawn);
+            }
+            _ => {
+                let mut drawn = ragdoll.clone();
+                follow_bodies(&mut f, &mut drawn, &bodies_at);
+                f.set_worlds(&drawn);
+            }
+        }
+        // The game's depenetration nudging the actor in knock state 6 (a unit a frame along x).
+        if state == 6 {
+            let mut r = f.reference();
+            r[0] += 1.0;
+            rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, r);
+        }
+        // nv-rs's frame (the knockdowns' bookkeeping: its holds of the bodies' velocities, which
+        // the next step moves them by).
+        get_ups(&mut f.e);
+        if run.set_at.is_none() {
+            if let Some((_, at)) = get_up_of().and_then(|g| g.placed) {
+                run.set_at = Some(at);
+                let bones = bodies(&mut f.e, ACTOR);
+                run.pelvis_found = pelvis_pos(&mut f.e, ACTOR, &bones).is_some();
+            }
+        }
+        // The reactions' frame: the write (a get-up blend), the world pass's read, the put-back.
+        crate::active_ragdoll::apply(&mut f.e);
+        crate::active_ragdoll::read_drawn(&mut f.e);
+        let all = f.worlds();
+        let at = |n: &str| f.world(n).unwrap().1;
+        const NAMED: [&str; 5] = [
+            "Bip01 Pelvis",
+            "Bip01 Spine2",
+            "Bip01 Head",
+            "Bip01 L Foot",
+            "Bip01 R Foot",
+        ];
+        let named: Vec<[f32; 3]> = NAMED.iter().map(|n| at(n)).collect();
+        let named_r: Vec<M3> = NAMED.iter().map(|n| f.world(n).unwrap().0).collect();
+        let index = |n: &str| f.nodes.iter().position(|x| x.name == n).unwrap();
+        if state == 6 && arrived.is_some() && first_blend_frame {
+            if let Some(rig) = crate::active_ragdoll::get_up_blend_from(ACTOR) {
+                first_blend_frame = false;
+                run.blend_from = rig;
+            }
+        }
+        let head_i = f.nodes.iter().position(|n| n.name == "Bip01 Head").unwrap();
+        let skeleton: Vec<usize> = (1..f.nodes.len())
+            .filter(|&i| {
+                f.nodes[i].name.starts_with("Bip01 ") && f.nodes[i].name != "Bip01 NonAccum"
+            })
+            .collect();
+        run.frames.push(Frame {
+            t: start.elapsed().as_secs_f32(),
+            state,
+            pelvis: named[0],
+            head: named[2],
+            drawn: named,
+            anim_pelvis: anim.as_ref().map(|a| a[pelvis_i].1),
+            anim_head: anim.as_ref().map(|a| a[head_i].1),
+            anim: anim
+                .as_ref()
+                .map(|a| NAMED.iter().map(|n| a[index(n)].1).collect()),
+            drawn_r: named_r,
+            anim_r: anim
+                .as_ref()
+                .map(|a| NAMED.iter().map(|n| a[index(n)].0).collect()),
+            lowest: skeleton
+                .iter()
+                .map(|&i| all[i].1[2])
+                .fold(f32::INFINITY, f32::min),
+            reference: f.reference(),
+            blending: crate::active_ragdoll::get_up_blending(ACTOR),
+        });
         crate::active_ragdoll::after_draw(&mut f.e);
+        let drawn_pelvis = run.frames.last().map_or(0.0, |x| x.pelvis[2]);
+        run.samples.push((
+            state,
+            drawn_pelvis,
+            crate::active_ragdoll::sample_fields(ACTOR),
+        ));
         crate::active_ragdoll::unwrite(&mut f.e);
     }
     crate::active_ragdoll::clear();
     clear();
-    let _ = IDENTITY;
     run
 }
 
-fn fastest(frames: &[(f32, Vec<[f32; 3]>)]) -> f32 {
-    frames
-        .windows(2)
-        .map(|w| {
-            let dt = (w[1].0 - w[0].0).max(1e-3);
-            w[1].1
-                .iter()
-                .zip(&w[0].1)
-                .map(|(a, b)| length(sub(*a, *b)) / dt)
-                .fold(0.0, f32::max)
-        })
-        .fold(0.0, f32::max)
+fn scale_v(v: [f32; 3], k: f32) -> [f32; 3] {
+    v.map(|x| x * k)
 }
 
-/// The get-up on the mannequin laid out as FNV's tree (no body on the pelvis), lying 9 units over
-/// a collision floor at 0 with the navmesh 8 under it, knocked down where it stood on that floor:
-/// the pelvis is found, the actor is set on the collision floor (never the navmesh, never the
-/// lowest bone), the blend starts from the ragdoll's pose (its farthest bone well off the
-/// animation's) and eases (no bone drawn over 400 units a second), no body rises faster than 50
-/// units a second through the get-up, and nothing is drawn under the floor by more than 3.
-#[test]
-fn the_get_up_finds_its_pelvis_sets_it_on_the_floor_and_blends() {
-    let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
-    let run = get_up(rig_fixture::mannequin(), 9.0, -8.0, 0.0);
+/// Each node with no body is drawn from its parent's drawn world and its own local (as the game's
+/// update places it), parents first.
+fn follow_bodies(f: &mut Fixture, drawn: &mut [(M3, [f32; 3])], bodies_at: &[usize]) {
+    for i in 1..f.nodes.len() {
+        if bodies_at.contains(&i) {
+            continue;
+        }
+        let Some(p) = f.nodes[i].parent else { continue };
+        let n = f.at[i];
+        let local_r = rig_fixture::read9(&f.e, n + rig_fixture::LOCAL_ROTATION);
+        let local_t = rig_fixture::read3(&f.e, n + rig_fixture::LOCAL_TRANSLATION);
+        let (pr, pt) = drawn[p];
+        drawn[i] = (
+            ragdoll_core::flinch::mul(&pr, &local_r),
+            ragdoll_core::flinch::add(pt, ragdoll_core::flinch::apply_m(&pr, local_t)),
+        );
+    }
+}
+
+/// The checks of Patrick's bdf710a review on a get-up's frames (every frame of knock states 1 to
+/// 6 and the frames after): the blend starts at least 20 units off the animation and eased (its
+/// first frame drawn as the ragdoll lay); the drawn pelvis never more than 10 units over the
+/// animation's; the torso never upside down (the head more than 20 under the pelvis) unless the
+/// animation has it; no node more than 3 under the floor; no frame moving a drawn joint more than
+/// 2 units beyond the animation's own move (the blend's end and the animation's taking over
+/// included); the actor not moved in knock state 6. Answers a summary for the report.
+fn check_get_up(run: &Run) -> String {
     let set = run.set_at.expect("never let up");
     assert!(run.pelvis_found, "no pelvis found");
     assert!(
@@ -187,68 +401,156 @@ fn the_get_up_finds_its_pelvis_sets_it_on_the_floor_and_blends() {
         set[2]
     );
     assert!(
-        run.blend_from > 20.0,
+        run.blend_from >= 20.0,
         "the blend starts {:.1} off the animation",
         run.blend_from
     );
-    let v = fastest(&run.frames);
-    eprintln!(
-        "RESULT get-up: pelvis found {}, set at z {:.2}, blend from {:.1} units, fastest drawn bone {v:.0} u/s, fastest body rising {:.0} u/s, lowest drawn joint z {:.1}",
-        run.pelvis_found, set[2], run.blend_from, run.fastest_rise, run.lowest_drawn
-    );
-    assert!(v <= 400.0, "a bone drawn at {v:.0} units/s in the get-up");
+    // The pose log has the drawn get-up every frame of knock states 1 to 6 (bdf710a's had none):
+    // the pelvis it says as drawn, the torso's up-axis, the animation's pelvis once it is in.
+    for (state, pelvis, sample) in &run.samples {
+        if !(1..=6).contains(state) {
+            continue;
+        }
+        let said = sample
+            .split("\"pelvis_over_floor\":")
+            .nth(1)
+            .and_then(|x| x.split(',').next())
+            .and_then(|x| x.parse::<f32>().ok())
+            .unwrap_or_else(|| panic!("no drawn pelvis in knock state {state}'s sample: {sample}"));
+        assert!(
+            (said - pelvis).abs() < 0.1,
+            "the sample says the pelvis at {said}, drawn at {pelvis}: {sample}"
+        );
+        assert!(
+            sample.contains(&format!("\"down\":{{\"knock_state\":{state},")),
+            "{sample}"
+        );
+        assert!(sample.contains("\"torso_up\":"), "{sample}");
+    }
     assert!(
-        run.fastest_rise <= 50.0 + 0.5,
-        "a body rising {:.0} units/s",
-        run.fastest_rise
+        run.samples
+            .iter()
+            .any(|(s, _, x)| *s == 6 && !x.contains("\"anim_pelvis_over_floor\":null")),
+        "no animation pelvis logged in knock state 6"
+    );
+    let trace: Vec<String> = run
+        .frames
+        .iter()
+        .map(|x| {
+            format!(
+                "{:.3} ks{}{}: pelvis z {:.1} (anim {}), head z {:.1}, lowest {:.1}",
+                x.t,
+                x.state,
+                if x.blending { " blend" } else { "" },
+                x.pelvis[2],
+                x.anim_pelvis.map_or("-".into(), |a| format!("{:.1}", a[2])),
+                x.head[2],
+                x.lowest
+            )
+        })
+        .collect();
+    let trace = trace.join("\n");
+    let (mut over_anim, mut inverted, mut lowest, mut pop, mut moved) =
+        (0.0f32, 0, f32::MAX, 0.0f32, 0.0f32);
+    let (mut blend_fastest, mut turn_pop) = (0.0f32, 0.0f32);
+    let ref6 = run
+        .frames
+        .iter()
+        .find(|x| x.state == 6)
+        .map(|x| x.reference);
+    for w in run.frames.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        if let Some(ap) = b.anim_pelvis {
+            over_anim = over_anim.max(b.pelvis[2] - ap[2]);
+        }
+        let anim_inverted = b
+            .anim_head
+            .zip(b.anim_pelvis)
+            .is_some_and(|(h, p)| h[2] < p[2] - 20.0);
+        if b.head[2] < b.pelvis[2] - 20.0 && !anim_inverted {
+            inverted += 1;
+        }
+        lowest = lowest.min(b.lowest);
+        let own: Vec<[f32; 3]> = match (&a.anim, &b.anim) {
+            (Some(x), Some(y)) => x.iter().zip(y).map(|(p, q)| sub(*q, *p)).collect(),
+            _ => vec![[0.0; 3]; b.drawn.len()],
+        };
+        let step = b
+            .drawn
+            .iter()
+            .zip(&a.drawn)
+            .zip(&own)
+            .map(|((q, p), o)| length(sub(sub(*q, *p), *o)))
+            .fold(0.0, f32::max);
+        // The blend itself eases the body over (at most 400 units a second along a bone's arc);
+        // every other frame, its end and the animation's taking over among them, no pop.
+        if b.blending {
+            blend_fastest = blend_fastest.max(step / (b.t - a.t).max(1e-3));
+        } else {
+            pop = pop.max(step);
+            // Each joint's turn this frame beyond the animation's own (the drawn rotation's
+            // change against the animated one's).
+            for (k, (q, p)) in b.drawn_r.iter().zip(&a.drawn_r).enumerate() {
+                let own = match (&a.anim_r, &b.anim_r) {
+                    (Some(x), Some(y)) => {
+                        ragdoll_core::flinch::mul(&y[k], &ragdoll_core::flinch::transpose(&x[k]))
+                    }
+                    _ => IDENTITY,
+                };
+                let moved = ragdoll_core::flinch::mul(q, &ragdoll_core::flinch::transpose(p));
+                turn_pop = turn_pop.max(rig_fixture::degrees_between(&moved, &own));
+            }
+        }
+        if b.state == 6 {
+            if let Some(r) = ref6 {
+                moved = moved.max(length(sub(b.reference, r)));
+            }
+        }
+    }
+    let summary = format!(
+        "pelvis found {}, set at z {:.2}, blend from {:.1} units, drawn pelvis over the animation's at most {over_anim:.1}, inverted frames {inverted}, lowest node z {lowest:.1}, largest per-frame move beyond the animation outside the blend {pop:.2} units and {turn_pop:.2} degrees, fastest drawn joint in the blend {blend_fastest:.0} units/s, actor moved in ks6 {moved:.2}",
+        run.pelvis_found, set[2], run.blend_from
     );
     assert!(
-        run.lowest_drawn >= -3.0,
-        "drawn {:.1} under the floor",
-        run.lowest_drawn
+        over_anim <= 10.0,
+        "drawn pelvis {over_anim:.1} over the animation's:\n{trace}"
     );
+    assert_eq!(inverted, 0, "{inverted} frames upside down:\n{trace}");
+    assert!(
+        lowest >= -3.0,
+        "a node {lowest:.1} under the floor:\n{trace}"
+    );
+    assert!(
+        pop <= 2.0,
+        "a drawn joint moved {pop:.2} units in a frame beyond the animation:\n{trace}"
+    );
+    assert!(
+        turn_pop <= 1.0,
+        "a drawn joint turned {turn_pop:.2} degrees in a frame beyond the animation:\n{trace}"
+    );
+    assert!(moved <= 0.5, "the actor moved {moved:.2} in knock state 6");
+    assert!(
+        blend_fastest <= 420.0,
+        "a joint drawn at {blend_fastest:.0} units/s in the blend:\n{trace}"
+    );
+    summary
 }
 
-/// The get-up on FNV's own skeleton (no body on the pelvis; the root body on `Bip01 NonAccum`).
+/// The tester's anti-materiel get-up on FNV's own skeleton, as the game runs knock state 6.
 #[test]
 fn the_get_up_on_fnvs_skeleton() {
     let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
-    let run = get_up(rig_fixture::fnv_skeleton(), 9.0, -8.0, 0.0);
-    let set = run.set_at.expect("never let up");
-    assert!(run.pelvis_found, "no pelvis found");
-    assert!(
-        set[2].abs() < 0.5,
-        "set at z {:.1}, not on the collision floor at 0",
-        set[2]
-    );
-    assert!(
-        run.blend_from > 20.0,
-        "the blend starts {:.1} off the animation",
-        run.blend_from
-    );
-    let v = fastest(&run.frames);
-    eprintln!(
-        "RESULT get-up: pelvis found {}, set at z {:.2}, blend from {:.1} units, fastest drawn bone {v:.0} u/s, fastest body rising {:.0} u/s, lowest drawn joint z {:.1}",
-        run.pelvis_found, set[2], run.blend_from, run.fastest_rise, run.lowest_drawn
-    );
-    assert!(v <= 400.0, "a bone drawn at {v:.0} units/s in the get-up");
-    assert!(
-        run.fastest_rise <= 50.0 + 0.5,
-        "a body rising {:.0} units/s",
-        run.fastest_rise
-    );
-    assert!(
-        run.lowest_drawn >= -3.0,
-        "drawn {:.1} under the floor",
-        run.lowest_drawn
-    );
+    let run = game_get_up(rig_fixture::fnv_skeleton());
+    let summary = check_get_up(&run);
+    eprintln!("RESULT get-up (FNV skeleton): {summary}");
 }
 
 /// The launch on FNV's skeleton: a reacting body (a hit's active ragdoll) switched to the ragdoll
 /// at 4.35 m/s along the hit (`give_launch`), then the game's own knock-down push adding 170 units
 /// a second along it (`KnockExplosion`, a7a2d15 held 470 for a 304 units/s hit). The launch check
 /// (`launches`, each frame) holds the bodies' speed along it within 10% of the hit's through its
-/// window and says the root body's velocity 0.1 s after the switch, also within 10%.
+/// window and says the root body's velocity along the ground 0.1 s after the switch, also within
+/// 10%, though the body falls (400 units a second off a ledge, then gravity).
 #[test]
 fn the_launch_is_the_hits_speed_on_fnvs_skeleton() {
     let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
@@ -302,9 +604,27 @@ fn the_launch_is_the_hits_speed_on_fnvs_skeleton() {
         said: false,
         held_said: false,
     });
+    // Knocked off a ledge: the bodies falling 400 units a second, gravity on them each frame (the
+    // 0.1 s line read 1.91 times the hit from such a fall: Patrick's bdf710a review, 38.67 s).
+    let fall = |f: &mut Fixture, by: f32| {
+        for &(_, b) in &bodies(&mut f.e, ACTOR) {
+            let v = linear(&mut f.e, b).unwrap();
+            set_velocity(
+                &mut f.e,
+                SET_LINEAR_VELOCITY,
+                b,
+                [v[0], v[1], v[2] - by / rig_fixture::HK],
+            );
+        }
+    };
+    fall(&mut f, 400.0);
     let mut most = 0.0f32;
     let start = Instant::now();
+    let mut last = Instant::now();
     while start.elapsed() < Duration::from_millis(350) {
+        let dt = last.elapsed().as_secs_f32();
+        last = Instant::now();
+        fall(&mut f, 686.0 * dt);
         launches(&mut f.e);
         let along: Vec<f32> = f
             .body_velocities()
