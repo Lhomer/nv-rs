@@ -63,6 +63,12 @@ pub struct Spec {
     pub read_back: bool,
     pub leave_written: bool,
     pub aim_pass: bool,
+    /// The animation's L Calf jumping (0.3 rad, about 150 tolerances) this many frames after the
+    /// first hit and staying there: the game's hit animation starting under the reaction
+    /// (`legjump=2`; read back with `readback=1`).
+    pub leg_jump: Option<u32>,
+    /// The heading it starts at (degrees; `face=180` faces the obstacles).
+    pub face: f32,
     /// The player's perks (`perks=stoppingpower,hotloads,bowlingball`).
     pub perks: crate::sim::Perks,
     pub limbs: Limbs,
@@ -91,6 +97,8 @@ impl Default for Spec {
             read_back: false,
             leave_written: false,
             aim_pass: false,
+            leg_jump: None,
+            face: 0.0,
             perks: crate::sim::Perks::default(),
             limbs: Limbs::WHOLE,
             armed: false,
@@ -170,7 +178,7 @@ pub const BUILT_IN: [(&str, &str, &str); 32] = [
     ),
     (
         "wall-brace",
-        "ground=wall&hits=4570@chest",
+        "face=180&ground=wall&hits=4570@chest",
         "upright,braced,vjump<=2,armspin<=6.5",
     ),
     (
@@ -219,10 +227,12 @@ pub const BUILT_IN: [(&str, &str, &str); 32] = [
         "fell,armspin<=6.5",
     ),
     // The world (Patrick, 2026-11-15): obstacles found at several heights and across the body,
-    // braced on at their height, folded over, tripped on; and sustained fire escalating.
+    // braced on at their height, folded over, tripped on; and sustained fire escalating. The
+    // braces face their obstacle (`face=180`: shot from behind into it): hands never brace behind
+    // the back (`ragdoll_core::brace::hand_may_brace`, Patrick's 21-16-09 clip).
     (
         "railing-brace",
-        "ground=railing&hits=4570@chest",
+        "face=180&ground=railing&hits=4570@chest",
         "upright,braced:waist,armspin<=6.5",
     ),
     (
@@ -232,7 +242,7 @@ pub const BUILT_IN: [(&str, &str, &str); 32] = [
     ),
     (
         "table-edge-brace",
-        "ground=table&hits=4570@chest",
+        "face=180&ground=table&hits=4570@chest",
         "upright,braced:waist,armspin<=6.5",
     ),
     (
@@ -242,7 +252,7 @@ pub const BUILT_IN: [(&str, &str, &str); 32] = [
     ),
     (
         "gap-railing",
-        "ground=gaprailing&hits=4570@chest",
+        "face=180&ground=gaprailing&hits=4570@chest",
         "upright,braced:waist,armspin<=6.5",
     ),
     (
@@ -254,34 +264,34 @@ pub const BUILT_IN: [(&str, &str, &str); 32] = [
     // keeps its aim (a rifle's support hand lets go of it).
     (
         "armed-pistol-wall-brace",
-        "ground=wall&armed=pistol&hits=4570@chest",
+        "face=180&ground=wall&armed=pistol&hits=4570@chest",
         "upright,braced,onehand,armspin<=6.5",
     ),
     (
         "armed-rifle-wall-brace",
-        "ground=wall&armed=rifle&hits=4570@chest",
+        "face=180&ground=wall&armed=rifle&hits=4570@chest",
         "upright,braced,onehand,armspin<=6.5",
     ),
     (
         "armed-pistol-railing-brace",
-        "ground=railing&armed=pistol&hits=4570@chest",
+        "face=180&ground=railing&armed=pistol&hits=4570@chest",
         "upright,braced:waist,onehand,armspin<=6.5",
     ),
     (
         "armed-rifle-railing-brace",
-        "ground=railing&armed=rifle&hits=4570@chest",
+        "face=180&ground=railing&armed=rifle&hits=4570@chest",
         "upright,braced:waist,onehand,armspin<=6.5",
     ),
     // The support hand goes back to the rifle's grip smoothly after the brace (Patrick,
     // 2026-11-15, e2e5531 reel: it wobbled as it regripped).
     (
         "rifle-wall-regrip",
-        "ground=wall&armed=rifle&hits=4570@chest/10",
+        "face=180&ground=wall&armed=rifle&hits=4570@chest/10",
         "upright,braced,onehand,regripped,regripover<=0.5,regripwobble<=0,armspin<=6.5",
     ),
     (
         "rifle-railing-regrip",
-        "ground=railing&armed=rifle&hits=4570@chest/-10",
+        "face=180&ground=railing&armed=rifle&hits=4570@chest/-10",
         "upright,braced:waist,onehand,regripped,regripover<=0.5,regripwobble<=0,armspin<=6.5",
     ),
 ];
@@ -403,6 +413,10 @@ impl Spec {
                     spec.leave_written = value == "written";
                 }
                 "aimpass" => spec.aim_pass = value == "1",
+                "face" => spec.face = value.parse().map_err(|_| "face".to_string())?,
+                "legjump" => {
+                    spec.leg_jump = Some(value.parse().map_err(|_| "legjump".to_string())?)
+                }
                 "perks" => {
                     for perk in value.split(',').filter(|p| !p.is_empty()) {
                         match perk {
@@ -622,6 +636,9 @@ pub fn prepare(sim: &mut Sim, spec: &Spec, base: Tuning) -> Result<(), String> {
     sim.read_back = spec.read_back;
     sim.leave_written = spec.leave_written;
     sim.aim_pass = spec.aim_pass;
+    // The first hit fires 0.3 s in (`run`).
+    sim.leg_jump_at = spec.leg_jump.map(|n| 0.3 + n as f64 * STEP as f64);
+    sim.face = spec.face.to_radians();
     sim.perks = spec.perks;
     sim.set_limbs(spec.limbs);
     sim.armed = spec.armed;
@@ -922,6 +939,20 @@ mod tests {
                     r.expect, r.steps, r.fall, r.decisions
                 ));
             }
+            // Every drawn bone keeps its length, and none is drawn far off its animation (a fall's
+            // and a bracing arm's own aside: Patrick's 21-16-09 clip, a creature 1047 units off).
+            if sim.stats.length_change > 0.5 {
+                failed.push(format!(
+                    "{name}: a bone's length {:.2} units off",
+                    sim.stats.length_change
+                ));
+            }
+            if sim.stats.drawn_most_off > ragdoll_core::active::MOST_DRAWN_OFF {
+                failed.push(format!(
+                    "{name}: a bone drawn {:.1} units off its animation",
+                    sim.stats.drawn_most_off
+                ));
+            }
             // No elbow or knee ever bends backwards, standing, in the ragdoll or getting up
             // (Patrick, 2026-11-15: the wall brace's arms bent backwards in c87282a).
             if r.back_bend > MOST_BACK_BEND {
@@ -973,7 +1004,7 @@ mod tests {
                 for gun in ["4570", "44", "308"] {
                     for from in ["0", "15", "-15"] {
                         let text = format!(
-                            "name={ground}-{armed}-{gun}-{from}&ground={ground}&armed={armed}&hits={gun}@chest/{from}"
+                            "name={ground}-{armed}-{gun}-{from}&face=180&ground={ground}&armed={armed}&hits={gun}@chest/{from}"
                         );
                         let spec = Spec::parse(&text).unwrap();
                         let r = run(&mut sim, &spec, Tuning::GAME).unwrap();
@@ -2630,8 +2661,9 @@ mod floor {
             "{spec}: {:.1} units under the floor",
             s.under_floor
         );
+        // (While the AI walks it, the animated foot swings off the floor: the floor is checked.)
         assert!(
-            s.foot_drop <= 0.5,
+            spec.contains("walk=") || s.foot_drop <= ragdoll_core::active::LIFT_SLACK + 1.0,
             "{spec}: a foot {:.1} under its animation",
             s.foot_drop
         );
@@ -2735,5 +2767,174 @@ mod floor {
                 s.pelvis_jump
             );
         }
+    }
+}
+
+#[cfg(test)]
+/// Continuity (Patrick's 21-16-09 clip, 6b0cec2: 7 of 27 hits ended with the animation's L Calf
+/// jumping a frame or two after the hit; the upper body popped sideways and up for 1 to 3
+/// frames, then the reaction yielded): at the hit's onset, through a re-base, a yield and a
+/// brace's release, no drawn bone moves more than 3 units or turns more than 6 degrees in a 60
+/// fps frame beyond its animation's own motion.
+mod continuity {
+    use super::*;
+    use crate::sim::Sim;
+
+    pub const MOST_MOVE: f32 = 3.0;
+    pub const MOST_TURN: f32 = 6.0;
+
+    fn run_spec(spec: &str) -> Sim {
+        let mut sim = Sim::new(GroundKind::Flat);
+        run(&mut sim, &Spec::parse(spec).unwrap(), Tuning::GAME).unwrap();
+        let s = &sim.stats;
+        eprintln!(
+            "{spec:80} moved {:.2} ({} at {:.2} s) turned {:.2} ({}) rebased {} steps {} fell {} \
+             off {:.1} length {:.2}",
+            s.drawn_move,
+            ragdoll_core::flinch::BONES[s.drawn_move_bone].0,
+            s.drawn_move_at,
+            s.drawn_turn_step,
+            ragdoll_core::flinch::BONES[s.drawn_turn_bone].0,
+            s.rebased,
+            s.steps,
+            s.fell,
+            s.drawn_most_off,
+            s.length_change
+        );
+        sim
+    }
+
+    fn check(sim: &Sim, spec: &str) {
+        let s = &sim.stats;
+        assert!(
+            s.drawn_most_off <= ragdoll_core::active::MOST_DRAWN_OFF,
+            "{spec}: a bone drawn {:.1} units off its animation",
+            s.drawn_most_off
+        );
+        assert!(
+            s.length_change <= 0.5,
+            "{spec}: a bone's length {:.2} units off",
+            s.length_change
+        );
+        assert!(
+            s.drawn_move <= MOST_MOVE,
+            "{spec}: {} moved {:.2} units in a frame at {:.2} s",
+            ragdoll_core::flinch::BONES[s.drawn_move_bone].0,
+            s.drawn_move,
+            s.drawn_move_at
+        );
+        assert!(
+            s.drawn_turn_step <= MOST_TURN,
+            "{spec}: {} turned {:.2} degrees in a frame",
+            ragdoll_core::flinch::BONES[s.drawn_turn_bone].0,
+            s.drawn_turn_step
+        );
+    }
+
+    /// The game's hit animation jumping the L Calf 150 tolerances two frames after the hit is
+    /// re-based, never drawn, never yielded to.
+    #[test]
+    fn a_leg_jump_at_the_hit_is_not_drawn() {
+        for armed in ["0", "pistol", "rifle"] {
+            for hit in ["9mm@chest", "10mm@chest", "10mm@head", "9mm@pelvis"] {
+                let spec = format!("armed={armed}&hits={hit}&readback=1&legjump=2");
+                let sim = run_spec(&spec);
+                assert_eq!(sim.stats.rebased, 1, "{spec}: not re-based");
+                assert!(
+                    !sim.log.iter().any(|n| n.contains("yields")),
+                    "{spec}: yielded"
+                );
+                check(&sim, &spec);
+            }
+        }
+    }
+
+    /// The same jump later than `active::REBASE_WINDOW` after the hit is yielded to, and the yield
+    /// hands back with no jump either.
+    #[test]
+    fn a_hit_and_its_yield_are_continuous() {
+        for spec in [
+            "hits=9mm@chest",
+            "armed=pistol&hits=9mm@chest",
+            "armed=pistol&hits=10mm@lclavicle&move=0.2&walk=40&turn=180&turnby=180",
+            "hits=10mm@head&move=0.3&walk=40&turn=180&turnby=180",
+            "armed=pistol&hits=9mm@chest&readback=1&legjump=30",
+        ] {
+            let sim = run_spec(spec);
+            check(&sim, spec);
+        }
+    }
+}
+
+#[cfg(test)]
+/// A thin rail (Patrick's 21-16-09 clip, 6b0cec2: a railing at his hips behind him; the hands went
+/// behind the back, then the left arm was held out straight through the railing for 2 s and
+/// snapped to idle): a 3-unit pipe at 80 units behind is never braced on with the hands; in
+/// front, a planted wrist is drawn within a unit of its plant, its elbow never swings back and
+/// forth, and a released hand is home within 0.6 s.
+mod thin_rail {
+    use super::*;
+    use crate::sim::Sim;
+
+    fn run_spec(spec: &str) -> Sim {
+        let mut sim = Sim::new(GroundKind::Pipe);
+        let r = run(&mut sim, &Spec::parse(spec).unwrap(), Tuning::GAME).unwrap();
+        let s = &sim.stats;
+        eprintln!(
+            "{spec:64} braced {} hands {:?} planted {} drift {:.2} elbow {} return {:.2} s \
+             fell {} upright {}",
+            s.braced,
+            s.brace_hands,
+            r.log.iter().any(|l| l.contains("hand plants")),
+            s.plant_drift,
+            s.elbow_reversals,
+            s.return_time,
+            s.fell,
+            r.upright
+        );
+        sim
+    }
+
+    #[test]
+    fn a_rail_behind_gets_no_hands() {
+        for armed in ["0", "pistol", "rifle"] {
+            for gun in ["44", "4570", "308"] {
+                for from in ["0", "15", "-15"] {
+                    let spec = format!("ground=pipe&armed={armed}&hits={gun}@chest/{from}");
+                    let sim = run_spec(&spec);
+                    assert_eq!(
+                        sim.stats.brace_hands,
+                        [false, false],
+                        "{spec}: a hand braced"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_rail_in_front_is_held_still() {
+        let mut planted = 0;
+        for armed in ["0", "pistol", "rifle"] {
+            for gun in ["44", "4570", "308"] {
+                for from in ["15", "0", "-15"] {
+                    let spec =
+                        format!("ground=pipe&face=180&armed={armed}&hits={gun}@chest/{from}");
+                    let sim = run_spec(&spec);
+                    let s = &sim.stats;
+                    if sim.log.iter().any(|l| l.contains("hand plants")) {
+                        planted += 1;
+                        assert!(
+                            s.plant_drift <= 1.0,
+                            "{spec}: the wrist {:.2} off",
+                            s.plant_drift
+                        );
+                        assert_eq!(s.elbow_reversals, 0, "{spec}: the elbow swung");
+                    }
+                    assert!(s.return_time <= 0.6, "{spec}: {:.2} s home", s.return_time);
+                }
+            }
+        }
+        assert!(planted > 0, "no hand planted on the rail");
     }
 }

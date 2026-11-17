@@ -7,6 +7,25 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-17 (6b0cec2: the hit's pop, the railing brace, a creature far off)
+
+- **Now:**
+  - Core: `active::leg_jumped`, `rebases`, `Limit::rebase`, `lift_amount` (`LIFT_SLACK`,
+    `LIFT_RISE`), `lift_feet` in the knee's own plane, `too_far`; `brace::hand_may_brace`,
+    `carried_hand`, `turn_toward`, `PUSH_OFF` 0.97, `PUSH_BACK`, `RETURN_MOST` 0.6, the approach
+    0.12 to 0.2 s; `flinch::rig_maps`.
+  - Host: the re-base and the carry kept out of jumps; `drawn` (the brace and the hit read the
+    pose last drawn); the brace's rules; `moves_root`; the 80% rig gate; the 30-unit drop;
+    `update` at collision mode 3; the pose log's `drawn_delta`, `drawn_length`, `rebased`.
+  - Lab: `legjump=`, `face=`, `ground=pipe`; `scenario::continuity`, `scenario::thin_rail`; the
+    brace suites face their obstacle.
+  - Docs: docs/GUNPLAY.md "6b0cec2: a pop at the hit".
+  - Core, lab, host and repo-hygiene tests pass; the Windows check is clean. Not run in the game.
+- **Patrick:** 6b0cec2's 21-16-09 tester clip (the game log): 7 of 27 hits popped on an L Calf
+  jump and yielded; the railing brace behind him, a straight arm held 2 s; a Young Bighorner drawn
+  1047 units off. Asked: re-base leg jumps at a hit, the brace's IK from the drawn shoulder, no
+  hands behind, bone lengths locked, the creature gate, the update's collision objects, the tests.
+
 ### Claude, 2026-11-17 (0c1fbbf: the floor, the heap, the get-up, the snap, the speed; the tester's update)
 
 - **Now:**

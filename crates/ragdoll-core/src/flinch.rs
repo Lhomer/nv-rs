@@ -117,6 +117,11 @@ impl Role {
             Role::Clavicle | Role::UpperArm | Role::Forearm | Role::Hand
         )
     }
+
+    /// A thigh, a calf or a foot.
+    pub fn is_leg(self) -> bool {
+        matches!(self, Role::Thigh | Role::Calf | Role::Foot)
+    }
 }
 
 /// The rig's bones by name (the Gamebryo biped's), and their roles.
@@ -142,6 +147,43 @@ pub const BONES: [(&str, Role); 20] = [
     ("Bip01 L Hand", Role::Hand),
     ("Bip01 R Hand", Role::Hand),
 ];
+
+/// A bone found by name for [`rig_maps`]: its role and side (0 left, 1 right, 2 neither), and its
+/// rig parent's, when it reaches one.
+pub type RigBone = (Role, u8, Option<(Role, u8)>);
+
+/// The share of [`BONES`] a skeleton must map, each under the bone a biped's hangs from, for an
+/// active ragdoll ([`rig_maps`]).
+pub const RIG_MAPPED: f32 = 0.8;
+
+/// Whether a skeleton's bones found by name (`bones`: each one's role and side, and its rig
+/// parent's role and side, `None` when it reaches none) are a biped's: at least [`RIG_MAPPED`] of
+/// [`BONES`] found, each under the bone a biped's hangs from (a calf under its thigh, a hand under
+/// its forearm...). Answers whether, and how many mapped. A Young Bighorner matched 19 of the 20
+/// names, its body built as a biped's put a bone 2.67 m from the pelvis and drew it 1047 units
+/// off (Patrick's 21-16-09 clip).
+pub fn rig_maps(bones: &[RigBone]) -> (bool, usize) {
+    let mapped = bones
+        .iter()
+        .filter(|(role, side, parent)| {
+            let same = |r: Role| matches!(parent, Some((pr, ps)) if *pr == r && ps == side);
+            match role {
+                Role::Pelvis => true,
+                Role::Spine => matches!(parent, None | Some((Role::Pelvis | Role::Spine, _))),
+                Role::Neck => matches!(parent, Some((Role::Spine, _))),
+                Role::Head => matches!(parent, Some((Role::Neck | Role::Spine, _))),
+                Role::Clavicle => matches!(parent, Some((Role::Spine | Role::Neck, _))),
+                Role::UpperArm => same(Role::Clavicle),
+                Role::Forearm => same(Role::UpperArm),
+                Role::Hand => same(Role::Forearm),
+                Role::Thigh => matches!(parent, Some((Role::Pelvis | Role::Spine, _))),
+                Role::Calf => same(Role::Thigh),
+                Role::Foot => same(Role::Calf),
+            }
+        })
+        .count();
+    (mapped as f32 >= RIG_MAPPED * BONES.len() as f32, mapped)
+}
 
 /// The tuning (the host's `crate::active_ragdoll` documents it): kick (rad/s per m/s of the body's
 /// speed), the spread's reach (m) at no speed and per m/s, at most; the muscle's dip near the hit
@@ -857,6 +899,88 @@ pub fn brace_weight(t: f32) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
+    /// A biped maps; a skeleton with the biped's names hung otherwise (a quadruped's) does not.
+    #[test]
+    fn only_a_biped_gets_a_rig() {
+        let side = |name: &str| {
+            if name.contains(" L ") {
+                0
+            } else if name.contains(" R ") {
+                1
+            } else {
+                2
+            }
+        };
+        let parent_of = |name: &str| -> Option<&str> {
+            Some(match name {
+                "Bip01 Pelvis" | "Bip01 Spine" => return None,
+                "Bip01 Spine1" => "Bip01 Spine",
+                "Bip01 Spine2" => "Bip01 Spine1",
+                "Bip01 Neck1" => "Bip01 Spine2",
+                "Bip01 Head" => "Bip01 Neck1",
+                n if n.ends_with("Clavicle") => "Bip01 Neck1",
+                n if n.ends_with("UpperArm") => {
+                    return Some(if n.contains(" L ") {
+                        "Bip01 L Clavicle"
+                    } else {
+                        "Bip01 R Clavicle"
+                    })
+                }
+                n if n.ends_with("Forearm") => {
+                    return Some(if n.contains(" L ") {
+                        "Bip01 L UpperArm"
+                    } else {
+                        "Bip01 R UpperArm"
+                    })
+                }
+                n if n.ends_with("Hand") => {
+                    return Some(if n.contains(" L ") {
+                        "Bip01 L Forearm"
+                    } else {
+                        "Bip01 R Forearm"
+                    })
+                }
+                n if n.ends_with("Thigh") => "Bip01 Pelvis",
+                n if n.ends_with("Calf") => {
+                    return Some(if n.contains(" L ") {
+                        "Bip01 L Thigh"
+                    } else {
+                        "Bip01 R Thigh"
+                    })
+                }
+                n if n.ends_with("Foot") => {
+                    return Some(if n.contains(" L ") {
+                        "Bip01 L Calf"
+                    } else {
+                        "Bip01 R Calf"
+                    })
+                }
+                _ => return None,
+            })
+        };
+        let role = |n: &str| BONES.iter().find(|b| b.0 == n).unwrap().1;
+        let biped: Vec<_> = BONES
+            .iter()
+            .map(|(n, r)| (*r, side(n), parent_of(n).map(|p| (role(p), side(p)))))
+            .collect();
+        assert_eq!(rig_maps(&biped), (true, 20));
+        // A quadruped's: the same names, the legs under the spine's end, the arms' bones under
+        // the head and each other's sides, one missing (19 found).
+        let quadruped: Vec<_> = BONES
+            .iter()
+            .filter(|(n, _)| *n != "Bip01 Neck1")
+            .map(|(n, r)| {
+                let p = match r {
+                    Role::Calf | Role::Foot | Role::Forearm | Role::Hand => Some((Role::Spine, 2)),
+                    Role::UpperArm | Role::Clavicle => Some((Role::Head, 2)),
+                    _ => parent_of(n).map(|p| (role(p), side(p))),
+                };
+                (*r, side(n), p)
+            })
+            .collect();
+        let (ok, mapped) = rig_maps(&quadruped);
+        assert!(!ok, "{mapped} of 19 mapped");
+    }
 
     /// The struck bone is the one whose segment the impact is on: a hit on the thigh names the
     /// thigh (not the calf, whose joint is the knee), on the belly the spine, on the shin the calf,

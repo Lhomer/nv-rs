@@ -316,6 +316,54 @@ pub const YIELD_BACK: f32 = 0.35;
 pub const YIELD_MOVE: f32 = 6.0;
 pub const YIELD_TURN: f32 = 0.25;
 
+/// The farthest a drawn bone may be from its animated place (game units, [`too_far`]): past it the
+/// body is dropped and nothing is written that frame (a Young Bighorner was drawn 1047 units off
+/// for a frame: Patrick's 21-16-09 clip).
+pub const MOST_DRAWN_OFF: f32 = 30.0;
+
+/// The bone drawn farthest past [`MOST_DRAWN_OFF`] from its animated place (`shown` against
+/// `anim`, world joints, game units; `checked` says which count), and how far.
+pub fn too_far(shown: &[V3], anim: &[V3], checked: impl Fn(usize) -> bool) -> Option<(usize, f32)> {
+    shown
+        .iter()
+        .zip(anim)
+        .enumerate()
+        .filter(|(i, _)| checked(*i))
+        .map(|(i, (s, a))| (i, length(sub(*s, *a))))
+        .filter(|(_, d)| d.is_nan() || *d > MOST_DRAWN_OFF)
+        .fold(None, |best: Option<(usize, f32)>, (i, d)| match best {
+            Some((_, b)) if b >= d => best,
+            _ => Some((i, d)),
+        })
+}
+
+/// How soon after a hit (s) a jump of the animation confined to the legs is re-based instead of
+/// yielded to ([`rebases`]).
+pub const REBASE_WINDOW: f32 = 0.2;
+
+/// A leg bone's animated local turning more than this in a frame (rad) is a jump of its
+/// animation ([`leg_jumped`]), whatever the frame rate: 117 to 155 tolerances (about 0.25 to 0.3
+/// rad) were flagged at Patrick's frame rate, under `pose::capped`'s 0.35 at 60.
+pub const LEG_JUMP_TURN: f32 = 0.15;
+
+/// Whether a leg bone's animated local jumped from `prev` to `next` ([`LEG_JUMP_TURN`]).
+pub fn leg_jumped(prev: &(M3, V3), next: &(M3, V3)) -> bool {
+    let d = qnorm(qmul(qfrom_m(&next.0), qconj(qfrom_m(&prev.0))));
+    length(qlog(short(d))) > LEG_JUMP_TURN
+}
+
+/// Whether the animation's jump `since_hit` seconds after the last hit is re-based (the body's
+/// world pose kept, its offsets put against the new animation: nothing drawn jumps) rather than
+/// yielded to: a leg jumped (`leg_jump`, [`leg_jumped`]) and every bone the animation jumped by
+/// more than its frame's share (`cut`, `pose::capped`: their roles) is a leg. A game's hit
+/// animation starting under the reaction jumps the legs a frame or two after the hit (Patrick's
+/// 21-16-09 clip: 7 of 27 hits, always the L Calf, 117 to 155 tolerances); carried into the body
+/// and yielded to, the upper body popped up and sideways for 1 to 3 frames and the flinch was
+/// gone.
+pub fn rebases(since_hit: f32, leg_jump: bool, cut: &[Role]) -> bool {
+    since_hit <= REBASE_WINDOW && leg_jump && cut.iter().all(|r| r.is_leg())
+}
+
 /// How fast the AI moves (game units/s) or turns (rad/s) an actor walking or turning on its own:
 /// a push below a knock-down then takes no catch steps, its stride carries it (steps planned from
 /// a stride and followed while the AI walks it threw the pelvis 7 units sideways in the lab).
@@ -383,13 +431,35 @@ pub fn feet_on_floor(feet: [V3; 2], animated: [V3; 2], floor: [Option<f32>; 2]) 
     })
 }
 
+/// How fast a shown foot's lift grows or shrinks (game units a second, [`lift_amount`]): never in
+/// a frame (Patrick's 21-16-09 clip).
+pub const LIFT_RISE: f32 = 40.0;
+/// How far under its animated ankle a shown foot may be before it is lifted (game units,
+/// [`lift_amount`]): the lift then only takes the rest, so it starts from nothing. Lifting a nearly
+/// straight leg's ankle a unit bends its knee out about 5: followed exactly, an animated foot
+/// rising a unit (a hit animation starting) swung the knee 4 units in a frame.
+pub const LIFT_SLACK: f32 = 1.5;
+
+/// How much a shown foot is lifted now ([`lift_feet`]: game units): toward `excess` (how far it
+/// is shown under its animated ankle less [`LIFT_SLACK`], or under its collision floor plus its
+/// ankle; 0 while catch steps place the legs) from `was`, last frame's, by at most [`LIFT_RISE`]
+/// over `dt` either way: a lift starting, a step's end or start, an animated foot jumping up
+/// (the game's hit animation starting) are followed, never jumped to in a frame.
+pub fn lift_amount(was: f32, excess: f32, dt: f32) -> f32 {
+    let r = LIFT_RISE * dt.max(0.0);
+    let was = if was.is_finite() { was.max(0.0) } else { 0.0 };
+    excess.max(0.0).clamp((was - r).max(0.0), was + r)
+}
+
 /// The shown legs lifted off the floor: each leg (`legs`: thigh, calf and foot bones) whose ankle
 /// is shown (`at`: the shown joints, world, game units) under `low` (its animated ankle's
-/// height, or its collision floor plus its ankle where higher) turned by two-bone IK from its
-/// hip (`crate::flinch::leg_ik`, the knee forward along `forward`) so the ankle is at `low`,
-/// where it is across: the shown world rotations `shown` of its thigh and calf turned (the foot
-/// keeps its own). A planted foot never sinks into the floor under the body's lowered pelvis
-/// (Patrick's 19-43-08 clip). Answers how many legs were lifted.
+/// height, or its collision floor plus its ankle where higher) solved as two bones from its hip
+/// so the ankle is at `low`, where it is across, its knee kept in the plane it is bent in (toward
+/// `forward` for a straight leg); the shown world rotations `shown` of its thigh and calf turned
+/// the short way onto it (the foot keeps its own). A planted foot never sinks into the floor under
+/// the body's lowered pelvis (Patrick's 19-43-08 clip), and a small lift is a small move: solved
+/// against a fixed pole, a lift of a unit swung the knee 6 units (21-16-09). Answers how many
+/// legs were lifted.
 pub fn lift_feet(
     shown: &mut [M3],
     at: &[V3],
@@ -397,18 +467,33 @@ pub fn lift_feet(
     low: &[f32],
     forward: V3,
 ) -> u32 {
+    use crate::balance::{between, two_bone};
+    use crate::flinch::{apply_m, mul, rotation};
     let mut lifted = 0;
     for (&(t, c, f), &low) in legs.iter().zip(low) {
         let (hip, knee, ankle) = (at[t], at[c], at[f]);
         if ankle[2] >= low - 0.01 {
             continue;
         }
+        let (l1, l2) = (length(sub(knee, hip)), length(sub(ankle, knee)));
+        if l1 < 1.0 || l2 < 1.0 {
+            continue;
+        }
         let goal = [ankle[0], ankle[1], low];
-        let Some((r1, m, _)) = crate::flinch::leg_ik(hip, knee, ankle, hip, goal, forward) else {
+        // The knee's side of the hip-ankle line as it is, leaning forward the straighter the leg
+        // (no switch between the two: the knee never jumps sides).
+        let off = sub(knee, scale(add(hip, ankle), 0.5));
+        let side = add(off, scale([forward[0], forward[1], 0.0], 0.5));
+        let Some(side) = unit(side) else {
             continue;
         };
-        shown[t] = crate::flinch::mul(&r1, &shown[t]);
-        shown[c] = crate::flinch::mul(&crate::flinch::mul(&r1, &m), &shown[c]);
+        let Some((k, reached)) = two_bone(hip, goal, l1, l2, add(knee, scale(side, 20.0))) else {
+            continue;
+        };
+        let r1 = rotation(between(sub(knee, hip), sub(k, hip)));
+        let r2 = rotation(between(apply_m(&r1, sub(ankle, knee)), sub(reached, k)));
+        shown[t] = mul(&r1, &shown[t]);
+        shown[c] = mul(&mul(&r2, &r1), &shown[c]);
         lifted += 1;
     }
     lifted
@@ -446,6 +531,15 @@ pub struct Limit {
 }
 
 impl Limit {
+    /// Bone `i`'s kept offset moved onto a new animation (its animated world rotation `from` to
+    /// `to`): the world rotation it held stays, so the new animation's jump is not drawn
+    /// ([`rebases`]).
+    pub fn rebase(&mut self, i: usize, from: Q, to: Q) {
+        if let Some(b) = self.before.get_mut(i) {
+            *b = short(qnorm(qmul(qmul(*b, from), qconj(to))));
+        }
+    }
+
     /// Nothing kept (a new body).
     pub fn open(&mut self) {
         self.before.clear();
@@ -2783,5 +2877,56 @@ mod tests {
         let mut same = vec![IDENTITY; 3];
         assert_eq!(lift_feet(&mut same, &at, &[(0, 1, 2)], &[5.0], fwd), 0);
         assert_eq!(same, vec![IDENTITY; 3]);
+    }
+
+    /// A leg-only jump right after a hit is re-based; anything else, or later, yields. The kept
+    /// offset re-based keeps its world rotation.
+    #[test]
+    fn a_leg_jump_at_the_hit_is_re_based() {
+        assert!(rebases(0.03, true, &[Role::Calf]));
+        assert!(rebases(0.03, true, &[]));
+        assert!(rebases(0.2, true, &[Role::Calf, Role::Foot, Role::Thigh]));
+        assert!(!rebases(0.25, true, &[Role::Calf]));
+        assert!(!rebases(0.03, true, &[Role::Calf, Role::Spine]));
+        assert!(!rebases(0.03, false, &[]));
+        let still = (crate::flinch::IDENTITY, [0.0; 3]);
+        let turned = |a: f32| (m_from_q(qexp([a, 0.0, 0.0])), [0.0; 3]);
+        assert!(leg_jumped(&still, &turned(0.3)));
+        assert!(!leg_jumped(&still, &turned(0.05)));
+        let mut limit = Limit::default();
+        let anim = vec![qexp([0.1, 0.0, 0.0])];
+        let mut shown = vec![qexp([0.3, 0.0, 0.2])];
+        let mut p = [0.0; 3];
+        limit.hold(&mut shown, &anim, &mut p, 2.0, 1.0 / 60.0, |_| false);
+        let world = qmul(limit.before[0], anim[0]);
+        let to = qexp([0.0, 0.4, 0.0]);
+        limit.rebase(0, anim[0], to);
+        let again = qmul(limit.before[0], to);
+        // The same rotation (either sign of the quaternion).
+        assert!(qmul(again, qconj(world))[0].abs() > 1.0 - 1e-5);
+    }
+
+    /// The lift grows and shrinks toward what is wanted no faster than `LIFT_RISE`.
+    #[test]
+    fn the_lift_eases_in_and_out() {
+        let r = LIFT_RISE / 60.0;
+        assert!((lift_amount(0.0, 5.0, 1.0 / 60.0) - r).abs() < 1e-5);
+        assert!((lift_amount(0.5, 0.6, 1.0 / 60.0) - 0.6).abs() < 1e-5);
+        assert!((lift_amount(3.0, 0.0, 1.0 / 60.0) - (3.0 - r)).abs() < 1e-5);
+        assert_eq!(lift_amount(0.2, -4.0, 1.0 / 60.0), 0.0);
+    }
+
+    /// A bone drawn more than `MOST_DRAWN_OFF` from its animation (or not finite) is found, the
+    /// farthest; the bones not checked are not.
+    #[test]
+    fn a_bone_drawn_far_off_is_found() {
+        let anim = [[0.0; 3], [0.0, 0.0, 50.0], [10.0, 0.0, 90.0]];
+        let near = [[1.0, 0.0, 0.0], [0.0, 3.0, 50.0], [10.0, 0.0, 95.0]];
+        assert_eq!(too_far(&near, &anim, |_| true), None);
+        let far = [[1.0, 0.0, 0.0], [0.0, 40.0, 50.0], [10.0, 0.0, 1100.0]];
+        assert_eq!(too_far(&far, &anim, |_| true).map(|f| f.0), Some(2));
+        assert_eq!(too_far(&far, &anim, |i| i != 2).map(|f| f.0), Some(1));
+        let nan = [[f32::NAN, 0.0, 0.0], [0.0, 0.0, 50.0], [10.0, 0.0, 90.0]];
+        assert_eq!(too_far(&nan, &anim, |_| true).map(|f| f.0), Some(0));
     }
 }

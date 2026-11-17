@@ -49,16 +49,22 @@ pub const REACH_SPEED: f32 = 1.5;
 pub const REACH_SWEEP: f32 = 4.5;
 /// The approach onto the plant (s): at least and at most; within them, as long as the hand's own
 /// speed takes at an even deceleration.
-pub const APPROACH_MIN: f32 = 0.04;
-pub const APPROACH_MAX: f32 = 0.16;
+pub const APPROACH_MIN: f32 = 0.12;
+pub const APPROACH_MAX: f32 = 0.2;
 /// The shoulder further from the plant than this share of the arm's reach: the body pushes off
-/// (the arm cannot hold it), the hand lets go.
-pub const PUSH_OFF: f32 = 1.0;
+/// (the arm cannot hold it), the hand lets go. At the full reach (1.0) the arm was held straight,
+/// stretched out through a railing for 2 s (Patrick's 21-16-09 clip).
+pub const PUSH_OFF: f32 = 0.97;
 /// The reaching hand's path stays within this share of the arm's reach from the shoulder.
 pub const REACH_SHORT: f32 = 0.97;
 /// A plant no further from the shoulder than this share of the arm's reach (some room left for
 /// the body to sway back before it pushes off).
-pub const PLANT_REACH: f32 = 0.995;
+pub const PLANT_REACH: f32 = 0.95;
+/// A planted hand lets go once the shoulder has come back out this far (game units) from the
+/// closest it came, at least [`PUSH_BACK_AFTER`] (s) after it came to rest on it: the body has taken
+/// the load and pushes back off (the elbow never swings back and forth with the torso).
+pub const PUSH_BACK: f32 = 0.5;
+pub const PUSH_BACK_AFTER: f32 = 0.0;
 /// The longest a hand stays planted (s), whatever the body does.
 pub const MOST_PLANTED: f32 = 3.0;
 /// The body counts as recovered (the planted hands let go) once its steps are done, the brace has
@@ -73,13 +79,16 @@ pub const WEAPON_SIDE: u8 = 1;
 /// A released hand's way back to its home ([`Phase::Released`]): a critically damped path of this
 /// frequency (Hz), no faster than [`REACH_SPEED`]; locked on within [`REGRIP_LOCK`] (game units);
 /// handed back once the free arm's wrist is within [`HANDOVER_NEAR`] of the home too (game units),
-/// or after [`RETURN_MOST`] (s); the hand-over takes [`RETURN_FADE`] (s, eased).
+/// or after [`RETURN_MOST`] (s); the hand-over takes [`RETURN_FADE`] (s, eased). 3 s at weight 1
+/// held a straight arm out for 2 s while the free arm never came home (Patrick's 21-16-09 clip):
+/// now its way home (about 0.4 s) is done within 0.6 s and the hand-over starts by then (0.3 s
+/// for the hand-over turned a hand at 8.5 rad/s).
 pub const RETURN_HZ: f32 = 2.0;
 /// The way back turns around the shoulder at most this fast (rad/s).
 pub const RETURN_SWEEP: f32 = 3.5;
 pub const REGRIP_LOCK: f32 = 0.5;
 pub const HANDOVER_NEAR: f32 = 0.75;
-pub const RETURN_MOST: f32 = 3.0;
+pub const RETURN_MOST: f32 = 0.6;
 pub const RETURN_FADE: f32 = 0.5;
 /// The planted hand's pin (the physical body's): its frequency (Hz) on the arm's mass, critically
 /// damped.
@@ -88,6 +97,60 @@ pub const PIN_ZETA: f32 = 3.0;
 /// The shown upper arm's twist about itself at most this fast (rad/s) while the brace puts it on
 /// the hand's path.
 pub const MOST_TWIST: f32 = 2.0;
+
+/// How far behind the pelvis (game units, across) an obstacle is the hips' to lean on, never the
+/// hands' ([`hand_may_brace`]).
+pub const BEHIND_HIPS: f32 = 20.0;
+
+/// Whether a hand may brace on `target` (where the brace sends it) for a body whose pelvis is at
+/// `pelvis`, facing `forward` (flat), against an obstacle whose face is at `face`: never a target
+/// behind the torso's coronal plane (a hand behind the back), nor an obstacle within
+/// [`BEHIND_HIPS`] behind the pelvis: the hips lean on it instead (Patrick's 21-16-09 clip: the
+/// hands went behind the back onto a railing at his hips, then one arm was held out straight
+/// through it).
+pub fn hand_may_brace(pelvis: V3, forward: V3, target: V3, face: Option<V3>) -> bool {
+    let Some(fwd) = unit([forward[0], forward[1], 0.0]) else {
+        return true;
+    };
+    let ahead = |p: V3| dot([p[0] - pelvis[0], p[1] - pelvis[1], 0.0], fwd);
+    if ahead(target) < 0.0 {
+        return false;
+    }
+    !face.is_some_and(|f| ahead(f) < 0.0 && -ahead(f) <= BEHIND_HIPS)
+}
+
+/// A new brace's hand on `side` (`wanted`: the brace has it brace) from the brace before
+/// (`old`): a hand still planted keeps its plant (a second push while it holds is held by it;
+/// a new hand reached again from the plant, behind the back once), else a new reach.
+pub fn carried_hand(old: Option<Hand>, wanted: bool, side: u8) -> Option<Hand> {
+    if !wanted {
+        return None;
+    }
+    match old {
+        Some(h) if h.side == side && h.planted() => Some(h),
+        _ => Some(Hand::new(side)),
+    }
+}
+
+/// A released hand turned onto its home's rotation at most this fast (rad/s, [`turn_toward`]):
+/// eased by its way home alone, a hand let go near its home turned at 10 rad/s in the lab.
+pub const HAND_HOME_TURN: f32 = 6.0;
+
+/// The rotation `from` turned toward `to` by at most `most` (rad).
+pub fn turn_toward(from: &M3, to: &M3, most: f32) -> M3 {
+    use crate::active::{m_from_q, qconj, qexp, qfrom_m, qlog, qmul, qnorm};
+    let (a, b) = (qfrom_m(from), qfrom_m(to));
+    let mut d = qnorm(qmul(b, qconj(a)));
+    if d[0] < 0.0 {
+        d = d.map(|x| -x);
+    }
+    let w = qlog(d);
+    let l = length(w);
+    if l <= most.max(0.0) || !l.is_finite() {
+        return *to;
+    }
+    m_from_q(qnorm(qmul(qexp(scale(w, most.max(0.0) / l)), a)))
+}
 
 /// What a brace's hands meet: a wall's face, or a waist-high obstacle's top (with its face below
 /// it), in the world.
@@ -164,6 +227,11 @@ pub enum Phase {
         t: f32,
         /// The surface's way out at the plant (the contact pushes along it, never pulls).
         normal: V3,
+        /// The closest the shoulder has come to the plant since it touched (game units):
+        /// the body pushing back off past [`PUSH_BACK`] lets it go ([`Hand::update`]).
+        closest: f32,
+        /// The shoulder's distance from the plant the frame before.
+        last: f32,
     },
     /// Let go (or never touched), `t` seconds ago: the hand goes back to its home (a two-handed
     /// weapon's grip, carried by the weapon hand; else where the animation has it, carried by the
@@ -300,6 +368,8 @@ impl Hand {
                         at,
                         t: 0.0,
                         normal: s.gap(at).1,
+                        closest: f32::INFINITY,
+                        last: f32::INFINITY,
                     };
                     return Some(Event::Planted(at));
                 }
@@ -325,12 +395,33 @@ impl Hand {
                 }
                 None
             }
-            Phase::Planted { at, t, .. } => {
+            Phase::Planted {
+                at,
+                t,
+                approach,
+                closest,
+                last,
+                ..
+            } => {
                 *t += dt;
                 let at = *at;
                 let here = shown.unwrap_or(at);
-                let why = if length(sub(at, shoulder)) > reach * PUSH_OFF {
+                let d = length(sub(at, shoulder));
+                // The closest the shoulder came since it touched: the load taken; the body swaying
+                // back out past it pushes off (held on, the elbow swung back and forth with the
+                // torso).
+                *closest = closest.min(d);
+                // A frame ahead at its pace (the shoulder is the shown arm's of the frame before).
+                let ahead = if last.is_finite() {
+                    d + (d - *last).max(0.0)
+                } else {
+                    d
+                };
+                *last = d;
+                let why = if d > reach * PUSH_OFF {
                     Some("pushed off")
+                } else if *t >= *approach + PUSH_BACK_AFTER && ahead > *closest + PUSH_BACK {
+                    Some("pushed back off it")
                 } else if *t >= MOST_PLANTED {
                     Some("held long enough")
                 } else {
@@ -493,6 +584,11 @@ impl Hand {
     /// Let go (or never touched): coming back.
     pub fn released(&self) -> bool {
         matches!(self.phase, Phase::Released { .. })
+    }
+
+    /// Planted and at rest on its plant (its approach done).
+    pub fn at_rest(&self) -> bool {
+        matches!(self.phase, Phase::Planted { t, approach, .. } if t >= approach)
     }
 
     pub fn planted(&self) -> bool {
@@ -821,6 +917,50 @@ pub fn units(m: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// No hand braces behind the torso, nor on an obstacle right behind the hips; one in front
+    /// does. A planted hand is kept by a new brace, a reaching one starts again.
+    #[test]
+    fn hands_brace_in_front_only_and_keep_a_plant() {
+        let (pelvis, fwd) = ([0.0, 0.0, 60.0], [0.0, 1.0, 0.0]);
+        assert!(hand_may_brace(
+            pelvis,
+            fwd,
+            [5.0, 30.0, 70.0],
+            Some([0.0, 25.0, 70.0])
+        ));
+        assert!(!hand_may_brace(
+            pelvis,
+            fwd,
+            [5.0, -10.0, 70.0],
+            Some([0.0, -24.0, 70.0])
+        ));
+        assert!(!hand_may_brace(
+            pelvis,
+            fwd,
+            [5.0, 2.0, 70.0],
+            Some([0.0, -12.0, 70.0])
+        ));
+        assert!(hand_may_brace(pelvis, fwd, [5.0, 2.0, 70.0], None));
+        let mut planted = Hand::new(0);
+        planted.phase = Phase::Planted {
+            start: [0.0; 3],
+            v0: [0.0; 3],
+            approach: 0.1,
+            at: [1.0, 2.0, 3.0],
+            t: 0.5,
+            normal: [0.0, 0.0, 1.0],
+            closest: 20.0,
+            last: 20.0,
+        };
+        assert_eq!(carried_hand(Some(planted), true, 0), Some(planted));
+        assert_eq!(
+            carried_hand(Some(Hand::new(0)), true, 0),
+            Some(Hand::new(0))
+        );
+        assert_eq!(carried_hand(Some(planted), false, 0), None);
+        assert_eq!(carried_hand(None, true, 1), Some(Hand::new(1)));
+    }
+
     use super::*;
 
     /// A brace's hands let go once one hit's time is up, once the game turns the actor away from
@@ -922,7 +1062,7 @@ mod tests {
         );
         assert!(h.planted());
         // Let go: back home (a grip that moves) along a path that never goes past it nor swings,
-        // locked on, handed back once the free arm's wrist is there too.
+        // locked on, handed back once the free arm's wrist is there too or `RETURN_MOST` is up.
         let home0: V3 = [0.0, 25.0, 90.0];
         assert_eq!(
             h.update(
@@ -964,8 +1104,12 @@ mod tests {
             let d = length(rel);
             assert!(d <= least + 1e-3, "never further from it again: frame {i}");
             least = least.min(d);
-            if i < 90 {
+            // Held until the free arm is there, or `RETURN_MOST` at most (home within 0.6 s).
+            if (i as f32 + 1.0) * dt < RETURN_MOST {
                 assert!(h.plant_weight() > 0.999, "held until the free arm is there");
+            }
+            if (i as f32 + 1.0) * dt >= RETURN_MOST + RETURN_FADE + dt {
+                assert!(h.plant_weight() < 1e-3, "handed back by then: frame {i}");
             }
         }
         assert_eq!(h.home_share(), 1.0);

@@ -486,6 +486,97 @@ for the shot, the hit's round and the breakdown; a knocked-down actor's fall dam
 attacker but an actor. Test: `ballistics::a_trap_shot_asks_for_no_holders_ammo`. The merged JIP
 patches (#624) and the knockdown's companion refusal were not on the path.
 
+### 6b0cec2: a pop at the hit, an erratic railing brace, a creature drawn far off (Patrick, 2026-11-16, 21-16-09 clip)
+
+Patrick's tester clip, the game log only (the pose log stayed on his laptop): a Powder Ganger hit
+27 times, a Young Bighorner, four braces on a railing at his hips.
+
+- **The pop at the hit.** 7 of 27 hits ended "its animation jumped under the reaction (Bip01 L
+  Calf 117 to 155 tolerances in a frame): the reaction yields", always a frame or two after the
+  hit: the game's hit animation starting. The jump was carried into the physical body
+  (`Body::carry` moves each bone by its animation's motion), the bounds kept their offsets
+  against the old animation, and the reaction yielded: the upper body popped up and sideways for
+  1 to 3 frames, then no flinch.
+  - A leg turning more than 0.15 rad in a frame (`active::leg_jumped`, whatever the frame rate:
+    `pose::capped`'s bound is 0.35 rad at 60 fps) within 0.2 s of a hit, with nothing but legs
+    past their frame's share, is re-based (`active::rebases`): no yield, the log names the
+    actor's playing animation groups and idle.
+  - Any jump, re-based or yielded to, is kept out of the body's carry, and the bounds' kept
+    offsets move onto the new animation (`Limit::rebase`): the body keeps its world pose and its
+    motors take it to the new one.
+  - The feet's lift (0c1fbbf's `lift_feet`) solved a nearly straight leg against a fixed pole: a
+    unit's lift swung the knee 6 units. It now keeps the knee's own bend plane, lifts only past
+    1.5 units under the animated ankle (`LIFT_SLACK`), eased in and out at 40 units a second
+    (`lift_amount`), and not while the steps place the legs.
+- **The railing brace.** Four braces planted stably (hands within 3 units each time) on a railing
+  72 units over the ankle, 0 to 7 units past the foot along the push: at his hips, behind him.
+  The hands went behind the back, then the left arm was held straight through the railing for
+  about 2 s (35 to 36 and 41 to 42 s) and snapped to idle.
+  - Behind: no hand braces on a target behind the torso's coronal plane, nor on an obstacle
+    within 20 units behind the pelvis (`brace::hand_may_brace`): the hand-less brace (the steps
+    stop at it) leans the body on it.
+  - The host read the brace's shoulder, elbow and wrist, and "the arm as shown a frame before"
+    for the plant's IK, from the bone nodes, which since 00262dd hold the game's own pose between
+    draws: the arm was solved from the animation's every frame, its plant pinned from the
+    animated shoulder. Now from the pose last drawn (`active_ragdoll::drawn`,
+    `Rig::shown_world`). The pelvis is held up before the arm is put on its plant.
+  - A plant past 0.97 of the arm's reach lets go (`PUSH_OFF`; plants only to 0.95), and so does
+    one the shoulder backs off 0.5 units from the closest it came (`PUSH_BACK`, a frame ahead):
+    the body has taken the load (held on, the elbow swung with the torso).
+  - A released hand is home within 0.6 s (`RETURN_MOST` 0.6, was 3: the 2 s straight arm), its
+    hand-over 0.5 s; it turns onto its home's rotation at most 6 rad/s (`turn_toward`).
+  - A new brace keeps a hand still planted (`brace::carried_hand`), never a new reach from it.
+  - A released hand's home is carried by the chest, not the clavicle the arm itself moves (a loop:
+    the home jumped 4 units a frame, the arm spun at 13 rad/s); the approach onto a plant takes
+    0.12 to 0.2 s (was 0.04 to 0.16: a hand next to the wall swung onto it at 12 rad/s).
+- **The creature.** A Young Bighorner matched 19 of the 20 biped names (the log's "1 of 19 bones"
+  was the bones the hit touched), its body built as a biped's: "bone 17 is 2.67 m from the
+  pelvis", a 0.719 m joint gap, drawn 1047.8 units off.
+  - A rig only when at least 80% of the 20 bones map, each under the bone a biped's hangs from
+    (`flinch::rig_maps`).
+  - Any bone more than 30 units off its animation (a fall's and a bracing arm's own aside, the
+    steps' move the root does not show yet allowed for) drops the body and writes nothing that
+    frame (`active::too_far`).
+  - Only the pelvis and a spine root have their translation written; no limb's (`moves_root`):
+    a limb's length is the game's own.
+- **`update(root)`** (after the write and after the put-back) ran no controller (time 0,
+  `bUpdateControllers` false), but every collision object in the skeleton keyframed its body
+  from the node, or set the node from its body, at whatever mode the game's
+  `bhkNiCollisionObject::Synchronize` had left in the thread block's `+0x2c0`. It is now held at
+  3 (the nodes' transforms only) through our updates and put back.
+- **The pose log:** `drawn_delta` (the most a drawn bone moved this frame beyond its animation's
+  own move: a pop shows there), `drawn_length` (the most a drawn bone's length is off its
+  animation's), `rebased`.
+
+Lab, 6b0cec2's handling against this:
+
+| Run | before | after |
+|---|---|---|
+| A forced 150-tolerance L Calf jump two frames after a 9mm (carried, against re-based) | a foot 8.6 units and 17.2 degrees in a frame | 2.5 units, 5.7 degrees (the spin bound), no yield |
+| Front braces, 108 runs (wall, railing, table, gap railing) | arm up to 13.6 rad/s, regrip up to 28 wobbles, hand jitter 0.029 m/s | arm 6.9 rad/s at most, 0 wobbles, 0.008 m/s |
+| A 3-unit pipe at 80 units, in front (27 runs) | (no such test) | wrist within 0.00 units of its plant, no elbow swing, home in 0.42 to 0.52 s |
+| The same pipe behind (27 runs) | hands behind the back | no hand braces |
+
+- Tests:
+  - lab `scenario::continuity`: a forced 150-tolerance L Calf jump on frame 2 (`legjump=2`, read
+    back) is re-based, never yielded, and no drawn bone moves more than 3 units or turns more
+    than 6 degrees in a frame beyond its animation's own (the animation without the forced jump;
+    a catch step's swinging legs aside), nor is drawn more than 30 units off, nor changes length
+    by more than 0.5; a hit and its yield too (a later jump yielded to as well);
+  - lab `scenario::thin_rail` (`ground=pipe`): behind, no hand braces; in front, the wrist within a
+    unit of its plant, no elbow swing at rest, home within 0.6 s;
+  - lab: every built-in scenario keeps every bone's length within 0.5 of the bind pose and none
+    drawn more than 30 units off;
+  - core: `a_leg_jump_at_the_hit_is_re_based`, `the_lift_eases_in_and_out`,
+    `hands_brace_in_front_only_and_keep_a_plant`, `only_a_biped_gets_a_rig`,
+    `a_bone_drawn_far_off_is_found`;
+  - host: `the_update_moves_the_nodes_only`, `no_limb_bone_is_moved`.
+- Changed lab expectations, said: the brace scenes now face their obstacle (`face=180`, shot from
+  behind into it: each pushed the body backward into an obstacle behind it, which no longer gets
+  hands); the floor tests allow a foot 2.5 units under its animation (the lift's slack and ease;
+  never under the floor); the plant's elbow is watched once the wrist is at rest on it; a brace
+  hand's return is timed to its lock on its home. Not run in the game.
+
 ### 0c1fbbf: bodies into the floor, a heap, a plank get-up, a snap, too fast (Patrick, 2026-11-16, 19-43-08 clip)
 
 The reactions showed in 0c1fbbf (`drawn_offset` non-zero on every hit), but the tuning was set

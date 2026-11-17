@@ -288,6 +288,10 @@ pub struct Stats {
     pub hand_losses: u32,
     pub hand_jitter: f32,
     pub hand_slip: f32,
+    /// The furthest a planted wrist was drawn from its plant once at rest there (units), and the
+    /// longest a released hand took home (s; Patrick's 21-16-09 clip: 3 s).
+    pub plant_drift: f32,
+    pub return_time: f32,
     pub elbow_reversals: u32,
     /// A two-handed weapon's support hand going back to its grip after a brace (the shown pose,
     /// relative to the grip, which moves with the weapon hand): whether it was watched, how far
@@ -331,6 +335,19 @@ pub struct Stats {
     pub torso_turn: f32,
     /// The most that turn changed in a frame (degrees: the host's `drawn_turn` jumping).
     pub turn_jump: f32,
+    /// Leg-only animation jumps at a hit re-based (`active::rebases`).
+    pub rebased: u32,
+    /// Continuity (Patrick's 21-16-09 clip): the most a drawn bone moved (units) and turned
+    /// (degrees) in a frame beyond its animation's own motion, standing; which bone and when.
+    pub drawn_move: f32,
+    pub drawn_turn_step: f32,
+    pub drawn_move_bone: usize,
+    pub drawn_move_at: f64,
+    pub drawn_turn_bone: usize,
+    /// The farthest a drawn bone was from its animated place (units; a fall's and a bracing
+    /// arm's aside), and the most a drawn bone's length was off the animation's (units).
+    pub drawn_most_off: f32,
+    pub length_change: f32,
     /// ... while it yields to its AI's walk and once handed back (degrees).
     pub yield_turn_jump: f32,
     pub react_v: f32,
@@ -493,6 +510,9 @@ pub struct Sim {
     /// The animation's root: its heading (rad about Z), and how fast it turns (rad/s) and walks
     /// (units/s along +X) while it stands, as the game's AI moves an actor while it reacts.
     pub heading: f32,
+    /// The heading it starts at (rad; `face=` degrees): 180 faces the obstacles (they stand at
+    /// -Y), so a push from behind takes it into one in front of it.
+    pub face: f32,
     pub turn: f32,
     pub walk: f32,
     /// The AI's move starting at this time (s; none: from the start: a scenario's `move` is after
@@ -519,6 +539,10 @@ pub struct Sim {
     pub leave_written: bool,
     /// `active::Limit` off (a test's comparison only).
     pub limit_off: bool,
+    /// The animation's L Calf jumps from this time on (`Spec::leg_jump`); an animated jump to keep
+    /// out of the body's carry this frame.
+    pub leg_jump_at: Option<f64>,
+    rebase_legs: bool,
     /// The player's perks of nv-rs's own (`ragdoll_core::perks`; the host's `perks`): every hit
     /// here is the player's.
     pub perks: Perks,
@@ -532,6 +556,9 @@ pub struct Sim {
     pub own_moved: V3,
     offsets_before: Option<[active::Q; COUNT]>,
     torso_before: Option<f32>,
+    clean_before: Option<[Xf; COUNT]>,
+    /// How much each shown foot is lifted (`active::lift_amount`).
+    lift_low: [f32; 2],
     /// The steps' own moves of the actor not yet left out of the body's carry.
     pub own_carry: V3,
     was_holding: bool,
@@ -598,6 +625,7 @@ impl Sim {
             weapon: Weapon::default(),
             range: 10.0,
             heading: 0.0,
+            face: 0.0,
             turn: 0.0,
             walk: 0.0,
             move_after: None,
@@ -612,11 +640,15 @@ impl Sim {
             base_ready: false,
             leave_written: false,
             limit_off: false,
+            leg_jump_at: None,
+            rebase_legs: false,
             perks: Perks::default(),
             aim_pass: false,
             own_moved: [0.0; 3],
             offsets_before: None,
             torso_before: None,
+            clean_before: None,
+            lift_low: [0.0; 2],
             own_carry: [0.0; 3],
             was_holding: false,
             raw: [IDENT_XF; COUNT],
@@ -679,7 +711,7 @@ impl Sim {
         }
         let start = world::ground_point(&self.world, [0.0, 0.0, 0.0]).unwrap_or([0.0; 3]);
         self.pos = start;
-        self.heading = 0.0;
+        self.heading = self.face;
         self.turned = 0.0;
         self.gait_phase = 0.0;
         self.gait_w = 0.0;
@@ -708,6 +740,8 @@ impl Sim {
         self.anim_pelvis = None;
         self.offsets_before = None;
         self.torso_before = None;
+        self.clean_before = None;
+        self.lift_low = [0.0; 2];
         self.own_moved = [0.0; 3];
         self.acceleration = None;
         self.note("reset: standing at the start".into());
@@ -771,9 +805,24 @@ impl Sim {
     /// A bone's local as the game's animation writes it this frame: its pose ([`Sim::anim_local`])
     /// and the gait while the AI moves the actor ([`Sim::gait_w`]).
     pub fn true_local(&self, b: usize) -> Xf {
+        self.local_of(b, true)
+    }
+
+    /// The animation as it would be without the forced leg jump (`Spec::leg_jump`): its own
+    /// motion, which the drawn pose may follow ([`Stats::drawn_move`]).
+    fn clean_anim(&self) -> [Xf; COUNT] {
+        let locals: [Xf; COUNT] = std::array::from_fn(|b| self.local_of(b, false));
+        self.fk(&locals)
+    }
+
+    /// [`Sim::true_local`], with the forced leg jump or without.
+    fn local_of(&self, b: usize, jump: bool) -> Xf {
         let (w, ph) = (self.gait_w, self.gait_phase);
         let mut r = self.anim_local(b);
         let mut t = self.rest_local(b);
+        if jump && b == mq::L_CALF && self.leg_jump_at.is_some_and(|at| self.t >= at - 1e-6) {
+            r = mul(&r, &rotation([0.3, 0.0, 0.0]));
+        }
         if w > 0.0 {
             match b {
                 mq::L_THIGH => r = mul(&r, &rotation([0.45 * w * ph.sin(), 0.0, 0.0])),
@@ -820,6 +869,8 @@ impl Sim {
         let first = !self.base_ready;
         self.base_ready = true;
         let mut jumped = false;
+        let mut jumped_roles: Vec<Role> = Vec::new();
+        let mut leg_jump = false;
         let moving = self.moving() && self.gait_w > 0.0;
         for b in 0..COUNT {
             let mut now = self.true_local(b);
@@ -841,6 +892,9 @@ impl Sim {
             let (mut base, how) =
                 ragdoll_core::pose::read_base(now, Some(self.base[b]), self.written.map(|w| w[b]));
             if how == ragdoll_core::pose::Read::Animated && reacting {
+                if mq::role_side(b).0.is_leg() && active::leg_jumped(&self.base[b], &base) {
+                    leg_jump = true;
+                }
                 let (eased, cut) = ragdoll_core::pose::capped(&self.base[b], &base, k);
                 if cut {
                     self.stats.base_jumps += 1;
@@ -849,6 +903,7 @@ impl Sim {
                         base = eased;
                     } else {
                         jumped = true;
+                        jumped_roles.push(mq::role_side(b).0);
                     }
                 }
             }
@@ -858,7 +913,19 @@ impl Sim {
             self.base[b] = base;
             self.raw[b] = now;
         }
-        if jumped {
+        // A leg-only jump right after a hit is re-based (the host's too), else yielded to.
+        let since_hit = self
+            .stats
+            .last_hit
+            .map_or(f32::MAX, |h| (self.t - h) as f32);
+        // Any jump is kept out of the body's carry (the host's too).
+        self.rebase_legs = self.rig.body.is_some() && (jumped || leg_jump);
+        if self.rig.body.is_some() && active::rebases(since_hit, leg_jump, &jumped_roles) {
+            self.stats.rebased += 1;
+            self.note(format!(
+                "its animation jumped in the legs {since_hit:.2} s after the hit: re-based"
+            ));
+        } else if jumped {
             self.yield_now("its animation jumped");
         }
     }
@@ -1590,20 +1657,37 @@ impl Sim {
                 let target = brace_target(anim[u].1, dir, wall, top);
                 reaches[side as usize] = surface.is_none()
                     || hands::reaches(anim[u].1, target, reach, self.anim_facing(), side);
+                // Never behind the back, nor on an obstacle right behind the hips (the host's
+                // too): the hips lean on it.
+                if !hands::hand_may_brace(
+                    anim[mq::PELVIS].1,
+                    self.anim_facing(),
+                    target,
+                    surface.map(|s| s.face),
+                ) {
+                    arms[side as usize] = false;
+                }
             }
         }
         let one_arm = self.tune.brace_holds * self.tune.balance.max(1.0) / 100.0 * hands::ONE_ARM;
         let bracing = hands::bracing_arms(arms, self.armed, v, one_arm, reaches);
         self.stats.brace_hands = bracing;
-        self.watch = [HandWatch::default(); 2];
-        self.hand_lock = [None; 2];
+        // A hand still planted from the brace before keeps its plant (the host's too).
+        let old = self.rig.brace.map_or([None; 2], |b| b.hands);
+        let kept = [0u8, 1].map(|s| hands::carried_hand(old[s as usize], bracing[s as usize], s));
+        for s in 0..2 {
+            if kept[s] != old[s] || kept[s].is_none() {
+                self.watch[s] = HandWatch::default();
+                self.hand_lock[s] = None;
+            }
+        }
         Brace {
             dir,
             t: 0.0,
             wall,
             top,
             surface,
-            hands: [0u8, 1].map(|s| bracing[s as usize].then(|| Hand::new(s))),
+            hands: kept,
             facing: self.anim_facing(),
             walked: 0.0,
         }
@@ -2246,11 +2330,19 @@ impl Sim {
                 if let (Some(from), false) = (self.rig.carry_from.as_ref(), self.rig.fall.is_some())
                 {
                     let to_body = |p: V3| scale(sub(p, origin), m);
-                    let from: Vec<_> = from.iter().map(|&(q, p)| (q, to_body(p))).collect();
+                    let mut from: Vec<_> = from.iter().map(|&(q, p)| (q, to_body(p))).collect();
                     let to: Vec<_> = frames
                         .iter()
                         .map(|&(q, p)| (q, to_body(sub(p, own))))
                         .collect();
+                    // The animation jumped: the jump is not carried into the body, and the bounds'
+                    // kept offsets move onto the new animation (the host's too).
+                    if std::mem::take(&mut self.rebase_legs) {
+                        for b in 0..COUNT {
+                            self.rig.limit.rebase(b, from[b].0, to[b].0);
+                            from[b] = to[b];
+                        }
+                    }
                     body.carry(&from, &to);
                 }
                 self.rig.carry_from = Some(frames);
@@ -2361,7 +2453,21 @@ impl Sim {
                 (mq::L_THIGH, mq::L_CALF, mq::L_FOOT),
                 (mq::R_THIGH, mq::R_CALF, mq::R_FOOT),
             ];
-            let low = [anim[mq::L_FOOT].1[2], anim[mq::R_FOOT].1[2]];
+            // Eased in and out (`active::lift_amount`); none wanted while the steps place the
+            // legs (their targets are held up already).
+            let feet = [mq::L_FOOT, mq::R_FOOT];
+            let stepping = self.rig.balance.is_some();
+            let lift = [0, 1].map(|i| {
+                let f = feet[i];
+                let excess = if stepping {
+                    0.0
+                } else {
+                    anim[f].1[2] - active::LIFT_SLACK - at[f][2]
+                };
+                active::lift_amount(self.lift_low[i], excess, dt)
+            });
+            self.lift_low = lift;
+            let low = [0, 1].map(|i| at[feet[i]][2] + lift[i]);
             active::lift_feet(&mut rots, &at, &legs, &low, self.anim_facing());
         }
         let mut out = self.place(&rots, pelvis);
@@ -2413,13 +2519,15 @@ impl Sim {
                         *self.hand_lock[hand.side as usize].get_or_insert(ph)
                     } else if let (true, Some(home)) = (hand.released(), self.home(&out, hand.side))
                     {
-                        // Turned onto its grip as it comes home (from as it let go).
+                        // Turned onto its grip as it comes home (from as it let go), no faster
+                        // than a hand turns from as it was drawn (the host's too).
                         let from = self.hand_lock[hand.side as usize].unwrap_or(carried);
-                        active::m_from_q(active::qslerp(
+                        let to = active::m_from_q(active::qslerp(
                             active::qfrom_m(&from),
                             active::qfrom_m(&home.0),
                             active::ease(hand.home_share()),
-                        ))
+                        ));
+                        hands::turn_toward(&ph, &to, hands::HAND_HOME_TURN * self.dt)
                     } else {
                         carried
                     };
@@ -2582,6 +2690,22 @@ impl Sim {
             };
             let wrist = self.posed[h].1;
             let holding = !matches!(hand.phase, hands::Phase::Released { .. });
+            // The drawn wrist on its plant once it has come to rest there (world-pinned), and how
+            // long a released hand takes home (its arm handed back).
+            match hand.phase {
+                hands::Phase::Planted {
+                    at, t, approach, ..
+                } if t >= approach => {
+                    self.stats.plant_drift = self.stats.plant_drift.max(length(sub(wrist, at)));
+                }
+                // Home: locked on it (or handed back to the free arm already).
+                hands::Phase::Released { t, locked, .. } => {
+                    if !locked && hand.plant_weight() > 1e-3 {
+                        self.stats.return_time = self.stats.return_time.max(t);
+                    }
+                }
+                _ => {}
+            }
             let w = &mut self.watch[side];
             let (gap, _) = surface.gap(wrist);
             let touching = gap <= hands::HAND + TOUCH;
@@ -2604,7 +2728,13 @@ impl Sim {
                     }
                 }
             }
-            if hand.planted() {
+            // The elbow watched once the wrist is at rest on its plant (its own way onto it is
+            // the touch, not a swing).
+            let at_rest = matches!(
+                hand.phase,
+                hands::Phase::Planted { t, approach, .. } if t >= approach
+            );
+            if at_rest {
                 let a = sub(self.posed[f].1, self.posed[u].1);
                 let c = sub(wrist, self.posed[f].1);
                 let bend = (dot(a, c) / (length(a) * length(c)).max(1e-6))
@@ -2671,7 +2801,11 @@ impl Sim {
             }
         }
         let h = mq::bone_of(Role::Hand, side)?;
-        let c = mq::PARENT[mq::bone_of(Role::UpperArm, side)?]?;
+        // Carried by the chest, never by the clavicle the arm moves (the host's too).
+        let mut c = mq::PARENT[mq::bone_of(Role::UpperArm, side)?]?;
+        while mq::role_side(c).0.is_arm() {
+            c = mq::PARENT[c]?;
+        }
         let anim = self.anim();
         Some(hands::carried(anim[c], anim[h], pose[c]))
     }
@@ -2783,6 +2917,61 @@ impl Sim {
         if self.stats.last_hit.is_none() || dt <= 0.0 {
             return;
         }
+        // Continuity: each drawn bone's move and turn in this frame beyond its clean animation's
+        // own (`clean_anim`: a forced jump is not the animation's motion), standing.
+        let clean = self.clean_anim();
+        // How far any drawn bone is from its animated place (a fall's and a bracing arm's own
+        // aside), and every drawn bone's length against the animation's (Patrick's 21-16-09 clip).
+        if self.rig.fall.is_none() {
+            let anim_now = self.anim();
+            for b in 0..COUNT {
+                let (role, side) = mq::role_side(b);
+                let bracing = role.is_arm()
+                    && side < 2
+                    && self
+                        .rig
+                        .brace
+                        .is_some_and(|br| br.hands[side as usize].is_some());
+                if !bracing {
+                    let d = length(sub(self.posed[b].1, anim_now[b].1));
+                    self.stats.drawn_most_off = self.stats.drawn_most_off.max(d);
+                }
+                if let Some(p) = mq::PARENT[b] {
+                    // Against the bind pose (the rest locals; the lab's gait moves its feet's).
+                    let drawn = length(sub(self.posed[b].1, self.posed[p].1));
+                    let bind = length(self.rest_local(b));
+                    self.stats.length_change = self.stats.length_change.max((drawn - bind).abs());
+                }
+            }
+        }
+        // A catch step's legs swing on the steps' own pose (a person's step, faster than the
+        // bound): left out while the steps last.
+        let stepping = self.rig.balance.is_some();
+        if let (Some(c0), None) = (self.clean_before, self.rig.fall.as_ref()) {
+            for b in 0..COUNT {
+                if stepping && mq::role_side(b).0.is_leg() {
+                    continue;
+                }
+                // (The steps' own move of the actor moves the animation, not the drawn body.)
+                let moved = add(
+                    sub(sub(self.posed[b].1, before[b].1), sub(clean[b].1, c0[b].1)),
+                    self.own_moved,
+                );
+                let drawn = mul(&self.posed[b].0, &transpose(&before[b].0));
+                let own = mul(&clean[b].0, &transpose(&c0[b].0));
+                let turn = length(rotation_vector(&mul(&drawn, &transpose(&own))));
+                if length(moved) > self.stats.drawn_move {
+                    self.stats.drawn_move = length(moved);
+                    self.stats.drawn_move_bone = b;
+                    self.stats.drawn_move_at = self.t;
+                }
+                if turn.to_degrees() > self.stats.drawn_turn_step {
+                    self.stats.drawn_turn_step = turn.to_degrees();
+                    self.stats.drawn_turn_bone = b;
+                }
+            }
+        }
+        self.clean_before = Some(clean);
         // Smoothness: each bone's velocity, acceleration and jerk from its shown position; the
         // biggest change of velocity in a frame and the biggest jerk (m/s, m/s3).
         let v: [V3; COUNT] = std::array::from_fn(|b| {
@@ -3077,6 +3266,8 @@ impl Sim {
         self.anim_pelvis = None;
         self.offsets_before = None;
         self.torso_before = None;
+        self.clean_before = None;
+        self.lift_low = [0.0; 2];
         self.own_moved = [0.0; 3];
         self.acceleration = None;
         self.last_knock = Some(self.t);

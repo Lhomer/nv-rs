@@ -125,7 +125,11 @@ Beside each clip a `.json` sidecar of the same name holds:
   `jumps` (animation jumps the reaction yielded to), `fade` (how much of a dropped body's way back
   is left), `heights` (the root's, `Bip01 NonAccum`'s and the pelvis's world height over the
   actor's reference, as drawn, game units) and `feet_over_floor` (each foot's height over the
-  collision floor under it, `null` where the cast found none); `null` when it is not reacting.
+  collision floor under it, `null` where the cast found none), `drawn_delta` (the most a drawn
+  bone moved this frame beyond its animation's own move, game units: a pop at the hit shows here),
+  `drawn_length` (the most a drawn bone's length is off its animation's, game units: 0 unless a
+  bone is stretched) and `rebased` (leg-only animation jumps at a hit re-based instead of yielded
+  to); `null` when it is not reacting.
 
 The clips need the Vulkan renderer (the default; Settings.cmd's Renderer). With "Direct3D 9" the
 game is drawn by Windows' Direct3D, whose frames the recorder does not see: the clip comes out

@@ -21,9 +21,12 @@ pub enum GroundKind {
     HalfWall,
     Table,
     Curb,
+    /// A thin rail: a 3-unit pipe [`PIPE_TOP`] high at the obstacles' place, nothing under it
+    /// (Patrick's 21-16-09 clip's railing).
+    Pipe,
 }
 
-pub const GROUNDS: [(&str, GroundKind); 11] = [
+pub const GROUNDS: [(&str, GroundKind); 12] = [
     ("flat", GroundKind::Flat),
     ("slope", GroundKind::Slope),
     ("uneven", GroundKind::Uneven),
@@ -35,6 +38,7 @@ pub const GROUNDS: [(&str, GroundKind); 11] = [
     ("halfwall", GroundKind::HalfWall),
     ("table", GroundKind::Table),
     ("curb", GroundKind::Curb),
+    ("pipe", GroundKind::Pipe),
 ];
 
 impl GroundKind {
@@ -61,6 +65,9 @@ pub const WALL_AT: f32 = -25.0;
 pub const OBSTACLE_AT: f32 = -24.0;
 pub const RAIL_TOP: f32 = 70.0;
 pub const TABLE_TOP: f32 = 52.0;
+/// The thin rail's top ([`GroundKind::Pipe`]) and thickness (game units).
+pub const PIPE_TOP: f32 = 80.0;
+pub const PIPE: f32 = 3.0;
 pub const POST_EVERY: f32 = 40.0;
 pub const BAR_EVERY: f32 = 14.0;
 pub const CURB_AT: f32 = -20.0;
@@ -327,6 +334,15 @@ pub fn build(world: &mut PhysicsWorld, kind: GroundKind) -> Ground {
                     [x + 2.0, y + 2.0, TABLE_TOP - 3.0],
                 );
             }
+        }
+        GroundKind::Pipe => {
+            add_box(world, &mut tris, [-far, -far, -40.0], [far, far, 0.0]);
+            add_box(
+                world,
+                &mut tris,
+                [-150.0, OBSTACLE_AT - PIPE, PIPE_TOP - PIPE],
+                [150.0, OBSTACLE_AT, PIPE_TOP],
+            );
         }
         GroundKind::Curb => {
             add_box(world, &mut tris, [-far, CURB_AT, -40.0], [far, far, 0.0]);
