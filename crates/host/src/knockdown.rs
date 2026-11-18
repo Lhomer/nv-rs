@@ -3183,6 +3183,61 @@ pub(crate) fn proxy_set_position(e: &mut Engine, proxy: u32, position: u32) {
     );
 }
 
+/// The `hkpWorld` `actor`'s character controller is in, 0 for none.
+pub(crate) fn actor_world(e: &mut Engine, actor: u32) -> u32 {
+    let controller = e.call(CHAR_CONTROLLER, &args![actor]).u32();
+    if controller == 0 {
+        0
+    } else {
+        controller_world(e, controller)
+    }
+}
+
+/// The world's operation queue and locks, said (`[np world]`): the queue's records
+/// (`m_pendingOperations` +0x88, its count at +4), the pending count (+0x8c), the
+/// critical-operation lock counts (+0x94, +0x98), the blocked flag (+0x9c), `m_isLocked`
+/// (+0xbc), the Havok lock's depth and the owning-thread word of its critical section (the
+/// record at `012681d4`: depth +0xc, the section at +0x18, its owner at +0xc of that), and the
+/// phantom updates (op 17) queued for the same phantom twice.
+pub(crate) fn world_state(e: &Engine, world: u32) -> String {
+    let queue = e.mem.u32(world + 0x88);
+    let (records, count) = if queue != 0 {
+        (e.mem.u32(queue), e.mem.u32(queue + 4))
+    } else {
+        (0, 0)
+    };
+    let mut phantoms = Vec::new();
+    let mut twice = 0;
+    for i in 0..count.min(256) {
+        let r = records.wrapping_add(i * 0x14);
+        if e.mem.u8(r) == 0x11 {
+            let ph = e.mem.u32(r + 4);
+            if phantoms.contains(&ph) {
+                twice += 1;
+            } else {
+                phantoms.push(ph);
+            }
+        }
+    }
+    let lock = e.mem.u32(0x0126_81d4);
+    let (depth, owner) = if lock != 0 {
+        (e.mem.u32(lock + 0xc), e.mem.u32(lock + 0x18 + 0xc))
+    } else {
+        (0, 0)
+    };
+    format!(
+        "the queue {count} records ({} phantom updates, {twice} queued twice), pending {}, \
+         critical operations {} / {}, blocked {}, isLocked {}, the Havok lock depth {depth} \
+         owned by thread word {owner:#x}",
+        phantoms.len() + twice,
+        e.mem.u32(world + 0x8c) as i32,
+        e.mem.u32(world + 0x94) as i32,
+        e.mem.u32(world + 0x98) as i32,
+        e.mem.u8(world + 0x9c),
+        e.mem.u32(world + 0xbc) as i32,
+    )
+}
+
 /// New Physics' move of `actor` to `at` ([`place`]) made under the world's own lock, as
 /// `hkpWorld::stepDeltaTime` takes it, and only with none of its critical operations open:
 /// answers false (nothing moved: try again) when they are (another thread's work on the world;

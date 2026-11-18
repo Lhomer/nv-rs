@@ -1082,6 +1082,45 @@ const AI_THREAD: u32 = 0x008c_7aa0;
 /// At the take the floor is taken from the animated feet when they stand within this of the
 /// collision floor (game units).
 const FLOOR_NEAR: f32 = 12.0;
+/// Once a second, each world a New Physics actor is in: its operation queue and locks
+/// (`[np world]`, `knockdown::world_state`; Patrick's 13:35 clip: bullets and shells frozen in
+/// the air for 3400 frames before the 13:17 overflow).
+fn world_said(e: &mut Engine) {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+        if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1)) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    let actors: Vec<u32> = ACTORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .map(|a| a.actor)
+        .collect();
+    let mut worlds = Vec::new();
+    for actor in actors {
+        let w = crate::knockdown::actor_world(e, actor);
+        if w != 0 && !worlds.contains(&w) {
+            worlds.push(w);
+        }
+    }
+    for w in worlds {
+        let ai = e.call(0x008c_7aa0, &[]).bool();
+        note(format!(
+            "[np world] {w:08X} (said from the main thread{}): {}",
+            if ai {
+                ", an AI thread's task running"
+            } else {
+                ""
+            },
+            crate::knockdown::world_state(e, w)
+        ));
+    }
+}
+
 /// New Physics moves its actor only by this much or more (game units); less is gathered.
 const MOVE_LEAST: f32 = 0.5;
 /// The actor is moved by the body only while drawn within this of it (degrees, units).
@@ -1512,6 +1551,7 @@ pub fn let_gos() -> u32 {
 /// (`knockdown::hand_over`); if the game refuses it, New Physics keeps it downed. A death: its
 /// ragdoll's bodies put on the pose drawn with those velocities (`knockdown::place_bodies`).
 pub fn main_thread(e: &mut Engine) {
+    world_said(e);
     let waiting: Vec<NpActor> = {
         let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
         if !actors.iter().any(|a| a.handing.is_some()) {
