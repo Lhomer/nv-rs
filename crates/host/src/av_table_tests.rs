@@ -398,6 +398,8 @@ mod world {
             e.mem.set_f32(proxy + 0x58, 0.1);
             e.mem.set_u32(phantom + 8, WORLD);
             e.mem.set_u32(phantom + 0x10, SHAPE);
+            // Its collidable's motion state (`+0x18`): its own, at `+0xb0`.
+            e.mem.set_u32(phantom + 0x18, phantom + 0xb0);
             // Its transform (the motion state at `+0xb0`): the identity.
             for i in 0..3 {
                 e.mem.set_f32(phantom + 0xb0 + 0x14 * i, 1.0);
@@ -936,5 +938,238 @@ fn np_creature_melee_hit_never_reads_past_the_actor_value_table() {
             crate::gunplay::set_tuning(was);
         }
     }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// What one run of [`bite_run`] left: every node's world of both trees, the NPC's ragdoll bodies'
+/// velocities, both actors' knock states and reference positions, the actors the reactions
+/// still had (none), the knockdown's decision lines, and the hit data's damage after the kill
+/// impulse (the game's push reads it).
+#[derive(Debug, PartialEq)]
+struct BiteState {
+    worlds: Vec<(u32, [u32; 12])>,
+    bodies: Vec<[u32; 3]>,
+    knock: [u8; 2],
+    refs: [[u32; 3]; 2],
+    reacting: Vec<u32>,
+    decisions: usize,
+    /// The knockdowns' switches into the game's `KnockExplosion` (their "knock state after the
+    /// switch" lines).
+    switched: usize,
+    after_kill: [u32; 4],
+}
+
+/// Three bites of the Coyote's (the game's `ClearData` and `InitializeHitData_ov3`) on the NPC
+/// and on the creature, the third lethal, then 30 frames, then the kill impulse (`008ae000`) of
+/// the last bite. `fork`: none, the game's own `HitMe` and `008ae000` with no nv-rs hook (vanilla
+/// FNV); else nv-rs's hooks installed as in play (`gunplay::install`), New Physics off and the
+/// knockdowns and the ballistics as given, each frame the reactions' pass as the game's frame
+/// runs it.
+fn bite_run(fork: Option<(bool, bool)>) -> BiteState {
+    use engine::units::fallout_ai::actor_p3::actor_hit_me;
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut f = Fixture::new(
+        rig_fixture::fnv_skeleton(),
+        Ground {
+            collision: Some(-1.0),
+            navmesh: -9.0,
+        },
+    );
+    f.make_character();
+    lay_out_gecko(&mut f.e);
+    f.add_actor(GECKO, GECKO_ID, gecko_like(), CREATURE_TREE);
+    f.game_update();
+    dress_npc(&mut f.e);
+    f.e.mem.set_u32(GECKO_VTABLE + 0x21c, ANSWER_YES);
+    f.e.register_double(SLOTS + 32, |_, _| (BITE as u32).into_ret());
+    f.e.mem.set_u32(GECKO_VTABLE + 0x444, SLOTS + 32);
+    f.e.mem.set_u32(SHOOTER + rig_fixture::FORM_ID, BITER_ID);
+    f.e.register_double(SLOTS + 36, |_, _| (AREA + 0x2_6000).into_ret());
+    f.e.mem.set_u32(GECKO_VTABLE + 0x1e4, SLOTS + 36);
+    // The character controller in a Havok world (what the game's `KnockExplosion` reads).
+    platform::install(&mut f.e);
+    world::lay_out(&mut f.e, rig_fixture::CONTROLLER);
+    f.e.mem.set_f32(0x011c_582c, 1.0 / rig_fixture::HK);
+    platform::set_slot(world::ROUTER_TLS, world::ROUTERS[0]);
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    let was = crate::gunplay::tuning();
+    if let Some((knockdowns, ballistics)) = fork {
+        crate::gunplay::set_tuning(crate::gunplay::Tuning {
+            new_physics: false,
+            knockdowns,
+            ballistics,
+            // Low enough that the bites stagger or knock down: the knockdowns' own decision.
+            knockdown_threshold: 5,
+            ..was
+        });
+        crate::gunplay::install(&mut f.e);
+    }
+    room_events::set_on(true);
+    let _ = room_events::take();
+    for bite in 0..3u32 {
+        // The third bite is lethal (`+0x338`'s answer from the tenth "pellet").
+        PELLETS.store(if bite == 2 { 10 } else { 0 }, SeqCst);
+        for target in [ACTOR, GECKO] {
+            f.animate();
+            f.e.call(0x009b_4dc0, &[HIT]);
+            f.e.call(0x009b_5170, &[HIT, SHOOTER, target, 0, 0]);
+            if fork.is_some() {
+                f.e.call(0x0089_a760, &[target, HIT, 0]);
+            } else {
+                actor_hit_me(&mut f.e, Ptr::new(target), Ptr::new(HIT), 0);
+            }
+        }
+        for _ in 0..10 {
+            f.e.mem.set_f32(0x011d_ea30, 1.0 / 60.0);
+            f.animate();
+            if fork.is_some() {
+                crate::new_physics::main_thread(&mut f.e);
+                crate::active_ragdoll::apply(&mut f.e);
+                crate::active_ragdoll::read_drawn(&mut f.e);
+                crate::active_ragdoll::after_draw(&mut f.e);
+                crate::active_ragdoll::unwrite(&mut f.e);
+            }
+        }
+    }
+    // The kill impulse of the last bite (the game's push of the killed body): the biter's
+    // attack point (its process's `+0x460`) at its 3D's origin.
+    f.e.register_double(SLOTS + 44, |_, _| (AREA + 0x2_7000).into_ret());
+    f.e.mem.set_u32(PROCESS_VTABLE + 0x460, SLOTS + 44);
+    f.e.call(0x008a_e000, &[SHOOTER, HIT]);
+    let lines = room_events::take();
+    room_events::set_on(false);
+    let mut worlds = Vec::new();
+    let trees: Vec<u32> =
+        f.at.iter()
+            .copied()
+            .chain(f.others.iter().flat_map(|o| o.2.clone()))
+            .collect();
+    for n in trees {
+        let mut w = [0u32; 12];
+        for (i, o) in (0..9)
+            .map(|i| rig_fixture::WORLD_ROTATION + 4 * i)
+            .chain((0..3).map(|i| rig_fixture::WORLD_TRANSLATION + 4 * i))
+            .enumerate()
+        {
+            w[i] = f.e.mem.u32(n + o);
+        }
+        worlds.push((n, w));
+    }
+    let bodies = (0..f.body_nodes().len())
+        .map(|k| f.body_velocity(k).map(f32::to_bits))
+        .collect();
+    let knock_of = |e: &Engine, actor: u32| {
+        let process = e.mem.u32(actor + rig_fixture::PROCESS);
+        e.mem.u8(process + rig_fixture::KNOCK_STATE)
+    };
+    let ref_of = |e: &Engine, actor: u32| {
+        [0, 4, 8].map(|o| e.mem.u32(actor + rig_fixture::REFR_POSITION + o))
+    };
+    let state = BiteState {
+        worlds,
+        bodies,
+        knock: [knock_of(&f.e, ACTOR), knock_of(&f.e, GECKO)],
+        refs: [ref_of(&f.e, ACTOR), ref_of(&f.e, GECKO)],
+        reacting: crate::active_ragdoll::reacting_actors(),
+        decisions: lines
+            .iter()
+            .filter(|l| l.contains("\"event\":\"hit\""))
+            .count(),
+        switched: lines
+            .iter()
+            .filter(|l| l.contains("knock state after the switch"))
+            .count(),
+        after_kill: [0x14, 0x18, 0x1c, 0x20].map(|o| f.e.mem.u32(HIT + o)),
+    };
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    crate::gunplay::set_tuning(was);
+    state
+}
+
+/// New Physics off is vanilla FNV's hits (Patrick, 2026-11-18). The same three bites of a
+/// creature on an NPC and on a creature, the third lethal, then its kill impulse ([`bite_run`]):
+/// - with the knockdowns and the ballistics off, nv-rs's hooks leave everything as the game's
+///   own path does: every node's world bit for bit, the bodies' velocities, the knock states, the
+///   references, the hit data after the kill impulse; no actor the reactions have; no knockdown
+///   decision;
+/// - with the knockdowns alone, the knockdowns decide on each living actor's bite (5: the third
+///   kills the creature) and switch the NPC into the game's `KnockExplosion` on each of its three
+///   (the creature's game refuses: a stagger), and nothing else differs: no bone written (the
+///   worlds, bodies and the rest the vanilla run's);
+/// - with the ballistics alone (they act on the projectiles, none here), all as vanilla.
+#[test]
+fn np_off_hits_are_vanilla_fnvs() {
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let vanilla = bite_run(None);
+    let mut failed = Vec::new();
+    for (name, knockdowns, ballistics, decisions) in [
+        ("knockdowns and ballistics off", false, false, 0usize),
+        ("knockdowns alone", true, false, 5),
+        ("ballistics alone", false, true, 0),
+    ] {
+        let fork = bite_run(Some((knockdowns, ballistics)));
+        let differ: Vec<u32> = fork
+            .worlds
+            .iter()
+            .zip(&vanilla.worlds)
+            .filter(|(a, b)| a != b)
+            .map(|(a, _)| a.0)
+            .collect();
+        eprintln!(
+            "RESULT New Physics off, {name}: nodes off the vanilla run {} of {}, bodies same {}, \
+             knock states {:?} (vanilla {:?}), references same {}, reacting {:?}, knockdown \
+             decisions {}, switches into the game's knock-down {}, the hit after the kill \
+             impulse same {}",
+            differ.len(),
+            fork.worlds.len(),
+            fork.bodies == vanilla.bodies,
+            fork.knock,
+            vanilla.knock,
+            fork.refs == vanilla.refs,
+            fork.reacting,
+            fork.decisions,
+            fork.switched,
+            fork.after_kill == vanilla.after_kill
+        );
+        // The knockdowns' own switch (the game's `KnockExplosion`) only with them on: the NPC's
+        // three bites (the creature's game refuses, a stagger, then it is dead).
+        let switches = if knockdowns { 3 } else { 0 };
+        if fork.switched != switches {
+            failed.push(format!(
+                "{name}: {} switches, want {switches}",
+                fork.switched
+            ));
+        }
+        if !differ.is_empty() {
+            failed.push(format!(
+                "{name}: {} nodes off the vanilla pose",
+                differ.len()
+            ));
+        }
+        if fork.bodies != vanilla.bodies {
+            failed.push(format!("{name}: the bodies' velocities differ"));
+        }
+        if fork.knock != vanilla.knock || fork.refs != vanilla.refs {
+            failed.push(format!("{name}: knock states or references differ"));
+        }
+        if !fork.reacting.is_empty() {
+            failed.push(format!("{name}: the reactions have {:x?}", fork.reacting));
+        }
+        if fork.decisions != decisions {
+            failed.push(format!(
+                "{name}: {} knockdown decisions, want {decisions}",
+                fork.decisions
+            ));
+        }
+        if fork.after_kill != vanilla.after_kill {
+            failed.push(format!("{name}: the kill impulse differs"));
+        }
+    }
+    assert_eq!((vanilla.decisions, vanilla.switched), (0, 0));
+    assert!(vanilla.reacting.is_empty());
     assert!(failed.is_empty(), "{failed:#?}");
 }

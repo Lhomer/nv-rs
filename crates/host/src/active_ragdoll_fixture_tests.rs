@@ -459,6 +459,7 @@ fn the_flinch_is_drawn_on_an_fnv_shaped_tree() {
     let _one = super::tests::SERIAL
         .lock()
         .unwrap_or_else(|p| p.into_inner());
+    let _layer = super::tests::layer_on();
     check_flinch(&rig_fixture::mannequin());
 }
 
@@ -468,6 +469,7 @@ fn the_flinch_is_drawn_on_fnvs_skeleton() {
     let _one = super::tests::SERIAL
         .lock()
         .unwrap_or_else(|p| p.into_inner());
+    let _layer = super::tests::layer_on();
     check_flinch(&rig_fixture::fnv_skeleton());
 }
 
@@ -637,6 +639,7 @@ fn the_flinch_survives_the_games_hit_animation_on_fnvs_skeleton() {
     let _one = super::tests::SERIAL
         .lock()
         .unwrap_or_else(|p| p.into_inner());
+    let _layer = super::tests::layer_on();
     let s = flinched_over_a_jump(rig_fixture::fnv_skeleton(), 0.79, 30.0, 0.7);
     let trace: Vec<String> = s
         .iter()
@@ -662,6 +665,7 @@ fn an_armed_actor_flinches_on_fnvs_skeleton() {
     let _one = super::tests::SERIAL
         .lock()
         .unwrap_or_else(|p| p.into_inner());
+    let _layer = super::tests::layer_on();
     let nodes = rig_fixture::fnv_skeleton();
     let mut f = Fixture::new(
         nodes.clone(),
@@ -708,6 +712,7 @@ fn the_write_reaches_the_spine_when_the_update_skips_it_on_fnvs_skeleton() {
     let _one = super::tests::SERIAL
         .lock()
         .unwrap_or_else(|p| p.into_inner());
+    let _layer = super::tests::layer_on();
     let nodes = rig_fixture::fnv_skeleton();
     let mut f = Fixture::new(
         nodes.clone(),

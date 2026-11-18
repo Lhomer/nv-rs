@@ -764,6 +764,10 @@ pub fn hit(
     if !crate::gunplay::is_on() {
         return;
     }
+    // New Physics off: vanilla hits, no flinch (`crate::gunplay::fork_hit_physics`).
+    if !crate::gunplay::fork_hit_physics() {
+        return;
+    }
     if strength <= 0 {
         note(format!(
             "{}: no flinch: Hit Reactions is 0",
@@ -3869,7 +3873,8 @@ fn balance_frame(
 pub fn push(e: &mut Engine, actor: u32, p: f32, mass: f32, direction: V3, aggressor: u32) {
     use crate::balance::{plan, Outcome, Stepping};
     let strength = crate::gunplay::tuning().balance;
-    if strength <= 0 || !crate::gunplay::is_on() || !(p > 0.0 && mass > 0.0) {
+    // New Physics off: vanilla hits, no catch steps (`crate::gunplay::fork_hit_physics`).
+    if strength <= 0 || !crate::gunplay::fork_hit_physics() || !(p > 0.0 && mass > 0.0) {
         return; // Balance off (or nothing pushed): the flinch alone, said by `hit`
     }
     if let Some(why) = blocked(e, actor) {
@@ -4816,7 +4821,9 @@ pub fn fall(
     speed: f32,
 ) -> bool {
     let t = crate::gunplay::tuning();
-    if !crate::gunplay::is_on() || (t.hit_reactions <= 0 && t.balance <= 0) {
+    // New Physics off: vanilla hits, the knockdown straight into the game's ragdoll
+    // (`crate::gunplay::fork_hit_physics`).
+    if !crate::gunplay::fork_hit_physics() || (t.hit_reactions <= 0 && t.balance <= 0) {
         return false;
     }
     if let Some(why) = blocked(e, actor) {
@@ -4970,6 +4977,26 @@ pub(crate) mod tests {
 
     /// The tests of the write's put-back share [`WRITTEN`]: one at a time.
     pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
+
+    /// The layered reactions on for a test (taken while [`SERIAL`] is held): they act only with
+    /// New Physics on (`crate::gunplay::fork_hit_physics`; off is vanilla FNV's hits), for the
+    /// actors New Physics does not take. The tuning is put back when it goes.
+    pub(crate) struct LayerOn(crate::gunplay::Tuning);
+
+    pub(crate) fn layer_on() -> LayerOn {
+        let was = crate::gunplay::tuning();
+        crate::gunplay::set_tuning(crate::gunplay::Tuning {
+            new_physics: true,
+            ..was
+        });
+        LayerOn(was)
+    }
+
+    impl Drop for LayerOn {
+        fn drop(&mut self) {
+            crate::gunplay::set_tuning(self.0);
+        }
+    }
 
     /// The update brought to a written skeleton runs no controller and keyframes no collision
     /// body: time 0, controllers off, the collision mode word at 3 through it, put back after.

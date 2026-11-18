@@ -7,6 +7,29 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-18 (New Physics off is vanilla FNV's hits)
+
+- Patrick: bNewPhysics=0 must be vanilla FNV's hit physics. `gunplay::fork_hit_physics()` (gunplay
+  on and New Physics on) now gates nv-rs's own hit physics: the layered reactions' bone writes
+  (`active_ragdoll::hit` the flinch, `push` the catch steps, `fall` the fall pose: a knockdown goes
+  straight into the game's ragdoll), the kill push (`iHitForce`'s `push_body`, `iImpulse`: the
+  game's `008ae000` as is), the force's dismemberment (`iDismemberForce`, `iExplodeForce`) and the
+  hit force on the game's own knock-downs (`hit_force::knock_strength`). The knockdowns
+  (`bKnockdowns`: their decisions, staggers and switches into the game's `KnockExplosion`) and the
+  ballistics are their own settings, unchanged either way. New Physics on is unchanged (the
+  layered reactions still run for the actors it does not take, a creature).
+- Test `np_off_hits_are_vanilla_fnvs`: three bites of a creature (the game's `ClearData` and
+  `InitializeHitData_ov3`) on an NPC and a creature, the third lethal, 30 frames, the kill impulse;
+  vanilla (the game's `HitMe` and `008ae000`, no nv-rs hook) against nv-rs's hooks with New Physics
+  off: knockdowns and ballistics off, knockdowns alone, ballistics alone. All 86 nodes' worlds bit
+  for bit, the bodies' velocities, knock states, references and the hit after the kill impulse as
+  vanilla; no actor the reactions have; the knockdowns' 5 decisions and 3 switches only with them
+  on. On 09625ec: 77 of 86 nodes off and two actors in the reactions with the knockdowns on.
+- The old layer's tests (`active_ragdoll` fixture and mock, `old_reactions_set_the_worlds_directly`)
+  now turn New Physics on for their run (`active_ragdoll::tests::layer_on`); their assertions are
+  unchanged.
+- Not covered by the test: the dismember roll's force (its gate is the same helper).
+
 ### Claude, 2026-11-18 (the 16:17 crash: a creature's bite and hit_force's skill)
 
 - **16:17 crash (08ff8723), fixed:** `3fc9101f` in `00406d70` < `008d4870` < `HitMe` <

@@ -1377,7 +1377,9 @@ fn old_reactions_set_the_worlds_directly_on_the_real_update() {
     crate::active_ragdoll::clear();
     let was = crate::gunplay::tuning();
     crate::gunplay::set_tuning(crate::gunplay::Tuning {
-        new_physics: false,
+        // The layered reactions act only with New Physics on (for an actor it does not take: this
+        // one is no character, `Fixture::make_character` not called).
+        new_physics: true,
         ..was
     });
     crate::room_events::set_on(true);

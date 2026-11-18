@@ -330,6 +330,7 @@ fn peak(samples: &[Sample], from: f32, to: f32) -> f32 {
 #[test]
 fn the_drawn_flinch_reaches_the_spine_tops_node() {
     let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let _layer = super::tests::layer_on();
     for (v, least, target) in [(0.32f32, 5.0f32, 6.0f32), (0.79, 12.0, 14.0)] {
         let s = run(v, [0.0, -1.0, 0.0], [0.0, 9.0, 90.0], 0.75);
         let at_peak = peak(&s, 0.08, 0.14);
@@ -360,6 +361,7 @@ fn the_drawn_flinch_reaches_the_spine_tops_node() {
 #[test]
 fn a_clavicle_hit_twists_the_drawn_torso() {
     let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let _layer = super::tests::layer_on();
     let s = run(0.79, [0.0, -1.0, 0.0], [8.0, 3.0, 100.0], 0.4);
     let twist = s
         .iter()
@@ -379,6 +381,7 @@ fn a_clavicle_hit_twists_the_drawn_torso() {
 #[test]
 fn the_drawn_flinch_shows_over_the_games_stagger() {
     let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let _layer = super::tests::layer_on();
     let stagger = |t: f32| {
         let a = 18f32.to_radians();
         let k = if t < 0.035 {
@@ -562,6 +565,7 @@ fn run_steps(v: f32, seconds: f32) -> Steps {
 #[test]
 fn catch_steps_follow_the_feet_without_a_slide() {
     let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let _layer = super::tests::layer_on();
     let s = run_steps(1.1, 1.6);
     let trace = s.trace.join("\n");
     assert!(

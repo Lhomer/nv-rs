@@ -380,6 +380,16 @@ fn on() -> bool {
     ON.load(Ordering::Relaxed)
 }
 
+/// Whether nv-rs's own hit physics act: the layered reactions' bone writes (the flinch, the catch
+/// steps, the fall pose: `crate::active_ragdoll`), the kill push (`iHitForce`, `iImpulse`), the
+/// force's dismemberment (`iDismemberForce`, `iExplodeForce`) and the hit force on the game's own
+/// knock-downs. Only with New Physics on: off, hits are vanilla FNV's (Patrick, 2026-11-18). The
+/// knockdowns (`bKnockdowns`) and the ballistics (`bBallistics`) are settings of their own and act
+/// either way.
+pub fn fork_hit_physics() -> bool {
+    on() && tuning().new_physics
+}
+
 /// Whether weighty combat is on now (the hit reactions run).
 pub(crate) fn is_on_now() -> bool {
     on()
@@ -850,7 +860,7 @@ pub fn install(e: &mut Engine) {
             Ptr::new(a[6]),
             Ptr::new(a[7]),
         );
-        if on() {
+        if fork_hit_physics() {
             // The part's explode chance (the third word) is 0 for a limb that never explodes.
             forced_outcome(e, a[1], a[2] as i32 > 0, a[6], a[7]);
         }
@@ -912,7 +922,7 @@ fn shot(e: &mut Engine, weapon: u32, player: u32) {
 /// The kill impulse: with `iHitForce` the ragdoll hit force ([`crate::hit_force::push_body`]);
 /// without it (0) the game's push scaled as before (`iImpulse`, melee by weight).
 fn kill_impulse(e: &mut Engine, aggressor: u32, hit: u32) {
-    if !on() || hit == 0 {
+    if !fork_hit_physics() || hit == 0 {
         fn_008ae000(e, Ptr::new(aggressor), Ptr::new(hit));
         return;
     }

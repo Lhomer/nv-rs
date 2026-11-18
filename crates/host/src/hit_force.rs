@@ -272,7 +272,7 @@ pub fn push_body(e: &mut Engine, aggressor: u32, hit: u32, stats: Option<&Weapon
 /// The knock-down by a blast with its strength times `iHitForce` (at most [`MAX_MOMENTUM`]).
 pub fn knock_strength(strength: f32) -> f32 {
     let t = crate::gunplay::tuning();
-    if !crate::gunplay::is_on() || !strength.is_finite() {
+    if !crate::gunplay::fork_hit_physics() || !strength.is_finite() {
         return strength;
     }
     (strength * t.hit_force.max(0) as f32 / 100.0).min(strength.max(MAX_MOMENTUM))
