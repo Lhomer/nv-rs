@@ -131,6 +131,9 @@ struct NpActor {
     floor_offset: Option<f32>,
     /// The world pass's lines said since the last hit.
     pass_logs: u32,
+    /// Downed: the combat target's direction (game units, none without one) and the aim's angle
+    /// off it (degrees) the last frame.
+    aim: Option<(Option<V3>, f32)>,
 }
 
 /// One hit's outcome as it goes (`[np outcome]`): the hit, then the most the spine's top went off
@@ -146,7 +149,7 @@ struct Outcome {
     drawn_most: (f32, f32),
     set_most: u32,
     /// How it came out (a fall, downed, died) once it did; measured on until [`OUTCOME_SECONDS`]
-    /// after the hit all the same.
+    /// after the hit all the same (and, standing, until its steps settle).
     result: Option<String>,
     /// The frames drawn nearer the animation than the body at the world pass (after its worlds
     /// were set), and the frames something had written over the body's nodes before it (set
@@ -159,8 +162,10 @@ struct Outcome {
     since: f32,
 }
 
-/// A hit's outcome is measured this long (s), whatever came of it, before `[np outcome]`.
+/// A hit's outcome is measured at least this long (s), whatever came of it, before
+/// `[np outcome]`, and at most [`OUTCOME_MOST`].
 pub const OUTCOME_SECONDS: f32 = 2.0;
+pub const OUTCOME_MOST: f32 = 6.0;
 
 /// One frame's figures of an actor New Physics has (the clips' `"np"` sample).
 #[derive(Clone, Copy, Debug, Default)]
@@ -393,6 +398,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             wrote_locals: Vec::new(),
             floor_offset: None,
             pass_logs: 0,
+            aim: None,
         });
     true
 }
@@ -1165,8 +1171,33 @@ pub const DOWN_TRIES: u32 = 3;
 /// After a rise gives up, the AI waits this long before it tries again (s).
 pub const RISE_AGAIN: f32 = 1.0;
 
-/// Combat target (the actor's `combatTarget`, slot 0x42c).
-const COMBAT_TARGET: u32 = 0x42c;
+/// The actor's combat target: its vtable's `GetCombatTarget` (slot `0x42c`, as the game's own
+/// `GetCombatTarget` script function calls it). Not a field: `actor + 0x42c` held 480.0
+/// (`0x43f00000`) in Patrick's tester logs, and its position read past the end of memory (the
+/// 20:58 and 23:01 crashes in the draw on b507e997).
+const COMBAT_TARGET_SLOT: u32 = 0x42c;
+
+/// `actor`'s combat target ([`COMBAT_TARGET_SLOT`]), only a mapped reference the game's form
+/// table knows by its own form id, never `actor` itself.
+fn combat_target(e: &mut Engine, actor: u32) -> Option<u32> {
+    let vtable = e.mem.u32(actor);
+    if vtable == 0 || !e.mem.is_mapped(vtable + COMBAT_TARGET_SLOT) {
+        return None;
+    }
+    if e.mem.u32(vtable + COMBAT_TARGET_SLOT) == 0 {
+        return None;
+    }
+    let target = e.vcall(actor, COMBAT_TARGET_SLOT, &args![]).u32();
+    if target == 0 || target == actor || target % 4 != 0 {
+        return None;
+    }
+    let end = target.checked_add(REFR_POSITION + 12)?;
+    if !(e.mem.is_mapped(target) && e.mem.is_mapped(end)) {
+        return None;
+    }
+    let id = e.mem.u32(target + FORM_ID);
+    (id != 0 && e.call(LOOKUP_FORM, &args![id]).u32() == target).then_some(target)
+}
 
 /// Whether `actor` is downed and its shots are withheld (it cannot aim from the pose it has):
 /// `crate::gunplay`'s fire hook skips the shot.
@@ -1242,13 +1273,13 @@ fn downed(e: &mut Engine, a: &mut NpActor, dt: f32) -> bool {
     let since = d.since;
     let failed = d.rise_failed;
     let push = np.push();
-    let target = e.mem.u32(a.actor + COMBAT_TARGET);
-    let to_target = (target != 0 && target != a.actor).then(|| {
+    let to_target = combat_target(e, a.actor).map(|target| {
         let at = read3(e, target + REFR_POSITION);
         let me = read3(e, a.actor + REFR_POSITION);
         sub(at, me)
     });
     let rd = ragdoll_core::np_down::reads(&reading, to_target, push);
+    a.aim = Some((to_target, rd.aim_off));
     if a.label.is_none() {
         // Kept downed (M6): the fall said as the game's ragdoll's would be.
         let reason = match np.balance.fall_reason {
@@ -1358,12 +1389,20 @@ fn outcome_now(a: &NpActor) -> String {
     }
 }
 
-/// The open hit's outcome said once it has been measured [`OUTCOME_SECONDS`].
+/// The open hit's outcome said once it has been measured [`OUTCOME_SECONDS`] and its steps have
+/// settled (a fall, downed or dead, or standing again with no step under way), or at
+/// [`OUTCOME_MOST`] whatever (the testers' b507e997 logs: "stood" was said at 2 s, then three
+/// catching steps walked it into a fall unsaid).
 fn close_if_due(a: &mut NpActor) {
-    if a.outcome
-        .as_ref()
-        .is_some_and(|o| o.since >= OUTCOME_SECONDS)
-    {
+    let settled = a.np.as_ref().map_or(true, |np| {
+        np.down.is_some()
+            || (np.phase() == Phase::Standing
+                && np.balance.step.is_none()
+                && np.balance.since >= ragdoll_core::np_balance::SETTLE)
+    });
+    if a.outcome.as_ref().is_some_and(|o| {
+        o.since >= OUTCOME_MOST || (o.since >= OUTCOME_SECONDS && (settled || o.result.is_some()))
+    }) {
         let now = outcome_now(a);
         close_outcome(a.id, &mut a.outcome, &now);
     }
@@ -1543,6 +1582,16 @@ pub fn floor_force(actor: u32) -> Option<f32> {
         .find(|a| a.actor == actor)
         .and_then(|a| a.np.as_ref())
         .map(|np| np.report.floor_load.iter().sum())
+}
+
+/// Downed, `actor`'s combat target's direction and the aim's angle off it (the last frame).
+pub fn aim_of(actor: u32) -> Option<(Option<V3>, f32)> {
+    ACTORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|a| a.actor == actor)
+        .and_then(|a| a.aim)
 }
 
 /// The balance's phase and catching steps of `actor`.

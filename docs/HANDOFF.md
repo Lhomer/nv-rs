@@ -55,6 +55,10 @@ machinery runs.
   feet within 12 units of it); surfaces push out what lay inside at 1 m/s at most; no foot down is
   not "unreachable" on its own; `[np outcome]` after 2 s. Tests `np_walking_*` (walking, turning
   animation, a writer of the locals every other frame). Not run in the game.
+- **b507e997 crash fix:** the downed AI's combat target from the vtable (`+0x42c` is a slot, not
+  a field), checked to be a mapped reference; a planted foot the animation moves is let go once
+  standing again (no more steps with no hit); `[np outcome]` waits for the steps to settle. Not run
+  in the game.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 

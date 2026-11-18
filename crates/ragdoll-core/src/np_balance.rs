@@ -40,6 +40,12 @@ pub const STANCE_OFF: f32 = 0.1;
 pub const STANCE_TIME: f32 = 0.45;
 /// How long the capture point stays inside before it stands again (s).
 pub const SETTLE: f32 = 0.3;
+/// Standing again, a planted foot its animation moves faster than this (m/s, the animation's own
+/// foot, the shift aside) is let go to go with it: a slow walk or turn under [`MOVING`] left the
+/// feet where they had landed while the animation went on, the capture point drifted out and
+/// the steps it took walked a 0.32 m/s hit into a fall (the testers' b507e997 logs: "stood", then
+/// three catching steps with no hit, the hips lowered 0.15 m, out of steps).
+pub const ANIM_FOOT_MOVING: f32 = 0.05;
 /// Moving: how far its capture point may leave the animation's before a gather step (m), and the
 /// animation's speed that counts as moving (m/s).
 pub const GATHER: f32 = 0.12;
@@ -133,6 +139,8 @@ pub struct Balance {
     pub fall_reason: &'static str,
     /// Whether a foot stood on the floor as the support was last measured.
     pub supported: bool,
+    /// Each animated foot's place the last frame (m, the shift aside).
+    pub anim_feet: [Option<V3>; 2],
     /// The last frame's centre of mass velocity against the animation's (m/s).
     pub rel_v: V3,
 }
@@ -204,6 +212,7 @@ impl Balance {
             knocked: None,
             fall_reason: "",
             supported: true,
+            anim_feet: [None, None],
             rel_v: [0.0; 3],
         }
     }
@@ -293,6 +302,20 @@ impl Balance {
         let flat = |a: V3| [a[0], a[1], 0.0];
         self.capture = add(flat(com), scale(flat(rel_v), 1.0 / omega));
         self.moving = length(flat(anim_v)) > MOVING;
+        // Standing again: a planted foot the animation itself moves goes with it.
+        for side in 0..2 {
+            let at = sub(anim[self.feet[side]].x, self.shift);
+            let moved = self.anim_feet[side].map_or(0.0, |was| length(sub(at, was)));
+            self.anim_feet[side] = Some(at);
+            if self.phase == Phase::Standing
+                && self.since >= SETTLE
+                && self.step.is_none()
+                && dt > 0.0
+                && moved / dt > ANIM_FOOT_MOVING
+            {
+                self.plants[side] = None;
+            }
+        }
         self.measure(model, states, floor);
         // The animation's own capture point (its centre over its feet, moving with it).
         let anim_capture = flat(anim_com);
@@ -591,6 +614,10 @@ impl Balance {
         self.shift = sub(self.shift, by);
         self.shift_from = sub(self.shift_from, by);
         self.shift_to = sub(self.shift_to, by);
+        // The actor moved: the animation comes moved by it, not by its own feet.
+        for f in self.anim_feet.iter_mut().flatten() {
+            *f = add(*f, by);
+        }
     }
 }
 

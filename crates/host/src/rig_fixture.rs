@@ -499,14 +499,18 @@ impl Fixture {
         )
     }
 
-    /// The actor a character (its vtable's `IsCharacter`, `+0x100`, answering yes): New Physics
-    /// takes only characters.
+    /// The actor a character (its vtable's `IsCharacter`, `+0x100`, answering yes, and
+    /// `GetCombatTarget`, `+0x42c`, none): New Physics takes only characters.
     pub fn make_character(&mut self) {
         const ACTOR_VTABLE: u32 = BASE + 0xc_7000;
         const YES: u32 = 0x7200_0020;
+        const NONE: u32 = 0x7200_0024;
         self.e.register_double(YES, |_, _| 1u32.into_ret());
+        self.e.register_double(NONE, |_, _| 0u32.into_ret());
         self.e.mem.set_u32(ACTOR, ACTOR_VTABLE);
         self.e.mem.set_u32(ACTOR_VTABLE + 0x100, YES);
+        // `GetCombatTarget` (`+0x42c`): none.
+        self.e.mem.set_u32(ACTOR_VTABLE + 0x42c, NONE);
         // The player's pointer (`0x011dea3c`): none.
         self.e.mem.map(0x011d_e000, 0x1000);
     }

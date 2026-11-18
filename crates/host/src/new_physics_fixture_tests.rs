@@ -1407,6 +1407,33 @@ struct WalkRun {
     /// The animated feet's most lift (units) and the animation's speed (m/s).
     lift: f32,
     anim_speed: f32,
+    /// The catching steps, the most the hips were lowered for a step (m), the outcome's lines.
+    steps: u32,
+    lower_most: f32,
+    outcomes: Vec<String>,
+    /// While downed with a combat target: the target's direction and the aim's angle off it the
+    /// last frame (`new_physics::aim_of`).
+    aim: Option<(Option<V3>, f32)>,
+    aim_from: V3,
+}
+
+/// A run's set-up ([`walk_run_with`]).
+struct Walk<'a> {
+    speed: f32,
+    body: &'a str,
+    /// The game's frame seconds: each frame drawn between these (the same for a fixed rate).
+    dt: (f32, f32),
+    on: bool,
+    seconds: f32,
+    under: f32,
+    /// The animation walks and turns (else it stands, its feet still).
+    walking: bool,
+    /// The writer of the animation's locals every this many frames.
+    writer_every: u32,
+    /// A combat target where the actor's vtable's `GetCombatTarget` answers it (this far from
+    /// the actor), the actor's `+0x42c` field holding 480.0 (`0x43f00000`) as in Patrick's
+    /// tester logs.
+    target: Option<V3>,
 }
 
 /// How far the gait's swinging foot is lifted (units), its speed (m/s) and turn (degrees a
@@ -1427,7 +1454,23 @@ const WALK_BOB: f32 = 2.5;
 /// the bodies' nodes are measured where the world pass draws them (after
 /// `crate::active_ragdoll::read_drawn`, what the world pass runs first).
 fn walk_run(speed: f32, body: &str, dt: f32, on: bool, seconds: f32, under: f32) -> WalkRun {
+    walk_run_with(&Walk {
+        speed,
+        body,
+        dt: (dt, dt),
+        on,
+        seconds,
+        under,
+        walking: true,
+        writer_every: 2,
+        target: None,
+    })
+}
+
+/// [`walk_run`] as `cfg` sets it up.
+fn walk_run_with(cfg: &Walk) -> WalkRun {
     use std::sync::atomic::{AtomicBool, Ordering};
+    let (speed, body, on, seconds, under) = (cfg.speed, cfg.body, cfg.on, cfg.seconds, cfg.under);
     static AI_BUSY: AtomicBool = AtomicBool::new(false);
     let _one = crate::active_ragdoll::tests::SERIAL
         .lock()
@@ -1550,37 +1593,80 @@ fn walk_run(speed: f32, body: &str, dt: f32, on: bool, seconds: f32, under: f32)
         pelvis_high: 0.0,
         lift: 0.0,
         anim_speed: 0.0,
+        steps: 0,
+        lower_most: 0.0,
+        outcomes: Vec::new(),
+        aim: None,
+        aim_from: [0.0; 3],
     };
-    let frames = (seconds / dt).round() as u32;
-    let hit_frame = (0.4 / dt).round() as u32;
+    if let Some(off) = cfg.target {
+        // The target: a reference of its own (form id, position) the form table knows; the
+        // actor's vtable's `GetCombatTarget` answers it; the field at +0x42c holds a float.
+        const TARGET: u32 = 0x0300_0000;
+        const TARGET_ID: u32 = 0x0012_3999;
+        const GET_TARGET: u32 = 0x7200_0028;
+        f.e.mem.map(TARGET, 0x1000);
+        f.e.mem.set_u32(TARGET + 0x0c, TARGET_ID);
+        rig_fixture::write3(&mut f.e, TARGET + rig_fixture::REFR_POSITION, add(at, off));
+        f.e.register_double(GET_TARGET, |_, _| TARGET.into_ret());
+        let vtable = f.e.mem.u32(ACTOR);
+        f.e.mem.set_u32(vtable + 0x42c, GET_TARGET);
+        f.e.mem.set_u32(ACTOR + 0x42c, 0x43f0_0000);
+        f.e.register_double(0x0048_39c0, |_, a| {
+            match a[0] {
+                rig_fixture::ACTOR_ID => ACTOR,
+                TARGET_ID => TARGET,
+                _ => 0,
+            }
+            .into_ret()
+        });
+    }
+    room_events::set_on(true);
+    let _ = room_events::take();
     let weight = model().mass * 9.81;
     let mut yaw = 0.0f32;
     let mut last_root: Option<V3> = None;
-    for frame in 0..frames {
-        let t = frame as f32 * dt;
+    let mut seed = 0x1357_9bdfu32;
+    let mut t = 0.0f32;
+    let mut hit_frame = u32::MAX;
+    let mut hit_t = 0.0f32;
+    let mut frame = 0u32;
+    while t < seconds {
+        let dt = if cfg.dt.0 == cfg.dt.1 {
+            cfg.dt.0
+        } else {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            cfg.dt.0 + (cfg.dt.1 - cfg.dt.0) * ((seed >> 8) as f32 / (1u32 << 24) as f32)
+        };
+        t += dt;
+        if hit_frame == u32::MAX && t >= 0.4 {
+            hit_frame = frame;
+            hit_t = t;
+        }
         f.e.mem.set_f32(0x011d_ea30, dt);
         AI_BUSY.store(false, Ordering::Relaxed);
         main_thread(&mut f.e);
         // The walk: the reference carried on along its facing and turned, each foot lifted in
         // turn.
-        yaw += WALK_TURN * dt;
+        let walk = if cfg.walking { 1.0 } else { 0.0 };
+        yaw += WALK_TURN * dt * walk;
         let (s, c) = yaw.to_radians().sin_cos();
         let mut reference = f.reference();
-        if frame > 0 {
+        if frame > 0 && walk > 0.0 {
             reference = add(
                 reference,
                 [-s * WALK_SPEED * k * dt, c * WALK_SPEED * k * dt, 0.0],
             );
             rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, reference);
         }
-        let phase = (std::f32::consts::TAU * t / WALK_PERIOD).sin();
+        let phase = walk * (std::f32::consts::TAU * t / WALK_PERIOD).sin();
         pose_leg(&mut f, 0, swing * phase.max(0.0).sqrt());
         pose_leg(&mut f, 1, swing * (-phase).max(0.0).sqrt());
         let yaw_m: M3 = [c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0];
         rig_fixture::write9(&mut f.e, root + rig_fixture::LOCAL_ROTATION, &yaw_m);
         // The gait's bob: the whole animation WALK_BOB up and down twice a stride (both feet
         // off the stance's height).
-        let bob = WALK_BOB * (2.0 * std::f32::consts::TAU * t / WALK_PERIOD).cos();
+        let bob = walk * WALK_BOB * (2.0 * std::f32::consts::TAU * t / WALK_PERIOD).cos();
         let root_at = add(add(reference, drop), [0.0, 0.0, bob]);
         rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, root_at);
         f.animate();
@@ -1617,7 +1703,7 @@ fn walk_run(speed: f32, body: &str, dt: f32, on: bool, seconds: f32, under: f32)
         crate::active_ragdoll::apply(&mut f.e);
         // The writer: every other frame the animation's locals set again and the worlds worked
         // out from them, after the write and before the world pass.
-        if frame % 2 == 1 {
+        if frame % cfg.writer_every == cfg.writer_every - 1 {
             for (i, &n) in f.at.iter().enumerate().skip(1) {
                 rig_fixture::write9(&mut f.e, n + rig_fixture::LOCAL_ROTATION, &locals[i].0);
                 rig_fixture::write3(&mut f.e, n + rig_fixture::LOCAL_TRANSLATION, locals[i].1);
@@ -1658,17 +1744,43 @@ fn walk_run(speed: f32, body: &str, dt: f32, on: bool, seconds: f32, under: f32)
                 run.fell |= phase == ragdoll_core::np_balance::Phase::Falling;
             }
             run.fell |= label_of(ACTOR).is_some();
+            if let Some((_, steps, _)) = state(ACTOR) {
+                run.steps = run.steps.max(steps);
+            }
+            if let Some(l) = field(&sample_field(ACTOR), "lower") {
+                run.lower_most = run.lower_most.max(l);
+            }
+            if let Some(a) = aim_of(ACTOR) {
+                run.aim = Some(a);
+                run.aim_from = f.reference();
+            }
+            if std::env::var_os("NP_TRACE").is_some() {
+                eprintln!(
+                    "TRACE t {t:.3} dt {dt:.3} {:?} floor {:.2} {}",
+                    state(ACTOR).map(|s| (s.0, s.1)),
+                    floor_force(ACTOR).unwrap_or(0.0) / weight,
+                    sample_field(ACTOR)
+                );
+            }
         }
-        if frame > hit_frame {
+        if frame > hit_frame && hit_frame != u32::MAX {
             let height = f.world_of(pelvis).1[2] - floor;
             run.pelvis_high = run.pelvis_high.max(height);
             if height < 30.0 && run.pelvis_down_after.is_none() {
-                run.pelvis_down_after = Some((frame - hit_frame) as f32 * dt);
+                run.pelvis_down_after = Some(t - hit_t);
             }
         }
         crate::active_ragdoll::after_draw(&mut f.e);
         crate::active_ragdoll::unwrite(&mut f.e);
+        for l in room_events::take() {
+            if let Some(i) = l.find("[np outcome]") {
+                run.outcomes
+                    .push(l[i..].trim_end_matches(['"', '}']).to_string());
+            }
+        }
+        frame += 1;
     }
+    room_events::set_on(false);
     AI_BUSY.store(false, Ordering::Relaxed);
     crate::active_ragdoll::clear();
     crate::knockdown::clear();
@@ -1747,4 +1859,81 @@ fn np_walking_a_rifle_hit_goes_down_and_stays_on_the_floor() {
 fn np_walking_off_takes_nothing() {
     let r = walk_run(0.52, "Bip01 Spine2", 0.033, false, 0.8, 3.0);
     assert!(!r.claimed && r.drawn_off == (0.0, 0.0) && r.floor_most == 0.0);
+}
+
+/// Patrick's tester crashes on b507e997 (20:58, 23:01: a read at 43f00030 in the draw): downed,
+/// the combat target was read from the actor's `+0x42c` as a field, which held 480.0
+/// (`0x43f00000`), and its position past the end of memory. A rifle hit downs the actor on the
+/// game's own update with that field and the vtable's `GetCombatTarget` answering a real target
+/// 300 units off: no panic, and the downed AI's aim reads that target.
+#[test]
+fn np_downed_aims_at_the_vtables_combat_target() {
+    let off = [300.0, 40.0, 0.0];
+    let r = walk_run_with(&Walk {
+        speed: 4.29,
+        body: "Bip01 Spine2",
+        dt: (0.016, 0.016),
+        on: true,
+        seconds: 2.5,
+        under: 3.0,
+        walking: false,
+        writer_every: 2,
+        target: Some(off),
+    });
+    eprintln!(
+        "RESULT np downed aims at the vtable's combat target: fell {}, aim {:?}",
+        r.fell, r.aim
+    );
+    assert!(r.fell, "not downed");
+    let (to, aim_off) = r.aim.expect("no downed aim read");
+    let to = to.expect("no target read");
+    let want = sub(add([-72152.0, 8282.0, 223.0], off), r.aim_from);
+    assert!(length(sub(to, want)) < 1.0, "target {to:?}, want {want:?}");
+    assert!(
+        aim_off.is_finite() && (0.0..=180.0).contains(&aim_off),
+        "{aim_off}"
+    );
+}
+
+/// The testers' 9mm (0.32 m/s) on the chest: it must not walk itself into a fall. The game's
+/// frame seconds anywhere from 0.008 to 0.038 (each frame drawn between them), the animation's
+/// locals written over every frame between the write and the world pass, 4 s, standing and
+/// walking: at most one catching step, no fall, the hips lowered under 0.05 m, the floor under 3
+/// body weights; the outcome said once, after the steps settle.
+#[test]
+fn np_a_light_hit_never_walks_into_a_fall() {
+    let mut failed = Vec::new();
+    for walking in [false, true] {
+        let r = walk_run_with(&Walk {
+            speed: 0.32,
+            body: "Bip01 Spine2",
+            dt: (0.008, 0.038),
+            on: true,
+            seconds: 4.0,
+            under: 3.0,
+            walking,
+            writer_every: 1,
+            target: None,
+        });
+        eprintln!(
+            "RESULT np 0.32 m/s, dt 0.008-0.038, the writer every frame, walking {walking}: {} catching steps, fell {}, hips lowered at most {:.3} m, floor at most {:.2} body weights, drawn off {:.3} deg / {:.3} u, outcomes {:?}",
+            r.steps, r.fell, r.lower_most, r.floor_most, r.drawn_off.0, r.drawn_off.1, r.outcomes
+        );
+        if r.steps > 1 {
+            failed.push(format!("walking {walking}: {} steps", r.steps));
+        }
+        if r.fell {
+            failed.push(format!("walking {walking}: fell"));
+        }
+        if r.lower_most >= 0.05 {
+            failed.push(format!("walking {walking}: hips {:.3} m", r.lower_most));
+        }
+        if r.floor_most >= 3.0 {
+            failed.push(format!("walking {walking}: floor {:.2}", r.floor_most));
+        }
+        if r.outcomes.len() != 1 {
+            failed.push(format!("walking {walking}: outcomes {:?}", r.outcomes));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
 }

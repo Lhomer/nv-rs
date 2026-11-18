@@ -854,6 +854,26 @@ floor; off, nothing taken. Not run in the game: whether the AI threads write ove
 *during* the world pass shows only in the game's `[np drawn] ... written over during the world
 pass` lines.
 
+**Fix from the testers' b507e997 crashes (20:58, 23:01: "read of unmapped memory at 43f00030" in
+the draw).** A 0.32 m/s hit on the chest "stood", then three catching steps with no new hit took
+it out of steps into a fall, kept downed; the downed AI read its combat target from the actor's
+`+0x42c` as a field (since 9ba82a3). `0x42c` is a vtable slot (`GetCombatTarget`, as the game's
+own script function calls it); the field there held 480.0 (`0x43f00000`) and the target's position
+`+0x30` was unmapped. Now the target is the vtable's answer, taken only if it is a mapped
+reference the form table knows by its own form id (`combat_target`). The walk into the fall: once
+standing again, the planted feet stayed where they had landed while the animation went on moving
+slowly (under the balance's 0.3 m/s "moving"), so the capture point drifted out and the steps
+came with no hit. Now, standing again, a planted foot the animation itself moves faster than 0.05
+m/s is let go to go with it (`np_balance::ANIM_FOOT_MOVING`). `[np outcome]` waits, after its 2 s,
+for the steps to settle (standing, no step under way), at most 6 s. Tests: the downed AI with
+`+0x42c` holding `0x43f00000` and the vtable answering a target 300 units off reads that target
+(on b507e997 it panicked with the testers' read at `43f00030`); a 0.32 m/s hit with the game's
+frame seconds anywhere from 0.008 to 0.038, the writer of the animation's locals every frame, 4 s,
+standing and walking: at most one catching step (b507e997: two while walking), no fall, the hips
+lowered under 0.05 m, the floor under 3 body weights, the outcome said once. The testers' 10.1
+body weights on the floor at 0.32 m/s did not show in the fixture (at most 2.7). Not run in the
+game.
+
 **Not done in M6 (for a later pass):** crawling to cover (the combat controller's cover point as
 the body's travel goal: `FindCombatLocation` `0099ac20`); the shot's origin and direction from the
 weapon as drawn (the game aims its NPC shots from the weapon node as animated, `fire_locate`, so a
