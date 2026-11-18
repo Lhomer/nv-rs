@@ -29,7 +29,12 @@ machinery runs.
   code is now the `game-profile` crate (its tests, now run off Windows, expect the fork's rows).
 - **M5:** `[np step]`, a fuller `[np reaction]`, the clips' `"np":{...}` sample each frame;
   docs/PLAYTESTING.md "Testing New Physics" (what Patrick runs and reports) and the tuning table
-  (docs/GUNPLAY.md "M5"). Next: M6, downed but active.
+  (docs/GUNPLAY.md "M5").
+- **M6 (lab):** `ragdoll-core::np_down` and `Np::down_frame`: a kept fall rests on whatever
+  touches it (floor and walls, per-body loads), labelled for the AI and the log only; asked, it
+  rises by balance (17 of 18 landings stand); too weak it settles. The downed limits take in a
+  living reach past the skeleton data (for Patrick to confirm). Next: M6 in the game (the host
+  keeping a downed actor, the AI's choices, dying while down, the logs).
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 

@@ -9,9 +9,10 @@
 //! ([`ROOT_SUPPORT`]'s across cap times the balance's hold): past it the body drifts and steps.
 
 use crate::active::{qconj, qfrom_m, qmul, qnorm, Q};
-use crate::flinch::{add, scale, sub, M3, V3};
+use crate::flinch::{add, dot, scale, sub, M3, V3};
 use crate::np_balance::{Balance, Phase};
-use crate::np_body::{Drive, Model, State, StepReport, Support, Tracking, UNITS};
+use crate::np_body::{Drive, Model, Plane, State, StepReport, Support, Tracking, UNITS};
+use crate::np_down::{Bodies, Label, Labeler, Reading};
 use crate::np_drive::Muscles;
 
 /// The root's support: up and down a spring (N/m), damper and cap (N); across the same at most
@@ -73,6 +74,51 @@ pub const MOVING_LEGS: (f32, f32) = (4.0, 2.0);
 /// Falling: the muscles' share (the ragdoll's until the game takes it, M4).
 pub const FALLING_MUSCLES: f32 = 0.25;
 
+/// A rise's pelvis must gain this (m) to count as progress.
+pub const RISE_GAINED: f32 = 0.01;
+/// Rising, a joint's goal lies at most this far from where the joint is (rad): the muscles' effort
+/// a frame is bounded (goals given whole threw the body off the floor).
+pub const RISE_REACH: f32 = 0.3;
+/// Rising, the spine's and legs' springs' share of standing's (times the effort); the legs hold
+/// none of their weight (a hold on legs and torso together floated the body off the floor).
+pub const RISE_GAIN: f32 = 0.6;
+/// Rising, the torso leans toward the feet by this much a metre the centre of mass lies behind
+/// them (rad/m), at most this (rad).
+pub const RISE_LEAN: (f32, f32) = (2.5, 1.0);
+/// Rising, each foot is drawn to its goal on the floor: spring (N/m), damper (N·s/m), cap (N,
+/// times the effort).
+pub const RISE_FEET: (f32, f32, f32) = (2000.0, 120.0, 250.0);
+/// Rising, the arms' push turning the torso up: spring (N·m/rad), damper (N·m·s/rad), cap (N·m,
+/// times the effort), and how near a surface the torso's centre must be for a hand to reach it
+/// (m); only while the torso tilts past this (rad).
+pub const RISE_ARMS: (f32, f32, f32, f32) = (3000.0, 150.0, 160.0, 0.6);
+pub const RISE_ARMS_TILT: f32 = 0.5;
+/// How long the limits stay soft after a fall (s).
+pub const LIMITS_SETTLE: f32 = 0.3;
+/// A rise with nothing to push from (or too weak) this long gives up (s).
+pub const RISE_NO_PUSH: f32 = 0.5;
+/// While the feet lie further than this from the hips (m, flat) the rise goes toward them.
+pub const RISE_FEET_OUT: f32 = 0.15;
+/// Rising from the floor, each foot's goal lies this share of its leg in front of its hip (a hip
+/// on the floor; under it as the hip comes up a leg high).
+pub const RISE_FOOT_OUT: f32 = 0.3;
+/// The legs push once the centre of mass is within this of the feet (m): their pull brings the
+/// hips forward over the feet as they lift.
+pub const RISE_OVER_FEET: f32 = 0.35;
+
+/// `now` turned toward `goal` by at most `most` (rad); relative rotations.
+fn turn_toward(now: Q, goal: Q, most: f32) -> Q {
+    let d = crate::active::qlog(qmul(goal, qconj(now)));
+    let a = crate::flinch::length(d);
+    if a <= most || a < 1e-6 {
+        return goal;
+    }
+    qnorm(qmul(crate::active::qexp(scale(d, most / a)), now))
+}
+
+/// Read standing and still this long (s), a downed body is the balance's again.
+pub const STAND_HOLD: f32 = 0.4;
+
 /// The rate (1/s) at which each body's turn off its animation's decays (a hit softens it with the
 /// joint's spring).
 pub const TRACKING: f32 = 90.0;
@@ -105,6 +151,50 @@ pub struct Np {
     /// velocity (m/s; set by [`Np::set_anim_velocity`] for the first frame).
     anim_com: Option<V3>,
     anim_v: V3,
+    /// The walls the body may rest on (m; the floor is the frame's).
+    pub walls: Vec<Plane>,
+    /// Keep a fallen body (M6, downed but active) rather than answer [`Phase::Falling`] for the
+    /// game's ragdoll to take it.
+    pub keep_down: bool,
+    /// Downed: what holds it and how it reads.
+    pub down: Option<Down>,
+    /// The AI's wish to stand (the controller works back toward balance while it holds).
+    pub rise: bool,
+    /// The strength left (wounds, a crippled leg, fatigue): 1 whole, 0 none.
+    pub effort: f32,
+    /// The muscles' strength given at the start (the legs' push scales by it).
+    pub strength: f32,
+    pub bodies: Bodies,
+    /// The joints' targets last frame (the limits widened by them too, `np_body::Tracking`).
+    last_targets: Vec<Q>,
+    /// Seconds since it last stood up from the floor (long ago: never).
+    stood_up: f32,
+}
+
+/// A downed body's figures: how long down, the label, the last reading, the rise's progress.
+#[derive(Clone, Debug)]
+pub struct Down {
+    pub since: f32,
+    pub labeler: Labeler,
+    pub reading: Reading,
+    /// A rise's time so far and the pelvis's best height in it (m over the floor).
+    pub rising: f32,
+    pub rise_best: f32,
+    /// Seconds since the rise's pelvis last got higher.
+    pub rise_stall: f32,
+    /// Whether the last rise gave up (too weak, or nothing to push from).
+    pub rise_failed: bool,
+    /// The legs' push now (N) and whether it lifts; whether the arms push the torso up.
+    pub push: f32,
+    pub lifting: bool,
+    pub lifting_was: bool,
+    pub arms: bool,
+    /// Seconds the body has read standing.
+    pub stood: f32,
+    /// Seconds a rise has had nothing to push from (or too little strength).
+    pub no_push: f32,
+    /// The label changes so far (time, label) for the log.
+    pub changes: Vec<(f32, Label)>,
 }
 
 /// Each joint's relative rotation (`parent⁻¹ child`) in a pose of body-node worlds.
@@ -126,6 +216,7 @@ impl Np {
     pub fn new(model: Model, anim: &[(M3, V3)], strength: f32) -> Np {
         let states = model.states_from_nodes(anim);
         let muscles = Muscles::new(&model, strength);
+        let bodies = Bodies::new(&model);
         let root_kd_turn = ROOT_SUPPORT
             .kd_turn
             .max(2.0 * (ROOT_SUPPORT.kp_turn * model.inertia_about_root()).sqrt());
@@ -134,6 +225,15 @@ impl Np {
             balance,
             anim_com: None,
             anim_v: [0.0; 3],
+            walls: Vec::new(),
+            keep_down: false,
+            down: None,
+            rise: false,
+            effort: 1.0,
+            strength,
+            bodies,
+            last_targets: Vec::new(),
+            stood_up: f32::INFINITY,
             root_kd_turn,
             anim_states: states.clone(),
             states,
@@ -201,6 +301,9 @@ impl Np {
             *s += dt;
         }
         self.muscles.advance(dt);
+        if self.down.is_some() {
+            return self.down_frame(anim, floor, dt);
+        }
         let ask = self.balance.update(
             &self.model,
             &self.states,
@@ -216,6 +319,26 @@ impl Np {
             .iter()
             .map(|(r, x)| (*r, add(*x, scale(shift, UNITS))))
             .collect();
+        if ask.falling && self.keep_down {
+            // Past any step: the body is kept, falling, and then held on whatever it lands on.
+            self.down = Some(Down {
+                since: 0.0,
+                labeler: Labeler::new(Label::Standing),
+                reading: Reading::default(),
+                rising: 0.0,
+                rise_best: 0.0,
+                rise_stall: 0.0,
+                rise_failed: false,
+                push: 0.0,
+                lifting: false,
+                lifting_was: false,
+                arms: false,
+                stood: 0.0,
+                no_push: 0.0,
+                changes: Vec::new(),
+            });
+            return self.down_frame(anim, floor, dt);
+        }
         let posed = self.legs_on_footing(&shifted, &ask);
         let targets = relative_of(&self.model, posed.as_deref().unwrap_or(anim));
         let mut gains = self.muscles.gains();
@@ -310,20 +433,370 @@ impl Np {
                 }
             }
         }
+        let grip = self.balance.feet.to_vec();
         let tracking = Tracking {
             w: anim_w,
             rate,
             slip,
+            grip,
+            // Standing, the limits as M2 had them (the last targets are kept for a fall).
+            before: {
+                self.last_targets = targets.clone();
+                Vec::new()
+            },
+            widen_by: Vec::new(),
+            // Just stood up from the floor: the downed limits eased out, as they were eased in.
+            reach: if self.stood_up < LIMITS_SETTLE {
+                self.bodies.reach.clone()
+            } else {
+                Vec::new()
+            },
+            soft_limits: self.stood_up < LIMITS_SETTLE,
         };
-        self.report = self.model.step_tracked(
+        self.stood_up += dt;
+        self.report = self.model.step_world(
             &mut self.states,
             &drives,
             &pulls,
             Some(&tracking),
             floor / UNITS,
+            &self.walls,
             dt,
         );
         self.model.node_worlds(&self.states)
+    }
+
+    /// The legs' push now (N): [`crate::np_down::RISE_FORCE`] times strength and effort.
+    pub fn push(&self) -> f32 {
+        crate::np_down::RISE_FORCE * self.strength.clamp(0.5, 1.5) * self.effort.clamp(0.0, 1.0)
+    }
+
+    /// One downed frame (M6): the body held on whatever touches it, falling with its muscles let
+    /// go until something does; with [`Np::rise`] the controller works back toward balance: the
+    /// feet drawn under the hips, the torso over the feet, then the legs' push. Nothing poses the
+    /// body: the joints aim at the animation (or, rising, at goals: a foot under its hip, the
+    /// torso over the feet) with springs that hold rather than stand.
+    fn down_frame(&mut self, anim: &[(M3, V3)], floor: f32, dt: f32) -> Vec<(M3, V3)> {
+        use crate::np_down::{classify, read, reads, turn_between, DOWN_ARMS, DOWN_GAINS};
+        let f = floor / UNITS;
+        let push = self.push();
+        let b = self.bodies.clone();
+        let r = self.model.root;
+        let mut reading = read(&self.model, &b, &self.states, &self.report, f);
+        let was_lifting = self.down.as_ref().is_some_and(|d| d.lifting);
+        if was_lifting {
+            reading.pushed = (reading.weight - reading.total).max(0.0);
+        }
+        let rising_wish = self.rise;
+        let rd = reads(&reading, None, push);
+        let mut down = self.down.take().unwrap_or_else(|| Down {
+            since: 0.0,
+            labeler: Labeler::new(Label::Lying),
+            reading,
+            rising: 0.0,
+            rise_best: 0.0,
+            rise_stall: 0.0,
+            rise_failed: false,
+            push,
+            lifting: false,
+            lifting_was: false,
+            arms: false,
+            stood: 0.0,
+            no_push: 0.0,
+            changes: Vec::new(),
+        });
+        down.since += dt;
+        down.reading = reading;
+        down.push = push;
+        // Nothing under it to push from, or too weak: the wish waits (a moment's lift of the
+        // legs as they fold is not a failure), and gives up once it has lasted.
+        if rising_wish && !rd.can_push_up {
+            down.no_push += dt;
+        } else {
+            down.no_push = 0.0;
+        }
+        let rising = rising_wish && down.no_push < RISE_NO_PUSH;
+        if let Some(l) = down.labeler.update(classify(&reading, rising), dt) {
+            down.changes.push((down.since, l));
+        }
+        let airborne = reading.total < 0.15 * reading.weight;
+        // The joints' targets: the animation's; rising, the legs onto goals under the hips.
+        let mut targets = relative_of(&self.model, anim);
+        let anim_rel = targets.clone();
+        let mut gains = self.muscles.gains();
+        let mut holds = vec![0.0f32; gains.len()];
+        let k = self.effort.clamp(0.0, 1.0);
+        for (j, def) in self.model.joints.iter().enumerate() {
+            let name = self.model.bodies[def.child]
+                .node
+                .trim_start_matches("Bip01 ");
+            let name = name.trim_start_matches(['L', 'R']).trim_start();
+            let (share, hold) = DOWN_GAINS
+                .iter()
+                .find(|g| {
+                    if g.0 == "Spine" {
+                        name.starts_with("Spine")
+                    } else {
+                        name == g.0
+                    }
+                })
+                .map_or((DOWN_ARMS, 0.0), |g| (g.1, g.2));
+            if airborne {
+                gains[j].0 *= FALLING_MUSCLES;
+                holds[j] = FALLING_MUSCLES;
+            } else {
+                gains[j].0 *= share * (0.3 + 0.7 * k);
+                holds[j] = hold * k;
+            }
+        }
+        let mut pulls = Vec::new();
+        down.lifting_was = down.lifting;
+        down.lifting = false;
+        down.arms = false;
+        if rising && !airborne {
+            down.rising += dt;
+            if reading.pelvis_height > down.rise_best + RISE_GAINED {
+                down.rise_best = reading.pelvis_height;
+                down.rise_stall = 0.0;
+            } else {
+                down.rise_stall += dt;
+            }
+            let worlds = self.model.node_worlds(&self.states);
+            let feet_mid = scale(add(self.states[b.feet[0]].x, self.states[b.feet[1]].x), 0.5);
+            // The way it rises: toward its feet while they lie out from the hips (on its back
+            // the torso's facing points at the sky), the torso's facing once they are under it.
+            let to_feet = sub(feet_mid, self.states[r].x);
+            let to_feet = [to_feet[0], to_feet[1], 0.0];
+            let rise_dir = if crate::flinch::length(to_feet) > RISE_FEET_OUT {
+                crate::flinch::unit(to_feet).unwrap_or(reading.facing)
+            } else {
+                reading.facing
+            };
+            let toward = sub(feet_mid, reading.com);
+            let flat = [toward[0], toward[1], 0.0];
+            // The torso over the feet: up, leaning toward them by how far behind it is.
+            let lean = (crate::flinch::length(flat) * RISE_LEAN.0).min(RISE_LEAN.1);
+            let dir = crate::flinch::unit(flat).unwrap_or(rise_dir);
+            let want_up = add(scale([0.0, 0.0, 1.0], lean.cos()), scale(dir, lean.sin()));
+            let c = turn_between(b.up_of(&self.states, b.torso), want_up);
+            // The arms' push off the floor (or a wall) behind and beside it, while the torso is
+            // low enough for a hand to reach (its centre within an arm of a surface): the torso
+            // turned toward the lean wanted, capped by strength (the legs' push is the root's
+            // support's: the same abstraction for the arms).
+            let torso_x = self.states[b.torso].x;
+            let reach = self
+                .walls
+                .iter()
+                .fold(torso_x[2] - f, |m, w| m.min(dot(sub(torso_x, w.p), w.n)));
+            if reach < RISE_ARMS.3 && reading.tilt > RISE_ARMS_TILT {
+                let q = self.states[b.torso].q;
+                pulls.push(Support {
+                    body: b.torso,
+                    x: torso_x,
+                    v: [0.0; 3],
+                    q: qnorm(qmul(crate::active::qexp(c), q)),
+                    kp: 0.0,
+                    kd: 0.0,
+                    max_force: 0.0,
+                    kp_h: 0.0,
+                    kd_h: 0.0,
+                    max_force_h: 0.0,
+                    kp_turn: RISE_ARMS.0,
+                    kd_turn: RISE_ARMS.1,
+                    max_torque: RISE_ARMS.2 * k,
+                });
+                down.arms = true;
+            }
+            let spines: Vec<usize> = self
+                .model
+                .joints
+                .iter()
+                .enumerate()
+                .filter(|(_, j)| b.spines.contains(&j.child))
+                .map(|(i, _)| i)
+                .collect();
+            let share = 1.0 / spines.len().max(1) as f32;
+            for &j in &spines {
+                let def = &self.model.joints[j];
+                let qc = self.states[def.child].q;
+                let qp = self.states[def.parent].q;
+                let goal = qmul(crate::active::qexp(scale(c, share)), qc);
+                let now = qnorm(qmul(qconj(qp), qc));
+                targets[j] = turn_toward(now, qnorm(qmul(qconj(qp), goal)), RISE_REACH);
+                gains[j].0 = self.muscles.base[j].0 * RISE_GAIN * k;
+                holds[j] = 0.5 * k;
+            }
+            // Each foot drawn onto the floor in front of its hip, as near as the leg folds (half
+            // its length out from a hip near the floor, under it once the hip is a leg high).
+            let mut posed = worlds.clone();
+            for side in 0..2 {
+                let (thigh, calf, foot) = (b.thighs[side], b.calves[side], b.feet[side]);
+                let hip = worlds[thigh].1;
+                let leg = self.balance.leg_length[side] * UNITS;
+                let foot_h = (anim[foot].1[2] - anim[r].1[2] + b.stand_height * UNITS).max(5.0);
+                let up = ((hip[2] - floor - foot_h) / leg).clamp(0.0, 1.0);
+                let out = leg * (RISE_FOOT_OUT * (1.0 - up) + 0.05 * up);
+                let ahead = scale(rise_dir, out);
+                let goal = [hip[0] + ahead[0], hip[1] + ahead[1], floor + foot_h];
+                let Some((r1, m, _)) = crate::flinch::leg_ik(
+                    worlds[thigh].1,
+                    worlds[calf].1,
+                    worlds[foot].1,
+                    hip,
+                    goal,
+                    rise_dir,
+                ) else {
+                    continue;
+                };
+                let mr1 = crate::flinch::mul(&m, &r1);
+                posed[thigh].0 = crate::flinch::mul(&r1, &worlds[thigh].0);
+                posed[calf].0 = crate::flinch::mul(&mr1, &worlds[calf].0);
+                posed[foot].0 = anim[foot].0;
+                // The foot drawn in along the floor (the leg's muscles against the floor's
+                // grip: a heel dragged, not a leg swung up); once the legs push, the feet stand
+                // where they are.
+                if down.lifting_was {
+                    continue;
+                }
+                let q = self.states[foot].q;
+                let com = self.model.bodies[foot].com;
+                let x = add(scale(goal, 1.0 / UNITS), crate::active::qrot(q, com));
+                pulls.push(Support {
+                    body: foot,
+                    x,
+                    v: [0.0; 3],
+                    q,
+                    kp: RISE_FEET.0,
+                    kd: RISE_FEET.1,
+                    max_force: RISE_FEET.2 * k,
+                    kp_h: RISE_FEET.0,
+                    kd_h: RISE_FEET.1,
+                    max_force_h: RISE_FEET.2 * k,
+                    kp_turn: 0.0,
+                    kd_turn: 0.0,
+                    max_torque: 0.0,
+                });
+            }
+            let legs = relative_of(&self.model, &posed);
+            let now_rel = self.model.relative(&self.states);
+            for side in 0..2 {
+                for &j in &self.balance.legs[side] {
+                    targets[j] = turn_toward(now_rel[j], legs[j], RISE_REACH);
+                    gains[j].0 = self.muscles.base[j].0 * RISE_GAIN * k;
+                    holds[j] = 0.0;
+                }
+            }
+            // Over a foot that is down (one knee still on the floor is a kneel to rise from):
+            // the legs' push lifts the pelvis toward standing.
+            let feet_down = b
+                .feet
+                .iter()
+                .any(|&ft| self.report.floor_load.get(ft).copied().unwrap_or(0.0) > 1.0);
+            if feet_down && reading.over_feet < RISE_OVER_FEET {
+                down.lifting = true;
+                let stand_z = f + b.stand_height;
+                pulls.push(Support {
+                    body: r,
+                    x: [feet_mid[0], feet_mid[1], stand_z],
+                    v: [0.0; 3],
+                    q: self.anim_states[r].q,
+                    kp: ROOT_SUPPORT.kp,
+                    kd: ROOT_SUPPORT.kd,
+                    max_force: push,
+                    kp_h: ROOT_SUPPORT.kp_h * 0.2,
+                    kd_h: ROOT_SUPPORT.kd_h * 0.2,
+                    max_force_h: 250.0 * k,
+                    kp_turn: ROOT_SUPPORT.kp_turn * 0.5,
+                    kd_turn: self.root_kd_turn * 0.5,
+                    max_torque: 300.0 * k,
+                });
+            }
+            // Not getting up (the pelvis no higher for a while): give up and settle back (the
+            // AI may try again).
+            if down.rise_stall > crate::np_down::RISE_STALL {
+                self.rise = false;
+                down.rise_failed = true;
+                down.rising = 0.0;
+                down.rise_best = 0.0;
+                down.rise_stall = 0.0;
+            }
+        } else {
+            if rising_wish && !rising {
+                self.rise = false;
+                down.rise_failed = true;
+                down.no_push = 0.0;
+            }
+            down.rising = 0.0;
+            down.rise_best = 0.0;
+        }
+        let drives: Vec<Drive> = targets
+            .iter()
+            .zip(gains)
+            .zip(holds)
+            .map(|((&target, (kp, kd)), hold)| Drive {
+                target,
+                kp,
+                kd,
+                hold,
+            })
+            .collect();
+        let tracking = Tracking {
+            w: vec![[0.0; 3]; self.states.len()],
+            rate: vec![0.0; self.states.len()],
+            slip: Vec::new(),
+            // Lifting, the feet carry the push.
+            grip: if down.lifting {
+                b.feet.to_vec()
+            } else {
+                Vec::new()
+            },
+            before: std::mem::replace(&mut self.last_targets, anim_rel.clone()),
+            widen_by: anim_rel,
+            reach: b.reach.clone(),
+            // Soft only just downed, while the limits change from the standing ones (widened by
+            // the legs' footing) to the downed ones (the animation's and the reach, which stay);
+            // hard otherwise.
+            soft_limits: down.since < LIMITS_SETTLE,
+        };
+        self.report = self.model.step_world(
+            &mut self.states,
+            &drives,
+            &pulls,
+            Some(&tracking),
+            f,
+            &self.walls,
+            dt,
+        );
+        // Standing again, balanced over its feet: the balance has it.
+        let mut now = read(&self.model, &b, &self.states, &self.report, f);
+        if down.lifting {
+            now.pushed = (now.weight - now.total).max(0.0);
+        }
+        if classify(&now, false) == Label::Standing && crate::flinch::length(now.com_v) < 0.4 {
+            down.stood += dt;
+        } else {
+            down.stood = 0.0;
+        }
+        // The actor goes where the body is: the animation follows the pelvis.
+        let pelvis = self.states[r].x;
+        let anim_root = scale(anim[r].1, 1.0 / UNITS);
+        self.balance.shift = [pelvis[0] - anim_root[0], pelvis[1] - anim_root[1], 0.0];
+        if down.stood >= STAND_HOLD {
+            let shift = self.balance.shift;
+            self.balance = Balance::new(&self.model);
+            self.balance.shift = shift;
+            self.rise = false;
+            self.down = None;
+            self.stood_up = 0.0;
+        } else {
+            self.down = Some(down);
+        }
+        self.model.node_worlds(&self.states)
+    }
+
+    /// The pose's label now (none while standing on its feet under the balance).
+    pub fn label(&self) -> Option<Label> {
+        self.down.as_ref().map(|d| d.labeler.label)
     }
 
     /// The animated pose (`anim`, shifted, game units) with its legs bent onto the balance's
@@ -406,7 +879,8 @@ impl Np {
     /// all of it once no step swings; the controller then expects the animation moved by it (the
     /// actor's reference and its 3D's root).
     pub fn take_move(&mut self) -> V3 {
-        if self.balance.step.is_some() || self.balance.phase == Phase::Falling {
+        let down = self.down.is_some();
+        if !down && (self.balance.step.is_some() || self.balance.phase == Phase::Falling) {
             return [0.0; 3];
         }
         let by = self.balance.shift;

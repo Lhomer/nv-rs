@@ -46,6 +46,47 @@ pub struct NpFrame {
     pub steps: u32,
     pub outside: f32,
     pub moved: V3,
+    /// Downed (M6): the pose's label (none standing under the balance), the loads the walls and
+    /// the floor carry (N), whether the legs' push is lifting, the deepest a capsule lies in a wall
+    /// (game units), the centre of mass (game units).
+    pub label: Option<&'static str>,
+    pub wall_load: f32,
+    pub floor_load: f32,
+    pub lifting: bool,
+    pub in_wall: f32,
+    pub com: V3,
+    /// Substeps the solver's speed guard slowed a body this frame (none expected).
+    pub clamped: u32,
+    /// Rising (the AI's wish still on), the centre of mass outside the feet (m), the torso's tilt
+    /// (degrees).
+    pub rising: bool,
+    pub over_feet: f32,
+    pub tilt: f32,
+}
+
+/// A scenario's world and the AI's asks: walls (game units: a point and the normal out), when the
+/// AI asks it to stand, its effort (wounds, fatigue: 1 whole), and whether a fall is kept downed
+/// (M6) rather than left falling for the game's ragdoll.
+#[derive(Clone, Debug)]
+pub struct Scene {
+    pub walls: Vec<(V3, V3)>,
+    pub rise_at: Option<f32>,
+    pub effort: f32,
+    pub keep_down: bool,
+    /// The AI asks again 1 s after a rise gives up (while it is still down).
+    pub retry: bool,
+}
+
+impl Default for Scene {
+    fn default() -> Scene {
+        Scene {
+            walls: Vec::new(),
+            rise_at: None,
+            effort: 1.0,
+            keep_down: false,
+            retry: false,
+        }
+    }
 }
 
 /// A scenario's run.
@@ -58,6 +99,8 @@ pub struct NpRun {
     /// The model's capsules (radius, ends in the body's frame, game units) for drawing.
     pub capsules: Vec<(f32, [V3; 2])>,
     pub floor: f32,
+    /// The scene's walls (game units: a point, the normal out) for drawing.
+    pub walls: Vec<(V3, V3)>,
 }
 
 /// FNV's ragdoll's bind pose: each body's node's world (game units), the model, the floor under
@@ -93,6 +136,17 @@ pub fn run_on(
     seconds: f32,
     anim_at: &dyn Fn(f32) -> Vec<(M3, V3)>,
 ) -> NpRun {
+    run_scene(name, hits, seconds, anim_at, &Scene::default())
+}
+
+/// [`run_on`] in `scene`.
+pub fn run_scene(
+    name: &str,
+    hits: &[NpHit],
+    seconds: f32,
+    anim_at: &dyn Fn(f32) -> Vec<(M3, V3)>,
+    scene: &Scene,
+) -> NpRun {
     let (model, _, floor) = bind_pose();
     let mut moved: V3 = [0.0; 3];
     let moved_anim = |t: f32, moved: V3| -> Vec<(M3, V3)> {
@@ -121,6 +175,18 @@ pub fn run_on(
     let spine = model.body("Bip01 Spine2").expect("a spine top");
     let head = model.body("Bip01 Head").expect("a head");
     let mut np = Np::new(model, &anim, 1.0);
+    np.keep_down = scene.keep_down;
+    np.effort = scene.effort;
+    np.walls = scene
+        .walls
+        .iter()
+        .map(|(p, n)| ragdoll_core::np_body::Plane {
+            p: ragdoll_core::flinch::scale(*p, 1.0 / UNITS),
+            n: *n,
+        })
+        .collect();
+    let mut rise_asked = false;
+    let mut gave_up: Option<f32> = None;
     // Already moving with its animation (a walk): its speed from the start.
     let next = moved_anim(FRAME, moved);
     let r0 = np.model.root;
@@ -132,6 +198,7 @@ pub fn run_on(
         name: name.to_string(),
         capsules,
         floor,
+        walls: scene.walls.clone(),
         ..NpRun::default()
     };
     let mut pending: Vec<&NpHit> = hits.iter().collect();
@@ -151,6 +218,20 @@ pub fn run_on(
             hits_given.push((t, add(node, h.offset), h.dir));
             false
         });
+        if let Some(at) = scene.rise_at {
+            if t >= at && !rise_asked {
+                rise_asked = true;
+                np.rise = true;
+            }
+            // Asked again a second after a rise gave up.
+            if scene.retry && rise_asked && !np.rise && np.down.is_some() {
+                gave_up = gave_up.or(Some(t));
+                if gave_up.is_some_and(|g| t - g >= 1.0) {
+                    np.rise = true;
+                    gave_up = None;
+                }
+            }
+        }
         let anim = moved_anim(t + FRAME, moved);
         let nodes = np.frame(&anim, floor, FRAME);
         moved = add(moved, np.take_move());
@@ -184,11 +265,42 @@ pub fn run_on(
             steps: np.balance.taken.iter().filter(|s| !s.2).count() as u32,
             outside: np.balance.outside,
             moved,
+            label: np.label().map(|l| l.name()),
+            wall_load: np.report.wall_load.iter().sum(),
+            floor_load: np.report.floor_load.iter().sum(),
+            lifting: np.down.as_ref().is_some_and(|d| d.lifting),
+            in_wall: in_wall(&np, &scene.walls),
+            com: ragdoll_core::flinch::scale(np.model.centre_of_mass(&np.states).0, UNITS),
+            clamped: np.report.clamped,
+            rising: np.rise,
+            over_feet: np.down.as_ref().map_or(0.0, |d| d.reading.over_feet),
+            tilt: np
+                .down
+                .as_ref()
+                .map_or(0.0, |d| d.reading.tilt.to_degrees()),
             nodes,
         });
     }
     out.hits = hits_given;
     out
+}
+
+/// The deepest any capsule lies inside a wall (game units; 0 outside them all).
+fn in_wall(np: &Np, walls: &[(V3, V3)]) -> f32 {
+    let mut most = 0.0f32;
+    for (def, s) in np.model.bodies.iter().zip(&np.states) {
+        for e in def.ends {
+            let p = ragdoll_core::flinch::scale(
+                add(s.x, ragdoll_core::active::qrot(s.q, sub(e, def.com))),
+                UNITS,
+            );
+            for (w, n) in walls {
+                let d = ragdoll_core::flinch::dot(sub(p, *w), *n) - def.radius * UNITS;
+                most = most.max(-d);
+            }
+        }
+    }
+    most
 }
 
 /// A walk (FNV's skeleton walked by a procedural gait, standing in for the game's walk cycle):
@@ -340,10 +452,18 @@ pub fn recoil(run: &NpRun, hit_at: f32) -> Recoil {
 pub fn frames_json(run: &NpRun, caption: impl Fn(&NpFrame) -> String) -> String {
     let mut s = String::new();
     s.push_str(&format!(
-        "{{\"name\":{:?},\"floor\":{},\"frame\":{},\"hits\":[{}],\"frames\":[",
+        "{{\"name\":{:?},\"floor\":{},\"frame\":{},\"walls\":[{}],\"hits\":[{}],\"frames\":[",
         run.name,
         run.floor,
         FRAME,
+        run.walls
+            .iter()
+            .map(|(p, n)| format!(
+                "[{:.2},{:.2},{:.2},{:.3},{:.3},{:.3}]",
+                p[0], p[1], p[2], n[0], n[1], n[2]
+            ))
+            .collect::<Vec<_>>()
+            .join(","),
         run.hits
             .iter()
             .map(|(t, p, d)| format!(
@@ -556,5 +676,287 @@ mod tests {
                 "{v} m/s: {late:.1} units off its walk after 1.5 s"
             );
         }
+    }
+
+    // --- M6: downed but active. ------------------------------------------------------------
+
+    /// A downed scene on the standing bind pose: a 4.35 m/s chest hit (past any step), the
+    /// fall kept, `walls`, the AI asking to stand at `rise_at`, `effort`, more `hits` after.
+    fn downed(
+        walls: Vec<(V3, V3)>,
+        rise_at: Option<f32>,
+        effort: f32,
+        more: &[NpHit],
+        seconds: f32,
+    ) -> NpRun {
+        let (_, anim, _) = bind_pose();
+        let mut hits = chest_hit(4.35);
+        hits.extend_from_slice(more);
+        let scene = Scene {
+            walls,
+            rise_at,
+            effort,
+            keep_down: true,
+            retry: false,
+        };
+        run_scene("down", &hits, seconds, &|_| anim.clone(), &scene)
+    }
+
+    /// The most any node moves (units, degrees) from one frame to the next after `from` s, the
+    /// lowest point, the deepest in a wall, the solver's guard's slowings.
+    fn down_limits(r: &NpRun, from: f32) -> (f32, f32, f32, f32, u32) {
+        let (mut d, mut a) = (0.0f32, 0.0f32);
+        for w in r.frames.windows(2).filter(|w| w[0].t >= from) {
+            for (x, y) in w[0].nodes.iter().zip(&w[1].nodes) {
+                d = d.max(length(sub(y.1, x.1)));
+                a = a.max(angle_between(&y.0, &x.0).to_degrees());
+            }
+        }
+        let low = r
+            .frames
+            .iter()
+            .map(|f| f.lowest)
+            .fold(f32::INFINITY, f32::min);
+        let wall = r.frames.iter().map(|f| f.in_wall).fold(0.0, f32::max);
+        // The guard's slowings away from a hit's own frames (its impulse spins the struck body
+        // for a substep).
+        let near_hit = |t: f32| r.hits.iter().any(|h| (t - h.0).abs() < 0.1);
+        let clamped = r
+            .frames
+            .iter()
+            .filter(|f| !near_hit(f.t))
+            .map(|f| f.clamped)
+            .sum();
+        (d, a, low, wall, clamped)
+    }
+
+    /// The body still at the end: the centre of mass moving under 2 units over the last 0.5 s.
+    fn still_at_end(r: &NpRun) -> f32 {
+        let n = r.frames.len();
+        let k = (0.5 / FRAME) as usize;
+        length(sub(r.frames[n - 1].com, r.frames[n - 1 - k].com))
+    }
+
+    /// A big hit with a wall 45 units behind: it falls against the wall and slides down it, and
+    /// comes to rest where the physics leaves it, the wall carrying it (at least 200 N on it)
+    /// and the label "propped" over the last 2 s; never in the wall more than 1 unit, nothing
+    /// under the floor more than 3, the solver's guard never used; still at the end. Without the
+    /// wall the same hit ends lying or seated, still, the wall carrying nothing.
+    #[test]
+    fn np_m6_comes_to_rest_where_the_physics_leaves_it() {
+        let wall = vec![([0.0, -45.0, 0.0], [0.0, 1.0, 0.0])];
+        let r = downed(wall, None, 1.0, &[], 6.0);
+        let late: Vec<&NpFrame> = r.frames.iter().filter(|f| f.t > 4.0).collect();
+        let (d, a, low, in_wall, clamped) = down_limits(&r, 1.0);
+        let load = late
+            .iter()
+            .map(|f| f.wall_load)
+            .fold(f32::INFINITY, f32::min);
+        eprintln!(
+            "RESULT np M6 against a wall: labels {:?}, the wall's load at least {load:.0} N, in the wall at most {in_wall:.2} u, lowest {low:.1} u, moves at most {d:.1} u / {a:.1} deg a frame after 1 s, still {:.2} u, guard {clamped}",
+            late.iter().map(|f| f.label).collect::<std::collections::BTreeSet<_>>(),
+            still_at_end(&r)
+        );
+        assert!(
+            late.iter().all(|f| f.label == Some("propped")),
+            "not propped"
+        );
+        assert!(load > 200.0, "the wall carries {load:.0} N");
+        assert!(in_wall < 1.0 && low > -3.0 && clamped == 0);
+        assert!(still_at_end(&r) < 2.0);
+        let open = downed(Vec::new(), None, 1.0, &[], 6.0);
+        let end = open.frames.last().unwrap();
+        eprintln!(
+            "RESULT np M6 without a wall: ends {:?}, still {:.2} u",
+            end.label,
+            still_at_end(&open)
+        );
+        assert!(
+            matches!(end.label, Some("lying") | Some("seated")),
+            "{:?}",
+            end.label
+        );
+        assert!(still_at_end(&open) < 2.0 && end.wall_load == 0.0);
+    }
+
+    /// Asked to stand, a strong, whole actor stands by its balance within 5 s of the ask (on its
+    /// back on open floor, and propped on the wall): it sits up, draws its feet in, comes over
+    /// them and pushes up, and the balance has it again (no label); its centre of mass ends over
+    /// its feet (outside them by at most 0.05 m once the pelvis is over 80% of its height); no node moves more
+    /// than 8 units or 25 degrees a frame, nothing under the floor, the guard never used.
+    #[test]
+    fn np_m6_stands_by_balance() {
+        for (name, walls, ask) in [
+            ("on its back", Vec::new(), 3.0f32),
+            (
+                "propped on a wall",
+                vec![([0.0, -45.0, 0.0], [0.0, 1.0, 0.0])],
+                4.0,
+            ),
+        ] {
+            let r = downed(walls, Some(ask), 1.0, &[], ask + 6.0);
+            let stood = r
+                .frames
+                .iter()
+                .find(|f| f.t > ask && f.label.is_none())
+                .map(|f| f.t - ask);
+            let (d, a, low, _, clamped) = down_limits(&r, 1.5);
+            let over = r
+                .frames
+                .iter()
+                .filter(|f| f.t > ask && f.label.is_some() && f.nodes[0].1[2] - r.floor > 54.0)
+                .map(|f| f.over_feet)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let end = r.frames.last().unwrap();
+            eprintln!(
+                "RESULT np M6 stands ({name}): by balance {:?} s after the ask, the centre at most {over:.2} m outside the feet over 80% up, moves at most {d:.1} u / {a:.1} deg a frame, lowest {low:.1} u, the pelvis {:.0} u up at the end, guard {clamped}",
+                stood,
+                end.nodes[0].1[2] - r.floor
+            );
+            assert!(
+                stood.is_some_and(|t| t < 5.0),
+                "{name}: not standing ({stood:?})"
+            );
+            assert!(
+                end.label.is_none() && end.nodes[0].1[2] - r.floor > 60.0,
+                "{name}"
+            );
+            assert!(
+                over < 0.05,
+                "{name}: the centre {over:.2} m outside the feet"
+            );
+            assert!(
+                d < 8.0 && a < 25.0,
+                "{name}: a frame moved {d:.1} u / {a:.1} deg"
+            );
+            assert!(
+                low > -3.0 && clamped == 0,
+                "{name}: lowest {low:.1}, guard {clamped}"
+            );
+        }
+    }
+
+    /// Too weak to push its weight up (effort 0.4: the legs' 600 N under its 795): it tries,
+    /// gives up within a second and settles back lying, still, with no half pose held (the pelvis
+    /// under 15 units); the wish to stand is off.
+    #[test]
+    fn np_m6_a_weak_actor_fails_and_settles() {
+        let r = downed(Vec::new(), Some(3.0), 0.4, &[], 7.0);
+        let end = r.frames.last().unwrap();
+        let gave_up = r
+            .frames
+            .iter()
+            .find(|f| f.t > 3.0 && !f.rising)
+            .map(|f| f.t - 3.0);
+        eprintln!(
+            "RESULT np M6 weak: gave up {gave_up:?} s after the ask, ends {:?}, pelvis {:.1} u, still {:.2} u",
+            end.label,
+            end.nodes[0].1[2] - r.floor,
+            still_at_end(&r)
+        );
+        assert!(gave_up.is_some_and(|t| t < 1.0));
+        assert_eq!(end.label, Some("lying"));
+        assert!(end.nodes[0].1[2] - r.floor < 15.0 && still_at_end(&r) < 2.0);
+    }
+
+    /// A 1.5 m/s chest hit half way up its rise is another impulse on a partly supported body:
+    /// whatever follows is physics, and it ends either standing by its balance or settled (lying,
+    /// seated or crouched, still); no node moves more than 8 units or 25 degrees a frame except in
+    /// the hit's own frame, nothing under the floor, the guard never used.
+    #[test]
+    fn np_m6_a_hit_during_the_rise() {
+        let probe = downed(Vec::new(), Some(3.0), 1.0, &[], 9.0);
+        let mid = probe
+            .frames
+            .iter()
+            .find(|f| f.t > 3.0 && f.label == Some("rising"))
+            .map_or(5.0, |f| f.t + 0.3);
+        let hit = NpHit {
+            at: mid,
+            body: "Bip01 Spine2",
+            offset: [0.0, 8.0, 4.0],
+            speed: 1.5,
+            dir: [0.0, -1.0, 0.0],
+        };
+        let r = downed(Vec::new(), Some(3.0), 1.0, &[hit], 11.0);
+        let end = r.frames.last().unwrap();
+        let after: Vec<&NpFrame> = r.frames.iter().filter(|f| f.t > mid + 0.05).collect();
+        let (mut d, mut a) = (0.0f32, 0.0f32);
+        for w in after.windows(2) {
+            for (x, y) in w[0].nodes.iter().zip(&w[1].nodes) {
+                d = d.max(length(sub(y.1, x.1)));
+                a = a.max(angle_between(&y.0, &x.0).to_degrees());
+            }
+        }
+        let (_, _, low, _, clamped) = down_limits(&r, 0.0);
+        eprintln!(
+            "RESULT np M6 hit at {mid:.2} s mid-rise: ends {:?} (pelvis {:.0} u), moves at most {d:.1} u / {a:.1} deg a frame after it, lowest {low:.1}, guard {clamped}",
+            end.label,
+            end.nodes[0].1[2] - r.floor
+        );
+        let settled = matches!(end.label, Some("lying") | Some("seated") | Some("crouched"))
+            && still_at_end(&r) < 2.0;
+        assert!(end.label.is_none() || settled, "{:?}", end.label);
+        assert!(d < 8.0 && a < 25.0 && low > -3.0 && clamped == 0);
+    }
+
+    /// Whatever pose the fall leaves it in, a strong, whole actor gets up: 18 landings (chest hits
+    /// of 3.8, 4.35 and 5 m/s from six directions, the AI asking 2.5 s after and again a second
+    /// after a rise gives up): at least 16 stand by their balance within 9 s; in all, nothing
+    /// under the floor and the solver's guard never used after the fall's first second (one
+    /// still trying is the AI's wish).
+    #[test]
+    fn np_m6_stands_from_whatever_pose_it_lands_in() {
+        let (_, anim, _) = bind_pose();
+        let (mut stood, mut n) = (0, 0);
+        let mut lines = Vec::new();
+        for speed in [3.8f32, 4.35, 5.0] {
+            for deg in [-30.0f32, -10.0, 0.0, 15.0, 35.0, 180.0] {
+                let a = deg.to_radians();
+                let dir = [a.sin(), -a.cos(), 0.0];
+                let hits = vec![NpHit {
+                    at: 0.2,
+                    body: "Bip01 Spine2",
+                    offset: [-dir[0] * 8.0, -dir[1] * 8.0, 4.0],
+                    speed,
+                    dir,
+                }];
+                let scene = Scene {
+                    rise_at: Some(2.7),
+                    keep_down: true,
+                    retry: true,
+                    ..Scene::default()
+                };
+                let r = run_scene("sweep", &hits, 12.0, &|_| anim.clone(), &scene);
+                let up = r
+                    .frames
+                    .iter()
+                    .find(|f| f.t > 2.7 && f.label.is_none())
+                    .map(|f| f.t - 2.7);
+                n += 1;
+                if up.is_some_and(|t| t < 9.0) {
+                    stood += 1;
+                }
+                let (_, _, low, _, _) = down_limits(&r, 0.0);
+                // The guard after the fall's first second (a face-first landing whips the light
+                // neck past it for a substep at the impact).
+                let clamped: u32 = r
+                    .frames
+                    .iter()
+                    .filter(|f| f.t > 1.0)
+                    .map(|f| f.clamped)
+                    .sum();
+                assert!(
+                    low > -3.0 && clamped == 0,
+                    "{speed} m/s from {deg}: lowest {low:.1}, guard {clamped}"
+                );
+                lines.push(format!("{speed}/{deg}: {up:.1?}"));
+            }
+        }
+        eprintln!(
+            "RESULT np M6 stands from {stood} of {n} landings (s after the ask): {}",
+            lines.join(", ")
+        );
+        assert!(stood >= 16, "{stood} of {n}");
     }
 }

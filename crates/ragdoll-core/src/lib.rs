@@ -27,6 +27,7 @@ pub mod knock;
 pub mod np;
 pub mod np_balance;
 pub mod np_body;
+pub mod np_down;
 pub mod np_drive;
 pub mod np_skeleton;
 pub mod obstacle;

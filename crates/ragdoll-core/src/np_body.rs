@@ -36,10 +36,18 @@ pub const GRAVITY: f32 = 9.81;
 pub const SUBSTEPS: usize = 16;
 /// How far past the animated pose's own value a limit is widened (radians, 3 degrees).
 pub const LIMIT_MARGIN: f32 = 0.052;
+/// Downed, the most a joint limit turns its joint back in a substep (rad; 9.6 rad/s at 16
+/// substeps a 60th): hard for anything the solver's own steps put past it, never a snap.
+pub const LIMIT_STEP: f32 = 0.01;
 /// The floor's friction (static, dynamic).
 pub const FRICTION: (f32, f32) = (1.0, 0.8);
 /// The longest frame stepped (s): a hitch is stepped as this.
 pub const MAX_FRAME: f32 = 0.05;
+/// The fastest a body moves (m/s) and turns (rad/s): a guard, as Havok's own, against a solver
+/// upset flinging the body (a hit's impulse spins the struck body up to 150 rad/s for a substep
+/// before the joints share it; a light neck whips past 170 at a fall's impact).
+pub const MAX_SPEED: f32 = 30.0;
+pub const MAX_SPIN: f32 = 200.0;
 
 /// A body: its node, mass, inertia about its centre of mass in its own frame, the centre of mass
 /// and its capsule (in its own frame, metres).
@@ -115,6 +123,23 @@ pub struct Tracking {
     /// Bodies the floor holds up but does not grip (no friction): an animated walk's feet,
     /// which go where the walk puts them.
     pub slip: Vec<usize>,
+    /// Bodies that grip as if they carried the whole body's weight (the feet under the root's
+    /// support, which stands in for the legs pushing through them): friction by the weight on
+    /// every end within 2 mm of a surface, pushed or not; the rest by their contacts' pushes.
+    pub grip: Vec<usize>,
+    /// The joints' targets last frame (empty: none): each limit is widened by them too, so a
+    /// target's change never leaves the pose outside the limits it held under (a downed body's
+    /// joints switching from the animation to a rise's goals were snapped back in one substep).
+    pub before: Vec<Q>,
+    /// The relative rotations the limits are widened by in place of the drives' targets (empty:
+    /// the targets): a downed body's goals (a rise's) are kept inside the limits of the data and
+    /// its animation, never widening them.
+    pub widen_by: Vec<Q>,
+    /// A pose the limits take in too (empty: none): a downed living body's reach.
+    pub reach: Vec<Q>,
+    /// Limits brought back at most [`LIMIT_STEP`] a substep (a downed body, whose limits move
+    /// under it as its goals change); otherwise at once.
+    pub soft_limits: bool,
 }
 
 /// A pull on a body this frame (the root's support, a swinging foot's carry): a spring and damper
@@ -138,15 +163,33 @@ pub struct Support {
     pub max_torque: f32,
 }
 
+/// A flat surface the body rests on or leans against (a wall): a point on it and its normal out
+/// of it (unit), metres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Plane {
+    pub p: V3,
+    pub n: V3,
+}
+
 /// What a frame's step found.
 #[derive(Clone, Debug, Default)]
 pub struct StepReport {
     /// Bodies touching the floor at the frame's end (with the contact's world point, metres).
     pub contacts: Vec<(usize, V3)>,
+    /// Bodies touching a wall at the frame's end: the body, the contact's world point and the
+    /// wall's index in the walls given.
+    pub wall_contacts: Vec<(usize, V3, usize)>,
+    /// The force each body's contacts carried over the frame (N, the frame's mean): from the floor,
+    /// and from the walls (each body's sum).
+    pub floor_load: Vec<f32>,
+    pub wall_load: Vec<f32>,
     /// The most a joint lay outside its widened limit before the frame's last projection (rad).
     pub limit_most: f32,
     /// The largest joint gap at the end (m).
     pub gap_most: f32,
+    /// Substeps in which a body was moving faster than [`MAX_SPEED`] or turning faster than
+    /// [`MAX_SPIN`] and was slowed to it (a solver upset: none expected).
+    pub clamped: u32,
 }
 
 impl Model {
@@ -379,7 +422,36 @@ impl Model {
         floor: f32,
         dt: f32,
     ) -> StepReport {
-        let mut report = StepReport::default();
+        self.step_world(states, drives, pulls, tracking, floor, &[], dt)
+    }
+
+    /// [`Model::step_tracked`] with walls besides the floor (`walls`: the body's capsules kept on
+    /// their outer side, with the floor's friction).
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_world(
+        &self,
+        states: &mut [State],
+        drives: &[Drive],
+        pulls: &[Support],
+        tracking: Option<&Tracking>,
+        floor: f32,
+        walls: &[Plane],
+        dt: f32,
+    ) -> StepReport {
+        let mut report = StepReport {
+            floor_load: vec![0.0; self.bodies.len()],
+            wall_load: vec![0.0; self.bodies.len()],
+            ..StepReport::default()
+        };
+        let mut surfaces = vec![Plane {
+            p: [0.0, 0.0, floor],
+            n: [0.0, 0.0, 1.0],
+        }];
+        surfaces.extend(
+            walls
+                .iter()
+                .filter_map(|w| unit(w.n).map(|n| Plane { p: w.p, n })),
+        );
         let dt = dt.clamp(0.0, MAX_FRAME);
         if dt <= 0.0 || states.len() != self.bodies.len() {
             return report;
@@ -391,8 +463,23 @@ impl Model {
             .iter()
             .enumerate()
             .map(|(j, def)| {
-                let target = drives.get(j).map_or(Q_ID, |d| d.target);
-                widen(def.limit, self.measure(j, target), axle_apart(def, target))
+                let target = match tracking.and_then(|t| t.widen_by.get(j)) {
+                    Some(&q) => q,
+                    None => drives.get(j).map_or(Q_ID, |d| d.target),
+                };
+                let by_target = widen(def.limit, self.measure(j, target), axle_apart(def, target));
+                let mut lim = by_target;
+                for extra in [
+                    tracking.and_then(|t| t.before.get(j)),
+                    tracking.and_then(|t| t.reach.get(j)),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let both = widen(lim, self.measure(j, *extra), axle_apart(def, *extra));
+                    lim = keep_apart(both, lim);
+                }
+                lim
             })
             .collect();
         for sub_i in 0..SUBSTEPS {
@@ -433,7 +520,8 @@ impl Model {
             // The joints: together, inside their limits, driven.
             for (j, def) in self.joints.iter().enumerate() {
                 self.pin(states, def);
-                let out = self.limit(states, def, &widened[j]);
+                let soft = tracking.is_some_and(|t| t.soft_limits);
+                let out = self.limit(states, def, &widened[j], soft);
                 if sub_i == SUBSTEPS - 1 {
                     report.limit_most = report.limit_most.max(out);
                 }
@@ -450,13 +538,56 @@ impl Model {
                 self.support(states, sp, h);
             }
             let slip: &[usize] = tracking.map_or(&[], |t| &t.slip);
-            self.floor(states, &prev, floor, slip);
+            let grip: &[usize] = tracking.map_or(&[], |t| &t.grip);
+            let loads = self.surfaces(states, &prev, &surfaces, slip);
+            // Each surface's push this substep as a force (N), the frame's mean.
+            let to_force = 1.0 / (h * h * SUBSTEPS as f32);
+            for &(b, k, lambda, _, _) in &loads {
+                if k == 0 {
+                    report.floor_load[b] += lambda * to_force;
+                } else {
+                    report.wall_load[b] += lambda * to_force;
+                }
+            }
             // Velocities from the moves.
             for (s, p) in states.iter_mut().zip(&prev) {
                 s.v = scale(sub(s.x, p.x), 1.0 / h);
                 let dq = qmul(s.q, qconj(p.q));
                 let w = scale([dq[1], dq[2], dq[3]], 2.0 / h);
                 s.w = if dq[0] < 0.0 { scale(w, -1.0) } else { w };
+            }
+            // The guard against an upset: no body faster than the most.
+            let mut over = false;
+            for st in states.iter_mut() {
+                let v = length(st.v);
+                if v > MAX_SPEED {
+                    st.v = scale(st.v, MAX_SPEED / v);
+                    over = true;
+                }
+                let w = length(st.w);
+                if w > MAX_SPIN {
+                    st.w = scale(st.w, MAX_SPIN / w);
+                    over = true;
+                }
+            }
+            if over {
+                report.clamped += 1;
+            }
+            // No bounce (the paper's restitution, at 0): a contact's push out of a surface moves
+            // the body out but leaves it no speed away from it.
+            for &(b, _, _, local, n) in &loads {
+                let r = qrot(states[b].q, local);
+                let r = sub(r, scale(n, self.bodies[b].radius));
+                let v = add(states[b].v, cross(states[b].w, r));
+                let vn = dot(v, n);
+                if vn > 0.0 {
+                    let w = self.point_weight(states, b, r, n);
+                    let p = scale(n, -vn / w.max(1e-6));
+                    let s_ = &mut states[b];
+                    s_.v = add(s_.v, scale(p, self.bodies[b].inv_mass));
+                    let iw = world_inv_inertia(&self.bodies[b], s_.q);
+                    s_.w = add(s_.w, apply_m(&iw, cross(r, p)));
+                }
             }
             // The drives' damping (the paper's joint damping, between the two bodies).
             for (j, def) in self.joints.iter().enumerate() {
@@ -484,13 +615,22 @@ impl Model {
                 let dv = [-rel[0] * kh, -rel[1] * kh, -rel[2] * kv];
                 states[r].v = add(states[r].v, dv);
             }
-            self.friction(states, floor, h, slip);
+            self.friction(states, &loads, h, slip, grip);
+            self.grip_friction(states, &surfaces, h, grip);
         }
         for (i, def) in self.bodies.iter().enumerate() {
             for e in def.ends {
                 let p = add(states[i].x, qrot(states[i].q, sub(e, def.com)));
                 if p[2] - def.radius <= floor + 0.005 {
                     report.contacts.push((i, [p[0], p[1], floor]));
+                }
+                for (k, w) in surfaces.iter().enumerate().skip(1) {
+                    let d = dot(sub(p, w.p), w.n) - def.radius;
+                    if d <= 0.005 {
+                        report
+                            .wall_contacts
+                            .push((i, sub(p, scale(w.n, d + def.radius)), k - 1));
+                    }
                 }
             }
         }
@@ -534,7 +674,7 @@ impl Model {
     }
 
     /// The joint brought inside its (widened) limit; answers how far out it was (rad).
-    fn limit(&self, states: &mut [State], def: &JointDef, lim: &Limit) -> f32 {
+    fn limit(&self, states: &mut [State], def: &JointDef, lim: &Limit, soft: bool) -> f32 {
         let (ra, rb) = (
             m_from_q(states[def.child].q),
             m_from_q(states[def.parent].q),
@@ -612,6 +752,14 @@ impl Model {
             }
         }
         for c in corrections {
+            // At most [`LIMIT_STEP`] a substep: a pose found far outside (its widening moved
+            // under it) is brought back within a few frames, not snapped in one substep.
+            let a = length(c);
+            let c = if soft && a > LIMIT_STEP {
+                scale(c, LIMIT_STEP / a)
+            } else {
+                c
+            };
             self.turn(states, def.child, Some(def.parent), c, 0.0, 1.0);
         }
         most
@@ -685,69 +833,122 @@ impl Model {
         }
     }
 
-    /// The capsules kept above the floor; a contact that has not slid past the static friction is
-    /// held where it was.
-    fn floor(&self, states: &mut [State], prev: &[State], floor: f32, slip: &[usize]) {
+    /// The capsules kept on the outer side of each surface (the floor first, then the walls); a
+    /// contact that has not slid past the static friction is held where it was. Answers each push
+    /// (body, surface, its size: kg·m, the capsule end's centre in the body's turn, the surface's
+    /// normal).
+    #[allow(clippy::type_complexity)]
+    fn surfaces(
+        &self,
+        states: &mut [State],
+        prev: &[State],
+        surfaces: &[Plane],
+        slip: &[usize],
+    ) -> Vec<(usize, usize, f32, V3, V3)> {
+        let mut loads = Vec::new();
         for (i, def) in self.bodies.iter().enumerate() {
             let grips = !slip.contains(&i);
             for e in def.ends {
                 let local = sub(e, def.com);
-                let centre = add(states[i].x, qrot(states[i].q, local));
-                let depth = floor - (centre[2] - def.radius);
-                if depth <= 0.0 {
-                    continue;
-                }
-                let n = [0.0, 0.0, 1.0];
-                let p = [centre[0], centre[1], centre[2] - def.radius];
-                let r = sub(p, states[i].x);
-                let w = self.point_weight(states, i, r, n);
-                let lambda = depth / w;
-                self.move_at(states, i, r, scale(n, lambda));
-                // Static friction: the contact point's slide this substep taken back while it is
-                // within the friction cone of the push out.
-                let now = add(states[i].x, qrot(states[i].q, local));
-                let was = add(prev[i].x, qrot(prev[i].q, local));
-                let slide = sub(now, was);
-                let slide = [slide[0], slide[1], 0.0];
-                let s = length(slide);
-                if grips && s > 1e-7 && s < FRICTION.0 * depth {
-                    let t = scale(slide, -1.0 / s);
-                    let r = sub([now[0], now[1], now[2] - def.radius], states[i].x);
-                    let w = self.point_weight(states, i, r, t);
-                    self.move_at(states, i, r, scale(t, s / w));
+                for (k, sf) in surfaces.iter().enumerate() {
+                    let n = sf.n;
+                    let centre = add(states[i].x, qrot(states[i].q, local));
+                    let depth = def.radius - dot(sub(centre, sf.p), n);
+                    if depth <= 0.0 {
+                        continue;
+                    }
+                    let p = sub(centre, scale(n, def.radius));
+                    let r = sub(p, states[i].x);
+                    let w = self.point_weight(states, i, r, n);
+                    let lambda = depth / w;
+                    self.move_at(states, i, r, scale(n, lambda));
+                    loads.push((i, k, lambda, local, n));
+                    // Static friction: the contact point's slide along the surface this substep
+                    // taken back while it is within the friction cone of the push out.
+                    let now = add(states[i].x, qrot(states[i].q, local));
+                    let was = add(prev[i].x, qrot(prev[i].q, local));
+                    let slide = sub(now, was);
+                    let slide = sub(slide, scale(n, dot(slide, n)));
+                    let s_len = length(slide);
+                    if grips && s_len > 1e-7 && s_len < FRICTION.0 * depth {
+                        let t = scale(slide, -1.0 / s_len);
+                        let r = sub(sub(now, scale(n, def.radius)), states[i].x);
+                        let w = self.point_weight(states, i, r, t);
+                        self.move_at(states, i, r, scale(t, s_len / w));
+                    }
                 }
             }
         }
+        loads
     }
 
-    /// The floor's sliding friction on the velocities of the bodies touching it.
-    fn friction(&self, states: &mut [State], floor: f32, h: f32, slip: &[usize]) {
-        for (i, def) in self.bodies.iter().enumerate() {
-            if slip.contains(&i) {
+    /// Each contact's sliding friction on the velocities (Coulomb's, the paper's): the contact
+    /// point's slide along its surface slowed by at most the friction of the push that held it
+    /// out this substep.
+    #[allow(clippy::type_complexity)]
+    fn friction(
+        &self,
+        states: &mut [State],
+        loads: &[(usize, usize, f32, V3, V3)],
+        h: f32,
+        slip: &[usize],
+        grip: &[usize],
+    ) {
+        for &(i, _, lambda, local, n) in loads {
+            if slip.contains(&i) || grip.contains(&i) || lambda <= 0.0 {
                 continue;
             }
+            let r = sub(qrot(states[i].q, local), scale(n, self.bodies[i].radius));
+            let v = add(states[i].v, cross(states[i].w, r));
+            let vt = sub(v, scale(n, dot(v, n)));
+            let s = length(vt);
+            if s < 1e-6 {
+                continue;
+            }
+            let t = scale(vt, -1.0 / s);
+            let w = self.point_weight(states, i, r, t).max(1e-6);
+            // At most what stops the slide, at most the friction of the push out.
+            let impulse = (s / w).min(FRICTION.1 * lambda / h);
+            let p = scale(t, impulse);
+            let s_ = &mut states[i];
+            s_.v = add(s_.v, scale(p, self.bodies[i].inv_mass));
+            let iw = world_inv_inertia(&self.bodies[i], s_.q);
+            s_.w = add(s_.w, apply_m(&iw, cross(r, p)));
+        }
+    }
+
+    /// The gripping bodies' friction (the standing feet): each capsule end touching a surface
+    /// (within 2 mm) has its contact point's slide slowed by the weight's friction, pushed or
+    /// not (the root's support carries the weight the legs put through them).
+    fn grip_friction(&self, states: &mut [State], surfaces: &[Plane], h: f32, grip: &[usize]) {
+        for &i in grip {
+            let Some(def) = self.bodies.get(i) else {
+                continue;
+            };
             for e in def.ends {
                 let local = sub(e, def.com);
-                let centre = add(states[i].x, qrot(states[i].q, local));
-                if centre[2] - def.radius > floor + 0.002 {
-                    continue;
+                for sf in surfaces {
+                    let n = sf.n;
+                    let centre = add(states[i].x, qrot(states[i].q, local));
+                    if dot(sub(centre, sf.p), n) - def.radius > 0.002 {
+                        continue;
+                    }
+                    let r = sub(sub(centre, scale(n, def.radius)), states[i].x);
+                    let v = add(states[i].v, cross(states[i].w, r));
+                    let vt = sub(v, scale(n, dot(v, n)));
+                    let s = length(vt);
+                    if s < 1e-6 {
+                        continue;
+                    }
+                    let dv = (FRICTION.1 * GRAVITY * h).min(s);
+                    let t = scale(vt, -1.0 / s);
+                    let w = self.point_weight(states, i, r, t);
+                    let p = scale(t, dv / w.max(1e-6));
+                    let s_ = &mut states[i];
+                    s_.v = add(s_.v, scale(p, self.bodies[i].inv_mass));
+                    let iw = world_inv_inertia(&self.bodies[i], s_.q);
+                    s_.w = add(s_.w, apply_m(&iw, cross(r, p)));
                 }
-                let r = sub([centre[0], centre[1], centre[2] - def.radius], states[i].x);
-                let v = add(states[i].v, cross(states[i].w, r));
-                let vt = [v[0], v[1], 0.0];
-                let s = length(vt);
-                if s < 1e-6 {
-                    continue;
-                }
-                // At most the friction of the body's weight over the substep.
-                let dv = (FRICTION.1 * GRAVITY * h).min(s);
-                let t = scale(vt, -1.0 / s);
-                let w = self.point_weight(states, i, r, t);
-                let p = scale(t, dv / w.max(1e-6));
-                let s_ = &mut states[i];
-                s_.v = add(s_.v, scale(p, self.bodies[i].inv_mass));
-                let iw = world_inv_inertia(&self.bodies[i], s_.q);
-                s_.w = add(s_.w, apply_m(&iw, cross(r, p)));
             }
         }
     }
@@ -849,6 +1050,30 @@ fn widen(lim: Limit, at: Measure, apart: f32) -> Limit {
                 perp1,
                 perp2,
                 angles: (angles.0.min(angle - m), angles.1.max(angle + m)),
+            }
+        }
+        (lim, _) => lim,
+    }
+}
+
+/// `lim` with a hinge's allowed axle angle the larger of its own and `other`'s.
+fn keep_apart(lim: Limit, other: Limit) -> Limit {
+    match (lim, other) {
+        (
+            Limit::Hinge {
+                axle,
+                perp1,
+                mut perp2,
+                angles,
+            },
+            Limit::Hinge { perp2: o, .. },
+        ) => {
+            perp2[0][0] = perp2[0][0].max(o[0][0]);
+            Limit::Hinge {
+                axle,
+                perp1,
+                perp2,
+                angles,
             }
         }
         (lim, _) => lim,
@@ -1172,5 +1397,54 @@ mod tests {
                 angle.to_degrees()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod friction_tests {
+    use super::*;
+
+    /// Laid on its back and sliding at 3 m/s, limp, the body stops by the floor's sliding
+    /// friction in about v² / (2 μ g) (0.57 m at μ 0.8; 0.4 to 0.9 m for the turning and settling
+    /// limbs) and stays: Coulomb's friction of each contact's own push, no bounce.
+    #[test]
+    fn a_sliding_body_stops_by_friction() {
+        let m = Model::fnv();
+        let (_, nodes) = m.bind();
+        let mut st = m.states_from_nodes(&nodes);
+        let q = qexp([-std::f32::consts::FRAC_PI_2, 0.0, 0.0]);
+        for s in st.iter_mut() {
+            s.x = qrot(q, s.x);
+            s.q = qmul(q, s.q);
+        }
+        let low = lowest_point(&m, &st);
+        for s in st.iter_mut() {
+            s.x[2] -= low;
+            s.v = [0.0, -3.0, 0.0];
+        }
+        let x0 = m.centre_of_mass(&st).0;
+        let drives: Vec<Drive> = m
+            .relative(&st)
+            .iter()
+            .map(|&t| Drive {
+                target: t,
+                kp: 0.0,
+                kd: 0.0,
+                hold: 0.0,
+            })
+            .collect();
+        let mut high = 0.0f32;
+        for _ in 0..120 {
+            m.step(&mut st, &drives, &[], 0.0, 1.0 / 60.0);
+            high = high.max(m.centre_of_mass(&st).0[2] - x0[2]);
+        }
+        let (c, v) = m.centre_of_mass(&st);
+        let slid = length(sub(c, x0));
+        eprintln!(
+            "RESULT slid {slid:.2} m, speed at 2 s {:.3} m/s, rose {high:.3} m",
+            length(v)
+        );
+        assert!((0.4..0.9).contains(&slid), "{slid}");
+        assert!(length(v) < 0.05 && high < 0.05);
     }
 }

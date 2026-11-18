@@ -646,6 +646,65 @@ The tuning, all in `ragdoll-core` (a change is a rebuild; none is a player setti
 | Settling after a step (s); a stance step past (m) | `np_balance::SETTLE`, `STANCE_OFF` | 0.3, 0.1 |
 | Let go: calm for (s), within (units) of the animation | `new_physics::LET_GO_AFTER`, `LET_GO_OFF` | 1.5, 1.5 |
 
+**M6, downed but active: the body (lab).** Nothing is staged: no seated, propped or lying state,
+no get-up animation. With `Np::keep_down` set (the host does not set it yet: a fall still goes
+to the game's ragdoll, M4), a hit past any step keeps the body: it falls with its muscles let go,
+and from then on the controller holds it on whatever touches it (`np::Np::down_frame`). The
+joints still aim at the animation, with springs that hold rather than stand
+(`np_down::DOWN_GAINS`: legs 0.15, spine 0.35 with some of its weight held, the head kept up, the
+arms 0.4). The floor and the walls are one contact pass
+(`np_body::Model::step_world`, `Plane`): each push out of a surface is reported per body
+(`StepReport::floor_load`, `wall_load`), the contact leaves no speed away from the surface (no
+bounce) and slides by Coulomb's friction of its own push (the standing feet keep the weight's
+grip, `Tracking::grip`). The pose is read from that (`np_down::read`: the loads on the feet, the
+seat, the hands, the back on a wall, the weapon arm; the pelvis's height, the torso's tilt, the
+centre of mass against the feet's soles and against everything touching) and named for the AI
+and the log only (`np_down::classify`: lying, seated, propped, crouched, rising, standing, held
+0.25 s before a change, `Labeler`). Nothing moves the body toward a label. The AI's reads
+(`np_down::reads`): the weapon arm free (it carries under 40 N), the target within 100 degrees of
+the torso's facing, a push up possible (something under it, the legs' push over the weight), a
+crawl possible.
+
+Rising is the controller pursuing balance when the AI asks (`Np::rise`). Its goals each frame come from
+the pose it has: the torso turned up and leaning toward the feet (by how far the centre of mass is
+behind them), each foot drawn along the floor in front of its hip (pulled there as the leg's
+muscles drag a heel), the legs folded onto it by the legs' IK; the arms' push turns the torso up
+while a hand can reach the floor or a wall (`RISE_ARMS`, capped by strength); once the centre of
+mass is within 0.35 m of a foot that is down (a kneel counts), the legs' push lifts the pelvis
+toward its standing height over the feet (`RISE_FORCE` 1500 N times strength and effort: the
+standing balance's root support is the same kind of abstraction). Each joint's goal lies at most
+0.3 rad from where it is (`RISE_REACH`). A rise whose pelvis gets no higher for 1.5 s gives up and
+settles back (`RISE_STALL`); one with nothing to push from, or a push under the body's weight,
+gives up in 0.5 s. Standing again (the pelvis at 88% of its height, the torso within 35 degrees,
+the feet carrying it, still) for 0.4 s, the balance has it again.
+
+**The joint limits while downed.** The skeleton's limits are a dead ragdoll's (the hip a 45 degree
+cone and 30 degrees forward, the knee to 87 degrees, the spine 18 degrees a joint): no one gets
+off the floor inside them. A downed body's limits take in, besides the data's and the
+animation's, a living body's reach (`np_down::reach_pose`: the bind pose with each leg folded by
+the legs' IK into a deep squat and each spine joint curled 26 degrees). The dead ragdoll, a fall
+and the standing balance keep the data's limits as before. The limits never widen to a rise's own
+goals: widening by each frame's target let the goals ratchet the joints 120 degrees past them.
+For 0.3 s after a fall, and after standing up, a joint outside the limits is brought back at most
+0.01 rad a substep, never snapped (`LIMIT_STEP`); otherwise the limits are hard. **For Patrick to
+confirm:** the reach goes past his skeleton data on purpose; it is in one place
+(`np_down::REACH_FOLD`, `REACH_CURL`).
+
+Lab tests (`np_lab.rs`, FNV's skeleton): a 4.35 m/s hit with a wall 45 units behind slides down
+the wall and stays propped (the wall carrying at least 420 N, the label "propped" over the last
+2 s, never in the wall, still); without the wall it ends lying, still. Asked to stand it stands by
+its balance 3.45 s after the ask on its back, 4.15 s propped on the wall, the centre of mass over
+its feet at the end of the rise, no node moving more than 4.6 units or 10.2 degrees a frame.
+Whatever pose it lands in, it gets up: of 18 landings (3.8, 4.35 and 5 m/s from six directions,
+the AI asking again a second after a rise gives up) 17 stand, in 3.4 to 7.8 s. Too weak
+(effort 0.4: the legs' 600 N under its 795 N) it tries, gives up and lies still. Hit again
+(1.5 m/s) half way up, it ends standing. Nothing under the floor, the solver's speed guard (30 m/s,
+200 rad/s, `np_body::MAX_SPEED`, `MAX_SPIN`) never used after a fall's impact. Videos:
+`np_m6_fall_rise`, `np_m6_wall`, `np_m6_weak`, `np_m6_hit_rising` (`examples/np_frames.rs m6`).
+The solver's other changes (the floor's Coulomb friction, no bounce, the walls) leave the M1 and M2
+tests as they were. Next (M6, the game): the host keeping a downed actor, the AI's choices
+(fire from the ground, crawl to cover, stand), dying while down, `[np pose]` / `[np choice]`.
+
 ### bdf710a: the get-up hoisted upside down, the stagger's slide, the head's nod, the launch along the ground (Patrick, 2026-11-17, clip 1456)
 
 On FNV's skeleton (`tests-data/fnv_skeleton.txt`) the get-up fixture now runs knock state 6 as the
