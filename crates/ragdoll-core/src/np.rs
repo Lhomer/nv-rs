@@ -136,7 +136,7 @@ fn turn_toward(now: Q, goal: Q, most: f32) -> Q {
 }
 
 /// Read standing and still this long (s), a downed body is the balance's again.
-pub const STAND_HOLD: f32 = 0.4;
+pub const STAND_HOLD: f32 = 0.25;
 
 /// The rate (1/s) at which each body's turn off its animation's decays (a hit softens it with the
 /// joint's spring).
@@ -183,6 +183,15 @@ pub struct Np {
     /// Each body's own floor (world, metres: the ground under it, a slope's; empty: the frame's
     /// flat floor).
     pub floors: Vec<Plane>,
+    /// About to be handed to the game's ragdoll: the body is brought inside the skeleton's own
+    /// limits (`np_body::Tracking::data_limits`); `report.limit_most` says how far out it still is.
+    pub to_limits: bool,
+    /// The last frame ran inside the skeleton's own limits ([`Np::to_limits`]): its
+    /// `report.limit_most` is how far out of them the body still was.
+    pub on_data_limits: bool,
+    /// The animation's jumps so far and the last's size (game units).
+    pub jumps: u32,
+    pub jump_last: f32,
     /// The ground's velocity under the body (m/s): what the game itself moved the actor by this
     /// frame (none once its movement is held); standing again is measured against it.
     pub ground_v: V3,
@@ -266,6 +275,10 @@ impl Np {
             anim_v: [0.0; 3],
             walls: Vec::new(),
             floors: Vec::new(),
+            to_limits: false,
+            on_data_limits: false,
+            jumps: 0,
+            jump_last: 0.0,
             ground_v: [0.0; 3],
             keep_down: false,
             down: None,
@@ -332,6 +345,7 @@ impl Np {
     }
 
     fn frame_local(&mut self, anim: &[(M3, V3)], floor: f32, dt: f32) -> Vec<(M3, V3)> {
+        self.on_data_limits = self.to_limits;
         let unshifted = self.model.states_from_nodes(anim);
         let (com_now, _) = self.model.centre_of_mass(&unshifted);
         let jumped = self
@@ -339,6 +353,10 @@ impl Np {
             .is_some_and(|was| crate::flinch::length(sub(com_now, was)) * UNITS > JUMP);
         if jumped {
             self.anim_samples.clear();
+            self.jumps += 1;
+            self.jump_last = self
+                .anim_com
+                .map_or(0.0, |was| crate::flinch::length(sub(com_now, was)) * UNITS);
         }
         // The animation's velocity across the last [`ANIM_V_WINDOW`] of frames whose pose
         // advanced (at least [`ANIM_V_LEAST`] of them; until then the seed): a frame's own
@@ -387,7 +405,10 @@ impl Np {
             vec![[0.0; 3]; anim_states.len()]
         };
         self.anim_states = anim_states;
-        if jumped {
+        // A jump of the animation (a teleport, a load) puts the body back on it, never while it
+        // is down (the downed body snapped upright on a jump read from torn locals: the tester's
+        // 08:13 clip).
+        if jumped && self.down.is_none() {
             self.states = self.anim_states.clone();
             self.balance = Balance::new(&self.model);
         }
@@ -398,6 +419,10 @@ impl Np {
         self.muscles.advance(dt);
         if self.down.is_some() {
             return self.down_frame(anim, floor, dt);
+        }
+        // Each foot's own ground plane (a slope's).
+        for side in 0..2 {
+            self.balance.foot_floor[side] = self.floors.get(self.balance.feet[side]).copied();
         }
         let ask = self.balance.update(
             &self.model,
@@ -546,8 +571,9 @@ impl Np {
             } else {
                 Vec::new()
             },
-            soft_limits: self.stood_up < LIMITS_SETTLE,
+            soft_limits: self.stood_up < LIMITS_SETTLE || self.to_limits,
             floors: self.floors.clone(),
+            data_limits: self.to_limits,
         };
         self.stood_up += dt;
         self.report = self.model.step_world(
@@ -735,10 +761,14 @@ impl Np {
                 let hip = worlds[thigh].1;
                 let leg = self.balance.leg_length[side] * UNITS;
                 let foot_h = (anim[foot].1[2] - anim[r].1[2] + b.stand_height * UNITS).max(5.0);
-                let up = ((hip[2] - floor - foot_h) / leg).clamp(0.0, 1.0);
+                // This foot's own ground under its hip (a slope's), game units.
+                let ground = self.ground_at(foot, hip).map_or(floor, |z| z * UNITS);
+                let up = ((hip[2] - ground - foot_h) / leg).clamp(0.0, 1.0);
                 let out = leg * (RISE_FOOT_OUT * (1.0 - up) + 0.05 * up);
                 let ahead = scale(rise_dir, out);
-                let goal = [hip[0] + ahead[0], hip[1] + ahead[1], floor + foot_h];
+                let at = [hip[0] + ahead[0], hip[1] + ahead[1], 0.0];
+                let ground = self.ground_at(foot, at).map_or(floor, |z| z * UNITS);
+                let goal = [at[0], at[1], ground + foot_h];
                 let Some((r1, m, _)) = crate::flinch::leg_ik(
                     worlds[thigh].1,
                     worlds[calf].1,
@@ -795,7 +825,13 @@ impl Np {
                 .any(|&ft| self.report.floor_load.get(ft).copied().unwrap_or(0.0) > 1.0);
             if feet_down && reading.over_feet < RISE_OVER_FEET {
                 down.lifting = true;
-                let stand_z = f + b.stand_height;
+                // Over the feet's own ground (a slope's).
+                let feet_ground = b
+                    .feet
+                    .iter()
+                    .filter_map(|&ft| self.ground_at(ft, scale(self.states[ft].x, UNITS)))
+                    .fold(None, |m: Option<f32>, z| Some(m.map_or(z, |m| m.max(z))));
+                let stand_z = feet_ground.unwrap_or(f) + b.stand_height;
                 pulls.push(Support {
                     body: r,
                     x: [feet_mid[0], feet_mid[1], stand_z],
@@ -867,8 +903,9 @@ impl Np {
             // Soft only just downed, while the limits change from the standing ones (widened by
             // the legs' footing) to the downed ones (the animation's and the reach, which stay);
             // hard otherwise.
-            soft_limits: down.since < LIMITS_SETTLE,
+            soft_limits: down.since < LIMITS_SETTLE || self.to_limits,
             floors: self.floors.clone(),
+            data_limits: self.to_limits,
         };
         self.report = self.model.step_world(
             &mut self.states,
@@ -908,6 +945,17 @@ impl Np {
         self.model.node_worlds(&self.states)
     }
 
+    /// Body `b`'s own ground under `at` (game units, local; metres answered), from its floor
+    /// plane ([`Np::floors`]); none without one.
+    fn ground_at(&self, b: usize, at: V3) -> Option<f32> {
+        let p = self.floors.get(b)?;
+        if p.n[2] <= 0.1 {
+            return None;
+        }
+        let (x, y) = (at[0] / UNITS, at[1] / UNITS);
+        Some(p.p[2] - (p.n[0] * (x - p.p[0]) + p.n[1] * (y - p.p[1])) / p.n[2])
+    }
+
     /// The pose's label now (none while standing on its feet under the balance).
     pub fn label(&self) -> Option<Label> {
         self.down.as_ref().map(|d| d.labeler.label)
@@ -921,12 +969,38 @@ impl Np {
         ask: &crate::np_balance::Ask,
     ) -> Option<Vec<(M3, V3)>> {
         let b = &self.balance;
-        let engaged = if b.moving {
-            // On its path the walk's legs drive; a gather step or a plant takes them.
-            b.step.is_some() || b.plants.iter().any(|p| p.is_some())
-        } else {
-            b.phase != Phase::Standing || b.plants.iter().any(|p| p.is_some()) || b.lower > 0.003
-        };
+        // How far each animated foot lies under its own ground (m; a flat animation's stance on
+        // a slope puts the uphill foot into it, and the legs drove it there at 4 to 5 body
+        // weights).
+        let under = [0, 1].map(|side| {
+            let f = b.feet[side];
+            let (Some(p), Some(s)) = (b.foot_floor[side], self.anim_states.get(f)) else {
+                return 0.0;
+            };
+            if p.n[2] <= 0.1 {
+                return 0.0;
+            }
+            let def = &self.model.bodies[f];
+            def.ends
+                .iter()
+                .map(|e| {
+                    let end = add(s.x, crate::active::qrot(s.q, sub(*e, def.com)));
+                    let ground =
+                        p.p[2] - (p.n[0] * (end[0] - p.p[0]) + p.n[1] * (end[1] - p.p[1])) / p.n[2];
+                    ground - (end[2] - def.radius)
+                })
+                .fold(0.0f32, f32::max)
+        });
+        let into_ground = under.iter().any(|&u| u > 0.01);
+        let engaged = into_ground
+            || if b.moving {
+                // On its path the walk's legs drive; a gather step or a plant takes them.
+                b.step.is_some() || b.plants.iter().any(|p| p.is_some())
+            } else {
+                b.phase != Phase::Standing
+                    || b.plants.iter().any(|p| p.is_some())
+                    || b.lower > 0.003
+            };
         if !engaged || ask.falling {
             return None;
         }
@@ -948,6 +1022,11 @@ impl Np {
             let goal = match (ask.foot, ask.plants[side]) {
                 (Some((fb, x, q, _)), _) if fb == foot => node_of(foot, x, q),
                 (_, Some((_, x, q))) => node_of(foot, x, q),
+                // An animated foot under its ground: where the animation has it, on the ground.
+                _ if under[side] > 0.01 => {
+                    let s = &self.anim_states[foot];
+                    node_of(foot, add(s.x, [0.0, 0.0, under[side]]), s.q)
+                }
                 _ => node_of(foot, self.states[foot].x, self.states[foot].q),
             };
             let hip = sub(anim[thigh].1, [0.0, 0.0, ask.lower * UNITS]);
@@ -968,6 +1047,28 @@ impl Np {
             out[foot].0 = anim[foot].0;
         }
         Some(out)
+    }
+
+    /// The body brought inside the skeleton's own limits at once (`Model::into_data_limits`) and
+    /// its bodies' nodes' worlds (game units, the world's): the pose handed to the game's ragdoll.
+    /// Answers them and how far out the body still lay (rad).
+    pub fn into_limits(&mut self) -> (Vec<(M3, V3)>, f32) {
+        let out = self.model.into_data_limits(&mut self.states, 12);
+        (
+            shift_by(&self.model.node_worlds(&self.states), self.origin),
+            out,
+        )
+    }
+
+    /// The actor was moved by `by` (m; its animation comes moved by it, which is not its own
+    /// motion nor a jump): a step's or a rise's end, and the height its owner gave it there.
+    pub fn anim_moved(&mut self, by: V3) {
+        if let Some(c) = self.anim_com.as_mut() {
+            *c = add(*c, by);
+        }
+        for s in self.anim_samples.iter_mut() {
+            s.1 = add(s.1, by);
+        }
     }
 
     /// The animation's velocity (m/s) the last frame measured.
@@ -994,8 +1095,13 @@ impl Np {
     /// all of it once no step swings; the controller then expects the animation moved by it (the
     /// actor's reference and its 3D's root).
     pub fn take_move(&mut self) -> V3 {
-        let down = self.down.is_some();
-        if !down && (self.balance.step.is_some() || self.balance.phase == Phase::Falling) {
+        // Downed, the actor stays where it is; the body's offset is taken once it stands again
+        // (the actor moved with the pelvis every frame glided 14 to 53 units a second: the
+        // tester's 08:13 clip).
+        if self.down.is_some()
+            || self.balance.step.is_some()
+            || self.balance.phase == Phase::Falling
+        {
             return [0.0; 3];
         }
         let by = self.balance.shift;
@@ -1003,13 +1109,7 @@ impl Np {
             return [0.0; 3];
         }
         self.balance.take(by);
-        if let Some(c) = self.anim_com.as_mut() {
-            *c = add(*c, by);
-        }
-        // The actor moved: the animation comes moved by it, which is not its own motion.
-        for s in self.anim_samples.iter_mut() {
-            s.1 = add(s.1, by);
-        }
+        self.anim_moved(by);
         scale(by, UNITS)
     }
 }

@@ -352,6 +352,28 @@ pub fn install(e: &mut Engine) {
         );
         Ret::default()
     });
+    // The game's animation update for an actor: New Physics' snapshot of its animation right
+    // after it, on whichever thread runs it.
+    e.register(crate::new_physics::ANIMATION_UPDATE_MOVEMENT, |e, a| {
+        engine::units::fallout_shared::animation::animation_update_movement(
+            e,
+            Ptr::new(a[0]),
+            Ptr::new(a[1]),
+        );
+        crate::new_physics::animation_updated(e, a[1]);
+        Ret::default()
+    });
+    e.register(crate::new_physics::ANIMATION_UPDATE_QUEUED, |e, a| {
+        let did = engine::units::fallout_shared::animation::animation_update_queued_scenegraph(
+            e,
+            Ptr::new(a[0]),
+        );
+        if did && a[0] != 0 {
+            let actor = e.mem.u32(a[0] + crate::new_physics::ANIMATION_ACTOR);
+            crate::new_physics::animation_updated(e, actor);
+        }
+        u32::from(did).into_ret()
+    });
     e.register(crate::new_physics::ACTOR_MOVER_UPDATE, |e, a| {
         mover_update(e, a[0], |e| {
             engine::units::fallout_ai::actormover::actor_mover_update(
@@ -365,17 +387,17 @@ pub fn install(e: &mut Engine) {
 }
 
 /// The game's path movement (`ActorMover::Update`, `run`), held before it applies for an actor
-/// New Physics has downed: not run, its move delta zero and its character controller's velocity
-/// zero (the body moves itself; the actor's reference follows its pelvis). 5402dadc ran it and
-/// zeroed the delta after: the reference still glided 30 to 34 units a second (Patrick's 23:41
-/// clip).
+/// New Physics has (it owns the reference: moved only by it): not run, its move delta zero and
+/// its character controller's velocity zero. 5402dadc ran it and zeroed the delta after: the
+/// reference still glided 30 to 34 units a second (Patrick's 23:41 clip); 25260865 held it only
+/// downed.
 pub(crate) fn mover_update(e: &mut Engine, mover: u32, run: impl FnOnce(&mut Engine)) {
     let actor = if mover != 0 {
         e.mem.u32(mover + MOVER_ACTOR)
     } else {
         0
     };
-    if actor != 0 && crate::new_physics::is_down(actor) {
+    if actor != 0 && crate::new_physics::owns(actor) {
         for o in [0u32, 4, 8] {
             e.mem.set_f32(mover + MOVER_DELTA + o, 0.0);
         }
@@ -3066,6 +3088,10 @@ fn set_velocity(e: &mut Engine, setter: u32, body: u32, v: [f32; 3]) {
 /// never set, so Havok can let the body come to rest and sleep. (274ad9c and 535c53a also damped
 /// every slow bone each frame, which woke the whole ragdoll every frame: it never slept and kept
 /// trembling.)
+/// The frames the clamp ([`hold_bones`]) held a bone (the tests': New Physics' hand-over must give
+/// the game's ragdoll nothing to clamp).
+pub(crate) static CLAMPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 fn hold_bones(e: &mut Engine, actor: u32, scale: f32, arms_only: bool) {
     let mut clamped = 0;
     let mut fastest = 0.0f32;
@@ -3127,6 +3153,9 @@ fn hold_bones(e: &mut Engine, actor: u32, scale: f32, arms_only: bool) {
             set_velocity(e, SET_ANGULAR_VELOCITY, body, nw);
         }
         clamped += usize::from(a || b);
+    }
+    if flung > 0 || clamped > 0 {
+        CLAMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     if flung > 0 {
         note(format!(
@@ -3458,4 +3487,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "knockdown_fixture_tests.rs"]
-mod fixture_tests;
+pub(crate) mod fixture_tests;

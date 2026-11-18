@@ -19,11 +19,11 @@
 
 use crate::room_events;
 use engine::prelude::*;
-use ragdoll_core::flinch::{add, apply_m, length, mul, scale, sub, transpose, M3, V3};
+use ragdoll_core::flinch::{add, apply_m, length, scale, sub, M3, V3};
 use ragdoll_core::np::Np;
 use ragdoll_core::np_balance::Phase;
 use ragdoll_core::np_body::Model;
-use ragdoll_core::pose::{self, Xf};
+use ragdoll_core::pose::Xf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -71,9 +71,6 @@ struct NpActor {
     root: u32,
     /// Each body's node.
     nodes: Vec<u32>,
-    /// Each body's nearest body above it (its index) and the nodes between (top down, its
-    /// parent last); none above: its node's parent's world as the game has it.
-    chains: Vec<(Option<usize>, Vec<u32>)>,
     np: Option<Np>,
     /// Hits waiting for its first frame (body, point in game units, impulse N·s).
     pending: Vec<(usize, V3, V3)>,
@@ -121,10 +118,6 @@ struct NpActor {
     order: Vec<usize>,
     /// Written this frame (cleared at the put-back): its worlds are set at the world pass.
     written_now: bool,
-    /// Each body's local as the animation had it and as written this frame (the world pass's
-    /// `[np locals]`: what wrote over them between).
-    anim_locals: Vec<(M3, V3)>,
-    wrote_locals: Vec<(M3, V3)>,
     /// The floor against the reference's height, taken at the take (game units): the animated
     /// feet's lowest point when within [`FLOOR_NEAR`] of it, else 0. Never the animated feet's
     /// each frame (Patrick's 803260d clip).
@@ -147,7 +140,112 @@ struct NpActor {
     /// What the floor taken at the take stood over the collision floor under the reference
     /// (game units; none: no collision floor found): standing, each body's ground raised by it.
     floor_lift: Option<f32>,
+    /// The nodes from the 3D's root to the bodies' (each with its parent, parents first), and
+    /// the snapshot of their locals right after the game's last animation update for the actor
+    /// (`animation_updated`): its animation, as New Physics reads it.
+    tree: Vec<(u32, u32)>,
+    snap: Option<Snapshot>,
+    /// The body's last frames since its last hit (the frame's time, each body's velocity and
+    /// spin at its end): the hand-over's velocities, their mean.
+    history: std::collections::VecDeque<(f32, Vec<(V3, V3)>)>,
+    /// The animation's jumps said.
+    jumps_said: u32,
 }
+
+/// The actor's animation as the game's update left it: its 3D root's world and each node's local
+/// of `NpActor::tree` (in its order).
+#[derive(Clone, Debug)]
+struct Snapshot {
+    root: Xf,
+    locals: Vec<Xf>,
+}
+
+/// The hand-over's velocities come from the body's last this many frames.
+const HISTORY_FRAMES: usize = 3;
+/// The hand-over waits for the body inside the skeleton's limits (radians out), at most this many
+/// frames.
+const HAND_LIMITS: f32 = 0.09;
+const HAND_WAIT_FRAMES: u32 = 45;
+
+/// The snapshot of `root`'s animation: its world and the locals of `tree`.
+fn snapshot(e: &Engine, root: u32, tree: &[(u32, u32)]) -> Snapshot {
+    let parent = e.mem.u32(root + PARENT);
+    let root_world = if parent == 0 {
+        read_local(e, root)
+    } else {
+        read_world(e, parent).then(&read_local(e, root))
+    };
+    Snapshot {
+        root: root_world,
+        locals: tree.iter().map(|&(n, _)| read_local(e, n)).collect(),
+    }
+}
+
+/// The bodies' nodes' worlds (rotation, game units) the snapshot makes.
+fn snapshot_worlds(s: &Snapshot, tree: &[(u32, u32)], bodies: &[u32]) -> Vec<(M3, V3)> {
+    let mut worlds: Vec<(u32, Xf)> = Vec::with_capacity(tree.len() + 1);
+    let root = tree.first().map(|t| t.1);
+    if let Some(r) = root {
+        worlds.push((r, s.root));
+    }
+    for (&(n, p), l) in tree.iter().zip(&s.locals) {
+        let up = worlds
+            .iter()
+            .rev()
+            .find(|w| w.0 == p)
+            .map_or(s.root, |w| w.1);
+        worlds.push((n, up.then(l)));
+    }
+    bodies
+        .iter()
+        .map(|b| {
+            worlds.iter().rev().find(|w| w.0 == *b).map_or(
+                ([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [0.0; 3]),
+                |w| (w.1.r, w.1.t),
+            )
+        })
+        .collect()
+}
+
+/// The nodes from `root` down to each of `bodies` (each with its parent), parents first.
+fn tree_of(e: &Engine, root: u32, bodies: &[u32]) -> Vec<(u32, u32)> {
+    let mut out: Vec<(u32, u32, u32)> = Vec::new();
+    for &b in bodies {
+        let mut path = Vec::new();
+        let mut at = b;
+        let mut depth = 0;
+        while at != 0 && at != root && depth < 32 {
+            let parent = e.mem.u32(at + PARENT);
+            path.push((at, parent));
+            at = parent;
+            depth += 1;
+        }
+        let total = path.len() as u32;
+        for (i, (n, p)) in path.into_iter().enumerate() {
+            if !out.iter().any(|o| o.0 == n) {
+                out.push((n, p, total - i as u32));
+            }
+        }
+    }
+    out.sort_by_key(|o| o.2);
+    out.into_iter().map(|o| (o.0, o.1)).collect()
+}
+
+/// Right after the game's animation update for `actor` (`Animation::UpdateMovement`,
+/// `Animation::UpdateQueuedScenegraph`, on whichever thread runs it): the snapshot of its
+/// animation New Physics reads, for an actor it has.
+pub fn animation_updated(e: &mut Engine, actor: u32) {
+    let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(a) = actors.iter_mut().find(|a| a.actor == actor) {
+        a.snap = Some(snapshot(e, a.root, &a.tree));
+    }
+}
+
+/// `Animation::UpdateMovement` (`00493900`) and `Animation::UpdateQueuedScenegraph`
+/// (`00493930`): the animation's actor (`pActorRef`, `+0x04`).
+pub const ANIMATION_UPDATE_MOVEMENT: u32 = 0x0049_3900;
+pub const ANIMATION_UPDATE_QUEUED: u32 = 0x0049_3930;
+pub const ANIMATION_ACTOR: u32 = 0x04;
 
 /// One hit's outcome as it goes (`[np outcome]`): the hit, then the most the spine's top went off
 /// its animation, the most drawn lay off the body, the most body worlds set directly in a frame,
@@ -216,7 +314,8 @@ pub struct Fall {
     pub actor: u32,
     pub root: f32,
     pub centre: f32,
-    pub pose: Vec<(u32, V3)>,
+    /// Each body's node handed: its world rotation and position (game units).
+    pub pose: Vec<(u32, M3, V3)>,
 }
 
 /// The falls handed over since the last [`clear`].
@@ -366,6 +465,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
     };
     let mut order: Vec<usize> = (0..nodes.len()).collect();
     order.sort_by_key(|&b| depth(b));
+    let tree = tree_of(e, root, &nodes);
     let id = e.mem.u32(actor + FORM_ID);
     note(format!(
         "{id:08X}: [np take] New Physics has it (its 18 bodies' nodes found): the current reactions \
@@ -379,7 +479,6 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             id,
             root,
             nodes,
-            chains,
             np: None,
             pending: Vec::new(),
             since_hit: 0.0,
@@ -407,11 +506,13 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             tops,
             order,
             written_now: false,
-            anim_locals: Vec::new(),
-            wrote_locals: Vec::new(),
             floor_offset: None,
             pass_logs: 0,
             aim: None,
+            tree: tree.clone(),
+            snap: Some(snapshot(e, root, &tree)),
+            history: std::collections::VecDeque::new(),
+            jumps_said: 0,
             grounds: Vec::new(),
             ref_after: None,
             floor_logs: 0,
@@ -463,6 +564,7 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
     });
     a.pass_logs = 0;
     a.floor_logs = 0;
+    a.history.clear();
     note(format!(
         "{:08X}: [np hit] {} N s on {} ({:.2} m/s on its {:.0} kg)",
         a.id,
@@ -512,7 +614,6 @@ pub fn apply(e: &mut Engine) {
         }
     };
     let mut keep = Vec::new();
-    let mut written = Vec::new();
     let mut roots = Vec::new();
     for mut a in list {
         if !(a.id != 0 && e.call(LOOKUP_FORM, &args![a.id]).u32() == a.actor) {
@@ -554,21 +655,20 @@ pub fn apply(e: &mut Engine) {
             ));
             continue;
         }
-        // The 3D brought up to its locals first (no controllers, the nodes only): a world the
-        // game's update left behind its locals (the root moved, a bone animated since) is not
-        // read as the animation, nor written against.
-        crate::active_ragdoll::update_tree(e, a.root);
-        refresh_bodies(e, &a.tops);
-        let anim: Vec<(M3, V3)> = a
-            .nodes
-            .iter()
-            .map(|&n| {
-                (
-                    read9(e, n + WORLD_ROTATION),
-                    read3(e, n + WORLD_TRANSLATION),
-                )
-            })
-            .collect();
+        // The animation: only the snapshot of its locals taken right after the game's animation
+        // update for it (`animation_updated`), never the nodes as they are now (the game's
+        // threads write them at any time, New Physics wrote them: the tester's 08:13 clip read
+        // its animation flip 67, 0, 158 degrees between 7 ms frames).
+        if a.snap.is_none() {
+            a.snap = Some(snapshot(e, a.root, &a.tree));
+        }
+        let Some(anim) = a
+            .snap
+            .as_ref()
+            .map(|s| snapshot_worlds(s, &a.tree, &a.nodes))
+        else {
+            continue;
+        };
         // The floor under the animated feet (their capsules' lowest point) when it lies within
         // [`FLOOR_NEAR`] of the reference's height, else the reference's: a pose whose feet stand
         // a few units off the reference (Patrick's d02bbd1 clip) was pushed out of the floor
@@ -691,81 +791,39 @@ pub fn apply(e: &mut Engine) {
         }
         a.since_hit += dt;
         a.frames += 1;
-        // The bodies written as the nodes' locals, parents first.
-        let mut ok = true;
-        a.anim_locals.clear();
-        a.wrote_locals.clear();
-        for (b, &node) in a.nodes.iter().enumerate() {
-            let (anc, between) = &a.chains[b];
-            let mut up = match anc {
-                Some(i) => Xf {
-                    r: drawn[*i].0,
-                    t: drawn[*i].1,
-                    s: e.mem.f32(a.nodes[*i] + WORLD_SCALE),
-                },
-                None => read_world(e, e.mem.u32(node + PARENT)),
-            };
-            for &n in between {
-                up = up.then(&read_local(e, n));
-            }
-            let (r, t) = drawn[b];
-            let lr = pose::ortho(&mul(&transpose(&up.r), &r));
-            let lt = scale(
-                apply_m(&transpose(&up.r), sub(t, up.t)),
-                1.0 / up.s.max(1e-3),
-            );
-            if !(lr.iter().all(|x| x.is_finite()) && lt.iter().all(|x| x.is_finite())) {
-                ok = false;
-                break;
-            }
-            let was = (
-                read9(e, node + LOCAL_ROTATION),
-                read3(e, node + LOCAL_TRANSLATION),
-            );
-            written.push((node, was, (lr, lt)));
-            a.anim_locals.push(was);
-            a.wrote_locals.push((lr, lt));
-            write9(e, node + LOCAL_ROTATION, &lr);
-            write3(e, node + LOCAL_TRANSLATION, lt);
-        }
-        if !ok {
+        // Nothing written to the nodes here: the bodies' worlds are set at the world pass
+        // (`read_drawn`), right before it skins them.
+        if !drawn
+            .iter()
+            .all(|(r, t)| r.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite()))
+        {
             note(format!("{:08X}: [np let go] its pose went bad", a.id));
             continue;
         }
-        crate::active_ragdoll::update_tree(e, a.root);
-        // The update leaves the body nodes as they were (their blend collision objects'
-        // no-controller mode): those it left off what was written have their worlds, and their
-        // subtrees', set from the locals written.
-        let set_directly = a
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|&(b, &node)| {
-                let w = read_world(e, node);
-                ragdoll_core::np_skeleton::angle_between(&w.r, &drawn[b].0).to_degrees() > 0.5
-                    || length(sub(w.t, drawn[b].1)) > 0.5
-            })
-            .count() as u32;
-        if set_directly > 0 {
-            refresh_bodies(e, &a.tops);
-        }
         roots.push((a.root, a.tops.clone()));
         a.written_now = true;
-        // Read back: what the update left in the nodes against the simulated bodies.
-        let mut most = (0.0f32, 0.0f32);
-        let mut each = Vec::new();
-        for (b, &node) in a.nodes.iter().enumerate() {
-            let w = read_world(e, node);
-            let deg = ragdoll_core::np_skeleton::angle_between(&w.r, &drawn[b].0).to_degrees();
-            let off = length(sub(w.t, drawn[b].1));
-            most.0 = most.0.max(deg);
-            most.1 = most.1.max(off);
-            each.push(format!(
-                "{} {deg:.2}/{off:.2}",
-                model().bodies[b].node.trim_start_matches("Bip01 ")
+        let set_directly = a.nodes.len() as u32;
+        // The body's last frames (each body's centre and turn, and the frame's time): the
+        // hand-over's velocities.
+        a.history
+            .push_back((dt, np.states.iter().map(|s| (s.v, s.w)).collect::<Vec<_>>()));
+        while a.history.len() > HISTORY_FRAMES {
+            a.history.pop_front();
+        }
+        // Every jump of the animation said.
+        if np.jumps > a.jumps_said {
+            a.jumps_said = np.jumps;
+            note(format!(
+                "{:08X}: [np jump] the animation jumped {:.0} units in a frame{}",
+                a.id,
+                np.jump_last,
+                if np.down.is_some() {
+                    ": downed, the body kept (never put back on it)"
+                } else {
+                    ": the body put back on it"
+                }
             ));
         }
-        a.readback = most;
         if let Some(o) = a.outcome.as_mut() {
             o.set_most = o.set_most.max(set_directly);
             o.since += dt;
@@ -779,20 +837,6 @@ pub fn apply(e: &mut Engine) {
                     .to_degrees(),
             );
         }
-        // Each body's read-back for a take's first frames (degrees/units): which bones the
-        // update did not leave where they were written.
-        if a.hit_frames <= READBACK_LOG_FRAMES {
-            note(format!(
-                "{:08X}: [np readback] frame {} after the hit: at most {:.2} degrees, {:.2} units \
-                 ({set_directly} body worlds set directly): {}",
-                a.id,
-                a.hit_frames,
-                most.0,
-                most.1,
-                each.join(", ")
-            ));
-        }
-        a.readback_most = (a.readback_most.0.max(most.0), a.readback_most.1.max(most.1));
         let spine = model().body("Bip01 Spine2").unwrap_or(0);
         a.spine_peak = a.spine_peak.max(
             ragdoll_core::np_skeleton::angle_between(&drawn[spine].0, &anim[spine].0).to_degrees(),
@@ -859,10 +903,24 @@ pub fn apply(e: &mut Engine) {
         let held = a.readback.0 <= MOVE_DRAWN.0 && a.readback.1 <= MOVE_DRAWN.1;
         let mv = if held { np.take_move() } else { [0.0; 3] };
         if length(mv) > 1e-3 {
+            // New Physics owns the reference while it has the actor: moved only by it (a step's
+            // end, a rise's end), its height the ground's under it (kept as far over the ground as
+            // it stood at the take): released 22 units over the ground, it dropped (the tester's
+            // 08:13 clip).
             let at = read3(e, a.actor + REFR_POSITION);
-            crate::knockdown::place(e, a.actor, add(at, mv));
+            let mut to = add(at, mv);
+            let over = a.floor_lift.unwrap_or(0.0) - a.floor_offset.unwrap_or(0.0);
+            if let Some(g) = crate::active_ragdoll::floor_under(e, [to[0], to[1], at[2] + 30.0]) {
+                to[2] = g + over;
+            }
+            crate::knockdown::place(e, a.actor, to);
+            // The height it was given too: the animation comes moved by it (never a jump).
+            let dz = read3(e, a.actor + REFR_POSITION)[2] - at[2];
+            np.anim_moved([0.0, 0.0, dz / ragdoll_core::np_body::UNITS]);
             a.moved = add(a.moved, mv);
         }
+        // Its movement held while New Physics has it (the mover's at its update too).
+        crate::knockdown::hold_controller(e, a.actor);
         a.ref_after = Some(read3(e, a.actor + REFR_POSITION));
         if a.handing.is_none()
             && ((np.phase() == Phase::Falling && np.down.is_none()) || a.choice == "give up")
@@ -887,13 +945,18 @@ pub fn apply(e: &mut Engine) {
             came_out(&mut a.outcome, format!("fell ({reason})"));
             a.handing_frames = 0;
         }
+        // Waiting for the game's ragdoll: the body brought inside the skeleton's own limits (the
+        // ragdoll's constraints), so the game takes the pose it is drawn in.
+        np.to_limits = a.handing.is_some();
         if a.handing.is_some() {
             a.handing_frames += 1;
             close_if_due(&mut a);
             keep.push(a);
             continue;
         }
-        let calm = np.phase() == Phase::Standing
+        let calm = np.down.is_none()
+            && a.label.is_none()
+            && np.phase() == Phase::Standing
             && !np.muscles.soft()
             && np.balance.step.is_none()
             && a.since_hit > LET_GO_AFTER;
@@ -912,10 +975,6 @@ pub fn apply(e: &mut Engine) {
         close_if_due(&mut a);
         keep.push(a);
     }
-    WRITTEN
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .extend(written);
     ROOTS
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -1170,12 +1229,40 @@ pub fn main_thread(e: &mut Engine) {
     for mut a in waiting {
         let reason = a.handing.unwrap_or("steps");
         let Some(np) = a.np.as_mut() else { continue };
+        // Not yet inside the skeleton's limits (brought in a few degrees a frame): the game's
+        // ragdoll would snap it there; wait, a little while at most.
+        // A give-up or a death waits for it (no hurry); a fall from standing goes at once.
+        let out = np.report.limit_most;
+        let wait = if matches!(reason, "give up" | "death") {
+            HAND_WAIT_FRAMES
+        } else {
+            0
+        };
+        if (!np.on_data_limits || out > HAND_LIMITS) && a.handing_frames < wait {
+            back.push(a);
+            continue;
+        }
+        // What is left out projected in at once: the pose handed lies inside them.
+        let (inside, out) = np.into_limits();
+        let left = model()
+            .bodies
+            .iter()
+            .enumerate()
+            .map(|(b, _)| {
+                (
+                    ragdoll_core::np_skeleton::angle_between(&inside[b].0, &a.drawn[b].0)
+                        .to_degrees(),
+                    length(sub(inside[b].1, a.drawn[b].1)),
+                )
+            })
+            .fold((0.0f32, 0.0f32), |m, x| (m.0.max(x.0), m.1.max(x.1)));
+        a.drawn = inside;
         let anim = if a.anim_last.is_empty() {
             a.drawn.clone()
         } else {
             a.anim_last.clone()
         };
-        let (shown, animated, velocities) = handing(&a.nodes, &a.drawn, &anim, &np.states);
+        let (shown, animated, velocities) = handing(&a.nodes, &a.drawn, &anim, &a.history);
         // The hand-over's source said: the pose drawn against the animation the game had its
         // bodies at (a downed body handed over lies far off a standing animation: the 23:41
         // clip's give-up was drawn 180 degrees, 122 units off).
@@ -1191,13 +1278,29 @@ pub fn main_thread(e: &mut Engine) {
             .fold((0.0f32, 0.0f32), |m, x| (m.0.max(x.0), m.1.max(x.1)));
         note(format!(
             "{:08X}: [np hand-over] {reason}: the pose drawn at most {:.0} degrees, {:.0} units off \
-             the animation the game had its ragdoll's bodies at; its bodies put on the pose drawn \
-             ({} frames after it was asked)",
-            a.id, apart.0, apart.1, a.handing_frames
+             the animation the game had its ragdoll's bodies at; brought inside the skeleton's \
+             limits ({:.1} degrees out after, the last {:.1} degrees, {:.1} units at the hand-over); \
+             its bodies moving as over New Physics' last {HISTORY_FRAMES} frames ({} frames after \
+             it was asked)",
+            a.id,
+            apart.0,
+            apart.1,
+            out.to_degrees(),
+            left.0,
+            left.1,
+            a.handing_frames
         ));
         let k = ragdoll_core::np_body::UNITS;
-        let pelvis = length(scale(np.states[model().root].v, k));
-        let (_, com_v) = np.model.centre_of_mass(&np.states);
+        // The root body's and the centre's speed as handed (the frames' mean).
+        let pelvis = velocities.get(model().root).map_or(0.0, |v| length(v.1));
+        let com_v = {
+            let m = model();
+            let mut p = [0.0f32; 3];
+            for (b, v) in velocities.iter().enumerate() {
+                p = add(p, scale(v.1, m.bodies[b].mass / k));
+            }
+            scale(p, 1.0 / m.mass)
+        };
         if reason == "death" {
             let (moved, given) =
                 crate::knockdown::place_bodies(e, a.actor, &shown, &animated, &velocities);
@@ -1227,7 +1330,7 @@ pub fn main_thread(e: &mut Engine) {
                     actor: a.actor,
                     root: pelvis,
                     centre: length(com_v) * k,
-                    pose: shown.iter().map(|x| (x.0, x.2)).collect(),
+                    pose: shown.iter().map(|x| (x.0, x.1, x.2)).collect(),
                 });
                 summary(&mut a);
             }
@@ -1302,21 +1405,22 @@ pub fn read_drawn(e: &mut Engine) {
             continue;
         }
         // What the nodes hold as the pass begins.
-        let (before, before_anim) = drawn_against(e, &a.nodes, &a.drawn, &a.anim_last);
-        let (mut changed, mut animation) = (0u32, 0u32);
-        for (b, &node) in a.nodes.iter().enumerate() {
-            let now = (
-                read9(e, node + LOCAL_ROTATION),
-                read3(e, node + LOCAL_TRANSLATION),
-            );
-            if a.wrote_locals.get(b).is_some_and(|w| *w != now) {
-                changed += 1;
-                if a.anim_locals.get(b).is_some_and(|an| *an == now) {
-                    animation += 1;
+        let (before, _) = drawn_against(e, &a.nodes, &a.drawn, &a.anim_last);
+        // The body locals the game wrote since the snapshot New Physics read its animation from.
+        let mut changed = 0u32;
+        if let Some(snap) = a.snap.as_ref() {
+            for &node in &a.nodes {
+                let Some(i) = a.tree.iter().position(|t| t.0 == node) else {
+                    continue;
+                };
+                let now = read_local(e, node);
+                let was = snap.locals[i];
+                if now.r != was.r || now.t != was.t {
+                    changed += 1;
                 }
             }
         }
-        let over = changed > 0 || before.0 > 1.0 || before.1 > 1.0;
+        let over = changed > 0;
         // Set from the body.
         for &b in &a.order {
             let node = a.nodes[b];
@@ -1328,6 +1432,11 @@ pub fn read_drawn(e: &mut Engine) {
             crate::active_ragdoll::set_subtree(e, node, world, 0);
         }
         let (after, as_anim) = drawn_against(e, &a.nodes, &a.drawn, &a.anim_last);
+        a.readback = after;
+        a.readback_most = (
+            a.readback_most.0.max(after.0),
+            a.readback_most.1.max(after.1),
+        );
         if let Some(o) = a.outcome.as_mut() {
             o.drawn_most = (o.drawn_most.0.max(after.0), o.drawn_most.1.max(after.1));
             o.as_animation += u32::from(as_anim);
@@ -1339,19 +1448,14 @@ pub fn read_drawn(e: &mut Engine) {
                 a.pass_logs += 1;
             }
             note(format!(
-                "{:08X}: [np locals] frame {} after the hit: {changed} of {} body locals changed \
-                 since the write ({animation} the animation's again), the worlds {:.2} degrees, \
-                 {:.2} units off the body{}",
+                "{:08X}: [np locals] frame {} after the hit: {changed} of {} body locals written \
+                 by the game since the animation's snapshot (never read), the game's worlds {:.2} \
+                 degrees, {:.2} units off the body before they were set",
                 a.id,
                 a.hit_frames,
                 a.nodes.len(),
                 before.0,
-                before.1,
-                if before_anim {
-                    " (drawn as the animation)"
-                } else {
-                    ""
-                }
+                before.1
             ));
             note(format!(
                 "{:08X}: [np drawn] frame {} after the hit: the {} bodies' worlds set from the \
@@ -1382,6 +1486,8 @@ pub fn after_world_pass(e: &mut Engine) {
             continue;
         }
         let (off, as_anim) = drawn_against(e, &a.nodes, &a.drawn, &a.anim_last);
+        a.readback = (a.readback.0.max(off.0), a.readback.1.max(off.1));
+        a.readback_most = (a.readback_most.0.max(off.0), a.readback_most.1.max(off.1));
         if off.0 <= 1.0 && off.1 <= 1.0 {
             continue;
         }
@@ -1425,7 +1531,7 @@ static WITHHELD: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 /// ground before it tries to stand (s), its shots' extra spread (as a support hand this far off a
 /// two-handed grip, `crate::one_hand`), the rises that may give up before it collapses into the
 /// game's ragdoll (the knockdowns' get-up).
-pub const DOWN_SETTLE: f32 = 1.0;
+pub const DOWN_SETTLE: f32 = 0.7;
 pub const FIRE_DOWN: f32 = 4.0;
 pub const DOWN_SPREAD: f32 = 0.6;
 pub const DOWN_TRIES: u32 = 3;
@@ -1496,13 +1602,22 @@ fn handing(
     nodes: &[u32],
     drawn: &[(M3, V3)],
     animated: &[(M3, V3)],
-    states: &[ragdoll_core::np_body::State],
+    history: &std::collections::VecDeque<(f32, Vec<(V3, V3)>)>,
 ) -> (Vec<(u32, M3, V3)>, Vec<(u32, M3, V3)>, Vec<(u32, V3, V3)>) {
     let k = ragdoll_core::np_body::UNITS;
+    // Each body's velocity and spin, the mean over its last frames since the hit (one frame's
+    // was its last substep's, a constraint's kick in it: the knockdown's clamp fired at 2813
+    // units a second, the tester's 08:13 clip).
+    let n = history.len().max(1) as f32;
     let velocities = nodes
         .iter()
-        .zip(states)
-        .map(|(&n, s)| (n, scale(s.v, k), s.w))
+        .enumerate()
+        .map(|(b, &node)| {
+            let (v, w) = history.iter().fold(([0.0; 3], [0.0; 3]), |m, h| {
+                h.1.get(b).map_or(m, |x| (add(m.0, x.0), add(m.1, x.1)))
+            });
+            (node, scale(v, k / n), scale(w, 1.0 / n))
+        })
         .collect();
     let shown = nodes
         .iter()
@@ -1853,6 +1968,46 @@ pub fn aim_of(actor: u32) -> Option<(Option<V3>, f32)> {
         .iter()
         .find(|a| a.actor == actor)
         .and_then(|a| a.aim)
+}
+
+/// The tests': `actor`'s strength left (`Np::effort`: 0, its legs cannot push it up).
+#[cfg(test)]
+pub(crate) fn set_effort(actor: u32, effort: f32) {
+    if let Some(np) = ACTORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter_mut()
+        .find(|a| a.actor == actor)
+        .and_then(|a| a.np.as_mut())
+    {
+        np.effort = effort;
+    }
+}
+
+/// The tests': `actor`'s downed AI has given up its rises (as after [`DOWN_TRIES`] that failed),
+/// so its next frame hands it to the game's ragdoll.
+#[cfg(test)]
+pub(crate) fn give_up(actor: u32) {
+    if let Some(a) = ACTORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter_mut()
+        .find(|a| a.actor == actor)
+    {
+        a.fails = DOWN_TRIES;
+    }
+}
+
+/// Each body's spin now (rad/s, world) of `actor` (the tests' measure of a turn its motion
+/// explains).
+pub fn spins(actor: u32) -> Option<Vec<V3>> {
+    ACTORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|a| a.actor == actor)
+        .and_then(|a| a.np.as_ref())
+        .map(|np| np.states.iter().map(|s| s.w).collect())
 }
 
 /// The balance's phase and catching steps of `actor`.

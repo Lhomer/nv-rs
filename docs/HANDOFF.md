@@ -63,6 +63,12 @@ machinery runs.
   game's mover and controller held while downed; standing measured against the ground's motion;
   rises capped at 4 s; steps per hit; `[np floor load]` and `[np hand-over]` say the sources. Not
   run in the game.
+- **25260865 08:13 clip, structural:** the animation read only from a snapshot after the game's
+  animation update (`00493900`/`00493930` hooked), no local written, worlds set at the world pass;
+  New Physics owns the reference (mover and controller held, moved at a rise's end); steps that
+  cover the capture point (15 cm at least); hand-over inside the skeleton's limits with 3-frame
+  velocities. Full-cycle fixture tests with a racing animation thread. Open: rising from a pose with
+  the arms 50 degrees out failed all three tries in the fixture. Not run in the game.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 

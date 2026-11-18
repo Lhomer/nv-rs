@@ -417,7 +417,8 @@ impl Fixture {
     }
 
     /// Each local as the animation has it (the tree's own; the root's, where the actor is, as
-    /// it is), the worlds worked out.
+    /// it is), the worlds worked out: the game's animation update (New Physics' snapshot taken
+    /// after it, `crate::new_physics::animation_updated`).
     pub fn animate(&mut self) {
         for i in 1..self.nodes.len() {
             let (r, t) = (self.nodes[i].r, self.nodes[i].t);
@@ -425,6 +426,8 @@ impl Fixture {
             write3(&mut self.e, self.at[i] + LOCAL_TRANSLATION, t);
         }
         self.update();
+        // The game's animation update ends here: New Physics' snapshot of it.
+        crate::new_physics::animation_updated(&mut self.e, ACTOR);
     }
 
     /// The bodies' velocities (game units a second) by node name, as the doubles keep them.
@@ -523,6 +526,11 @@ impl Fixture {
         self.e.mem.set_u32(ACTOR_VTABLE + 0x100, YES);
         // `GetCombatTarget` (`+0x42c`): none.
         self.e.mem.set_u32(ACTOR_VTABLE + 0x42c, NONE);
+        // Its position (the knockdowns' `position`): the reference's.
+        const POSITION: u32 = 0x7200_002c;
+        self.e
+            .register_double(POSITION, |_, _| (ACTOR + REFR_POSITION).into_ret());
+        self.e.mem.set_u32(ACTOR_VTABLE + 0x1f4, POSITION);
         // The player's pointer (`0x011dea3c`): none.
         self.e.mem.map(0x011d_e000, 0x1000);
     }

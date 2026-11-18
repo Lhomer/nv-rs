@@ -28,6 +28,9 @@ pub const MARGIN: f32 = 0.02;
 /// (s) and lift (m).
 pub const STEP_PAST: f32 = 0.08;
 pub const STEP_MOST: f32 = 0.65;
+/// A catching step is at least this long (m): the clip's chose the shorter foot, moving the same
+/// one 2 to 9 units three times, never covering the capture point (the tester's 08:13 clip).
+pub const STEP_LEAST: f32 = 0.15;
 pub const STEP_TIME: f32 = 0.3;
 pub const STEP_LIFT: f32 = 0.08;
 /// Steps before it falls, and how far outside its feet the capture point may be before no step can
@@ -143,6 +146,8 @@ pub struct Balance {
     pub anim_feet: [Option<V3>; 2],
     /// The floor's height the last frame (m).
     pub floor_was: Option<f32>,
+    /// Each foot's own ground plane (m; none: the frame's floor), set each frame by its owner.
+    pub foot_floor: [Option<crate::np_body::Plane>; 2],
     /// The last frame's centre of mass velocity against the animation's (m/s).
     pub rel_v: V3,
 }
@@ -216,6 +221,7 @@ impl Balance {
             supported: true,
             anim_feet: [None, None],
             floor_was: None,
+            foot_floor: [None, None],
             rel_v: [0.0; 3],
         }
     }
@@ -242,8 +248,21 @@ impl Balance {
         out
     }
 
-    /// Whether a foot stands on the floor (its lowest point within 2 cm).
-    fn planted(model: &Model, s: &State, b: usize, floor: f32) -> bool {
+    /// Whether a foot stands on the floor (its lowest point within 2 cm): its own ground when
+    /// given ([`Balance::foot_floor`]: on a slope one foot stands higher than the other; against
+    /// one height the uphill foot read lifted and the steps came with no hit, the tester's 08:13
+    /// clip).
+    fn planted(&self, model: &Model, s: &State, b: usize, floor: f32) -> bool {
+        let floor = (0..2)
+            .find(|&side| self.feet[side] == b)
+            .and_then(|side| self.foot_floor[side])
+            .map_or(floor, |p| {
+                if p.n[2] > 0.1 {
+                    p.p[2] - (p.n[0] * (s.x[0] - p.p[0]) + p.n[1] * (s.x[1] - p.p[1])) / p.n[2]
+                } else {
+                    floor
+                }
+            });
         let def = &model.bodies[b];
         def.ends.iter().any(|e| {
             add(s.x, crate::active::qrot(s.q, sub(*e, def.com)))[2] - def.radius < floor + 0.03
@@ -257,7 +276,7 @@ impl Balance {
         let mut pts: Vec<[f32; 2]> = Vec::new();
         for side in 0..2 {
             let b = self.feet[side];
-            if Some(side) != swinging && Self::planted(model, &states[b], b, floor) {
+            if Some(side) != swinging && self.planted(model, &states[b], b, floor) {
                 pts.extend(Self::sole(model, &states[b], b));
             }
         }
@@ -410,7 +429,7 @@ impl Balance {
                 scale(sub(self.shift_to, self.shift_from), k),
             );
             let b = self.feet[st.side];
-            let down = Self::planted(model, &states[b], b, floor);
+            let down = self.planted(model, &states[b], b, floor);
             if st.t >= st.time && (down || st.t >= st.time + LAND_MOST) {
                 self.step = None;
                 if !st.stance {
@@ -428,7 +447,8 @@ impl Balance {
                 // Landing: pressed down onto its spot.
                 self.step = Some(st);
                 ask.leg[st.side] = 0.25;
-                ask.foot = Some((b, [st.to[0], st.to[1], st.to[2] - 0.04], st.q, [0.0; 3]));
+                // Pressed onto the floor, never into it.
+                ask.foot = Some((b, st.to, st.q, [0.0; 3]));
                 ask.hold_across = 0.6;
                 return ask;
             } else {
@@ -487,7 +507,7 @@ impl Balance {
         let landing = self.phase == Phase::Recovering && self.since < LAND_WAIT && {
             let side = self.taken.last().map_or(0, |t| t.0);
             let b = self.feet[side];
-            !Self::planted(model, &states[b], b, floor)
+            !self.planted(model, &states[b], b, floor)
         };
         let out = !landing
             && if self.moving {
@@ -560,8 +580,10 @@ impl Balance {
         ask
     }
 
-    /// The catching step: the foot that reaches past the capture point without crossing the other
-    /// (it keeps its side of the body), the shorter of the two.
+    /// The catching step: each foot's step past the capture point without crossing the other (it
+    /// keeps its side of the body), at least [`STEP_LEAST`] long and at most [`STEP_MOST`]; the
+    /// one whose landing leaves the capture point least outside the feet (the shorter of two that
+    /// cover it alike).
     fn plan(&self, model: &Model, states: &[State], anim: &[State], floor: f32) -> Option<Step> {
         let flat = |a: V3| [a[0], a[1], 0.0];
         let mid = scale(
@@ -577,7 +599,7 @@ impl Balance {
         } else {
             (self.capture, unit(sub(self.capture, mid))?)
         };
-        let mut best: Option<(f32, Step)> = None;
+        let mut best: Option<(f32, f32, Step)> = None;
         for side in 0..2 {
             let b = self.feet[side];
             let foot = flat(states[b].x);
@@ -590,7 +612,18 @@ impl Balance {
             if l > STEP_MOST {
                 d = scale(d, STEP_MOST / l);
                 to = add(foot, d);
+            } else if l < STEP_LEAST {
+                d = scale(unit(d).unwrap_or(dir), STEP_LEAST);
+                to = add(foot, d);
             }
+            // The support once it lands: the other foot's sole and this one's moved to `to`.
+            let mut pts = Self::sole(model, &states[self.feet[1 - side]], self.feet[1 - side]);
+            pts.extend(
+                Self::sole(model, &states[b], b)
+                    .into_iter()
+                    .map(|p| [p[0] + d[0], p[1] + d[1]]),
+            );
+            let covers = outside(&hull(&pts), [self.capture[0], self.capture[1]]).max(0.0);
             let height = states[b].x[2] - lowest_of(model, states, b) + floor;
             let st = Step {
                 side,
@@ -602,12 +635,15 @@ impl Balance {
                 lift: STEP_LIFT,
                 stance: false,
             };
-            if best.as_ref().map_or(true, |(bl, _)| length(d) < *bl) {
-                best = Some((length(d), st));
+            let better = best.as_ref().map_or(true, |(bc, bl, _)| {
+                covers < bc - 0.01 || (covers <= bc + 0.01 && length(d) < *bl)
+            });
+            if better {
+                best = Some((covers, length(d), st));
             }
         }
         let _ = cross;
-        best.map(|b| b.1)
+        best.map(|b| b.2)
     }
 
     fn begin(&mut self, st: Step, states: &[State], anim: &[State]) {

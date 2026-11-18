@@ -70,7 +70,7 @@ struct Frame {
 }
 
 /// What a get-up did.
-struct Run {
+pub(crate) struct Run {
     set_at: Option<[f32; 3]>,
     pelvis_found: bool,
     blend_from: f32,
@@ -168,7 +168,7 @@ fn game_get_up(nodes: Vec<rig_fixture::Node>) -> Run {
         .unwrap();
     let about = lying[pelvis_i].1;
     let yaw = rotation([0.0, 0.0, 35f32.to_radians()]);
-    let mut ragdoll: Vec<(M3, [f32; 3])> = lying
+    let ragdoll: Vec<(M3, [f32; 3])> = lying
         .iter()
         .enumerate()
         .map(|(i, (r, t))| {
@@ -187,6 +187,20 @@ fn game_get_up(nodes: Vec<rig_fixture::Node>) -> Run {
             )
         })
         .collect();
+    f.set_worlds(&ragdoll);
+    get_up_from(&mut f, ragdoll)
+}
+
+/// The get-up as [`game_get_up`] runs it, from the ragdoll lying as `ragdoll` (every node's world)
+/// on the fixture `f` (the collision floor at 0): knock state 1, the get-up's bookkeeping, then
+/// the knock states to the get-up animation and standing.
+pub(crate) fn get_up_from(f: &mut Fixture, mut ragdoll: Vec<(M3, [f32; 3])>) -> Run {
+    let reference = f.reference();
+    let pelvis_i = f
+        .nodes
+        .iter()
+        .position(|n| n.name == "Bip01 Pelvis")
+        .unwrap();
     f.set_worlds(&ragdoll);
     f.set_knock_state(1);
     knocked(reference, 1.0);
@@ -238,7 +252,7 @@ fn game_get_up(nodes: Vec<rig_fixture::Node>) -> Run {
         // The animation's pose now (none before it arrives).
         let anim = arrived.map(|a| {
             let tau = a.elapsed().as_secs_f32();
-            get_up_animation(&mut f, reference, tau)
+            get_up_animation(f, reference, tau)
         });
         // The game's physics: a driven body's motor pulls its velocity toward what reaches its
         // animated joint in [`DRIVE`] seconds (half the way a frame; its velocity, which nv-rs may
@@ -274,12 +288,12 @@ fn game_get_up(nodes: Vec<rig_fixture::Node>) -> Run {
                     drawn[i] = ragdoll[i];
                 }
                 // A node with no body under a body's node follows it with its animated local.
-                follow_bodies(&mut f, &mut drawn, &bodies_at);
+                follow_bodies(f, &mut drawn, &bodies_at);
                 f.set_worlds_only(&drawn);
             }
             _ => {
                 let mut drawn = ragdoll.clone();
-                follow_bodies(&mut f, &mut drawn, &bodies_at);
+                follow_bodies(f, &mut drawn, &bodies_at);
                 f.set_worlds(&drawn);
             }
         }
@@ -392,6 +406,44 @@ fn follow_bodies(f: &mut Fixture, drawn: &mut [(M3, [f32; 3])], bodies_at: &[usi
 /// animation has it; no node more than 3 under the floor; no frame moving a drawn joint more than
 /// 2 units beyond the animation's own move (the blend's end and the animation's taking over
 /// included); the actor not moved in knock state 6. Answers a summary for the report.
+/// The lowest of a get-up's drawn pelvis, head and feet (game units): the game's own get-up
+/// log's (`crate::down_log`, target -3 over the floor or more).
+pub(crate) fn get_up_lowest_logged(run: &Run) -> f32 {
+    run.frames
+        .iter()
+        .map(|f| {
+            f.pelvis[2]
+                .min(f.head[2])
+                .min(f.drawn[3][2])
+                .min(f.drawn[4][2])
+        })
+        .fold(f32::MAX, f32::min)
+}
+
+/// A get-up's frames upside down (the head more than 20 under the pelvis, the animation not) and
+/// its lowest drawn node (game units): [`check_get_up`]'s.
+pub(crate) fn get_up_figures(run: &Run) -> (u32, f32) {
+    let (mut inverted, mut lowest) = (0u32, f32::MAX);
+    for w in run.frames.windows(2) {
+        let b = &w[1];
+        let anim_inverted = b
+            .anim_head
+            .zip(b.anim_pelvis)
+            .is_some_and(|(h, p)| h[2] < p[2] - 20.0);
+        if b.head[2] < b.pelvis[2] - 20.0 && !anim_inverted {
+            inverted += 1;
+        }
+        lowest = lowest.min(b.lowest);
+        if std::env::var_os("NP_TRACE").is_some() {
+            eprintln!(
+                "GETUP {:.3} ks{} pelvis {:?} head {:?} lowest {:.1} ref {:?}",
+                b.t, b.state, b.pelvis, b.head, b.lowest, b.reference
+            );
+        }
+    }
+    (inverted, lowest)
+}
+
 fn check_get_up(run: &Run) -> String {
     let set = run.set_at.expect("never let up");
     assert!(run.pelvis_found, "no pelvis found");

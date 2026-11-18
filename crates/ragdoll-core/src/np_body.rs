@@ -42,6 +42,10 @@ pub const LIMIT_MARGIN: f32 = 0.052;
 /// Downed, the most a joint limit turns its joint back in a substep (rad; 9.6 rad/s at 16
 /// substeps a 60th): hard for anything the solver's own steps put past it, never a snap.
 pub const LIMIT_STEP: f32 = 0.01;
+/// Brought inside the skeleton's own limits for the hand-over (`Tracking::data_limits`): at most
+/// this a frame (rad, whatever its substeps): a few frames for a pose far out, never a turn over
+/// 20 degrees a frame drawn.
+pub const HAND_LIMIT_FRAME: f32 = 0.15;
 /// The floor's friction (static, dynamic).
 pub const FRICTION: (f32, f32) = (1.0, 0.8);
 /// The longest frame stepped (s): a hitch is stepped as this.
@@ -97,6 +101,9 @@ pub struct Model {
     /// the body's.
     pub below_inertia: Vec<f32>,
     pub above_inertia: Vec<f32>,
+    /// Each joint's relative rotation in the bind pose (the skeleton's own rest: the game's
+    /// ragdoll rests there, the neck 17 degrees out of its cone in the data).
+    pub bind_rel: Vec<Q>,
 }
 
 /// A body's state: its centre of mass (world, metres), its frame's rotation, velocities.
@@ -153,6 +160,11 @@ pub struct Tracking {
     /// ground under it, a slope's included (a flat floor at one height pushed a downed body's
     /// shins and knees into a 20 degree slope: Patrick's 23:41 clip).
     pub floors: Vec<Plane>,
+    /// The skeleton's own limits only (the game's ragdoll's: none widened by the animation, the
+    /// targets or a reach), brought in gently (with `soft_limits`): a body about to be handed to
+    /// the game's ragdoll (whose constraints snapped a pose far outside them: the tester's 08:13
+    /// clip, 79 to 183 degrees out).
+    pub data_limits: bool,
 }
 
 /// A pull on a body this frame (the root's support, a swinging foot's carry): a spring and damper
@@ -276,6 +288,7 @@ impl Model {
             below,
             below_inertia: Vec::new(),
             above_inertia: Vec::new(),
+            bind_rel: Vec::new(),
         };
         // The subtrees' inertia about their joints in the bind pose.
         let nodes: Vec<(M3, V3)> = model
@@ -305,7 +318,27 @@ impl Model {
         }
         model.below_inertia = below_i;
         model.above_inertia = above_i;
+        model.bind_rel = model.relative(&states);
         model
+    }
+
+    /// `states` brought inside the skeleton's own limits (the bind pose's taken in) at once: the
+    /// joints held together and each limit projected, `passes` times; answers the most a joint
+    /// lay out before the last pass (rad). The pose handed to the game's ragdoll, whose
+    /// constraints would snap it there.
+    pub fn into_data_limits(&self, states: &mut [State], passes: usize) -> f32 {
+        let mut most = 0.0;
+        for _ in 0..passes {
+            most = 0.0f32;
+            for (j, def) in self.joints.iter().enumerate() {
+                let bind = self.bind_rel.get(j).copied().unwrap_or(Q_ID);
+                let lim = widen(def.limit, self.measure(j, bind), axle_apart(def, bind));
+                self.pin(states, def);
+                most = most.max(self.limit(states, def, &lim, false, LIMIT_STEP));
+                self.pin(states, def);
+            }
+        }
+        most
     }
 
     /// The bind pose (each body's node's world, game units) the model was made from.
@@ -480,6 +513,12 @@ impl Model {
             .iter()
             .enumerate()
             .map(|(j, def)| {
+                if tracking.is_some_and(|t| t.data_limits) {
+                    // The skeleton's own, taking in its bind pose (the neck's lies 17 degrees out
+                    // of its cone in the data: the game's ragdoll rests there).
+                    let bind = self.bind_rel.get(j).copied().unwrap_or(Q_ID);
+                    return widen(def.limit, self.measure(j, bind), axle_apart(def, bind));
+                }
                 let target = match tracking.and_then(|t| t.widen_by.get(j)) {
                     Some(&q) => q,
                     None => drives.get(j).map_or(Q_ID, |d| d.target),
@@ -539,7 +578,12 @@ impl Model {
             for (j, def) in self.joints.iter().enumerate() {
                 self.pin(states, def);
                 let soft = tracking.is_some_and(|t| t.soft_limits);
-                let out = self.limit(states, def, &widened[j], soft);
+                let step = if tracking.is_some_and(|t| t.data_limits) {
+                    HAND_LIMIT_FRAME / substeps as f32
+                } else {
+                    LIMIT_STEP
+                };
+                let out = self.limit(states, def, &widened[j], soft, step);
                 if sub_i == substeps - 1 {
                     report.limit_most = report.limit_most.max(out);
                 }
@@ -696,7 +740,14 @@ impl Model {
     }
 
     /// The joint brought inside its (widened) limit; answers how far out it was (rad).
-    fn limit(&self, states: &mut [State], def: &JointDef, lim: &Limit, soft: bool) -> f32 {
+    fn limit(
+        &self,
+        states: &mut [State],
+        def: &JointDef,
+        lim: &Limit,
+        soft: bool,
+        step: f32,
+    ) -> f32 {
         let (ra, rb) = (
             m_from_q(states[def.child].q),
             m_from_q(states[def.parent].q),
@@ -777,8 +828,8 @@ impl Model {
             // At most [`LIMIT_STEP`] a substep: a pose found far outside (its widening moved
             // under it) is brought back within a few frames, not snapped in one substep.
             let a = length(c);
-            let c = if soft && a > LIMIT_STEP {
-                scale(c, LIMIT_STEP / a)
+            let c = if soft && a > step {
+                scale(c, step / a)
             } else {
                 c
             };

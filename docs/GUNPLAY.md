@@ -913,6 +913,52 @@ m/s the balance is moving and takes no steps; `np_balance`'s tests of the step c
 the floor at most 1.94, 2.33 and 2.41 body weights for 0.28, 0.5 and 0.69 m/s (5402dadc: 4.08
 at 0.69). Not run in the game.
 
+**Structural fix from the tester's 25260865 clip (08:13, 9mm: 0.32 m/s hits falling after three
+steps, a downed body snapping upright and let go gliding 50-75 units a second, hand-overs 79-183
+degrees outside the ragdoll's limits).**
+- **A. The animation from a snapshot.** New Physics read its animation from the bones' locals at
+  the draw's set-up, which the game's threads write at any time (and New Physics wrote): torn reads
+  flipped it 67, 0, 158 degrees between frames, a jump reset the downed body onto it. Now the
+  game's animation update for the actor is hooked (`Animation::UpdateMovement` `00493900`,
+  `Animation::UpdateQueuedScenegraph` `00493930`, on whichever thread runs them) and the actor's
+  locals from its 3D's root to its bodies are snapshotted right after (`animation_updated`); New
+  Physics reads only that. It never writes a local: the bodies' worlds are set at the world pass
+  only (and the game's own worlds put back after the draw). A jump of the animation never resets a
+  downed body, and every jump is said (`[np jump]`). `[np locals]` now says how many body locals
+  the game wrote since the snapshot.
+- **B. New Physics owns the reference while it has the actor.** The mover and the controller are
+  held (not only downed); downed, the actor stays where it was (it followed the pelvis every frame
+  before) and is moved to the body at a rise's end, its height the ground's under it (as far over
+  it as it stood at the take). Standing, a step's end still moves it (the let-go needs the actor
+  where the body is). The calm let-go needs it standing, never downed.
+- **C. Steps.** Each foot's step is tried; the one whose landing leaves the capture point least
+  outside the feet is taken, at least 15 cm. A landing foot is pressed onto the floor, no longer 4
+  cm into it. A planted foot reads its own ground (a slope's). An animated foot under its own
+  ground (a flat animation's stance on a slope) has the leg bent onto it.
+- **D. The hand-over.** Waiting for the game's ragdoll, the body is brought inside the skeleton's
+  own limits (the bind pose's taken in), 0.15 rad a frame; a give-up or a death waits for it (at
+  most 45 frames), a fall goes at once; what is left is projected in at once and that pose is
+  handed (`[np hand-over]` says both). The bodies' velocities are the mean over New Physics' last
+  3 frames since the hit.
+- Also: a rise's floor and its feet's goals from the feet's own ground; the downed AI settles 0.7
+  s before it chooses (was 1.0) and a standing body holds 0.25 s before its balance takes it (was
+  0.4): with 1.0 and 0.4 the slope test of the last round stood after 4.6 s, its limit 4.
+Tests (the game's own update, the game's mover walking the AI at 0.45 m/s, the frame seconds
+anywhere from 0.008 to 0.038, a fake animation thread updating the locals at a random point of
+each frame and caught half-way through the draw's set-up about a third of the frames):
+`np_full_cycle_with_a_racing_animation` (flat: the old get-up's fixture's floor) and
+`np_slope_walking_with_a_racing_animation` (20 degrees, the collision floor 7 units under the
+reference). On 25260865 they fail: the reference moved 154 and 304 units a second downed, the
+slope run never stood and was handed over 82 degrees outside the limits, two snaps. Now: no
+snap (a turn beyond the body's own spin over 20 degrees a frame, after the hit's first 0.1 s;
+at most 17 and 10 degrees), the reference still downed (0 units a second, the game 0), three 0.32
+m/s hits with no fall and no step, no step with no hit, the floor at most 1.93 and 0.63 body
+weights standing, drawn as simulated (0.000), the hand-over 1.5 degrees outside the limits, the
+clamp never, the get-up never upside down and its pelvis, head and feet at least 1.35 units over
+the floor (the game's own get-up log's measure; a thumb, not a body, 3.5 under). The full cycle
+gives up by the test's hand (its strength taken, its rises given up once it lies) and uses the
+skeleton's own arms: with the arms 50 degrees out it failed all three rises. Not run in the game.
+
 **Not done in M6 (for a later pass):** crawling to cover (the combat controller's cover point as
 the body's travel goal: `FindCombatLocation` `0099ac20`); the shot's origin and direction from the
 weapon as drawn (the game aims its NPC shots from the weapon node as animated, `fire_locate`, so a
