@@ -31,6 +31,10 @@ pub const STEP_MOST: f32 = 0.65;
 /// A catching step is at least this long (m): the clip's chose the shorter foot, moving the same
 /// one 2 to 9 units three times, never covering the capture point (the tester's 08:13 clip).
 pub const STEP_LEAST: f32 = 0.15;
+/// Out of its [`MAX_STEPS`] it falls only with the capture point this far outside the feet or
+/// more (m): within it another step catches it (it fell "steps" at 0.04 m out: Patrick's 10:08
+/// clip).
+pub const STEPS_FALL_OUTSIDE: f32 = 0.15;
 pub const STEP_TIME: f32 = 0.3;
 pub const STEP_LIFT: f32 = 0.08;
 /// Steps before it falls, and how far outside its feet the capture point may be before no step can
@@ -98,6 +102,10 @@ pub struct Step {
     pub lift: f32,
     /// A step back to the animated stance (not a catch: it does not count).
     pub stance: bool,
+    /// A catch's length (flat, m) and how far its landing leaves the capture point outside the
+    /// feet as planned (m, 0 covered).
+    pub reach: f32,
+    pub covers: f32,
 }
 
 /// One actor's balance.
@@ -125,6 +133,9 @@ pub struct Balance {
     pub legs: [Vec<usize>; 2],
     /// The steps taken since the hit (for the log), catches and stance steps.
     pub taken: Vec<(usize, V3, bool)>,
+    /// Each catch since the hit: its length and how far its landing left the capture point
+    /// outside the feet (m).
+    pub catches: Vec<(f32, f32)>,
     /// Where each foot that stepped stands (its body's centre and rotation): held there (the
     /// leg's muscles pulled a landed foot back under the hip, toward the animation's stance) until
     /// a stance step brings it back.
@@ -201,6 +212,7 @@ impl Balance {
             feet: [foot("Bip01 L Foot"), foot("Bip01 R Foot")],
             legs: [leg("L"), leg("R")],
             taken: Vec::new(),
+            catches: Vec::new(),
             plants: [None, None],
             thighs: [foot("Bip01 L Thigh"), foot("Bip01 R Thigh")],
             leg_length: {
@@ -516,8 +528,10 @@ impl Balance {
                 self.outside > MARGIN
             };
         if out {
-            if self.steps >= MAX_STEPS || self.outside > UNREACHABLE {
-                self.fall_reason = if self.steps >= MAX_STEPS {
+            if (self.steps >= MAX_STEPS && self.outside > STEPS_FALL_OUTSIDE)
+                || self.outside > UNREACHABLE
+            {
+                self.fall_reason = if self.outside <= UNREACHABLE {
                     "steps"
                 } else {
                     "unreachable"
@@ -571,6 +585,8 @@ impl Balance {
                         time: STANCE_TIME,
                         lift: STEP_LIFT * 0.5,
                         stance: true,
+                        reach: 0.0,
+                        covers: 0.0,
                     };
                     self.begin(st, states, anim);
                 }
@@ -623,7 +639,24 @@ impl Balance {
                     .into_iter()
                     .map(|p| [p[0] + d[0], p[1] + d[1]]),
             );
-            let covers = outside(&hull(&pts), [self.capture[0], self.capture[1]]).max(0.0);
+            let mut covers = outside(&hull(&pts), [self.capture[0], self.capture[1]]).max(0.0);
+            // Not covering it: the step reaches further along its way, as far as it may, until
+            // its landing does.
+            let mut reach = length(d);
+            while covers > MARGIN && reach < STEP_MOST - 1e-3 {
+                let longer = (reach + 0.05).min(STEP_MOST);
+                let more = scale(unit(d).unwrap_or(dir), longer - reach);
+                d = add(d, more);
+                to = add(to, more);
+                reach = longer;
+                let mut pts = Self::sole(model, &states[self.feet[1 - side]], self.feet[1 - side]);
+                pts.extend(
+                    Self::sole(model, &states[b], b)
+                        .into_iter()
+                        .map(|p| [p[0] + d[0], p[1] + d[1]]),
+                );
+                covers = outside(&hull(&pts), [self.capture[0], self.capture[1]]).max(0.0);
+            }
             let height = states[b].x[2] - lowest_of(model, states, b) + floor;
             let st = Step {
                 side,
@@ -634,6 +667,8 @@ impl Balance {
                 time: STEP_TIME,
                 lift: STEP_LIFT,
                 stance: false,
+                reach: length(d),
+                covers,
             };
             let better = best.as_ref().map_or(true, |(bc, bl, _)| {
                 covers < bc - 0.01 || (covers <= bc + 0.01 && length(d) < *bl)
@@ -658,6 +693,9 @@ impl Balance {
         self.shift_from = self.shift;
         self.shift_to = add(self.shift, sub(mid_then, anim_mid));
         self.taken.push((st.side, st.to, st.stance));
+        if !st.stance {
+            self.catches.push((st.reach, st.covers));
+        }
         self.step = Some(st);
         self.phase = Phase::Stepping;
         self.since = 0.0;

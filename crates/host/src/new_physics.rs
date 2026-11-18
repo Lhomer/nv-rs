@@ -127,8 +127,8 @@ struct NpActor {
     /// Downed: the combat target's direction (game units, none without one) and the aim's angle
     /// off it (degrees) the last frame.
     aim: Option<(Option<V3>, f32)>,
-    /// The ground cast under each of [`GROUND_SAMPLES`] (where it was cast from, flat, and the
-    /// height found; none: not cast, or nothing found), cast again past [`GROUND_RECAST`].
+    /// The ground cast under each body (where it was cast from, flat, and the height found;
+    /// none: not cast, or nothing found), cast again past [`GROUND_RECAST`].
     grounds: Vec<Option<(V3, Option<f32>)>>,
     /// The actor's reference after New Physics last moved it (the game's own move since is the
     /// ground's, `Np::ground_v`).
@@ -150,6 +150,11 @@ struct NpActor {
     history: std::collections::VecDeque<(f32, Vec<(V3, V3)>)>,
     /// The animation's jumps said.
     jumps_said: u32,
+    /// Each body's walls found beside it (world, metres; where the cast met it, game units):
+    /// kept while the body stays within [`WALL_KEEP`] of it.
+    walls: Vec<Vec<(ragdoll_core::np_body::Plane, V3)>>,
+    /// The wall lines said since the last hit.
+    wall_logs: u32,
 }
 
 /// The actor's animation as the game's update left it: its 3D root's world and each node's local
@@ -267,10 +272,12 @@ struct Outcome {
     /// back from the body).
     as_animation: u32,
     overwritten: u32,
-    /// The most the floor carried in a frame (body weights).
+    /// The most the floor carried in a frame (body weights), and a wall (N).
     floor_most: f32,
-    /// Seconds since the hit.
+    wall_most: f32,
+    /// Seconds since the hit; the pellets of its burst (1 a single hit).
     since: f32,
+    pellets: u32,
 }
 
 /// A hit's outcome is measured at least this long (s), whatever came of it, before
@@ -513,6 +520,8 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             snap: Some(snapshot(e, root, &tree)),
             history: std::collections::VecDeque::new(),
             jumps_said: 0,
+            walls: Vec::new(),
+            wall_logs: 0,
             grounds: Vec::new(),
             ref_after: None,
             floor_logs: 0,
@@ -544,11 +553,30 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
     let body = nearest_body(m, &worlds, point);
     let impulse = scale(direction, p);
     a.since_hit = 0.0;
+    // Pellets of one burst (hits before a frame has run since the last): one outcome, their
+    // momenta summed (each pellet closed the last as "stood, 0 frames": Patrick's 10:08 clip).
+    if a.hit_frames == 0 {
+        if let Some(o) = a.outcome.as_mut() {
+            o.impulse += p;
+            o.speed = o.impulse / m.mass;
+            o.pellets += 1;
+            note(format!(
+                "{:08X}: [np hit] {p:.1} N s on {} (pellet {} of a burst, {:.2} m/s in all)",
+                a.id, m.bodies[body].node, o.pellets, o.speed
+            ));
+            match a.np.as_mut() {
+                Some(np) => np.hit(body, point, impulse),
+                None => a.pending.push((body, point, impulse)),
+            }
+            return;
+        }
+    }
     // The last hit's outcome said as it stands now; this one's begins.
     let now = outcome_now(a);
     close_outcome(a.id, &mut a.outcome, &now);
     a.hit_frames = 0;
     a.outcome = Some(Outcome {
+        pellets: 1,
         impulse: p,
         speed: p / m.mass,
         body,
@@ -560,10 +588,12 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
         as_animation: 0,
         overwritten: 0,
         floor_most: 0.0,
+        wall_most: 0.0,
         since: 0.0,
     });
     a.pass_logs = 0;
     a.floor_logs = 0;
+    a.wall_logs = 0;
     a.history.clear();
     note(format!(
         "{:08X}: [np hit] {} N s on {} ({:.2} m/s on its {:.0} kg)",
@@ -703,6 +733,9 @@ pub fn apply(e: &mut Engine) {
                     feet.map_or("none".to_string(), |f| format!("{:+.1}", f - reference_z)),
                 ));
                     a.floor_offset = Some(z - reference_z);
+                    // Each foot's own ground lifted by the least the animated feet stand over it
+                    // (one height for both, from the ground under the reference, put the uphill
+                    // foot of a walk 3 cm into a slope at the take: 4.6 body weights).
                     a.floor_lift = cast.map(|c| z - c);
                     z - reference_z
                 }
@@ -766,8 +799,21 @@ pub fn apply(e: &mut Engine) {
             np.floors = Vec::new();
             floor
         };
+        // The walls beside each body: cast along its motion from where it was (a fast body
+        // through a thin wall too), kept while it stays near (Patrick's 10:08 clip: no wall was
+        // ever met, "a wall 0 N" on every pose line).
+        // The weapon arm (the right, holding its weapon drawn): it keeps it; the free arm pushes.
+        np.weapon_side = crate::active_ragdoll::weapon_drawn(e, a.actor).then_some(1);
+        let velocities: Vec<V3> = np.states.iter().map(|s| s.v).collect();
+        find_walls(e, &mut a.walls, &pose, &velocities, dt);
+        np.body_walls = a
+            .walls
+            .iter()
+            .map(|ws| ws.iter().map(|w| w.0).collect())
+            .collect();
         let drawn = np.frame(&anim, floor, dt);
         floor_load_said(&mut a, floor, dt);
+        wall_load_said(&mut a);
         let Some(np) = a.np.as_mut() else { continue };
         a.anim_last = anim.clone();
         a.hit_frames += 1;
@@ -908,6 +954,24 @@ pub fn apply(e: &mut Engine) {
             // it stood at the take): released 22 units over the ground, it dropped (the tester's
             // 08:13 clip).
             let at = read3(e, a.actor + REFR_POSITION);
+            // Swept: never through a wall or a crate on the way, and its capsule clear of them
+            // where it ends (Patrick's 10:08 and 10:10 clips: moved 193 and 213 units in one
+            // frame, through what lay between).
+            let (to_flat, said) = swept_move(e, a.actor, at, mv);
+            let moved = sub(to_flat, at);
+            let left = sub(mv, [moved[0], moved[1], 0.0]);
+            if length(left) > 0.5 {
+                np.give_back(scale(left, 1.0 / ragdoll_core::np_body::UNITS));
+            }
+            if let Some(why) = said {
+                note(format!(
+                    "{:08X}: [np move] the actor moved {:.0} of {:.0} units to the body: {why}",
+                    a.id,
+                    length([moved[0], moved[1], 0.0]),
+                    length(mv)
+                ));
+            }
+            let mv = [moved[0], moved[1], 0.0];
             let mut to = add(at, mv);
             let over = a.floor_lift.unwrap_or(0.0) - a.floor_offset.unwrap_or(0.0);
             if let Some(g) = crate::active_ragdoll::floor_under(e, [to[0], to[1], at[2] + 30.0]) {
@@ -1036,6 +1100,8 @@ const GROUND_RECAST: f32 = 6.0;
 /// to flat (game units squared, each).
 const GROUND_STEEPEST: f32 = 1.2;
 const GROUND_FLAT_BIAS: f32 = 4.0;
+/// A cast more than this off the fitted ground (game units) lies on another level.
+const GROUND_STEP: f32 = 4.0;
 
 /// Each body's own floor (world, metres) from the ground cast under [`GROUND_SAMPLES`] in `pose`
 /// (each body's node's world, game units), cached and cast again past [`GROUND_RECAST`]: the
@@ -1082,49 +1148,267 @@ fn ground_planes(
         return (Vec::new(), flat, None);
     }
     // z = a (x - x0) + b (y - y0) + c, least squares, leaning to flat.
-    let n = found.len() as f32;
-    let mean = scale(found.iter().fold([0.0; 3], |s, p| add(s, *p)), 1.0 / n);
-    let (mut sxx, mut syy, mut sxy, mut sxz, mut syz) = (0.0f32, 0.0, 0.0, 0.0, 0.0);
-    for p in &found {
-        let (x, y, z) = (p[0] - mean[0], p[1] - mean[1], p[2] - mean[2]);
-        sxx += x * x;
-        syy += y * y;
-        sxy += x * y;
-        sxz += x * z;
-        syz += y * z;
-    }
-    sxx += GROUND_FLAT_BIAS * n;
-    syy += GROUND_FLAT_BIAS * n;
-    let det = sxx * syy - sxy * sxy;
-    let (mut a, mut b) = if det.abs() > 1e-6 {
-        ((sxz * syy - syz * sxy) / det, (syz * sxx - sxz * sxy) / det)
-    } else {
-        (0.0, 0.0)
+    let fit = |pts: &[V3]| -> (V3, f32, f32) {
+        let n = pts.len() as f32;
+        let mean = scale(pts.iter().fold([0.0; 3], |s, p| add(s, *p)), 1.0 / n);
+        let (mut sxx, mut syy, mut sxy, mut sxz, mut syz) = (0.0f32, 0.0, 0.0, 0.0, 0.0);
+        for p in pts {
+            let (x, y, z) = (p[0] - mean[0], p[1] - mean[1], p[2] - mean[2]);
+            sxx += x * x;
+            syy += y * y;
+            sxy += x * y;
+            sxz += x * z;
+            syz += y * z;
+        }
+        sxx += GROUND_FLAT_BIAS * n;
+        syy += GROUND_FLAT_BIAS * n;
+        let det = sxx * syy - sxy * sxy;
+        let (mut a, mut b) = if det.abs() > 1e-6 {
+            ((sxz * syy - syz * sxy) / det, (syz * sxx - sxz * sxy) / det)
+        } else {
+            (0.0, 0.0)
+        };
+        let steep = (a * a + b * b).sqrt();
+        if steep > GROUND_STEEPEST {
+            a *= GROUND_STEEPEST / steep;
+            b *= GROUND_STEEPEST / steep;
+        }
+        (mean, a, b)
     };
-    let steep = (a * a + b * b).sqrt();
-    if steep > GROUND_STEEPEST {
-        a *= GROUND_STEEPEST / steep;
-        b *= GROUND_STEEPEST / steep;
+    let off = |p: &V3, (mean, a, b): (V3, f32, f32)| {
+        p[2] - (mean[2] + a * (p[0] - mean[0]) + b * (p[1] - mean[1]))
+    };
+    // The level most casts lie on: a cast more than GROUND_STEP off the fit lies on another (a
+    // slab's top, a crate's, a pit): fitted without those, it never tilts or lifts the rest, and
+    // a body over one stands on it flat (one plane through all tilted at a slab's edge and pushed
+    // a body into it: Patrick's 10:08 clip). On one even ground nothing changes.
+    let mut plane = fit(&found);
+    let mut other = vec![false; found.len()];
+    for _ in 0..2 {
+        let flags: Vec<bool> = found
+            .iter()
+            .map(|p| off(p, plane).abs() > GROUND_STEP)
+            .collect();
+        let level: Vec<V3> = found
+            .iter()
+            .zip(&flags)
+            .filter(|(_, o)| !**o)
+            .map(|(p, _)| *p)
+            .collect();
+        if !flags.iter().any(|o| *o) || level.len() < 3 {
+            break;
+        }
+        other = flags;
+        plane = fit(&level);
     }
+    let (_, a, b) = plane;
     let normal = ragdoll_core::flinch::unit([-a, -b, 1.0]).unwrap_or([0.0, 0.0, 1.0]);
     let planes = pose
         .iter()
         .map(|(_, t)| {
             let near = found
                 .iter()
-                .min_by(|p, q| {
+                .enumerate()
+                .min_by(|(_, p), (_, q)| {
                     let d = |c: &V3| length([c[0] - t[0], c[1] - t[1], 0.0]);
                     d(p).total_cmp(&d(q))
                 })
-                .copied()
-                .unwrap_or([t[0], t[1], flat]);
+                .map(|(i, p)| (*p, other[i]));
+            let (at, flat_here) = near.unwrap_or(([t[0], t[1], flat], false));
             ragdoll_core::np_body::Plane {
-                p: scale(near, 1.0 / k),
-                n: normal,
+                p: scale(at, 1.0 / k),
+                n: if flat_here { [0.0, 0.0, 1.0] } else { normal },
             }
         })
         .collect();
     (planes, pelvis, feet)
+}
+
+/// The heights over the reference a move is swept at (game units: the knees', the waist's).
+const SWEEP_HEIGHTS: [f32; 2] = [12.0, 30.0];
+
+/// The actor's move from `at` by `mv` (flat, game units), swept at [`SWEEP_HEIGHTS`]: stopped its
+/// capsule's radius short of what it meets, then nudged clear of anything within its radius
+/// around (eight casts, twice). Answers where it may stand (flat; `at`'s height) and what it
+/// met, if anything.
+fn swept_move(e: &mut Engine, actor: u32, at: V3, mv: V3) -> (V3, Option<String>) {
+    let radius = crate::knockdown::capsule(e, actor);
+    let dist = length([mv[0], mv[1], 0.0]);
+    if dist < 1e-3 {
+        return (at, None);
+    }
+    let dir = [mv[0] / dist, mv[1] / dist, 0.0];
+    let mut allowed = dist;
+    let mut said = None;
+    for h in SWEEP_HEIGHTS {
+        let from = add(at, [0.0, 0.0, h]);
+        if let Some(hit) = crate::active_ragdoll::cast_world(e, from, dir, dist + radius) {
+            let d = length(sub(hit, from));
+            if d - radius < allowed {
+                allowed = (d - radius).max(0.0);
+                said = Some(format!(
+                    "a wall {:.0} units along the way at {:.0} units up",
+                    d, h
+                ));
+            }
+        }
+    }
+    let mut to = add(at, scale(dir, allowed));
+    let mut nudged = 0.0f32;
+    for _ in 0..2 {
+        let mut push = [0.0f32; 3];
+        for i in 0..8 {
+            let a = i as f32 * std::f32::consts::TAU / 8.0;
+            let d8 = [a.cos(), a.sin(), 0.0];
+            for h in SWEEP_HEIGHTS {
+                let from = add(to, [0.0, 0.0, h]);
+                if let Some(hit) = crate::active_ragdoll::cast_world(e, from, d8, radius) {
+                    let d = length(sub(hit, from));
+                    if d < radius {
+                        push = sub(push, scale(d8, (radius - d) / 2.0));
+                    }
+                }
+            }
+        }
+        if length(push) < 0.1 {
+            break;
+        }
+        nudged += length(push);
+        to = add(to, push);
+    }
+    if nudged > 0.1 {
+        let was = said.take().map_or(String::new(), |s| format!("{s}; "));
+        said = Some(format!(
+            "{was}nudged {nudged:.0} units clear of what is beside it"
+        ));
+    }
+    (to, said)
+}
+
+/// A wall found is kept while its body stays within this of where the cast met it (game units),
+/// at most [`WALLS_MOST`] a body; a body casts along its motion past [`WALL_CAST_SPEED`] (m/s),
+/// as far as it goes in [`WALL_LOOK`] seconds and its radius more.
+const WALL_KEEP: f32 = 40.0;
+const WALLS_MOST: usize = 3;
+const WALL_CAST_SPEED: f32 = 0.2;
+const WALL_LOOK: f32 = 0.1;
+/// The side rays that find a wall's face (game units across the cast).
+const WALL_SIDE: f32 = 5.0;
+/// A surface whose normal rises more than this (under 50 degrees) is ground: the floors have it.
+const WALL_WALKABLE: f32 = 0.64;
+
+/// Each body's walls: cast from its capsule's centre in `pose` (game units) along its flat
+/// velocity (`velocities`, m/s), the face's normal from two side rays (else against the cast);
+/// those it moved away from dropped.
+fn find_walls(
+    e: &mut Engine,
+    walls: &mut Vec<Vec<(ragdoll_core::np_body::Plane, V3)>>,
+    pose: &[(M3, V3)],
+    velocities: &[V3],
+    dt: f32,
+) {
+    let m = model();
+    let k = ragdoll_core::np_body::UNITS;
+    walls.resize(pose.len(), Vec::new());
+    for (b, (r, t)) in pose.iter().enumerate() {
+        let def = &m.bodies[b];
+        let centre = add(*t, apply_m(r, scale(def.com, k)));
+        walls[b].retain(|w| length([w.1[0] - centre[0], w.1[1] - centre[1], 0.0]) <= WALL_KEEP);
+        let v = velocities.get(b).copied().unwrap_or([0.0; 3]);
+        let flat = [v[0], v[1], 0.0];
+        let speed = length(flat);
+        if speed < WALL_CAST_SPEED {
+            continue;
+        }
+        let dir = scale(flat, 1.0 / speed);
+        let range = (speed * (dt + WALL_LOOK) + def.radius) * k + 4.0;
+        let Some(hit) = crate::active_ragdoll::cast_world(e, centre, dir, range) else {
+            continue;
+        };
+        // The surface's normal from three points: the hit, one to each side, and one raised
+        // (a ray each the same way); one a body could stand on is the floor's, not a wall.
+        let across = [-dir[1], dir[0], 0.0];
+        let ray = |e: &mut Engine, off: V3| {
+            crate::active_ragdoll::cast_world(e, add(centre, off), dir, range + 20.0)
+        };
+        let sides = (
+            ray(e, scale(across, WALL_SIDE)),
+            ray(e, scale(across, -WALL_SIDE)),
+        );
+        let up = ray(e, [0.0, 0.0, WALL_SIDE]);
+        let along = match sides {
+            (Some(p1), Some(p2)) => sub(p1, p2),
+            _ => across,
+        };
+        let rise = match up {
+            Some(pu) => sub(pu, hit),
+            None => [0.0, 0.0, 1.0],
+        };
+        let n = ragdoll_core::flinch::unit(ragdoll_core::flinch::cross(along, rise))
+            .unwrap_or(scale(dir, -1.0));
+        let n = if ragdoll_core::flinch::dot(n, dir) > 0.0 {
+            scale(n, -1.0)
+        } else {
+            n
+        };
+        if n[2] > WALL_WALKABLE {
+            continue;
+        }
+        let plane = ragdoll_core::np_body::Plane {
+            p: scale(hit, 1.0 / k),
+            n,
+        };
+        let same = walls[b].iter().any(|w| {
+            ragdoll_core::flinch::dot(w.0.n, n) > 0.95
+                && ragdoll_core::flinch::dot(sub(scale(hit, 1.0 / k), w.0.p), n).abs() < 0.04
+        });
+        if !same {
+            if walls[b].len() >= WALLS_MOST {
+                walls[b].remove(0);
+            }
+            walls[b].push((plane, hit));
+        }
+    }
+}
+
+/// A wall's load on the body said (`[np wall]`, a few a hit): the bodies against it and how
+/// hard.
+fn wall_load_said(a: &mut NpActor) {
+    let Some(np) = a.np.as_ref() else {
+        return;
+    };
+    let load = &np.report.wall_load;
+    let total: f32 = load.iter().sum();
+    if total <= 1.0 {
+        return;
+    }
+    if let Some(o) = a.outcome.as_mut() {
+        o.wall_most = o.wall_most.max(total);
+    }
+    if a.wall_logs >= FLOOR_LOGS {
+        return;
+    }
+    a.wall_logs += 1;
+    let weight = model().mass * ragdoll_core::np_body::GRAVITY;
+    let bodies = load
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n > 1.0)
+        .map(|(b, n)| {
+            format!(
+                "{} {:.0} N",
+                model().bodies[b].node.trim_start_matches("Bip01 "),
+                n
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    note(format!(
+        "{:08X}: [np wall] {:.0} N ({:.2} body weights) against a wall: {bodies}",
+        a.id,
+        total,
+        total / weight
+    ));
 }
 
 /// The floor's load past [`FLOOR_LOAD_SAID`] body weights in a frame said with its source
@@ -1715,6 +1999,7 @@ fn downed(e: &mut Engine, a: &mut NpActor, dt: f32) -> bool {
         crate::one_hand::set(a.actor, DOWN_SPREAD);
     }
     np.rise = choice == "stand";
+    np.firing = choice == "fire";
     {
         let mut w = WITHHELD.lock().unwrap_or_else(|p| p.into_inner());
         w.retain(|&x| x != a.actor);
@@ -1797,14 +2082,17 @@ fn close_outcome(id: u32, outcome: &mut Option<Outcome>, result: &str) {
         return;
     };
     note(format!(
-        "{:08X}: [np outcome] hit {:.1} N s / {:.2} m/s on {} -> {result}, peak spine {:.1} \
+        "{:08X}: [np outcome] hit {:.1} N s / {:.2} m/s ({} pellets) on {} -> {result}, a wall \
+         at most {:.0} N, peak spine {:.1} \
          deg, drawn-vs-sim max {:.2} deg / {:.2} u at the world pass, {} frames drawn as the \
          animation, {} frames written over before the world pass (set back), world set \
          directly {} bones, floor at most {:.1} body weights, over {:.2} s",
         id,
         o.impulse,
         o.speed,
+        o.pellets,
         model().bodies[o.body].node.trim_start_matches("Bip01 "),
+        o.wall_most,
         o.spine_peak,
         o.drawn_most.0,
         o.drawn_most.1,
@@ -2008,6 +2296,55 @@ pub fn spins(actor: u32) -> Option<Vec<V3>> {
         .find(|a| a.actor == actor)
         .and_then(|a| a.np.as_ref())
         .map(|np| np.states.iter().map(|s| s.w).collect())
+}
+
+/// What the tests read of `actor` each frame: its catches (length, how far outside the planned
+/// landing left the capture point; m), each hand's plant (game units) and whether it has
+/// touched, the floor's load on each hand (N), each hand's centre (game units), the weapon arm,
+/// and whether the legs push in a rise.
+#[cfg(test)]
+pub(crate) struct Probe {
+    pub catches: Vec<(f32, f32)>,
+    pub hands: [Option<V3>; 2],
+    pub landed: [bool; 2],
+    pub hand_load: [f32; 2],
+    pub hand_at: [V3; 2],
+    pub hand_low: [f32; 2],
+    pub weapon_side: Option<usize>,
+    pub lifting: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn probe(actor: u32) -> Option<Probe> {
+    let actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+    let np = actors.iter().find(|a| a.actor == actor)?.np.as_ref()?;
+    let arms = np.bodies.arms;
+    let load = |b: usize| np.report.floor_load.get(b).copied().unwrap_or(0.0);
+    let k = ragdoll_core::np_body::UNITS;
+    Some(Probe {
+        catches: np.balance.catches.clone(),
+        hands: np.down.as_ref().map_or([None, None], |d| d.hand_plants),
+        landed: np.down.as_ref().map_or([false, false], |d| d.hand_landed),
+        hand_load: [load(arms[0][2]), load(arms[1][2])],
+        // Each hand's node (its plant's point) and its lowest point's height (game units).
+        hand_at: [0, 1].map(|s| {
+            let st = &np.states[arms[s][2]];
+            let com = np.model.bodies[arms[s][2]].com;
+            scale(sub(st.x, ragdoll_core::active::qrot(st.q, com)), k)
+        }),
+        hand_low: [0, 1].map(|s| {
+            let b = arms[s][2];
+            let st = &np.states[b];
+            let def = &np.model.bodies[b];
+            def.ends
+                .iter()
+                .map(|e| add(st.x, ragdoll_core::active::qrot(st.q, sub(*e, def.com)))[2])
+                .fold(f32::INFINITY, f32::min)
+                * k
+        }),
+        weapon_side: np.weapon_side,
+        lifting: np.down.as_ref().is_some_and(|d| d.lifting),
+    })
 }
 
 /// The balance's phase and catching steps of `actor`.

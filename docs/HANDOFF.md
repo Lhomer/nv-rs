@@ -7,6 +7,32 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-18 (New Physics: barriers, the rise's pace, the arms' push, bursts)
+
+- **Done (Patrick's 10:08/10:10 clips on abcb629e):**
+  - Walls come from the world: each moving body casts along its motion; the side and raised
+    rays give the face's normal, and walkable faces are left to the floors. Walls are kept per
+    body (`Np.body_walls`), their load is said (`[np wall]`), and the outcome line carries
+    `a wall at most N`.
+  - The ground fit drops casts on another level (a slab's or a crate's top), so it no longer
+    tilts at edges.
+  - The reference's move at a rise's end is swept and nudged clear (`[np move]`).
+  - The rise's pelvis support is damped against its own pace (`RISE_PACE`), not toward still;
+    rises now take about 3 s, not 4 to 7.
+  - A lapse of a frame in the legs' push is held (`LIFT_LAPSE`).
+  - The arms push in rises (`np.rs` `plant_hands`): unarmed both arms, armed the free arm. They
+    are driven a frame's reach at a time. Firing from the ground, the free arm braces.
+  - Steps: a catch lengthens until it covers the capture point, a stance step lands on its own
+    ground, and a "steps" fall needs the capture point 0.15 m out.
+  - The pellets of one frame are one outcome (`(N pellets)`).
+- **Open (ignored tests, each doc says what fails):**
+  - Rising beside a wall or a crate (`np_walls_and_crates_hold_the_body`,
+    `np_the_reference_moves_clear_of_a_wall`).
+  - Planted hands slide (14 to 35 u) and bounce on slopes (`np_planted_hands_hold_still`).
+  - The tests on a slope are chaotic: sub-millimetre floor changes swing a catching step's
+    landing between 2 and 4 body weights. A standing foot can read 3 cm over its own ground (the
+    feet's mean floor carried into plants).
+
 ### Claude, 2026-11-17 (New Physics approved: M0, the joint limits and the switch)
 
 - **Now:** Patrick approved the New Physics design (with M6, downed but active, emergent). M0:

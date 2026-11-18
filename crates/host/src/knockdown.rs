@@ -2737,7 +2737,7 @@ pub(crate) fn navmesh_point(e: &mut Engine, actor: u32, near: [f32; 3]) -> Optio
 }
 
 /// The capsule radius of an actor (game units): [`CAPSULE_RADIUS`] times its scale.
-fn capsule(e: &mut Engine, actor: u32) -> f32 {
+pub(crate) fn capsule(e: &mut Engine, actor: u32) -> f32 {
     let scale = e.call(GET_SCALE, &args![actor]).f64() as f32;
     CAPSULE_RADIUS * sane_scale(scale)
 }

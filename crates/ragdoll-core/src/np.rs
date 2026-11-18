@@ -103,6 +103,14 @@ pub const RISE_FEET: (f32, f32, f32) = (2000.0, 120.0, 250.0);
 /// (m); only while the torso tilts past this (rad).
 pub const RISE_ARMS: (f32, f32, f32, f32) = (3000.0, 150.0, 160.0, 0.6);
 pub const RISE_ARMS_TILT: f32 = 0.5;
+/// A rise's hand plant: out from the shoulder and ahead toward the rise (m), and its pull
+/// (spring, damper, most force N).
+pub const HAND_OUT: f32 = 0.12;
+pub const HAND_AHEAD: f32 = 0.08;
+pub const HAND_PLANT: (f32, f32, f32) = (3000.0, 150.0, 400.0);
+/// Until it touches, the hand is guided to its spot with at most this (N): the arm's muscles put
+/// it there (the plant's whole pull yanked the arm, turning the pelvis 20 degrees in a frame).
+pub const HAND_REACH: f32 = 60.0;
 /// How long the limits stay soft after a fall (s).
 pub const LIMITS_SETTLE: f32 = 0.3;
 /// A rise with nothing to push from (or too weak) this long gives up (s).
@@ -124,6 +132,11 @@ pub const RISE_FOOT_OUT: f32 = 0.3;
 /// The legs push once the centre of mass is within this of the feet (m): their pull brings the
 /// hips forward over the feet as they lift.
 pub const RISE_OVER_FEET: f32 = 0.35;
+/// The legs' push lifts the pelvis at most this fast (m/s), slowing as it nears standing height
+/// (its pace per metre still to go, 1/s).
+pub const RISE_PACE: (f32, f32) = (0.8, 3.0);
+/// The legs' push held through a lapse this long (s).
+pub const LIFT_LAPSE: f32 = 0.2;
 
 /// `now` turned toward `goal` by at most `most` (rad); relative rotations.
 fn turn_toward(now: Q, goal: Q, most: f32) -> Q {
@@ -180,9 +193,16 @@ pub struct Np {
     anim_v: V3,
     /// The walls the body may rest on (m; the floor is the frame's).
     pub walls: Vec<Plane>,
+    /// Each body's own walls (world, metres): what the world has beside it (its owner's casts).
+    pub body_walls: Vec<Vec<Plane>>,
     /// Each body's own floor (world, metres: the ground under it, a slope's; empty: the frame's
     /// flat floor).
     pub floors: Vec<Plane>,
+    /// The arm that holds a weapon (0 left, 1 right; none unarmed): it keeps it, and its aim
+    /// while the AI fires from the ground; the free arm pushes.
+    pub weapon_side: Option<usize>,
+    /// The AI fires from the ground: the weapon arm aims, the free arm braces.
+    pub firing: bool,
     /// About to be handed to the game's ragdoll: the body is brought inside the skeleton's own
     /// limits (`np_body::Tracking::data_limits`); `report.limit_most` says how far out it still is.
     pub to_limits: bool,
@@ -237,6 +257,17 @@ pub struct Down {
     pub no_push: f32,
     /// The label changes so far (time, label) for the log.
     pub changes: Vec<(f32, Label)>,
+    /// Each hand's plant on the ground in a rise (game units, local): where it was put down,
+    /// held there until the legs push.
+    pub hand_plants: [Option<V3>; 2],
+    /// Each planted hand has touched the ground: from then the ground alone holds it up (it only
+    /// pushes), the plant only keeps it from sliding.
+    pub hand_landed: [bool; 2],
+    /// The legs have taken this rise over: the hands stay let go until it ends (a frame's lapse
+    /// in the legs' push planted them again mid-rise).
+    pub arms_off: bool,
+    /// How long the legs' push has lapsed (s).
+    pub lift_lapse: f32,
 }
 
 /// Each joint's relative rotation (`parent⁻¹ child`) in a pose of body-node worlds.
@@ -275,6 +306,9 @@ impl Np {
             anim_v: [0.0; 3],
             walls: Vec::new(),
             floors: Vec::new(),
+            body_walls: Vec::new(),
+            weapon_side: None,
+            firing: false,
             to_limits: false,
             on_data_limits: false,
             jumps: 0,
@@ -330,6 +364,18 @@ impl Np {
                 n: w.n,
             })
             .collect();
+        let body_walls = std::mem::take(&mut self.body_walls);
+        self.body_walls = body_walls
+            .iter()
+            .map(|ws| {
+                ws.iter()
+                    .map(|w| Plane {
+                        p: sub(w.p, scale(self.origin, to_m)),
+                        n: w.n,
+                    })
+                    .collect()
+            })
+            .collect();
         let floors = std::mem::take(&mut self.floors);
         self.floors = floors
             .iter()
@@ -341,6 +387,7 @@ impl Np {
         let out = self.frame_local(&local, floor, dt);
         self.walls = walls;
         self.floors = floors;
+        self.body_walls = body_walls;
         shift_by(&out, self.origin)
     }
 
@@ -456,6 +503,10 @@ impl Np {
                 stood: 0.0,
                 no_push: 0.0,
                 changes: Vec::new(),
+                hand_plants: [None, None],
+                hand_landed: [false, false],
+                arms_off: false,
+                lift_lapse: 0.0,
             });
             return self.down_frame(anim, floor, dt);
         }
@@ -574,6 +625,7 @@ impl Np {
             soft_limits: self.stood_up < LIMITS_SETTLE || self.to_limits,
             floors: self.floors.clone(),
             data_limits: self.to_limits,
+            body_walls: self.body_walls.clone(),
         };
         self.stood_up += dt;
         self.report = self.model.step_world(
@@ -626,6 +678,10 @@ impl Np {
             stood: 0.0,
             no_push: 0.0,
             changes: Vec::new(),
+            hand_plants: [None, None],
+            hand_landed: [false, false],
+            arms_off: false,
+            lift_lapse: 0.0,
         });
         down.since += dt;
         down.reading = reading;
@@ -808,7 +864,23 @@ impl Np {
                     max_torque: 0.0,
                 });
             }
+            // The arms' push (the free arm; both unarmed; the weapon arm keeps its aim): each
+            // hand put down on the ground beside its shoulder, toward the rise, and held where it
+            // lands (no slide, no bounce); the arm driven straight under a shoulder raised by
+            // half the arm, so it pushes the torso up from lying, seated or propped; let go once
+            // the legs push. The arms were held at the animation's sides before, the torso
+            // turned by an abstract support alone (Patrick's 10:08 and 10:10 clips).
+            down.arms_off |= down.lifting_was;
+            let arms = if down.arms_off {
+                Vec::new()
+            } else {
+                self.pushing_arms(&worlds, floor)
+            };
+            self.plant_hands(
+                &mut down, &arms, &worlds, floor, rise_dir, &mut posed, &mut pulls,
+            );
             let legs = relative_of(&self.model, &posed);
+            self.drive_planted_arms(&down, &legs, &mut targets, &mut gains, &mut holds);
             let now_rel = self.model.relative(&self.states);
             for side in 0..2 {
                 for &j in &self.balance.legs[side] {
@@ -823,7 +895,15 @@ impl Np {
                 .feet
                 .iter()
                 .any(|&ft| self.report.floor_load.get(ft).copied().unwrap_or(0.0) > 1.0);
-            if feet_down && reading.over_feet < RISE_OVER_FEET {
+            // A lapse of a few frames (a foot's load or the hips over it read off for a frame)
+            // keeps the push: each lapse let the feet be pulled again and the hands planted.
+            let over = feet_down && reading.over_feet < RISE_OVER_FEET;
+            if over {
+                down.lift_lapse = 0.0;
+            } else if down.lifting_was {
+                down.lift_lapse += dt;
+            }
+            if over || (down.lifting_was && down.lift_lapse < LIFT_LAPSE) {
                 down.lifting = true;
                 // Over the feet's own ground (a slope's).
                 let feet_ground = b
@@ -832,17 +912,26 @@ impl Np {
                     .filter_map(|&ft| self.ground_at(ft, scale(self.states[ft].x, UNITS)))
                     .fold(None, |m: Option<f32>, z| Some(m.map_or(z, |m| m.max(z))));
                 let stand_z = feet_ground.unwrap_or(f) + b.stand_height;
+                let up_now = ((self.states[r].x[2] - feet_ground.unwrap_or(f)) / b.stand_height)
+                    .clamp(0.0, 1.0);
+                // Damped against the rise's own pace, not against rising (damped toward still, the
+                // capped spring's push and an uncapped damper held the pelvis to 0.3 to 0.4 m/s:
+                // a rise of 2 s and more).
+                let pace = ((stand_z - self.states[r].x[2]) * RISE_PACE.1).clamp(0.0, RISE_PACE.0);
                 pulls.push(Support {
                     body: r,
                     x: [feet_mid[0], feet_mid[1], stand_z],
-                    v: [0.0; 3],
+                    v: [0.0, 0.0, pace],
                     q: self.anim_states[r].q,
                     kp: ROOT_SUPPORT.kp,
                     kd: ROOT_SUPPORT.kd,
                     max_force: push,
-                    kp_h: ROOT_SUPPORT.kp_h * 0.2,
-                    kd_h: ROOT_SUPPORT.kd_h * 0.2,
-                    max_force_h: 250.0 * k,
+                    // Held over the feet harder as it comes up: near upright the sway is the
+                    // stand's to stop (it swayed 0.36 to 0.56 m/s upright and never stood:
+                    // Patrick's 10:10 clip).
+                    kp_h: ROOT_SUPPORT.kp_h * (0.2 + 0.8 * up_now),
+                    kd_h: ROOT_SUPPORT.kd_h * (0.2 + 0.8 * up_now),
+                    max_force_h: (250.0 + 650.0 * up_now) * k,
                     kp_turn: ROOT_SUPPORT.kp_turn * 0.5,
                     kd_turn: self.root_kd_turn * 0.5,
                     max_torque: 300.0 * k,
@@ -855,6 +944,8 @@ impl Np {
                 down.rise_failed = true;
                 down.rising = 0.0;
                 down.rise_best = 0.0;
+                down.arms_off = false;
+                down.arms_off = false;
                 down.rise_stall = 0.0;
             }
         } else if rising_wish && !rising {
@@ -863,9 +954,29 @@ impl Np {
             down.no_push = 0.0;
             down.rising = 0.0;
             down.rise_best = 0.0;
+            down.arms_off = false;
         } else if !rising_wish {
             down.rising = 0.0;
             down.rise_best = 0.0;
+            down.arms_off = false;
+        }
+        // Not rising: firing from the ground the weapon arm aims (the game's) and the free arm
+        // braces; else no hand stays planted.
+        if !(rising && !airborne) {
+            let brace: Vec<usize> = match (self.firing, self.weapon_side) {
+                (true, Some(w)) => vec![1 - w],
+                _ => Vec::new(),
+            };
+            let worlds = self.model.node_worlds(&self.states);
+            let mut posed = worlds.clone();
+            let facing = reading.facing;
+            self.plant_hands(
+                &mut down, &brace, &worlds, floor, facing, &mut posed, &mut pulls,
+            );
+            if !brace.is_empty() {
+                let rel = relative_of(&self.model, &posed);
+                self.drive_planted_arms(&down, &rel, &mut targets, &mut gains, &mut holds);
+            }
         }
         // At most [`RISE_MOST`]: then it gives up (the AI waits, or gives up into the game's
         // ragdoll after its tries).
@@ -874,6 +985,7 @@ impl Np {
             down.rise_failed = true;
             down.rising = 0.0;
             down.rise_best = 0.0;
+            down.arms_off = false;
             down.rise_stall = 0.0;
         }
         let drives: Vec<Drive> = targets
@@ -892,10 +1004,18 @@ impl Np {
             rate: vec![0.0; self.states.len()],
             slip: Vec::new(),
             // Lifting, the feet carry the push.
-            grip: if down.lifting {
-                b.feet.to_vec()
-            } else {
-                Vec::new()
+            grip: {
+                let mut g = if down.lifting {
+                    b.feet.to_vec()
+                } else {
+                    Vec::new()
+                };
+                for side in 0..2 {
+                    if down.hand_plants[side].is_some() {
+                        g.push(b.arms[side][2]);
+                    }
+                }
+                g
             },
             before: std::mem::replace(&mut self.last_targets, anim_rel.clone()),
             widen_by: anim_rel,
@@ -906,6 +1026,7 @@ impl Np {
             soft_limits: down.since < LIMITS_SETTLE || self.to_limits,
             floors: self.floors.clone(),
             data_limits: self.to_limits,
+            body_walls: self.body_walls.clone(),
         };
         self.report = self.model.step_world(
             &mut self.states,
@@ -943,6 +1064,131 @@ impl Np {
             self.down = Some(down);
         }
         self.model.node_worlds(&self.states)
+    }
+
+    /// Each arm of `arms` put down on the ground (the rise's push, or the free arm's brace while
+    /// the weapon arm aims): its hand set down beside its shoulder, a little toward `dir`, and
+    /// held where it lands (no slide, no bounce: guided down with a hand's reach, then the ground
+    /// alone holds it up); the arm's pose for it into `posed`, driven straight under a shoulder
+    /// raised by half the arm, so it pushes the torso up. Any other arm lets go.
+    #[allow(clippy::too_many_arguments)]
+    fn plant_hands(
+        &self,
+        down: &mut Down,
+        arms: &[usize],
+        worlds: &[(M3, V3)],
+        floor: f32,
+        dir: V3,
+        posed: &mut [(M3, V3)],
+        pulls: &mut Vec<Support>,
+    ) {
+        let b = &self.bodies;
+        let k = self.effort.clamp(0.0, 1.0);
+        for side in 0..2 {
+            if !arms.contains(&side) {
+                down.hand_plants[side] = None;
+                down.hand_landed[side] = false;
+                continue;
+            }
+            let [upper, fore, hand] = b.arms[side];
+            let (shoulder, elbow, wrist) = (worlds[upper].1, worlds[fore].1, worlds[hand].1);
+            let torso_at = worlds[b.torso].1;
+            let out =
+                crate::flinch::unit([shoulder[0] - torso_at[0], shoulder[1] - torso_at[1], 0.0])
+                    .unwrap_or([0.0; 3]);
+            let hand_def = &self.model.bodies[hand];
+            let plant = *down.hand_plants[side].get_or_insert_with(|| {
+                let xy = add(
+                    add(shoulder, scale(out, HAND_OUT * UNITS)),
+                    scale(dir, HAND_AHEAD * UNITS),
+                );
+                let z =
+                    self.ground_at(hand, xy).map_or(floor, |g| g * UNITS) + hand_def.radius * UNITS;
+                [xy[0], xy[1], z]
+            });
+            let arm = crate::flinch::length(sub(elbow, shoulder))
+                + crate::flinch::length(sub(wrist, elbow));
+            let raised = add(shoulder, [0.0, 0.0, 0.5 * arm]);
+            if let Some((r1, m, _)) =
+                crate::flinch::leg_ik(shoulder, elbow, wrist, raised, plant, scale(out, -1.0))
+            {
+                let mr1 = crate::flinch::mul(&m, &r1);
+                posed[upper].0 = crate::flinch::mul(&r1, &worlds[upper].0);
+                posed[fore].0 = crate::flinch::mul(&mr1, &worlds[fore].0);
+            }
+            let q = self.states[hand].q;
+            let x = add(
+                scale(plant, 1.0 / UNITS),
+                crate::active::qrot(q, hand_def.com),
+            );
+            // Brought down onto its spot until it touches; then the ground pushes it (a pull
+            // down held the torso down as the arm straightened).
+            let landed = down.hand_landed[side]
+                || self.report.floor_load.get(hand).copied().unwrap_or(0.0) > 1.0;
+            down.hand_landed[side] = landed;
+            pulls.push(Support {
+                body: hand,
+                x,
+                v: [0.0; 3],
+                q,
+                kp: if landed { 0.0 } else { HAND_PLANT.0 },
+                kd: if landed { 0.0 } else { HAND_PLANT.1 },
+                max_force: HAND_REACH * k,
+                kp_h: HAND_PLANT.0,
+                kd_h: HAND_PLANT.1,
+                max_force_h: if landed { HAND_PLANT.2 } else { HAND_REACH } * k,
+                kp_turn: 0.0,
+                kd_turn: 0.0,
+                max_torque: 0.0,
+            });
+        }
+    }
+
+    /// A planted arm's joints driven toward its pose in `posed_rel`, as far as a frame's effort
+    /// goes (whole, the arm's goal yanked it: the pelvis turned 20 degrees in a frame as the rise
+    /// began).
+    fn drive_planted_arms(
+        &self,
+        down: &Down,
+        posed_rel: &[Q],
+        targets: &mut [Q],
+        gains: &mut [(f32, f32)],
+        holds: &mut [f32],
+    ) {
+        let k = self.effort.clamp(0.0, 1.0);
+        let now = self.model.relative(&self.states);
+        for side in 0..2 {
+            if down.hand_plants[side].is_none() {
+                continue;
+            }
+            for (j, def) in self.model.joints.iter().enumerate() {
+                if self.bodies.arms[side][..2].contains(&def.child) {
+                    targets[j] = turn_toward(now[j], posed_rel[j], RISE_REACH);
+                    gains[j].0 = self.muscles.base[j].0 * RISE_GAIN * k;
+                    holds[j] = 0.5 * k;
+                }
+            }
+        }
+    }
+
+    /// The arms that push in a rise: unarmed both; armed the free arm, the weapon arm too only
+    /// when the free arm finds no ground within its reach (a wall's foot, a ledge).
+    fn pushing_arms(&self, worlds: &[(M3, V3)], floor: f32) -> Vec<usize> {
+        let b = &self.bodies;
+        let Some(w) = self.weapon_side else {
+            return vec![0, 1];
+        };
+        let free = 1 - w;
+        let [upper, fore, hand] = b.arms[free];
+        let reach = crate::flinch::length(sub(worlds[fore].1, worlds[upper].1))
+            + crate::flinch::length(sub(worlds[hand].1, worlds[fore].1));
+        let shoulder = worlds[upper].1;
+        let ground = self.ground_at(hand, shoulder).map_or(floor, |g| g * UNITS);
+        if shoulder[2] - ground <= reach * 1.05 {
+            vec![free]
+        } else {
+            vec![free, w]
+        }
     }
 
     /// Body `b`'s own ground under `at` (game units, local; metres answered), from its floor
@@ -1058,6 +1304,14 @@ impl Np {
             shift_by(&self.model.node_worlds(&self.states), self.origin),
             out,
         )
+    }
+
+    /// Of the move [`Np::take_move`] answered, `by` (m, flat) was not made (the actor met a wall):
+    /// the body stays that far off its animation again.
+    pub fn give_back(&mut self, by: V3) {
+        let back = scale(by, -1.0);
+        self.balance.take(back);
+        self.anim_moved(back);
     }
 
     /// The actor was moved by `by` (m; its animation comes moved by it, which is not its own

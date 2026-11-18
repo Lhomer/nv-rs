@@ -122,14 +122,96 @@ thread_local! {
     pub static FLOOR: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
     /// Its slope (a point's x and y, the rise along x and along y: units a unit), none flat.
     pub static SLOPE: std::cell::Cell<Option<[f32; 4]>> = const { std::cell::Cell::new(None) };
+    /// The world the tests' ray casts meet (`crate::active_ragdoll`'s `cast_world`): the floor
+    /// and these boxes (each its least and most corner, game units: a wall, a crate, a slab);
+    /// none: the casts find nothing, as before.
+    pub static WORLD: std::cell::RefCell<Option<Vec<(V3, V3)>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Whether the fixture's actor holds a weapon drawn (`Actor::IsWeaponOut`).
+    pub static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// The tests' collision floor under `at` ([`FLOOR`], tilted by [`SLOPE`]).
-pub fn floor_at(at: V3) -> Option<f32> {
+/// The ground under `at` (the floor, tilted by [`SLOPE`]), boxes aside.
+fn ground_at(at: V3) -> Option<f32> {
     let f = FLOOR.with(std::cell::Cell::get)?;
     Some(match SLOPE.with(std::cell::Cell::get) {
         Some([x0, y0, gx, gy]) => f + gx * (at[0] - x0) + gy * (at[1] - y0),
         None => f,
+    })
+}
+
+/// The tests' collision floor under `at` ([`FLOOR`], tilted by [`SLOPE`]): with a [`WORLD`], the
+/// first surface a cast down from 50 units over `at` meets (a box's top included).
+pub fn floor_at(at: V3) -> Option<f32> {
+    let ground = ground_at(at)?;
+    let from = at[2] + 50.0;
+    let top = WORLD.with(|w| {
+        w.borrow().as_ref().and_then(|boxes| {
+            boxes
+                .iter()
+                .filter(|(lo, hi)| {
+                    at[0] >= lo[0] && at[0] <= hi[0] && at[1] >= lo[1] && at[1] <= hi[1]
+                })
+                .map(|(_, hi)| hi[2])
+                .filter(|&z| z <= from)
+                .reduce(f32::max)
+        })
+    });
+    Some(top.map_or(ground, |t| t.max(ground)))
+}
+
+/// A ray from `from` along `dir` (unit) within `range` against the [`WORLD`]'s boxes and its
+/// floor: the nearest hit point; none without a world (or nothing hit). A box the ray starts in
+/// is passed (as Havok's casts pass a shape they start inside).
+pub fn cast_at(from: V3, dir: V3, range: f32) -> Option<Option<V3>> {
+    WORLD.with(|w| {
+        let w = w.borrow();
+        let boxes = w.as_ref()?;
+        let mut best: Option<f32> = None;
+        for (lo, hi) in boxes {
+            let inside = (0..3).all(|i| from[i] > lo[i] && from[i] < hi[i]);
+            if inside {
+                continue;
+            }
+            let (mut t0, mut t1) = (0.0f32, range);
+            let mut hit = true;
+            for i in 0..3 {
+                if dir[i].abs() < 1e-9 {
+                    if from[i] < lo[i] || from[i] > hi[i] {
+                        hit = false;
+                        break;
+                    }
+                } else {
+                    let (a, b) = ((lo[i] - from[i]) / dir[i], (hi[i] - from[i]) / dir[i]);
+                    t0 = t0.max(a.min(b));
+                    t1 = t1.min(a.max(b));
+                }
+            }
+            if hit && t0 <= t1 {
+                best = Some(best.map_or(t0, |b| b.min(t0)));
+            }
+        }
+        // The floor: marched in short steps (it may be sloped).
+        let mut t = 0.0f32;
+        while t <= range {
+            let p = [
+                from[0] + dir[0] * t,
+                from[1] + dir[1] * t,
+                from[2] + dir[2] * t,
+            ];
+            if ground_at(p).is_some_and(|g| p[2] < g) {
+                best = Some(best.map_or(t, |b| b.min(t)));
+                break;
+            }
+            t += 1.0;
+        }
+        Some(best.map(|t| {
+            [
+                from[0] + dir[0] * t,
+                from[1] + dir[1] * t,
+                from[2] + dir[2] * t,
+            ]
+        }))
     })
 }
 
@@ -146,6 +228,8 @@ impl Fixture {
         e.mem.map(0x011e_0000, 0x2000);
         FLOOR.with(|f| f.set(ground.collision));
         SLOPE.with(|f| f.set(None));
+        WORLD.with(|w| *w.borrow_mut() = None);
+        ARMED.with(|a| a.set(false));
         let at: Vec<u32> = (0..nodes.len() as u32)
             .map(|i| BASE + i * NODE_SIZE)
             .collect();
@@ -222,7 +306,9 @@ impl Fixture {
             if a[0] == ACTOR_ID { ACTOR } else { 0 }.into_ret()
         });
         e.register_double(GET_SCALE, |_, _| 1.0f32.into_ret());
-        e.register_double(IS_WEAPON_DRAWN, |_, _| 0u32.into_ret());
+        e.register_double(IS_WEAPON_DRAWN, |_, _| {
+            u32::from(ARMED.with(std::cell::Cell::get)).into_ret()
+        });
         // The ragdoll's bodies: a node with one answers a collision object (its body block), the
         // collision object its rigid body, the rigid body its `hkpRigidBody` (the same block);
         // velocities kept in the block (Havok units).

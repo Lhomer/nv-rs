@@ -165,6 +165,10 @@ pub struct Tracking {
     /// the game's ragdoll (whose constraints snapped a pose far outside them: the tester's 08:13
     /// clip, 79 to 183 degrees out).
     pub data_limits: bool,
+    /// Each body's own walls (world, metres; empty: none): the sides of walls, crates and ledges
+    /// found near it (a plane holds only the body it was found for, so a crate's face never
+    /// reaches a body beyond the crate).
+    pub body_walls: Vec<Vec<Plane>>,
 }
 
 /// A pull on a body this frame (the root's support, a swinging foot's carry): a spring and damper
@@ -539,6 +543,7 @@ impl Model {
             })
             .collect();
         let floors: &[Plane] = tracking.map_or(&[], |t| &t.floors);
+        let body_walls: &[Vec<Plane>] = tracking.map_or(&[], |t| &t.body_walls);
         for sub_i in 0..substeps {
             let prev: Vec<State> = states.to_vec();
             // The muscles' hold of the weight below each joint (a torque pair on the joint).
@@ -601,7 +606,7 @@ impl Model {
             }
             let slip: &[usize] = tracking.map_or(&[], |t| &t.slip);
             let grip: &[usize] = tracking.map_or(&[], |t| &t.grip);
-            let loads = self.surfaces(states, &prev, &surfaces, floors, slip, h);
+            let loads = self.surfaces(states, &prev, &surfaces, floors, body_walls, slip, h);
             // Each surface's push this substep as a force (N), the frame's mean.
             let to_force = 1.0 / (h * h * substeps as f32);
             for &(b, k, lambda, _, _) in &loads {
@@ -690,7 +695,8 @@ impl Model {
                         .contacts
                         .push((i, sub(p, scale(fl.n, d + def.radius))));
                 }
-                for (k, w) in surfaces.iter().enumerate().skip(1) {
+                let own: &[Plane] = body_walls.get(i).map_or(&[], |w| w.as_slice());
+                for (k, w) in surfaces.iter().chain(own).enumerate().skip(1) {
                     let d = dot(sub(p, w.p), w.n) - def.radius;
                     if d <= 0.005 {
                         report
@@ -911,12 +917,14 @@ impl Model {
     /// (body, surface, its size: kg·m, the capsule end's centre in the body's turn, the surface's
     /// normal).
     #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
     fn surfaces(
         &self,
         states: &mut [State],
         prev: &[State],
         surfaces: &[Plane],
         floors: &[Plane],
+        body_walls: &[Vec<Plane>],
         slip: &[usize],
         h: f32,
     ) -> Vec<(usize, usize, f32, V3, V3)> {
@@ -924,9 +932,10 @@ impl Model {
         for (i, def) in self.bodies.iter().enumerate() {
             let grips = !slip.contains(&i);
             let fl = floor_of(surfaces, floors, i);
+            let own: &[Plane] = body_walls.get(i).map_or(&[], |w| w.as_slice());
             for e in def.ends {
                 let local = sub(e, def.com);
-                for (k, sf) in surfaces.iter().enumerate() {
+                for (k, sf) in surfaces.iter().chain(own).enumerate() {
                     let sf = if k == 0 { &fl } else { sf };
                     let n = sf.n;
                     let centre = add(states[i].x, qrot(states[i].q, local));

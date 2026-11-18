@@ -4146,7 +4146,11 @@ const BRACE_PROBE: f32 = 90.0;
 /// `range` (game units), the world only: a hit on an actor (the reacting actor's own limbs, which
 /// JIP's default layer meets, or anyone else's) is passed and the cast goes on beyond it, at most
 /// a few times. The hit point.
-fn cast_world(e: &mut Engine, from: V3, dir: V3, range: f32) -> Option<V3> {
+pub(crate) fn cast_world(e: &mut Engine, from: V3, dir: V3, range: f32) -> Option<V3> {
+    #[cfg(test)]
+    if let Some(hit) = crate::rig_fixture::cast_at(from, dir, range) {
+        return hit;
+    }
     let mut at = from;
     let mut left = range;
     for _ in 0..4 {

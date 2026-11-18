@@ -2475,6 +2475,36 @@ struct Cycle {
     seconds: f32,
     /// The upper arms' turn off the skeleton's pose (times 50 degrees).
     arms: f32,
+    /// The world's boxes the casts meet (each its least and most corner, units, about the
+    /// reference at the origin with the collision floor `below` under it): walls, crates, slabs.
+    boxes: Vec<(V3, V3)>,
+    /// The downing hits' speed (m/s; 4.8 when 0) and their way (flat; -y when zero).
+    heavy: f32,
+    knock: V3,
+    /// The light hits' speed (m/s; 0.32 when 0), each in this many pellets in one frame (1 when
+    /// 0) at points a few units apart, summing to it.
+    light: f32,
+    pellets: u32,
+    /// It holds a weapon drawn (the right hand's).
+    armed: bool,
+}
+
+impl Default for Cycle {
+    fn default() -> Self {
+        Cycle {
+            slope: 0.0,
+            below: 1.0,
+            give_up: false,
+            seconds: 18.0,
+            arms: 0.0,
+            boxes: Vec::new(),
+            heavy: 0.0,
+            knock: [0.0; 3],
+            light: 0.0,
+            pellets: 0,
+            armed: false,
+        }
+    }
 }
 
 /// What a [`cycle_run`] found.
@@ -2509,6 +2539,38 @@ struct CycleRun {
     get_up_any_node: f32,
     jumps: u32,
     notes: Vec<String>,
+    /// Every frame New Physics had it: the deepest any body's capsule lay inside a box (units),
+    /// which body and when (s after the last hit, downed).
+    inside_most: f32,
+    inside_at: String,
+    /// The `[np wall]` lines and the most a wall carried (N, the outcomes').
+    wall_logged: u32,
+    wall_most: f32,
+    /// The fastest body (m/s, drawn) past 0.3 s after the last hit, standing or downed past a
+    /// second (not the fall the hit causes).
+    fast_most: f32,
+    /// Seconds from going down to standing again, the first time; and the most from first
+    /// reading upright (labelled standing) to standing again.
+    first_stood: Option<f32>,
+    upright_still: f32,
+    /// The light hits' catches (length, how far the landing left the capture point outside; m).
+    catches: Vec<(f32, f32)>,
+    /// Downed: the most the hands carried of the body's weight while planted before the legs
+    /// push (its share), the most a landed hand slid (units), the times a landed hand's load went
+    /// and came back while planted (a bounce), the most one rose off its spot while planted
+    /// (units, its lowest point), the frames a weapon hand was planted, the frames any was.
+    hand_share: f32,
+    hand_slip: f32,
+    hand_bounce: u32,
+    hand_lift: f32,
+    weapon_planted: u32,
+    planted_frames: u32,
+    /// The reference furthest along the knock (the most it moved to the body), the most any
+    /// reference position lay inside a box (units, the actor's capsule's radius taken in) and
+    /// the moves swept (`[np move]`).
+    ref_end: V3,
+    ref_inside: f32,
+    moves: u32,
 }
 
 /// The whole cycle on FNV's skeleton through the game's own path: the game's update
@@ -2559,6 +2621,22 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
         rig_fixture::SLOPE.with(|s| s.set(Some([at[0], at[1], 0.0, rise])));
     }
     let ground = |p: V3| rig_fixture::floor_at(p).unwrap_or(at[2] - cfg.below);
+    if !cfg.boxes.is_empty() {
+        rig_fixture::WORLD.with(|w| *w.borrow_mut() = Some(cfg.boxes.clone()));
+    }
+    rig_fixture::ARMED.with(|a| a.set(cfg.armed));
+    let heavy = if cfg.heavy > 0.0 { cfg.heavy } else { 4.8 };
+    let knock = if length(cfg.knock) > 0.0 {
+        cfg.knock
+    } else {
+        [0.0, -1.0, 0.0]
+    };
+    let light = if cfg.light > 0.0 { cfg.light } else { 0.32 };
+    let pellets = cfg.pellets.max(1);
+    let mut hand_spots: [Option<V3>; 2] = [None, None];
+    let mut hand_off = [false; 2];
+    let mut upright_at: Option<f32> = None;
+    let mut last_bodies: Option<Vec<V3>> = None;
     f.game_update();
     f.make_character();
     crate::active_ragdoll::clear();
@@ -2620,12 +2698,13 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
     };
     let mut t = 0.0f32;
     // The script's state: the next hit's time and speed, the light hits left, when it stood.
-    let mut next_hit: Option<(f32, f32)> = Some((0.4, 4.8));
+    let mut next_hit: Option<(f32, f32)> = Some((0.4, heavy));
     let mut lights_left = 3u32;
     let mut stage = 0u32;
     let mut last_hit = 0.0f32;
     let mut last_steps = 0u32;
     let mut hit_steps_from = 0u32;
+    let mut catches_from = 0usize;
     let mut was_down = false;
     let mut downed_at = 0.0f32;
     let mut down_refs: Vec<(f32, V3)> = Vec::new();
@@ -2687,16 +2766,32 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
                 run.light_steps = run
                     .light_steps
                     .max(steps_now.saturating_sub(hit_steps_from));
+                if speed < 1.0 {
+                    if let Some(p) = probe(ACTOR) {
+                        run.catches.extend(p.catches.iter().skip(catches_from));
+                    }
+                }
                 claim(&mut f.e, ACTOR);
                 let spine = model().body("Bip01 Spine2").unwrap();
                 let chest = f.world_of(f.at[body_nodes[spine]]).1;
-                hit(
-                    &mut f.e,
-                    ACTOR,
-                    speed * model().mass,
-                    add(chest, [0.0, 6.0, 2.0]),
-                    [0.0, -1.0, 0.0],
-                );
+                let n = if speed < 1.0 { pellets } else { 1 };
+                for i in 0..n {
+                    // A burst's pellets a few units apart over the chest.
+                    let a = i as f32 * 2.4;
+                    let spread = if n > 1 {
+                        [4.0 * a.cos(), 0.0, 4.0 * a.sin()]
+                    } else {
+                        [0.0; 3]
+                    };
+                    hit(
+                        &mut f.e,
+                        ACTOR,
+                        speed / n as f32 * model().mass,
+                        add(add(chest, [0.0, -knock[1] * 6.0, 2.0]), spread),
+                        knock,
+                    );
+                }
+                catches_from = probe(ACTOR).map_or(0, |p| p.catches.len());
                 last_hit = t;
                 hit_steps_from = state(ACTOR).map_or(0, |s| s.1);
                 if speed < 1.0 {
@@ -2773,6 +2868,89 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
                 last_spin = spin_now;
             }
             ragdoll_pose = f.worlds();
+            // The bodies against the world's boxes, and their speed.
+            if let Some((p, _)) = drawn(ACTOR) {
+                let k = ragdoll_core::np_body::UNITS;
+                let mut centres = Vec::new();
+                for (b, def) in model().bodies.iter().enumerate() {
+                    let (r, x) = p[b];
+                    let ends: Vec<V3> = def
+                        .ends
+                        .iter()
+                        .map(|e| add(x, apply_m(&r, scale(*e, k))))
+                        .collect();
+                    let mid = scale(add(ends[0], ends[ends.len() - 1]), 0.5);
+                    centres.push(mid);
+                    let rad = def.radius * k;
+                    for e in ends.iter().copied().chain([mid]) {
+                        for (lo, hi) in &cfg.boxes {
+                            let depth = (0..3)
+                                .map(|i| (e[i] - (lo[i] - rad)).min(hi[i] + rad - e[i]))
+                                .fold(f32::INFINITY, f32::min);
+                            if depth > run.inside_most {
+                                run.inside_most = depth;
+                                run.inside_at = format!(
+                                    "{} {:.2} s after the hit, downed {down}, {:?}, at {:?}",
+                                    def.node,
+                                    t - last_hit,
+                                    label_of(ACTOR),
+                                    e.map(|x| x.round())
+                                );
+                            }
+                        }
+                    }
+                }
+                if let Some(was) = &last_bodies {
+                    // Past the hit's own (its push, the fall it causes): standing, or downed
+                    // past a second (settled, rising).
+                    if t - last_hit > 0.3 && (!down || t - downed_at > 1.0) {
+                        for (c, w) in centres.iter().zip(was) {
+                            run.fast_most = run.fast_most.max(length(sub(*c, *w)) / dt / k);
+                        }
+                    }
+                }
+                last_bodies = Some(centres);
+            }
+            if let Some(pr) = probe(ACTOR) {
+                let weight = model().mass * ragdoll_core::np_body::GRAVITY;
+                if pr.hands.iter().any(|h| h.is_some()) {
+                    run.planted_frames += 1;
+                    if !pr.lifting {
+                        run.hand_share = run
+                            .hand_share
+                            .max((pr.hand_load[0] + pr.hand_load[1]) / weight);
+                    }
+                }
+                for side in 0..2 {
+                    if pr.hands[side].is_some() && Some(side) == pr.weapon_side {
+                        run.weapon_planted += 1;
+                    }
+                    // A bounce: a landed hand's load gone and back while it stays planted.
+                    match (pr.hands[side], pr.landed[side]) {
+                        (Some(_), true) if pr.hand_load[side] <= 1.0 => hand_off[side] = true,
+                        (Some(_), true) if hand_off[side] => {
+                            run.hand_bounce += 1;
+                            hand_off[side] = false;
+                        }
+                        _ => {}
+                    }
+                    if pr.hands[side].is_none() {
+                        hand_off[side] = false;
+                    }
+                    match (pr.hands[side], pr.landed[side]) {
+                        (Some(_), true) => {
+                            let at = pr.hand_at[side];
+                            let low = pr.hand_low[side];
+                            let spot = *hand_spots[side].get_or_insert([at[0], at[1], low]);
+                            run.hand_slip =
+                                run.hand_slip
+                                    .max(length([at[0] - spot[0], at[1] - spot[1], 0.0]));
+                            run.hand_lift = run.hand_lift.max(low - spot[2]);
+                        }
+                        _ => hand_spots[side] = None,
+                    }
+                }
+            }
             if !down && phase_now != ragdoll_core::np_balance::Phase::Falling {
                 if let Some(n) = floor_force(ACTOR) {
                     run.floor_most = run.floor_most.max(n / weight);
@@ -2784,12 +2962,38 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
             last_steps = steps_now;
         } else {
             last_drawn = None;
+            last_bodies = None;
+        }
+        // The reference against the boxes (the actor's capsule's radius in).
+        {
+            let rf = f.reference();
+            if ragdoll_core::flinch::dot(rf, knock) > ragdoll_core::flinch::dot(run.ref_end, knock)
+            {
+                run.ref_end = rf;
+            }
+            let radius = crate::knockdown::capsule(&mut f.e, ACTOR);
+            for (lo, hi) in &cfg.boxes {
+                for h in [12.0f32, 30.0] {
+                    let p = add(rf, [0.0, 0.0, h]);
+                    if p[2] < lo[2] || p[2] > hi[2] {
+                        continue;
+                    }
+                    let depth = (0..2)
+                        .map(|i| (p[i] - (lo[i] - radius)).min(hi[i] + radius - p[i]))
+                        .fold(f32::INFINITY, f32::min);
+                    run.ref_inside = run.ref_inside.max(depth);
+                }
+            }
         }
         if down {
             if !was_down {
                 run.downed += 1;
                 downed_at = t;
                 down_refs.clear();
+                upright_at = None;
+            }
+            if upright_at.is_none() && label_of(ACTOR) == Some("standing") && t - downed_at > 0.5 {
+                upright_at = Some(t);
             }
             down_refs.push((t, f.reference()));
             // Its strength gone (it cannot push itself up), its rises given up once it lies still
@@ -2809,19 +3013,25 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
             }
         } else if was_down && owns(ACTOR) {
             run.stood += 1;
+            if run.first_stood.is_none() {
+                run.first_stood = Some(t - downed_at);
+            }
+            if let Some(u) = upright_at {
+                run.upright_still = run.upright_still.max(t - u);
+            }
             if stage == 0 {
                 stage = 1;
-                next_hit = Some((t + 1.0, 0.32));
+                next_hit = Some((t + 1.0, light));
             }
         }
         if stage == 1 && next_hit.is_none() && t - last_hit >= 1.5 && !down {
             if lights_left > 0 {
                 lights_left -= 1;
                 if lights_left > 0 {
-                    next_hit = Some((t, 0.32));
+                    next_hit = Some((t, light));
                 } else if cfg.give_up {
                     stage = 2;
-                    next_hit = Some((t, 4.8));
+                    next_hit = Some((t, heavy));
                 }
             }
         }
@@ -2839,7 +3049,16 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
         crate::active_ragdoll::after_draw(&mut f.e);
         crate::active_ragdoll::unwrite(&mut f.e);
         for l in room_events::take() {
-            for key in ["[np fall]", "[np hand-over]", "[np jump]", "[np outcome]"] {
+            for key in [
+                "[np fall]",
+                "[np hand-over]",
+                "[np jump]",
+                "[np outcome]",
+                "[np wall]",
+                "[np move]",
+                "[np choice]",
+                "[np floor load]",
+            ] {
                 if let Some(i) = l.find(key) {
                     run.notes
                         .push(l[i..].trim_end_matches(['"', '}']).to_string());
@@ -2876,6 +3095,17 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
         }
     }
     run.jumps = run.notes.iter().filter(|n| n.contains("[np jump]")).count() as u32;
+    run.wall_logged = run.notes.iter().filter(|n| n.contains("[np wall]")).count() as u32;
+    run.moves = run.notes.iter().filter(|n| n.contains("[np move]")).count() as u32;
+    run.wall_most = run
+        .notes
+        .iter()
+        .filter_map(|n| {
+            let i = n.find("a wall at most ")? + "a wall at most ".len();
+            n[i..].split(' ').next()?.parse::<f32>().ok()
+        })
+        .fold(0.0, f32::max);
+
     if down_time > 0.0 {
         run.game_speed = game_moved / down_time;
     }
@@ -2912,6 +3142,8 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
     room_events::set_on(false);
     AI_BUSY.store(false, Ordering::Relaxed);
     rig_fixture::SLOPE.with(|s| s.set(None));
+    rig_fixture::WORLD.with(|w| *w.borrow_mut() = None);
+    rig_fixture::ARMED.with(|a| a.set(false));
     crate::active_ragdoll::clear();
     crate::knockdown::clear();
     crate::gunplay::set_tuning(was);
@@ -2936,6 +3168,7 @@ fn np_full_cycle_with_a_racing_animation() {
         give_up: true,
         seconds: 30.0,
         arms: 0.0,
+        ..Default::default()
     });
     eprintln!("RESULT np full cycle: {r:#?}");
     assert_eq!(r.downed, 2, "{r:#?}");
@@ -3002,6 +3235,7 @@ fn np_slope_walking_with_a_racing_animation() {
         give_up: false,
         seconds: 18.0,
         arms: 1.0,
+        ..Default::default()
     });
     eprintln!("RESULT np slope cycle: {r:#?}");
     assert!(r.downed >= 1 && r.stood >= 1, "{r:#?}");
@@ -3039,4 +3273,365 @@ fn np_slope_walking_with_a_racing_animation() {
         r.drawn_off
     );
     assert_eq!(r.jumps, 0, "the animation jumped {} times", r.jumps);
+}
+
+/// A box about the reference (units): `x` and `y` its extents, standing `h` on the collision
+/// floor `below` under the reference.
+fn block(x: (f32, f32), y: (f32, f32), below: f32, h: f32) -> (V3, V3) {
+    ([x.0, y.0, -below - 20.0], [x.1, y.1, -below + h])
+}
+
+/// What [`barrier_runs`] found wrong (none: all held).
+fn barrier_runs(worlds: Vec<(&str, Vec<(V3, V3)>, bool)>) -> Vec<String> {
+    let mut failed = Vec::new();
+    for (name, boxes, wall) in worlds {
+        let r = cycle_run(&Cycle {
+            below: 1.0,
+            seconds: 14.0,
+            boxes,
+            ..Default::default()
+        });
+        eprintln!(
+            "RESULT np barrier {name}: downed {}, stood {} (first after {:?} s), the deepest body \
+             inside {:.2} u ({}), a wall at most {:.0} N, {} [np wall] lines, the floor at most \
+             {:.2} body weights standing, the fastest body past the hit {:.2} m/s, the reference \
+             inside {:.2} u, moves swept {}",
+            r.downed,
+            r.stood,
+            r.first_stood,
+            r.inside_most,
+            r.inside_at,
+            r.wall_most,
+            r.wall_logged,
+            r.floor_most,
+            r.fast_most,
+            r.ref_inside,
+            r.moves
+        );
+        if r.downed == 0 || r.stood == 0 {
+            failed.push(format!("{name}: downed {}, stood {}", r.downed, r.stood));
+        }
+        if r.inside_most > 2.0 {
+            failed.push(format!("{name}: a body {:.2} u inside", r.inside_most));
+        }
+        if wall && (r.wall_most <= 0.0 || r.wall_logged == 0) {
+            failed.push(format!(
+                "{name}: a wall's load {:.0} N, {} lines",
+                r.wall_most, r.wall_logged
+            ));
+        }
+        if r.floor_most >= 3.0 {
+            failed.push(format!(
+                "{name}: the floor {:.2} body weights",
+                r.floor_most
+            ));
+        }
+        if r.fast_most > 6.0 {
+            failed.push(format!("{name}: a body at {:.2} m/s", r.fast_most));
+        }
+        if r.ref_inside > 1.0 {
+            failed.push(format!(
+                "{name}: the reference {:.2} u inside",
+                r.ref_inside
+            ));
+        }
+    }
+    failed
+}
+
+/// Patrick's 10:08 clip: knocked down across a 12 unit slab's edge (the walking AI, the game's
+/// mover, the racing animation, frame seconds 0.008 to 0.038, FNV's skeleton): no body more than
+/// 2 units inside it (one plane through the samples tilted at its edge), the floor under 3 body
+/// weights standing, no body faster than 6 m/s but in the fall the hit causes, the reference's
+/// capsule never in it; it stands again.
+#[test]
+fn np_a_slab_edge_holds_the_body() {
+    let failed = barrier_runs(vec![(
+        "slab",
+        vec![block((-150.0, 150.0), (-300.0, -48.0), 1.0, 12.0)],
+        false,
+    )]);
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// Patrick's 10:08 clip: knocked down into a wall and against a crate: no body more than 2 units
+/// inside either and a wall's load and its `[np wall]` line (both hold now), but standing again
+/// by them is open: by the wall the floor reads 3.5 body weights once standing, by the crate its
+/// rises are given up (three) and it goes to the game's ragdoll.
+#[test]
+#[ignore = "open: rising beside a wall or a crate (see the doc)"]
+fn np_walls_and_crates_hold_the_body() {
+    let failed = barrier_runs(vec![
+        (
+            "wall",
+            vec![block((-120.0, 120.0), (-62.0, -50.0), 1.0, 150.0)],
+            true,
+        ),
+        (
+            "crate",
+            vec![block((-22.0, 22.0), (-76.0, -40.0), 1.0, 50.0)],
+            true,
+        ),
+    ]);
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// Downed by a wall off the reference (a 4.8 m/s hit carries it back and aside, against a wall):
+/// the reference's move to it at the rise's end is swept (`[np move]` when it meets or nudges
+/// off something) and the actor's capsule never lies in the wall, ending clear of it; it stands.
+/// Open: lying against the wall its rises are given up, so the move is never made.
+#[test]
+#[ignore = "open: rising beside a wall (see the doc)"]
+fn np_the_reference_moves_clear_of_a_wall() {
+    let below = 1.0;
+    let r = cycle_run(&Cycle {
+        below,
+        seconds: 12.0,
+        knock: [0.45, -0.89, 0.0],
+        boxes: vec![block((75.0, 89.0), (-300.0, 60.0), below, 150.0)],
+        ..Default::default()
+    });
+    eprintln!(
+        "RESULT np reference by a wall: downed {}, stood {}, the reference furthest at ({:.1}, {:.1}), \
+         at most {:.2} u inside the wall (the capsule's radius in), moves swept {}, the deepest body \
+         inside {:.2} u ({}); {:?}",
+        r.downed, r.stood, r.ref_end[0], r.ref_end[1], r.ref_inside, r.moves, r.inside_most,
+        r.inside_at,
+        r.notes.iter().filter(|n| n.contains("[np move]")).collect::<Vec<_>>()
+    );
+    assert!(r.downed >= 1 && r.stood >= 1, "{r:#?}");
+    assert!(r.ref_end[0] < 75.0, "through the wall: {:?}", r.ref_end);
+    assert!(
+        r.ref_inside <= 1.0,
+        "the capsule {:.2} u into the wall",
+        r.ref_inside
+    );
+    assert!(r.inside_most <= 2.0, "a body {:.2} u inside", r.inside_most);
+    assert!(
+        r.ref_end[1] < -60.0,
+        "the reference never went to the body: furthest {:?}",
+        r.ref_end
+    );
+}
+
+/// Patrick's 10:10 clip: the whole cycle at 4.6 m/s on flat ground and beside a 12 unit slab:
+/// it stands within 8 s of going down on its first try (no rise given up), never handed to the
+/// game's ragdoll, and once upright it is still (its centre under 0.4 m/s against its ground)
+/// within 1 s.
+#[test]
+fn np_rises_on_its_first_try() {
+    let below = 1.0;
+    let mut failed = Vec::new();
+    for (name, boxes) in [
+        ("flat", Vec::new()),
+        (
+            "by the slab",
+            vec![block((40.0, 200.0), (-300.0, 300.0), below, 12.0)],
+        ),
+    ] {
+        let r = cycle_run(&Cycle {
+            below,
+            seconds: 12.0,
+            heavy: 4.6,
+            boxes,
+            ..Default::default()
+        });
+        let given_up = r
+            .notes
+            .iter()
+            .any(|n| n.contains("[np choice]") && !n.contains("rises given up 0"));
+        eprintln!(
+            "RESULT np first try {name}: downed {}, stood after {:?} s, a rise given up {given_up}, \
+             upright to still {:.2} s, handed {}, clamps {}",
+            r.downed, r.first_stood, r.upright_still, r.handed, r.clamps
+        );
+        if r.downed == 0 || !r.first_stood.is_some_and(|s| s <= 8.0) {
+            failed.push(format!("{name}: stood after {:?} s", r.first_stood));
+        }
+        if given_up {
+            failed.push(format!("{name}: a rise given up"));
+        }
+        if r.handed {
+            failed.push(format!("{name}: handed to the game's ragdoll"));
+        }
+        if r.upright_still > 1.0 {
+            failed.push(format!(
+                "{name}: {:.2} s upright before still",
+                r.upright_still
+            ));
+        }
+        if r.clamps != 0 {
+            failed.push(format!("{name}: {} clamps", r.clamps));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// Patrick's 10:08 clip: light hits of 0.25 to 0.74 m/s and 7-pellet bursts (one frame, 0.5
+/// m/s in all) on the walking AI: none falls it, no fall with the capture point 0.15 m or less
+/// outside the feet; every catch at least 15 cm and its landing covering the capture point; each
+/// burst one outcome of its 7 pellets (none "stood" over no time).
+#[test]
+fn np_light_hits_and_bursts_step_right() {
+    let mut failed = Vec::new();
+    for (light, pellets) in [(0.25f32, 1u32), (0.5, 1), (0.74, 1), (0.5, 7)] {
+        let r = cycle_run(&Cycle {
+            below: 1.0,
+            seconds: 14.0,
+            light,
+            pellets,
+            ..Default::default()
+        });
+        let outcomes: Vec<&String> = r
+            .notes
+            .iter()
+            .filter(|n| n.contains("[np outcome]") && n.contains(&format!("/ {:.2} m/s", light)))
+            .collect();
+        let low_falls: Vec<&String> = r
+            .notes
+            .iter()
+            .filter(|n| n.contains("[np fall] steps"))
+            .filter(|n| {
+                n.split("the capture point ")
+                    .nth(1)
+                    .and_then(|x| x.split(' ').next())
+                    .and_then(|x| x.parse::<f32>().ok())
+                    .is_some_and(|o| o <= 0.15)
+            })
+            .collect();
+        eprintln!(
+            "RESULT np light {light} m/s x{pellets}: hits {}, fell {}, catches {:?}, outcomes {:?}",
+            r.light_hits,
+            r.light_fell,
+            r.catches
+                .iter()
+                .map(|c| format!("{:.2} m / {:.3} m out", c.0, c.1))
+                .collect::<Vec<_>>(),
+            outcomes
+                .iter()
+                .map(|o| o
+                    .split(" -> ")
+                    .nth(1)
+                    .unwrap_or("")
+                    .chars()
+                    .take(40)
+                    .collect::<String>())
+                .collect::<Vec<_>>()
+        );
+        if r.light_hits == 0 || r.light_fell || !low_falls.is_empty() {
+            failed.push(format!(
+                "{light} x{pellets}: hits {}, fell {}, {low_falls:?}",
+                r.light_hits, r.light_fell
+            ));
+        }
+        for &(reach, covers) in &r.catches {
+            if reach < ragdoll_core::np_balance::STEP_LEAST - 1e-3
+                || covers > ragdoll_core::np_balance::MARGIN
+            {
+                failed.push(format!(
+                    "{light} x{pellets}: a catch {reach:.3} m, {covers:.3} m out"
+                ));
+            }
+        }
+        if outcomes.len() < r.light_hits as usize {
+            failed.push(format!(
+                "{light} x{pellets}: {} outcomes for {} hits",
+                outcomes.len(),
+                r.light_hits
+            ));
+        }
+        for o in &outcomes {
+            if !o.contains(&format!("({pellets} pellets)")) || o.contains("over 0.00 s") {
+                failed.push(format!("{light} x{pellets}: {o}"));
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// The get-ups the arms tests run: down on its face and on its back (falling forward, back), on
+/// flat ground and on a 20 degree slope, unarmed and with a weapon drawn.
+fn arms_runs() -> Vec<(&'static str, bool, CycleRun)> {
+    [
+        ("on its face, flat", [0.0, 1.0, 0.0], 0.0f32, false),
+        ("on its back, flat", [0.0, -1.0, 0.0], 0.0, false),
+        ("on its face, slope", [0.0, 1.0, 0.0], 20.0, false),
+        ("on its back, slope", [0.0, -1.0, 0.0], 20.0, false),
+        ("on its back, armed", [0.0, -1.0, 0.0], 0.0, true),
+    ]
+    .into_iter()
+    .map(|(name, knock, slope, armed)| {
+        let r = cycle_run(&Cycle {
+            slope,
+            below: if slope > 0.0 { 7.0 } else { 1.0 },
+            seconds: 10.0,
+            knock,
+            armed,
+            ..Default::default()
+        });
+        eprintln!(
+            "RESULT np arms {name}: downed {}, stood after {:?} s, hands planted {} frames, \
+             carrying at most {:.2} of its weight, slid {:.2} u, bounced {}, rose {:.2} u, the \
+             weapon hand planted {} frames",
+            r.downed,
+            r.first_stood,
+            r.planted_frames,
+            r.hand_share,
+            r.hand_slip,
+            r.hand_bounce,
+            r.hand_lift,
+            r.weapon_planted
+        );
+        (name, armed, r)
+    })
+    .collect()
+}
+
+/// The arms' push in a get-up (Patrick's 10:08 and 10:10 clips: the arms passive at its sides),
+/// in each of [`arms_runs`]: the hands put down carry a real share of the body's weight while the
+/// torso comes up (a tenth or more for each arm that pushes: both unarmed, the free one armed),
+/// the weapon's hand never pushes (the free arm reaches), and it stands.
+#[test]
+fn np_the_arms_push_it_up() {
+    let mut failed = Vec::new();
+    for (name, armed, r) in arms_runs() {
+        if r.downed == 0 || r.first_stood.is_none() {
+            failed.push(format!(
+                "{name}: downed {}, stood {:?}",
+                r.downed, r.first_stood
+            ));
+        }
+        let need = if armed { 0.1 } else { 0.2 };
+        if r.hand_share < need {
+            failed.push(format!("{name}: the hands carried {:.2}", r.hand_share));
+        }
+        if armed && r.weapon_planted > 0 {
+            failed.push(format!(
+                "{name}: the weapon hand planted {}",
+                r.weapon_planted
+            ));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// A planted hand never slides (2 units at its node) nor bounces (its load gone and back while
+/// planted) in [`arms_runs`]. Open: the torso's move toward the feet drags a hand planted beside
+/// the shoulder 14 to 35 units across the ground (its hold 3000 N/m, at most 400 N), and on the
+/// slope a hand's load comes and goes 3 to 8 times; a stiffer hold and a let-go when dragged or
+/// lifted stopped both but changed the rises enough to break the cycle's own tests.
+#[test]
+#[ignore = "open: planted hands slide and, on a slope, bounce (see the doc)"]
+fn np_planted_hands_hold_still() {
+    let bad: Vec<String> = arms_runs()
+        .into_iter()
+        .filter(|(_, _, r)| r.hand_slip > 2.0 || r.hand_bounce > 0)
+        .map(|(name, _, r)| {
+            format!(
+                "{name}: slid {:.2} u, bounced {}",
+                r.hand_slip, r.hand_bounce
+            )
+        })
+        .collect();
+    assert!(bad.is_empty(), "{bad:#?}");
 }
