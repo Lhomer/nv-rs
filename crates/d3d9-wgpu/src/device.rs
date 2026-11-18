@@ -978,6 +978,13 @@ struct SunState {
     /// Draws not kept: not opaque; (kept: cut-outs); not kept: no pipeline, no bounds, no
     /// `ModelViewProj` (or skinned), `DrawPrimitiveUP`.
     rejected: [u64; 6],
+    /// The frame's lookups since the last log line: given to the lit draws, ended by a colour and
+    /// depth clear of another target after the scene's, and none for want of a map.
+    lookups: [u64; 3],
+    /// The world the casters were kept in ([`Device::sun_world`]) and how often a new one made
+    /// them forgotten (for the log).
+    world: Option<u32>,
+    forgotten: u64,
     map_draws: u64,
     took: std::time::Duration,
     said: u64,
@@ -1000,6 +1007,19 @@ impl SunState {
     /// cost for nothing), before its depth-only clear.
     fn recording(&self, now: u64) -> bool {
         self.ran == Some(now) && !self.closed
+    }
+
+    /// Another world: the casters kept, the frame's list and its camera go, and every map is to
+    /// be drawn again before the lit draws use it.
+    fn forget_world(&mut self) {
+        self.cache = sun_shadow::Cache::default();
+        self.lists.clear();
+        self.prev = None;
+        self.moving = 0;
+        self.rewritten.clear();
+        self.gpu.drawn = [None; sun_shadow::CASCADES];
+        self.light = None;
+        self.forgotten += 1;
     }
 
     fn new(device: &wgpu::Device) -> SunState {
@@ -1032,6 +1052,9 @@ impl SunState {
             moved: [0; sun_shadow::CASCADES],
             touched: [0; sun_shadow::CASCADES],
             rejected: [0; 6],
+            lookups: [0; 3],
+            world: None,
+            forgotten: 0,
             map_draws: 0,
             took: std::time::Duration::ZERO,
             said: 0,
@@ -6789,7 +6812,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         if self.presents >= sun.said + 300 || sun.said == 0 {
             let n = sun.frames.max(1) as f64;
             eprintln!(
-                "NV_D3D9 wgpu: sun shadows at present {}: {:.0} casters on the scene, {:.0} kept ({} moving), {:.2} still maps drawn a frame ({:.0} caster draws), {:.3} ms a frame on this thread; a frame {:.1} added, let go {:.1} written or released, {:.1} far, {:.1} moved or not drawn in view; still maps drawn for moving {:?}, for a changed caster {:?} times; draws a frame (not opaque, cut-outs kept, no pipeline, no bounds, no ModelViewProj or skinned, UP) {:?}; sun toward ({:.2}, {:.2}, {:.2}), cascades to {:?} units (texels {:?})",
+                "NV_D3D9 wgpu: sun shadows at present {}: {:.0} casters on the scene, {:.0} kept ({} moving), {:.2} still maps drawn a frame ({:.0} caster draws), {:.3} ms a frame on this thread; a frame {:.1} added, let go {:.1} written or released, {:.1} far, {:.1} moved or not drawn in view; still maps drawn for moving {:?}, for a changed caster {:?} times; draws a frame (not opaque, cut-outs kept, no pipeline, no bounds, no ModelViewProj or skinned, UP) {:?}; sun toward ({:.2}, {:.2}, {:.2}), cascades to {:?} units (texels {:?}); lookups (given, ended by another target's clear, no maps yet) {:?}; lit variants waiting, failed {:?}; casters forgotten for a new world {} times",
                 self.presents,
                 sun.casters as f64 / n,
                 sun.kept as f64 / n,
@@ -6809,6 +6832,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                 frame.to_sun[2],
                 cascades.map(|c| c.far.round()),
                 cascades.map(|c| (c.texel * 100.0).round() / 100.0),
+                sun.lookups,
+                (self.sun_pending.len(), self.sun_failed.len()),
+                sun.forgotten,
             );
             sun.said = self.presents;
             sun.frames = 0;
@@ -6822,11 +6848,44 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             sun.moved = [0; sun_shadow::CASCADES];
             sun.touched = [0; sun_shadow::CASCADES];
             sun.rejected = [0; 6];
+            sun.lookups = [0; 3];
         }
     }
 
     /// Waits until every sun-shadow variant on its way is made and keeps it (tests: the draws after
     /// take the variants).
+    /// The sun shadows' variants made since the last frame, into the pipelines' cache, whether
+    /// their draw comes again or not (each present). A variant is waited for only by its own key,
+    /// so one whose draw never came back (a state seen for a frame: a load's fade, a menu)
+    /// held its place among the [`SUN_VARIANTS_AT_ONCE`] for good: after six such, no lit draw
+    /// got its variant again for the rest of the run (the Strip after a coc from Doc's house: no
+    /// shadow at all, runs pf-s12a/s12g/s12g2 of 2026-11-17).
+    fn collect_sun_variants(&mut self) {
+        if self.sun_pending.is_empty() {
+            return;
+        }
+        let keys: Vec<PipeKey> = self.sun_pending.keys().cloned().collect();
+        for key in keys {
+            let Some(rx) = self.sun_pending.get(&key) else {
+                continue;
+            };
+            match rx.try_recv() {
+                Ok(Some(p)) => {
+                    self.sun_pending.remove(&key);
+                    self.pipelines.insert(key, (Some(p), 0));
+                }
+                Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.sun_pending.remove(&key);
+                    self.sun_failed.insert(key);
+                    self.warn(
+                        "sun shadows: a lit draw's variant could not be made (drawn without)",
+                    );
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
+
     pub fn wait_for_sun_variants(&mut self) {
         for (key, rx) in std::mem::take(&mut self.sun_pending) {
             match rx.recv() {
@@ -6968,6 +7027,22 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         false
     }
 
+    /// The world the camera is in ([`sun_shadow::WORLD_STATE`], recorded at a colour and depth
+    /// clear before the camera's words): when it is another than the one the casters were kept in,
+    /// they are forgotten (and the frame's list with them), and every map is drawn again from what
+    /// the new world draws.
+    pub(crate) fn sun_world(&mut self, words: &[u32]) {
+        let Some(&world) = words.first() else {
+            return;
+        };
+        if let Some(s) = &mut self.sun {
+            if s.world.is_some_and(|w| w != world) {
+                s.forget_world();
+            }
+            s.world = Some(world);
+        }
+    }
+
     /// The camera words recorded at the scene's clear ([`sun_shadow::VIEW_STATE`]), for
     /// [`Device::sun_lookup`].
     pub(crate) fn sun_begin_view(&mut self, words: &[u32]) {
@@ -6996,7 +7071,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
     }
 
     fn sun_lookup_with(&mut self, sun: &mut SunState, words: &[u32]) {
-        sun.light = None;
+        let had = sun.light.take().is_some();
         let (Some(frame), Some(view)) =
             (sun_shadow::Frame::from_words(words), sun.begin_view.take())
         else {
@@ -7014,7 +7089,12 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             && back == Some((rt.width, rt.height))
             && (ds.width, ds.height, ds.samples) == (rt.width, rt.height, rt.samples)
             && !rt.format.depth;
+        // Another target's colour and depth clear (a reflection) after the scene's ends the lookup
+        // for the rest of the frame (counted for the log).
         if !scene {
+            if had {
+                sun.lookups[1] += 1;
+            }
             return;
         }
         if sun.processed != Some(self.presents) {
@@ -7029,8 +7109,10 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             sun.closed = false;
         }
         if sun.gpu.drawn.iter().any(Option::is_none) {
+            sun.lookups[2] += 1;
             return;
         }
+        sun.lookups[0] += 1;
         let frustum = [view.left, view.right, view.bottom, view.top];
         let s = sun_shadow::splits(view.near, sun_shadow::FAR.min(view.far));
         let axes = frame.axes();
@@ -7663,6 +7745,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         self.last_present = Some(now);
         // Listed pipelines whose shaders the game has now made, made before its next frame.
         self.prepare_listed();
+        self.collect_sun_variants();
         self.end_pass();
         self.presents += 1;
         // The sun shadows: a frame's light list waits for the next frame's scene clear (where the
@@ -8696,6 +8779,85 @@ pub fn hardware_adapter() -> Option<String> {
             .map(|a| a.get_info())
             .find(|i| i.device_type != wgpu::DeviceType::Cpu)
             .map(|i| format!("{} ({:?})", i.name, i.backend))
+    })
+}
+
+/// What the Direct3D 9 layer's machine table off Windows takes from the card ([`card_facts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardFacts {
+    pub name: String,
+    pub vendor: u32,
+    pub device: u32,
+    pub driver: String,
+    pub driver_info: String,
+    /// The sample counts the device will make a surface with: those [`common_sample_count`] keeps
+    /// as they are for the back buffer's format (X8R8G8B8), so every format of the multisampled
+    /// family and the occlusion count's target take them.
+    pub sample_counts: Vec<u32>,
+    /// `TEXTURE_COMPRESSION_BC`: the game's DXT textures.
+    pub bc: bool,
+    /// `FLOAT32_BLENDABLE`.
+    pub float32_blendable: bool,
+}
+
+/// The sample counts of 1 to 16 a device of these `features` keeps as asked for `target`
+/// ([`common_sample_count`], with `supported` the adapter's answer).
+fn kept_sample_counts(
+    target: wgpu::TextureFormat,
+    supported: impl Fn(wgpu::TextureFormat, u32) -> bool,
+) -> Vec<u32> {
+    (1..=16)
+        .filter(|&n| n == 1 || common_sample_count(target, n, &supported) == n)
+        .collect()
+}
+
+/// The graphics card the game's device will most likely be made on, on the APIs `NV_WGPU_BACKEND`
+/// allows: on the first API, in [`apis`]' order, that has a card, a separate card before one built
+/// into the processor, then a virtual one, then any other, as a high-performance request takes
+/// them (the device itself is chosen when the game makes it, with its window). The software
+/// adapter only when `NV_WGPU_BACKEND=software` asks for it. `None` when there is no card.
+pub fn card_facts() -> Option<CardFacts> {
+    let (tries, software) = apis(std::env::var("NV_WGPU_BACKEND").ok().as_deref());
+    let rank = |t: wgpu::DeviceType| match t {
+        wgpu::DeviceType::DiscreteGpu => 0,
+        wgpu::DeviceType::IntegratedGpu => 1,
+        wgpu::DeviceType::VirtualGpu => 2,
+        wgpu::DeviceType::Other => 3,
+        wgpu::DeviceType::Cpu => 4,
+    };
+    tries.into_iter().find_map(|backends| {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = block_on(instance.enumerate_adapters(backends))
+            .into_iter()
+            .filter(|a| software == (a.get_info().device_type == wgpu::DeviceType::Cpu))
+            .min_by_key(|a| rank(a.get_info().device_type))?;
+        let info = adapter.get_info();
+        let features = adapter.features();
+        // As the device answers it (`Device::samples_supported`): the adapter's own format
+        // features where the device takes them, else the guaranteed ones.
+        let supported = |f: wgpu::TextureFormat, n: u32| {
+            let flags =
+                if features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
+                    adapter.get_texture_format_features(f)
+                } else {
+                    f.guaranteed_format_features(features)
+                };
+            flags.flags.sample_count_supported(n)
+        };
+        let target = format::format(22).map_or(wgpu::TextureFormat::Bgra8Unorm, |f| f.wgpu);
+        Some(CardFacts {
+            name: info.name,
+            vendor: info.vendor,
+            device: info.device,
+            driver: info.driver,
+            driver_info: info.driver_info,
+            sample_counts: kept_sample_counts(target, supported),
+            bc: features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
+            float32_blendable: features.contains(wgpu::Features::FLOAT32_BLENDABLE),
+        })
     })
 }
 
@@ -9925,6 +10087,18 @@ mod tests {
         // The occlusion count's 16-bit target lacks 8x: 4x, so counting still joins the pass.
         let count_4x = |f: F, c: u32| !(f == COUNT_FORMAT_16 && c > 4);
         assert_eq!(common_sample_count(F::Bgra8Unorm, 8, count_4x), 4);
+    }
+
+    /// The counts the machine table answers off Windows are those the device keeps as asked: a
+    /// count only the 16-bit float target lacks is not among them; counts the formats lack too.
+    #[test]
+    fn the_counts_answered_are_the_counts_the_device_keeps() {
+        let float_4x = |f: F, c: u32| c <= 8 && !(f == F::Rgba16Float && c > 4);
+        assert_eq!(kept_sample_counts(F::Bgra8Unorm, float_4x), [1, 2, 4]);
+        let r16_2x = |f: F, c: u32| c <= 16 && !(f == F::R16Float && c > 2);
+        assert_eq!(kept_sample_counts(F::Bgra8Unorm, r16_2x), [1, 2]);
+        let all = |_: F, c: u32| [1, 2, 4, 8].contains(&c);
+        assert_eq!(kept_sample_counts(F::Bgra8Unorm, all), [1, 2, 4, 8]);
     }
 
     /// The alpha test's bounds give the alphas at which the real Direct3D 9 here changes its

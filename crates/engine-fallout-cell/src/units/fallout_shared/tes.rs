@@ -1979,7 +1979,19 @@ pub fn fn_00451ef0(e: &mut Engine, this: Ptr<TES>, refr: Ptr, cell: Ptr, source:
         let player: u32 = e.global(PLAYER_CHARACTER);
         if r != player {
             let form_id = typed_call!(leaf::FAMILY, 0x0084_e3a0, leaf::word_at_c(e, r));
-            let node_3d = e.call(0x0043_fcd0, &args![r]).u32();
+            // JIP LN's O17 (`bNPCWeaponMods`, `WriteRelJump(0x45234E, DoOnLoadActorHook)`; O18
+            // shares the place): the handler deals the NPC's weapon mods and answers the node it
+            // reads itself (its render state's) in place of `0043fcd0`'s. Words: the actor.
+            let jip_node =
+                if e.jip_patches() & engine_core::extend::jip_patches::NPC_WEAPON_MODS != 0 {
+                    e.site(0x0045_234e, &[r])
+                } else {
+                    None
+                };
+            let node_3d = match jip_node {
+                Some(node) => node,
+                None => e.call(0x0043_fcd0, &args![r]).u32(),
+            };
             e.call(0x004b_6dc0, &args![node_3d, form_id]);
         }
     }
@@ -3491,7 +3503,14 @@ pub fn fn_00454450(e: &mut Engine, this: Ptr<TES>, pos: Ptr) {
         } else {
             e.call(0x0054_af40, &args![interior, 1u32]);
         }
-        e.call(0x008d_7dc0, &args![this, 0u32]);
+        // JIP LN's G90 (a fix row, `WriteRelJump(0x454576, CloudsFixHook)`): any answer of the
+        // handler (words: this) takes the place of the call that clears the interior cell (the
+        // handler clears it and ends the sky's weather transition at the next main loop).
+        if e.jip_patches() & engine_core::extend::jip_patches::FIXES == 0
+            || e.site(0x0045_4576, &[this.addr()]).is_none()
+        {
+            e.call(0x008d_7dc0, &args![this, 0u32]);
+        }
         if !e.call(0x0042_ce10, &args![script_context]).bool() {
             if e.get(this, TES::iSaveGridX) == 0x7fff_ffff {
                 if e.call(0x0045_7620, &args![this, pos]).u32() == 0 {
@@ -8055,6 +8074,39 @@ mod tests {
         assert_eq!(log.last().unwrap().0, 0x004b_6dc0);
     }
 
+    /// JIP LN's O17 seam at `0x45234E` (`bNPCWeaponMods`): its answer is the node given to
+    /// `004b6dc0` in place of `0043fcd0`'s; only with the switch's bit; no answer is the exe's.
+    #[test]
+    fn loading_an_actor_asks_jip_o17_for_the_node() {
+        use crate::units::fallout_shared::tesobjectrefr::jip_seam;
+        use engine_core::extend::jip_patches;
+        let (mut e, tes, refr, cell) = reference_engine();
+        returns(&mut e, 0x0300_0100, 1);
+        returns(&mut e, 0x0056_4e60, 1);
+        jip_seam::put(&mut e, 0x0045_234e, Some(0x5150));
+        let run = |e: &mut Engine| {
+            run_logged(e, |e| {
+                e.call(0x0045_1ef0, &args![tes, refr, cell, 0u32, 0u8]);
+            })
+        };
+        e.set_jip_patches(jip_patches::FIXES | jip_patches::NPC_PERKS);
+        let log = run(&mut e);
+        assert!(jip_seam::seen().is_empty(), "only the switch's bit asks");
+        assert_eq!(calls_to(&log, 0x004b_6dc0), vec![vec![0x9100, 0x1010]]);
+        e.set_jip_patches(jip_patches::NPC_WEAPON_MODS);
+        let log = run(&mut e);
+        assert_eq!(jip_seam::seen(), vec![vec![refr]]);
+        assert!(
+            calls_to(&log, 0x0043_fcd0).is_empty(),
+            "the exe's lookup replaced"
+        );
+        assert_eq!(calls_to(&log, 0x004b_6dc0), vec![vec![0x5150, 0x1010]]);
+        jip_seam::answer_with(None);
+        let log = run(&mut e);
+        assert_eq!(calls_to(&log, 0x004b_6dc0), vec![vec![0x9100, 0x1010]]);
+        jip_seam::seen();
+    }
+
     #[test]
     fn the_player_does_not_get_a_reference_id_on_the_scene_graph() {
         let (mut e, tes, refr, cell) = reference_engine();
@@ -10039,6 +10091,60 @@ mod tests {
         }
         assert_eq!(e.global::<f32>(GRID_FLOAT_011F94AC), 1.5);
         assert_eq!(e.global::<u8>(GRID_FLAG_TERRAIN), 0);
+    }
+
+    /// JIP LN's G90 seam at `0x454576` (a fix row): an answer takes the place of the call that
+    /// clears the interior cell (`008d7dc0(this, 0)`); only with the fix row's bit, and only
+    /// when an interior is left.
+    #[test]
+    fn leaving_an_interior_asks_jip_g90_in_place_of_the_cell_clear() {
+        use crate::units::fallout_shared::tesobjectrefr::jip_seam;
+        use engine_core::extend::jip_patches;
+        let (mut e, tes, _) = switch_engine();
+        returns(&mut e, GET_INTERIOR_CELL, 0x6200);
+        // The world of `leaving_an_interior_restores_the_saved_grid_and_starts_the_fade`.
+        let exterior = buffer(&mut e, &[0x2100, 0, 0]);
+        e.set(tes, TES::pExteriorBuffer, Ptr::new(exterior));
+        e.map(0x2100, 0x100);
+        let empty = e.mem.alloc(8);
+        returns(&mut e, 0x0040_8da0, empty);
+        returns(&mut e, 0x0070_ec90, 0xe000);
+        returns(&mut e, 0x0045_4b50, empty);
+        let pos = position(&mut e, 7.0 * 4096.0 + 2048.0, 8.0 * 4096.0 + 2048.0);
+        jip_seam::put(&mut e, 0x0045_4576, Some(0));
+        let run = |e: &mut Engine| {
+            e.set(tes, TES::iSaveGridX, 7);
+            e.set(tes, TES::iSaveGridY, 8);
+            run_logged(e, |e| {
+                e.call(0x0045_4450, &args![tes, pos]);
+            })
+        };
+        e.set_jip_patches(jip_patches::INSTALLED);
+        let log = run(&mut e);
+        assert_eq!(
+            calls_to(&log, 0x008d_7dc0),
+            vec![vec![tes.addr(), 0]],
+            "the exe"
+        );
+        assert!(jip_seam::seen().is_empty(), "only FIXES asks");
+        let exe_calls = log.len();
+        e.set_jip_patches(jip_patches::FIXES);
+        let log = run(&mut e);
+        assert_eq!(jip_seam::seen(), vec![vec![tes.addr()]]);
+        assert!(calls_to(&log, 0x008d_7dc0).is_empty(), "replaced");
+        assert_eq!(
+            log.len(),
+            exe_calls - 1,
+            "only that call left out; the rest goes on"
+        );
+        jip_seam::answer_with(None);
+        let log = run(&mut e);
+        assert_eq!(calls_to(&log, 0x008d_7dc0).len(), 1, "no answer: the exe");
+        // No interior: never asked.
+        returns(&mut e, GET_INTERIOR_CELL, 0);
+        jip_seam::seen();
+        run(&mut e);
+        assert!(jip_seam::seen().is_empty());
     }
 
     #[test]

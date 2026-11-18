@@ -1099,7 +1099,7 @@ like 3.9a's above (JIP's comment, exe places, what a player with JIP gets, built
 
 #### GA: UI: HUD, messages, text, start-up INI
 
-All fix rows (in with the row `NV_JIP_GAME_PATCHES`, off in vanilla); with JIP installed and the row
+All fix rows (in with the row `NV_JIP_GAME_PATCHES`, off in vanilla) but `bLoadScreenFix`, a switch of `jip_nvse.ini` read when that row is on; with JIP installed and the row
 off, each place runs the exe's code unchanged.
 
 | JIP's comment | Exe places | What a player with JIP gets | Built |
@@ -1116,15 +1116,13 @@ off, each place runs the exe's code unchanged.
 | (none; `RolloverWeaponHook` at `0x777123`) | `HUDMainMenu::SetInfoForRef` `00775a00`, `0x777123` | A weapon lying in the world that has a weapon mod on it shows "+" after its name when you look at it, as it does in the inventory lists; the game shows the plain name. Difference from JIP: on a name of 259 characters (the buffer's limit) the "+" is left off; JIP writes it past the buffer. With JIP installed and the row off, the game's test runs unchanged | 3.9 GA-4 |
 | (none; `GetVATSTargetDTHook` at `0x7ECE32`) | `VATSMenu::DoIdle` `007ec810`, `0x7ECE32` | In V.A.T.S., the damage threshold shown beside the target's name (with the perk that shows it) is the damage threshold of the last hit JIP's hit damage (its `bIgnoreDTDRFix` option) worked out (any attacker, any target; as in JIP), a negative one as 0; until JIP's hit damage has reckoned a hit, the game's own figure. With JIP installed and the row off, the game's figure is shown unchanged | 3.9 GA-5 |
 | (none; `QueueUIMessageHook` at `0x70535C`) | `QueueUIMessage` `007052f0`, `0x70535C` | Every corner message the game itself shows (item added, quest updated, and the like) stays up for the default message time, 2 seconds unless a mod sets another with `SetDefaultMessageTime`; a mod's own messages (xNVSE's `MessageEx`, JIP's `MessageExAlt` and its equip messages) keep their own time, as with JIP. With JIP installed and the row off, every message keeps the time its caller gives | 3.9 GA-6 |
+| `bLoadScreenFix` (off by default; `GetSuitableLoadScreensHook` at `0x78AC60`, `PickLoadScreenHook` at `0x78A79B`; JIP sorts the data's load screens into those made for places and the generic ones when the switch goes on, at `DeferredInit`) | `LoadingMenu::BuildCandidateList` `0078ac60` (rewritten), `LoadingMenu::MakeLoadScreenList` `0078a5a0` (`0x78A79B`) | Loading screens made for a place are shown there on their own: the game mixes in generic screens whenever it found fewer place screens than its limit, JIP only when no place screen can show there. In the overlay mode the game's flagged screens are taken from the generic ones only; while only type 3 screens are wanted (`0x11D8907` or the OS globals' byte +2), a place screen of another type is left out as the game does. Difference from JIP: with no place screens in the whole load order JIP's walk runs on past its empty list; here it takes the generic ones. With the switch off (or JIP not installed), or before the lists are made, the game's choice is unchanged | 3.9 GA-7 |
 
 Seams for other groups' rows: G06's `0x77765A` (the HUD's action
 text in `SetInfoForRef`; group GH2's row and handler, listed under GH2 below); O14's `0x770B0E`
-(`DoIdle`'s sneak test, asked with `bSneakBoundingBoxFix` on; group GX's row and handler, not
-built yet; O14's second hook site, `0xC72EA3` in the player's character controller setup where JIP's
-`InitControllerShapeHook` records the controller shape, has no seam yet: group GX adds it with its handler, and
-the two are tested together); G108's `0xAE5648` (the audio manager's message kind 54, which the game ignores; group
-GW's row and handler, not built yet). Until their handlers are in, those two places run the
-game's code.
+(`DoIdle`'s sneak test, asked with `bSneakBoundingBoxFix` on; group GX's row and handler, with its
+second site `0xC72EA3`: listed under GX below); G108's `0xAE5648` (the audio manager's message kind 54, which the
+game ignores; group GW's row and handler, listed under GW below).
 
 #### GB: UI: item lists, repair, pad dead zones
 
@@ -1133,6 +1131,18 @@ game's code.
 | (`DeferredInit`, when its XInput hook is in: `SafeWrite32` of `&s_deadZoneLSg` / `&s_deadZoneRSg` over the operand of eleven `FCOMP double ptr [0x010718F0]`) | left stick, nine: `00741500` (`0x7416D6`, `0x741705`), `007908f0` (`0x790966`), `00799790` (`0x799861`, the map's zoom), `007bd2a0` (`0x7BD47D`, `0x7BD4A0`, `0x7BD4DD`), `0094a8c0` (`0x94AB59`, `0x94AB88`, the free camera's move axes); right stick, two: `0094a8c0` (`0x94A93C`, `0x94A95F`, the free camera's look axes) | JIP's own: in whenever JIP is installed, whatever this row says (as JIP). The caravan, lockpick, map-zoom and roulette menus and the free camera's movement test the left stick against JIP's left dead zone, a double that starts at the game's own 7849 (no change until `SetDeadZoneLS` is built). The free camera's look axes use JIP's right dead zone, 8689 where the game uses 7849, so a slightly larger right-stick movement is needed before the free camera turns, once group GP's four free-camera seams are in (until then the free camera keeps the game's 7849) | 3.9 GB-1 |
 | (none; `RefreshMapMenuHook` in `InitGamePatches`) | `0079dbb0` (`0x79DF73`: `MapMenu::AddMapIcons`, before the map is centred on the player icon) | JIP's own: in whenever JIP is installed. Nothing changes by itself: the map is centred as in the original unless JIP's item-list refresh asked to leave it where it is, once (that refresh, `RefreshItemsList` and the `RemoveMe` refresh, is not built yet, so nothing asks today) (G87) | 3.9 GB-2 |
 | (none; `ProcessGradualSetFloatHook` and `SafeWrite8(0xA081A8, 6)` in `InitGamePatches`) | `00a080d0` (`0xA08718`, `0xA0871C`: `Tile::UpdateFadeControls`' fade types 5 and 6) | JIP's own: in whenever JIP is installed. Interface fades of JIP's two extra types (made only by `SetUIFloatGradual` with mode 3 or 4) run: the value moves from the start to the end over the time and then goes back to the start value, again and again for mode 3 (suited to turning images), once for mode 4. The original passes these types over, so before this such a fade did nothing. The game's own fades are unchanged (G88) | 3.9 GB-2 |
+| (none; 8 bytes at `0x728E10` and `SafeWrite32(0x729616, 0x1030018)` in `InitGamePatches`) | the recipe menu's item information `00728da0` (`0x728E10`: the value, `0x729616`: the weight's format) | With the fixes row on, the crafting (recipe) menu shows an item's own value, where the original first scales it by condition (`00647c00` with 1.0), and a weight below 1 with two decimals (0.25, not 0.3); a value below 1 keeps one decimal, as in the original (G13) | 3.9 GB-3 |
+| (none; `RecipeMenuAmmoEffectsHook`) | the same function (`0x7294DC`: its effects text) | With the fixes row on, ammunition in the crafting menu lists its effects (the ammo's own text, `00503a70`); the original shows none for ammunition, which has no effect list of the kind it reads (G68) | 3.9 GB-3 |
+| (none; `IsDisposableWeaponHook`) | the recipe menu's crafting `007284f0` (`0x72880D`: is the crafted weapon disposable) | With the fixes row on, a crafted weapon counts as disposable (handed over plainly instead of through the item-condition step) when its type number is above 9, which JIP reads itself; for every weapon type of the game (0 to 13) this answers as the original's test, so nothing changes in the game (G100) | 3.9 GB-3 |
+| (none; `InitBarterMenuHook`) | `BarterMenu::Create` `0072d250` (`0x72D661`: before the first fill of the lists) | With the fixes row on, the barter menu titles the vendor's side tab from its filter mode as it opens (the vendor's name in the "all" mode), as the game otherwise does only when the filter is changed (G56) | 3.9 GB-3 |
+| (none; `BarterSellFixHook`, `FixVendorCaps`) | `BarterMenu::CompleteTransaction` `0072fd10` (`0x73005C`: before the vendor's caps are taken) | With the fixes row on, when the vendor pays the player and holds more than 32,767 caps (the most one stack's count can hold), the vendor's caps in the barter container are first split into stacks of at most 32,767, so the payment comes from the whole amount. When more than one cap is left over, new stacks hold it; a single cap left over gets no stack (as JIP). Difference from JIP: with no barter container data the port does nothing, where JIP would read through it (G64) | 3.9 GB-3 |
+| (none; `QttMenuEnableWheelHook`) | `QuantityMenu::DoIdle` `007ac170` (`0x7AC179`) | With the fixes row on, the mouse wheel moves the count in the "how many" menu: up as the plus button, down as the minus button; the original ignores the wheel there (G69) | 3.9 GB-3 |
+| (none; `ConstructItemEntryNameHook`, with 6 bytes at `0x72F337`) | the inventory's, container's and barter menu's `InitFunc` (`00782850` at `0x782876`, `0075d160` at `0x75D1A5`, `0072f210` at `0x72F33D`) | With the fixes row on, an item list entry of a weapon with mods reads "Name+" also when there is only one (the original marks a modded weapon only in a stack, and not at all in the container and barter lists), and a stack of more than one "Name (count)" or "Name+ (count)"; the modded test is JIP's (G79's routine, the mods of the reference that dropped it). As in JIP, the text is read from every form's name words (+0x34, +0x38) whatever its type, so for a form whose name lies elsewhere (a note: its model path there) a stack of two or more shows that text. Difference from JIP: a name longer than the list's 127-character buffer is cut, where JIP writes past it (G82) | 3.9 GB-4 |
+| `bQttSelectShortKeys` (on by default) | the inventory's, container's and barter menu's `DoClick` (`0x780B09`, `0x75BF97`, `0x72D8B4`) and the container's weightless-item test (`0x75BF18`) | With the fixes row and JIP's switch on, holding Ctrl while choosing an item in the inventory (drop), a container or the barter menu takes one, and holding Shift takes the whole stack (in barter: all not yet traded), without the "how many" menu; without either key the game asks as usual. In the container menu's modes 1 and 2 (taking from the container's side), a weightless item that is not caps is no longer taken whole at once (the game's shortcut), so the quantity menu or the keys decide (O9) | 3.9 GB-4 |
+| `bEnableFO3Repair` (off by default) | `InventoryMenu::IsItemRepairable` `00781860` (`0x7818B2`, and the byte at `0x7818D3`), the repair list's test in `004d4bd0` (`0x4D4C11`), `RepairMenu::InitFunc` `007b57f0` (`0x7B58DB`), `DoClick` `007b5b40` (`0x7B5CED`, and the byte at `0x7B5D05`), `RepairItem` `007b5d80` (`0x7B5DAD`) | With the fixes row and JIP's switch on, repair works as in Fallout 3: the player's Repair skill sets a cap (from `fRepairSkillBase` times 10 at skill 0 to `fRepairSkillMax` times 10 at 100, at most 100%); an item can be repaired only while its condition (rounded up) is below that cap; the repair list offers the exe's matching items, but another copy of the same unmodified item only when it is in no better condition than the broken one; the condition reached is JIP's formula from both conditions (the better one, `fRepairMin`, the worse one times `fRepairScavengeMult`, and the skill's share of `fRepairMax - fRepairMin`, in tenths), never above the cap; after a repair the menu stays open while the item's condition plus one is at most the cap (the game closes at 99%) (O2) | 3.9 GB-5 |
+| (none; `GMST_INT(fRepairSkillMax) = 0x41200000` in `InitGamePatches`) | before `main` `0086a850` (`0x00ECC46B`: the C runtime's call of `main`, where xNVSE's loader loads xNVSE and its plugins; the port's `main` asks it first thing) | With the fixes row on, the game setting `fRepairSkillMax` is 10 where the game's own start-up makes it 9, so everything that reads it follows: vendors repair up to 100% instead of 90%, and repair costs and the repair menu's skill figures use 10. The value is set after the game's start-up values and before the data files load, as with JIP, so a plugin that sets `fRepairSkillMax` itself still wins (G112) | 3.9 GB-6 |
+| (none; `DeferredInit`: `fullName.name = avName`, `callback4C = 0x643BD0`) | the Big Guns actor value's data (`0x11D61C8`, index 0x21) | With the fixes row on, once the game has started (JIP's deferred start), the hidden Big Guns skill gets its display name (its actor value name, as JIP copies it) and the skills' starting-value formula (`00643bd0`, the one Energy Weapons and the other skills have; the game gives Big Guns none), which works its value out from the character as the other skills' (D06) | 3.9 GB-6 |
+| `bEnableBigGunsSkill` (off by default) | the same actor value's flags and description | With the fixes row and JIP's switch on, at JIP's deferred start Big Guns becomes a skill like Energy Weapons (flags `0x410`, the skill flag and the creature-combat-skill flag that Energy Weapons has, where the game gives Big Guns only `0x2000`) and its description is JIP's text ("The Big Guns skill determines your combat effectiveness with all oversized weapons such as the Fat Man, Missile Launcher, Flamer, Minigun, Gatling Laser, etc."), through JIP's description override (O3) | 3.9 GB-6 |
 
 #### GC: Hit damage, detection, combat formulas
 
@@ -1311,6 +1321,13 @@ list in records of its own.
 | JIP's comment | Exe places | What a player with JIP gets | Built |
 |---|---|---|---|
 | (none; `SafeWrite16(0x54E421, 0x1EEB)` and `WriteRelJump(0x54E4E1, ClearAshPilesHook)` in `InitGamePatches`, no INI setting) | the cell's reset walk `0054df30` (run when a cell is attached; it is the game's respawn of a cell whose reset time has passed): `0x54E421` (a deleted actor's ash pile) and `0x54E4E1` (the type branches for references that are neither actors nor containers) | GAINS: an ash pile (the two vanilla piles and any activator `MarkActivatorAshPile` marked) is deleted when the reset walk reaches it, unless the actor it came from has flag `0x400` on its base; the actor loses its link to the pile. A dead actor deleted by the reset no longer takes its ash pile with it there (the pile goes when the walk reaches it, if it is in the walked cell). JIP's jump also passes over the exe's two other branches there: a reference whose base is a `FLOR` record (form type 0x26) made harvestable again, and a picked-up placed `INGR` reference (type 0x1D, not persistent) brought back. The game's own data has none: `FalloutNV.esm`, the four story add-ons, Gun Runners' Arsenal and the four packs hold 0 `FLOR` records and 0 placed references to an `INGR` (New Vegas's plants are activators with scripts), so nothing in the game changes; only a mod that adds `FLOR` records or places `INGR` references sees those stop respawning, the same as with real JIP. Containers still refill and actors still respawn. With JIP installed and the row off, the exe's walk runs unchanged | 3.9 GH2-2 |
+| "Make TESObjectREFR::GetActivationIsCrime return 0 for unlocked teleport doors linked to public cells" (`WriteRelJump(0x579942, 0x579AB7)` in `InitGamePatches`) | `00579690` (whether activating a reference is stealing), the end of its door branch (`0x579942`) | A door is judged by its own rules only: locked doors the player may not open, and doors into a cell with an owner the player does not belong to. The general "an owned object the player does not own" test after them no longer applies to doors, so using an owned but unlocked door into a public cell (a shop's front door, say) is no longer counted as a crime. With the row off, the exe's two tests run as before | 3.9 GH2-3 |
+| (none; `WriteRelJump(0x5674D5, SetScaleHook)` and `SafeWrite16(0x567709, 0x15EB)`) | `SetScale` `00567490`: `0x5674D5` (the rounding and clamps) and `0x567709` (the text block's release) | `SetScale` keeps the scale as given, clamped to about 0.0001 .. 100 (the original rounds it to two decimals through a text buffer and clamps it to 0.01 .. 10). A NaN scale becomes the lower bound. Scripts and mods that set small or large scales see them take effect | 3.9 GH2-3 |
+| (none; `WriteRelCall(0x571F65 / 0x571FDF, ClearWeaponNodeHook)`) | `RemoveWeapon` `00571b50`: the held weapon node (`0x571F65`) and the "Weapon" child (`0x571FDF`) | When an actor's weapon is taken out of its 3D, the weapon node's children are detached (last to first; a child with the top bit of its flags set stays), in place of the original's release of the node's attached effects. Nothing left of the old weapon stays on the node when the next one is drawn | 3.9 GH2-3 |
+| (none; `WriteRelJump(0x454576, CloudsFixHook)`) | leaving an interior, `00454450` (`0x454576`) | The interior cell is cleared as in the original, and at the next main loop the sky's transition weather is cleared (JIP's `EndWeatherTransition`, one call), so coming out of a building the sky shows the current weather at once instead of fading from the weather left when the player went in | 3.9 GH2-3 |
+| (none; `SafeWrite32(0x4E4000, 0x00401F0F)` and `WriteRelCall(0x4E400E, UpdateWaterTexturesHook)`) | the water forms' update `004e3d60`: the "already updated this frame" lookup (`0x4E400E`) | The lookup is JIP's: the value the map keeps for the water form (always 1 when present, as the game stores it, so the same answer) unless the renderer's byte at `0x11F91C5` is set, which skips the noise texture update. The game only ever clears that byte, so in practice the water looks as in the original; a map with no buckets answers "not updated" (JIP would crash dividing by zero) | 3.9 GH2-3 |
+| "Credits to carxt for tracing the weapon backpack bug" (`WriteRelJump(0x4AB400, SetWeaponSlotHook)`, `WriteRelJump(0x6061D9, InitWornObjectHook)`, `WriteRelJump(0x5719ED, PickWeaponModelHook)`) | `BipedAnim::SetWeaponSlot` `004ab400` (rewritten), `TESNPC::InitWornObject` `006061b0` (`0x6061D9`), `00571760` (`0x5719ED`) | NPCs show the modded model of the weapon they hold (a scope, an extended magazine, ...): the weapon slot takes the mod flags of the NPC's weapon entry when the NPC's 3D is built and when it draws the weapon, and the model is chosen by those flags (the third-person modded model when it has a path, the first-person object for the player and for type 8 weapons with a mod). With the row off, NPCs show the plain weapon model as in the original | 3.9 GH2-4 |
+| `bNPCWeaponMods` (off by default; with `uWMChancePerLevel`, `uWMChanceMin`, `uWMChanceMax`, each non-zero) | the NPC's 3D set up `00451ef0` (`0x45234E`, the place `uNPCPerks` shares), the cell's reset walk `0054df30` (`0x54E2A4`), and after a save loads (JIP's `DoLoadGameHousekeeping`) | When an NPC (high or middle-high AI level, alive, not a teammate, not while a save loads) is first loaded, the weapon it holds may get weapon mods: the chance is its level times `uWMChancePerLevel`, held between `uWMChanceMin` and `uWMChanceMax` (percent); the mods its weapon record allows are drawn in a random order of three, each further mod with half the chance. Once dealt, an NPC is not dealt again until its cell respawns. After a save loads, the NPCs in the process manager's high-actor list not dealt yet are dealt the same way (here, as in JIP, whatever their AI level or life state; while the save loads the 3D step passes them over), and the player is marked so it is never dealt. The game's random numbers are drawn as JIP draws them | 3.9 GH2-4 |
 
 Part of JIP in every preset (not the row above), while JIP answers "installed":
 - `DestroyRefrHook` (`0055a430`, `0x55A488`): a destroyed reference lets go of its `SetRefName`
@@ -1363,6 +1380,21 @@ form, so without this a new NPC made in memory that held something else could st
 (for example one that will not fight, or runs everywhere); with JIP installed every new form now starts clean,
 as with JIP.
 
+Also fixes (the row on): a reference made in the game that carries form flag `0x400000` (and a projectile
+that says so itself) is not written to the save as an unloaded form, and a reference keeps that flag from the
+save when it loads (`0x484E03`, `0x8497CD`); the save's two form id maps get 0x7D63 buckets instead of 0x13AF
+(`0x845558`, `0x846FFB`): fewer collisions with many forms, no change in what is saved. A global variable
+whose form flags have bit 0x40 (the record's "Constant" flag, as xEdit names it) is not read again from a
+record once it has that flag (`0x5A64D7`).
+
+Also built as part of JIP (every preset while JIP answers "installed"): a plugin file keeps its name's hash at
+`+0x120` when it opens (JIP's mod lookups read it; `0x470D56`), and JIP's `hasModLog` byte of the file record
+starts clear when the record is made (`0x47079D`), so the built `ModLogPrint` starts each mod's log afresh in a
+session instead of sometimes appending to the last one. `TESObject::IsMarker` (`0050f9e0`) answers by JIP's
+set of ids (the 15 default marker objects by their ids, and 0x64..0x77): the same answers as the original for
+every form except one of a type above idle marker (0x30) with an id 0x64..0x77, which is no longer a marker
+(JIP's `SetInternalMarker`, which edits the set, is not built).
+
 #### GS: Script engine
 
 | JIP's comment | Exe places | What a player with JIP gets | Built |
@@ -1408,17 +1440,61 @@ on by a fixed table (no leap years, as in the original). Differences from JIP: w
 hardcore needs byte JIP sets is not written (JIP would write to a bad address), and a month number outside
 0 to 11 is taken to have 31 days (JIP reads past its table).
 
+Sound and music fixes (with the row): a sound form's frequency setting (its pitch up or down by a
+percentage) is applied to the sound as it plays, and a script or the game that changes a sound's pitch
+keeps that setting on top (`0x82D416`, the request to the audio thread; `0xAE5648`, the audio thread's
+message 54, which the game ignores; `0xAEACAA`, a new sound's factor 1.0; `00af01e0` and `00af0290`,
+the sound's frequency set and read, replaced: the result is rounded to the nearest whole frequency
+where the game cut it, and setting it answers 0 as JIP's does). A region's music media sets from a
+plugin are found through that plugin's masters (`0x4F49AB`, `0x4F49D2`; credited by JIP to lStewieAl
+and TrueCourierSix); a location's music plays its media sets in a shuffled order with no repeat
+until each has played (`00595560` replaced; the game drew at random and moved the pick to the end);
+battle music never picks the set it played last (`004f4f90`, the region's `GetMediaSetBattle`,
+replaced). A random sound from a folder picks among both its `.wav` and its `.ogg` files (`005e3630`,
+the folder sound picker, replaced; the game took the `.ogg` files only when there were any, and kept a
+pick from repeating). Differences from JIP: a sound map with no buckets or a request with no sound
+form does nothing (JIP would divide by 0 or read a bad address); a location with no music list
+picks nothing, as the game does (JIP would read address 0); JIP puts the folder picker in at its
+deferred start-up, the port from the start.
+
+`FalloutCustom.ini` (with the row; `0x86AC60`, before the game's launcher test at start-up): each
+`setting=value` line of each `[section]` sets the game's INI setting `setting:section` (a `b` setting
+takes 1 when the value starts with `1`, `i` and `u` whole numbers, `f` a decimal, `s` the text), so
+players can override INI settings without editing the game's own files. The port reads the file as a
+mod's file: from its own folder beside the saves (`nv-rs mod files`), else the game's folder; JIP reads
+it from the game's settings folder in Documents, which the port never reads for mods. A setting name
+longer than JIP's 255-character buffer is taken whole.
+
 Seams for group GF's row G45 (saving: temporary forms are not written): `0x8497CD` (whether `UnloadForm` goes
 on), `0x846FFB` and `0x845558` (the save's form id and changes maps' bucket counts). Until GF's handler is in,
 those places run the game's code.
 
 #### GL: Lights and magic effects
 
-Nothing built yet.
+| JIP's comment | Exe places | What a player with JIP gets | Built |
+|---|---|---|---|
+| (none; 26 bytes at `0x80ECA8` in `InitGamePatches`) | `LightEffect::AttachLight` `0080e970` (`0x80ECA8`) | With the fixes row on, a light effect (a spell's or a chem's glow) whose actor has no node to hang the light on skips attaching it, where the original calls through the missing node and crashes. When the node is there nothing changes, and the light itself (its colour, radius and position, everything the renderer is given) is set exactly as before (G66) | 3.9 GL-1 |
+| (none; `GetEffectHiddenHook`) | `EffectItemList::BuildMenuString` `00406620` (`0x406720`) | With the fixes row on, the effect lists of items (the Pip-Boy's and the HUD's effect text) leave out effects marked hidden (setting flag 8) and effects with no setting, as well as the usage monitor the original already leaves out (G86) | 3.9 GL-1 |
+| (none; `EffectSkillModifiers1Hook`, `EffectSkillModifiers2Hook`) | `BuildMenuString` (`0x4069D4`) and `MagicCaster::FindTargets` `00815d00` (`0x816519`) | With the fixes row on, an aid or food item's effect is scaled by the Medicine multiplier or, for an item that is not a medicine, by the Survival one, not by both (the original multiplies a medicine that is also food by both); detrimental effects (a negative value in the effect text, setting flag 4 when cast) are not scaled; the "recovered health" perks still apply to Health (when cast, for the player only, as in the original) (G67) | 3.9 GL-1 |
+| (none; `EffectItemGetModifiedDuration`, `ModPositiveChemDurationHook`) | `StatsMenu::StatusDataList::Register` `007e0b20` (`0x7E0C1F`, with the port's hand-over of the list at `BuildMenuString`'s call, `0x40686D`), `MagicTarget::CheckAddEffect` `00823210` (`0x8236FD`) | With the fixes row on, the `ModifyPositiveChemDuration` perks (Chemist) lengthen only chems' (alchemy types 10 and 11) non-hostile effects when taken, where the original lengthens every non-hostile alchemy effect, and the effect text shows the lengthened duration, which the original never does (G107) | 3.9 GL-1 |
 
 #### GX: Havok, pad rumble, mouse
 
-Nothing built yet.
+Fixes (with JIP installed and the row `NV_JIP_GAME_PATCHES` on): immobile creatures (turrets and the like,
+whose creature record is flagged immobile) no longer drop to the ground when their physics starts: JIP marks
+their character controller and the in-air state treats the mark as "not falling" (`0x9313EC`, `0xCD3FDD`); a
+fixed physics body follows its object when the object is moved or turned and asks for it, as `SetPos` or
+`SetAngle` on a static do (the game only moved such bodies outside a physics world) (`00c65b00`); the pad does
+not rumble while the game's controller rumble setting is off (`0xEE820A`); a jump's height counts from the
+character's own jump value in physics units (`0xCD4468`). With JIP's `bSneakBoundingBoxFix` (on by default):
+the player's and teammates' collision shape is lowered by 6 units while the player sneaks, so a sneaking player
+fits under lower ceilings, and goes back when the player stands (`0xC72EA3`, where the controller is given a
+shape of JIP's own, and `0x770B0E`, the HUD's sneak test).
+
+Built as part of JIP (in every preset once JIP answers "installed"): `ToggleMouseMovement` turns the mouse's
+x and y movement off and on, and the mouse wheel does nothing while its key is disabled (`DisableKey` on the
+wheel's up or down code) (`00a239e0`); the player's constructor clears the three bytes after
+`bMenuModeButtonClicked` too, the sneak shape's state among them (`0x939258`).
 
 ### UI Organizer
 

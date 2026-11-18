@@ -26,6 +26,7 @@ pub mod direct_files;
 pub mod down_log;
 pub mod draw_thread;
 pub mod equipment_stats;
+pub mod first_profile;
 pub mod fixes;
 pub mod form_types;
 pub mod fov_slider;
@@ -66,7 +67,6 @@ pub mod room_events;
 pub mod room_record;
 pub mod room_script;
 pub mod save_out;
-#[cfg(windows)]
 pub mod scene_light;
 #[cfg(test)]
 mod start_up_tests;
@@ -180,7 +180,7 @@ impl Host {
     /// [`Host::start`] with the [`fixes::Choice`] the player's settings give, bound before the
     /// game's first frame.
     pub fn start_with(data: &Path, choice: &fixes::Choice) -> Result<Host, String> {
-        let exe = engine::exe::installed_exe(data);
+        let exe = game_exe(data);
         if !exe.is_file() {
             return Err(format!(
                 "{}: not found. nv-rs reads the game's own FalloutNV.exe (version \
@@ -188,9 +188,22 @@ impl Host {
                 exe.display()
             ));
         }
-        // Linux and macOS: the program builds there, but the game does not run yet.
+        // Linux and macOS: the program builds there, but the game does not run yet. The exe's
+        // version is checked first, so a wrong FalloutNV.exe is said as such (status 1, a report
+        // asked) and not as the expected stop (review of #631, round 5).
         #[cfg(not(windows))]
-        not_provided_here()?;
+        stop_off_windows(&exe, &engine::exe::verify)?;
+        // Linux and macOS: the game's code page, chosen before anything turns a name or a text
+        // (the exe's own path, the save guard, the mod files, the INIs the extenders read, the
+        // machine table's `GetACP`), so the whole run has one page.
+        #[cfg(not(windows))]
+        choose_code_page()?;
+        // Off Windows, where the start goes on: what this build is, in the log (and on screen).
+        #[cfg(not(windows))]
+        eprintln!("{FIRST_STARTS}");
+        // Off Windows the save guard's look at the player's folders starts now, off the frames
+        // (nothing on Windows).
+        save_out::prepare(data);
         let mut engine = Box::new(Engine::with_exe(&exe)?);
         // Mods' own files (MCM's and later JIP's INI and file commands) kept beside the saves, never
         // in the game's folder (`mod_files`).
@@ -303,15 +316,12 @@ impl Host {
         // One reader for both: with the sun shadows on, the sun is the sun light the lit shaders
         // take (the ambient occlusion's contact shadows follow it too); off, the sun disc's place,
         // as before.
-        #[cfg(windows)]
-        let reader: fn(
-            &engine_platform::Engine,
-        ) -> Option<engine_platform::d3d9real::SceneView> = if choice.sun_shadows {
-            scene_light::read_lit
-        } else {
-            scene_light::read
-        };
-        #[cfg(windows)]
+        let reader: fn(&engine_platform::Engine) -> Option<engine_platform::d3d9real::SceneView> =
+            if choice.sun_shadows {
+                scene_light::read_lit
+            } else {
+                scene_light::read
+            };
         if choice.ambient_occlusion {
             engine_platform::d3d9real::want_scene_light(reader, choice.ambient_occlusion_strength);
             eprintln!(
@@ -322,7 +332,6 @@ impl Host {
         // The sun shadows (`fixes::Choice::sun_shadows`: `NV_SUN_SHADOWS`; else, in a launcher's play
         // run, Fallout.ini's `[nv-rs Display] bSunShadows`; off by default). Off: nothing is
         // installed, read or recorded.
-        #[cfg(windows)]
         if choice.sun_shadows {
             engine_platform::d3d9real::want_sun_shadows(reader);
             eprintln!("nv-rs: sun shadows on (Vulkan only; in the game's lighting, or the engineers' overlay with NV_SUN_SHADOWS=debug)");
@@ -336,6 +345,24 @@ impl Host {
                 fixes::Renderer::Vulkan => Backends::Wgpu,
                 fixes::Renderer::D3d9 => Backends::Real,
             });
+        }
+        // From here the run's renderer is chosen: the display part of the machine table may be
+        // made ([`display_table_text`] refuses before).
+        RENDERER_CHOSEN.store(true, std::sync::atomic::Ordering::Relaxed);
+        // The sun light from the sky's discs (`fixes::Choice::light_from_sky`: with the sun shadows
+        // on, `bSunLightFromSky` / `NV_SUN_LIGHT_FROM_SKY`, on by default): the game's sun light is
+        // turned to come from the sun disc by day and the moon by night, so the lit sides, the game's
+        // actor shadows and the sun shadows agree with the sky. Only where the sun shadows draw
+        // (Vulkan, `NV_D3D9` naming wgpu or the play default): with the real Direct3D 9 drawing, the
+        // new lighting is off and the game's light stays the exe's ([`light_from_sky_wanted`]); and
+        // each frame only while wgpu still draws (`wgpu_draws`: false once the real Direct3D 9 took
+        // over at the device's making, when no sun shadows are drawn).
+        if light_from_sky_wanted(choice, engine_platform::d3d9real::backends()) {
+            engine::sky_sun::want_light_from_sky(
+                &mut engine,
+                engine_platform::d3d9real::wgpu_draws,
+            );
+            eprintln!("nv-rs: the sun light comes from the sun and moon discs (bSunLightFromSky)");
         }
         // `NV_SOUND=out`: the game's sound on the player's default device, from when the game
         // makes its DirectSound device on; `NV_SOUND_RECORD=FILE.wav` also records what goes
@@ -403,7 +430,7 @@ impl Host {
         start_crt_io(&mut engine, &mut movement);
         // The machine table before the C initializers: `__get_sse2_info` (`00ed1927`, from
         // the initializer `00ed454f`) asks the processor, which the table answers.
-        load_adapter_table(&mut engine);
+        load_adapter_table(&mut engine, data)?;
         // nv-rs's own perks' plugin in Data and the player's plugins.txt (with the row on), before
         // the game reads its plugin list (`perks`).
         for line in perks::ensure_plugin(&mut engine, data) {
@@ -508,60 +535,142 @@ impl Host {
     }
 }
 
-/// [`Host::start_with`] and [`check_installation`] off Windows: the program builds on Linux and
-/// macOS, but the game cannot run there yet, so every start (and `--check`) is refused with the
-/// pieces that are still Windows-only, instead of a run that would go on without them and fail
-/// somewhere less clear. The game's paths and file listings are provided
-/// (`engine_platform::host_paths`), and so is the sound on the speakers. The game's window with its
-/// mouse and keyboard is provided on Linux (winit, X11 and Wayland), not yet on macOS, where it
-/// needs the program's main thread. On a processor other than x86-64 (Apple silicon) it also names
-/// what differs there.
+/// The process status `nv-viewer` ends with for [`not_provided_here`]'s stop (sysexits'
+/// EX_UNAVAILABLE): the game was found but does not run on this system yet. Expected in the
+/// Linux and macOS previews, so play.sh says it needs no report (`NOT_PROVIDED_STATUS` there).
+pub const NOT_PROVIDED_STATUS: i32 = 69;
+
+/// The process status for an error of [`Host::start_with`] or [`check_installation`]:
+/// [`NOT_PROVIDED_STATUS`] for the stop off Windows (any [`not_provided_on`] refusal: macOS, a
+/// processor other than x86-64), 1 for any other.
+pub fn error_status(err: &str) -> i32 {
+    if err.starts_with(REFUSAL_START) {
+        NOT_PROVIDED_STATUS
+    } else {
+        1
+    }
+}
+
+/// How every refusal of [`not_provided_on`] begins (and nothing else the start says).
+const REFUSAL_START: &str = "nv-rs does not run the game on this system yet: ";
+
+/// The line a Linux start and `--check` say where the start is not refused: what this build is
+/// and is not (review of #687).
+#[cfg_attr(windows, allow(dead_code))]
+const FIRST_STARTS: &str = "nv-rs on this system: built and unit-tested here, but never started \
+     with the game's files before. Known to be missing: sounds at rates other than the sound \
+     device's are not heard until the game first changes a sound's pitch, pop-up warnings are log \
+     lines, a mod's loose HLSL shaders stop the game. Please report any stop with this log.";
+
+/// [`Host::start_with`] and [`check_installation`] off Windows: what is still Windows-only on this
+/// system, which refuses every start (and `--check`) instead of a run that would go on without it
+/// and fail somewhere less clear. On Linux on x86-64 nothing known is: the game's paths and file
+/// listings (`engine_platform::host_paths`), the sound on the speakers, this machine's tables
+/// (`engine_platform::machine_table`, the sound's `engine_platform::dsound::fixed_table`), the code
+/// pages of the game's languages (`engine_platform::code_page`) and the game's window with its
+/// mouse and keyboard (winit, X11 and Wayland) are provided, so the start goes on (built and unit
+/// tested there; not yet started with the game's files). Not provided there and not refused: the
+/// D3DX shader compiler, which only shaders missing from the game's shader packages reach (a run
+/// that reaches it stops there, naming it). On macOS the window still needs the program's main
+/// thread; on a processor other than x86-64 (Apple silicon) the refusal also names what differs.
 #[cfg(any(not(windows), test))]
 fn not_provided_here() -> Result<(), String> {
     not_provided_on(cfg!(target_arch = "x86_64"), cfg!(target_vendor = "apple"))
+}
+
+/// The game's code page on Linux and macOS (`engine_platform::code_page`): `NV_CODE_PAGE` (1252
+/// unless it names 1250 or 1251), set for the whole run and said in the log. A value that names
+/// no provided page stops the start with a line saying which values are taken (the player sees
+/// it where the start's errors are shown, not only in the log).
+#[cfg(not(windows))]
+fn choose_code_page() -> Result<(), String> {
+    let page = engine_platform::code_page::chosen(std::env::var("NV_CODE_PAGE").ok().as_deref())?;
+    engine_platform::code_page::set_game_page(page);
+    eprintln!("code page: {page} (NV_CODE_PAGE)");
+    Ok(())
+}
+
+/// Off Windows, the start's and `--check`'s stop: `exe` checked by `verify` first (a wrong
+/// FalloutNV.exe is said as such, status 1), then [`not_provided_here`] (status 69).
+#[cfg(not(windows))]
+fn stop_off_windows(
+    exe: &Path,
+    verify: &dyn Fn(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    verify(exe)?;
+    not_provided_here()
 }
 
 /// [`not_provided_here`]'s message, for an x86-64 processor or another, on macOS or another
 /// system.
 #[cfg(any(not(windows), test))]
 fn not_provided_on(x86_64: bool, apple: bool) -> Result<(), String> {
-    let mut why = String::from(
-        "nv-rs does not run the game on this system yet: it builds here, but these are only \
-         provided on Windows so far: ",
-    );
+    let mut missing = Vec::new();
     if apple {
-        why.push_str(
+        missing.push(
             "the game's window with its mouse and keyboard (and so anything drawn: on macOS the \
-             window needs the program's main thread), ",
+             window needs the program's main thread)",
         );
     }
-    why.push_str(
-        "this machine's tables (display adapter, sound devices, folders), which are measured on \
-         Windows, and code pages other than Windows' Western one (1252)",
-    );
     if !x86_64 {
-        why.push_str(
-            "; and on this processor the game's x87 maths (not yet exact off x86-64) and the \
+        missing.push(
+            "on this processor the game's x87 maths (not yet exact off x86-64) and the \
              processor's quick reciprocal estimates (RCPSS, RSQRTSS)",
         );
     }
-    Err(why)
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{REFUSAL_START}it builds here, but these are only provided on Windows so far: {}",
+        missing.join("; and ")
+    ))
+}
+
+/// The installation's `FalloutNV.exe` beside the `Data` folder `data`
+/// ([`engine::exe::installed_exe`]). Off Windows its name is matched without case by the game's
+/// own path rule (`engine_platform::host_paths::stored_name`: the exact name when there, else the
+/// first that differs only in case), as the finder and play.sh take a `Data` folder in any case:
+/// a copy whose exe was lower-cased (`falloutnv.exe`) is found.
+pub fn game_exe(data: &Path) -> PathBuf {
+    let exe = engine::exe::installed_exe(data);
+    #[cfg(not(windows))]
+    if let (Some(name), Some(folder)) =
+        (engine_platform::host_paths::stored_name(&exe), exe.parent())
+    {
+        return folder.join(name);
+    }
+    exe
 }
 
 /// What `nv-viewer --check` reports for the installation whose `Data` folder is `data`, without
 /// starting anything: an error when its `FalloutNV.exe` is missing or is not 1.4.0.525
 /// ([`engine::exe::verify`]), else a line for each thing that decides how the run will go.
 pub fn check_installation(data: &Path) -> Result<Vec<String>, String> {
-    let exe = engine::exe::installed_exe(data);
+    let exe = game_exe(data);
     if !exe.is_file() {
         return Err(format!("{}: not found", exe.display()));
     }
-    // Linux and macOS: the game cannot start there yet, so the check says so where the start
-    // does, right after the exe is found (`--check` then ends with status 1, "the game cannot
-    // start").
+    // Linux and macOS: the game cannot start there yet, so the check says so, after the exe was
+    // found and its version checked (a wrong build is said first); `--check` then ends with
+    // [`NOT_PROVIDED_STATUS`] ([`error_status`]), which play.sh says is expected.
     #[cfg(not(windows))]
-    not_provided_here()?;
+    stop_off_windows(&exe, &engine::exe::verify)?;
+    #[cfg(windows)]
     engine::exe::verify(&exe)?;
+    // Off Windows, where the start goes on: the code page the start will take (an unsupported
+    // `NV_CODE_PAGE` stops here as it stops the start) and what this build is.
+    #[cfg(not(windows))]
+    let elsewhere = {
+        let page =
+            engine_platform::code_page::chosen(std::env::var("NV_CODE_PAGE").ok().as_deref())?;
+        vec![
+            format!("code page: {page} (NV_CODE_PAGE)"),
+            FIRST_STARTS.to_string(),
+        ]
+    };
+    #[cfg(windows)]
+    let elsewhere: Vec<String> = Vec::new();
     let converter = if engine_platform::resampler::tables().is_some() {
         "found"
     } else {
@@ -584,11 +693,13 @@ pub fn check_installation(data: &Path) -> Result<Vec<String>, String> {
             }
         ),
     };
-    Ok(vec![
+    let mut lines = vec![
         format!("game: {} is 1.4.0.525", exe.display()),
         format!("sound device: {device}"),
         format!("sound converter tables: {converter}"),
-    ])
+    ];
+    lines.extend(elsewhere);
+    Ok(lines)
 }
 
 /// `main` (Xbox PDB, `0086a850`), the game's `WinMain`.
@@ -612,6 +723,8 @@ pub fn adapter_table_text() -> Option<String> {
 /// (a test's table), else the table of this machine (`engine_platform::machine_table`), made once
 /// per run from what the system reports, with the game's Documents and AppData inside nv-rs's own
 /// folder ([`own_folder`], made here when missing). What could not be answered is said in the log.
+/// The display and the card are not in it: [`display_table_text`], made in the start after the
+/// renderer choice, so nothing here reads that choice.
 #[cfg(not(windows))]
 pub fn adapter_table_text() -> Option<String> {
     if let Some(path) = std::env::var_os("NV_D3D9_ADAPTER") {
@@ -697,12 +810,80 @@ pub fn wgpu_cache_path() -> Option<PathBuf> {
 /// Gives the Direct3D 9 layer the player's adapter table ([`adapter_table_path`]) before the
 /// renderer's start-up asks about the adapter. Without the file nothing is loaded: the first
 /// Direct3D 9 query stops that stage and its message says how to capture the table.
-fn load_adapter_table(e: &mut Engine) {
+/// Off Windows the table is this machine's part ([`adapter_table_text`]) and, after it, the display
+/// and card part ([`display_table_text`]), made here: after the run's renderer choice. A card the
+/// game cannot draw on refuses the start (the error). In a play run off Windows the first start's
+/// profile files are prepared here too, from the whole table ([`first_profile::first_start`]: no
+/// Play.exe there), before the game reads them.
+#[cfg_attr(windows, allow(unused_variables))]
+fn load_adapter_table(e: &mut Engine, data: &Path) -> Result<(), String> {
     if let Some(text) = adapter_table_text() {
+        #[cfg(not(windows))]
+        let text = match display_table_text()? {
+            Some(display) => {
+                let text = text + &display;
+                if fixes::is_play_run(|name| std::env::var(name).ok()) {
+                    match (own_folder(), data.parent()) {
+                        (Ok(own), Some(game)) => {
+                            let [documents, _, _] =
+                                engine_platform::machine_table::game_folders(&own);
+                            first_profile::first_start(&documents, game, &text)?;
+                        }
+                        (Err(why), _) => eprintln!("first start: no profile files: {why}"),
+                        (_, None) => {}
+                    }
+                }
+                text
+            }
+            None => text,
+        };
         engine_platform::d3d9::load_adapter_table(e, &text);
     }
     if let Some(dir) = texture_cache_path() {
         engine_platform::d3dx::set_texture_cache(e, dir);
+    }
+    Ok(())
+}
+
+/// Set once the start has made the run's renderer choice ([`Host::start_with`]): the display part
+/// of the machine table asks whether the run draws, which that choice fixes for the whole run, so
+/// it must not be made before (review of #681: the settings' reading once made it first).
+static RENDERER_CHOSEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// [`display_table_text`]'s guard: an error, never a silent "draws nothing", when the renderer has
+/// not been chosen yet.
+#[cfg_attr(windows, allow(dead_code))]
+fn renderer_chosen_first(chosen: bool) -> Result<(), String> {
+    if chosen {
+        Ok(())
+    } else {
+        Err(
+            "nv-rs: the machine table's display part was asked for before the run chose its \
+             renderer (a start-up order fault in the port)"
+                .into(),
+        )
+    }
+}
+
+/// The display and card part of the machine table on Linux and macOS
+/// (`engine_platform::machine_table::this_display`), for a run that draws (the renderer chosen by
+/// now: `NV_D3D9`, or the run's choice made in [`Host::start_with`] before this): `None` with a
+/// test's table (`NV_D3D9_ADAPTER`), which has its own. What could not be answered is said in the
+/// log; a card the game cannot draw on is the error.
+#[cfg(not(windows))]
+pub fn display_table_text() -> Result<Option<String>, String> {
+    renderer_chosen_first(RENDERER_CHOSEN.load(std::sync::atomic::Ordering::Relaxed))?;
+    if std::env::var_os("NV_D3D9_ADAPTER").is_some() {
+        return Ok(None);
+    }
+    let (text, problems, refusal) =
+        engine_platform::machine_table::this_display(engine_platform::d3d9real::wanted());
+    for line in problems {
+        eprintln!("{line}");
+    }
+    match refusal {
+        Some(why) => Err(format!("nv-rs cannot draw the game here: {why}")),
+        None => Ok(Some(text)),
     }
 }
 
@@ -900,38 +1081,65 @@ fn sound_choice(sound: Option<&str>, record: bool, hidden: bool) -> SoundChoice 
     }
 }
 
+/// Whether the sun light from the sky's discs is installed (`sun::LightFromSky`): the choice says so
+/// (`fixes::Choice::light_from_sky`: the sun shadows on and `bSunLightFromSky` on) and wgpu alone is
+/// asked to draw (`backends`, `engine_platform::d3d9real::backends`). Anything else: the exe's light.
+fn light_from_sky_wanted(
+    choice: &fixes::Choice,
+    backends: Option<engine_platform::d3d9real::Backends>,
+) -> bool {
+    choice.light_from_sky() && backends == Some(engine_platform::d3d9real::Backends::Wgpu)
+}
+
 #[cfg(test)]
 mod tests {
-    /// Off Windows a start is refused, naming the pieces that are still Windows-only.
+    /// The light from the sky is installed only with the sun shadows on, the key on and wgpu alone
+    /// drawing: with the default choice, the sun shadows off (key on), the key off, the real
+    /// Direct3D 9, both, or no backend, nothing is installed and the game's light is the exe's.
+    #[test]
+    fn the_light_from_the_sky_is_installed_only_with_the_sun_shadows_on_wgpu() {
+        use engine_platform::d3d9real::Backends;
+        let wgpu = Some(Backends::Wgpu);
+        let mut choice = super::fixes::Choice::vanilla();
+        assert!(choice.sun_light_from_sky && !choice.sun_shadows);
+        assert!(!super::light_from_sky_wanted(&choice, wgpu));
+        choice.sun_shadows = true;
+        assert!(super::light_from_sky_wanted(&choice, wgpu));
+        for other in [Some(Backends::Real), Some(Backends::RealAndWgpu), None] {
+            assert!(!super::light_from_sky_wanted(&choice, other), "{other:?}");
+        }
+        choice.sun_light_from_sky = false;
+        assert!(!super::light_from_sky_wanted(&choice, wgpu));
+    }
+
+    /// Off Windows a start is refused, naming the pieces that are still Windows-only; on Linux on
+    /// x86-64 none is left, and the start goes on.
     #[test]
     fn a_start_off_windows_is_refused_naming_what_is_missing() {
-        let why = super::not_provided_here().unwrap_err();
-        for x86_64 in [true, false] {
-            for apple in [true, false] {
-                let why = super::not_provided_on(x86_64, apple).unwrap_err();
-                for piece in ["sound devices", "tables", "code page"] {
-                    assert!(why.contains(piece), "{piece}: {why}");
-                }
-                // The window with its mouse and keyboard: provided on Linux, not yet on macOS.
-                assert_eq!(why.contains("window"), apple, "{why}");
-                assert_eq!(why.contains("mouse and keyboard"), apple, "{why}");
-                assert_eq!(why.contains("main thread"), apple, "{why}");
-                // The game's paths and file listings are provided off Windows now.
-                assert!(!why.contains("folder names"), "{why}");
-                assert!(!why.contains("file times"), "{why}");
-                // The sound on the speakers is provided everywhere (engine-platform sound_out.rs).
-                assert!(!why.contains("speakers"), "{why}");
-                // So is the distortion's table (engine-platform dsfx.rs, the DLL's constants).
-                assert!(!why.contains("distortion"), "{why}");
-                // The processor's own differences only off x86-64 (Apple silicon).
-                assert_eq!(why.contains("x87"), !x86_64, "{why}");
-                assert_eq!(why.contains("RSQRTSS"), !x86_64, "{why}");
+        assert_eq!(super::not_provided_on(true, false), Ok(()));
+        for (x86_64, apple) in [(true, true), (false, true), (false, false)] {
+            let why = super::not_provided_on(x86_64, apple).unwrap_err();
+            // This machine's tables are made from what the system reports (the display, the
+            // card, the sound device, the folders: engine-platform machine_table.rs, dsound.rs),
+            // and the game's code pages are provided (engine-platform code_page.rs).
+            for gone in ["tables", "sound devices", "adapter", "folders", "code page"] {
+                assert!(!why.contains(gone), "{gone}: {why}");
             }
+            // The window with its mouse and keyboard: provided on Linux, not yet on macOS.
+            assert_eq!(why.contains("window"), apple, "{why}");
+            assert_eq!(why.contains("mouse and keyboard"), apple, "{why}");
+            assert_eq!(why.contains("main thread"), apple, "{why}");
+            // The game's paths, file listings, the speakers and the distortion are provided.
+            for gone in ["folder names", "file times", "speakers", "distortion"] {
+                assert!(!why.contains(gone), "{gone}: {why}");
+            }
+            // The processor's own differences only off x86-64 (Apple silicon).
+            assert_eq!(why.contains("x87"), !x86_64, "{why}");
+            assert_eq!(why.contains("RSQRTSS"), !x86_64, "{why}");
         }
         assert_eq!(
-            why,
+            super::not_provided_here(),
             super::not_provided_on(cfg!(target_arch = "x86_64"), cfg!(target_vendor = "apple"))
-                .unwrap_err()
         );
     }
 
@@ -944,28 +1152,130 @@ mod tests {
         dir
     }
 
-    /// The refusal is made before the exe is mapped: a start with an installation present stops
-    /// with it on Linux and macOS (an installation with no exe still says that first).
+    /// The refusal is made before the exe is mapped, after its version is checked (review of #631,
+    /// round 5): a start with a file that is not FalloutNV.exe 1.4.0.525 says so (status 1, a
+    /// report asked), not the expected stop; with the right exe (a check that passes) it stops
+    /// with the refusal.
     #[cfg(not(windows))]
     #[test]
-    fn a_start_off_windows_stops_with_the_refusal() {
+    fn a_start_off_windows_checks_the_version_then_stops_with_the_refusal() {
         let dir = scratch_installation("refusal");
         let err = super::Host::start(&dir.join("Data")).err().unwrap();
-        assert_eq!(err, super::not_provided_here().unwrap_err());
+        assert_ne!(Some(err.clone()), super::not_provided_here().err());
+        assert!(err.contains("1.4.0.525"), "{err}");
+        assert_eq!(super::error_status(&err), 1);
+        let exe = dir.join("FalloutNV.exe");
+        assert_eq!(
+            super::stop_off_windows(&exe, &|_| Ok(())),
+            super::not_provided_here()
+        );
+        assert_eq!(
+            super::stop_off_windows(&exe, &|_| Err("another build".into())),
+            Err("another build".to_string())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `nv-viewer --check` off Windows says the same (status 1: the game cannot start), where
-    /// the start does: after the exe is found.
+    /// Review of #631 (round 2): `nv-viewer --check` off Windows checks the exe's version FIRST
+    /// (a file that is not FalloutNV.exe 1.4.0.525 is said as such, status 1), and only then
+    /// stops as the start does; with no exe it says that.
     #[cfg(not(windows))]
     #[test]
-    fn the_installation_check_off_windows_says_the_game_cannot_start() {
+    fn the_installation_check_off_windows_checks_the_version_first() {
         let dir = scratch_installation("check");
         let err = super::check_installation(&dir.join("Data")).unwrap_err();
-        assert_eq!(err, super::not_provided_here().unwrap_err());
+        assert_ne!(Some(err.clone()), super::not_provided_here().err());
+        assert!(err.contains("1.4.0.525"), "{err}");
+        assert_eq!(super::error_status(&err), 1);
         let _ = std::fs::remove_dir_all(&dir);
         let missing = super::check_installation(&dir.join("Data")).unwrap_err();
         assert!(missing.ends_with("FalloutNV.exe: not found"), "{missing}");
+    }
+
+    /// The order of the start off Windows (review of #681): the settings' reading (which finds
+    /// `Fallout.ini` through the Documents folder) comes before the run's renderer choice, and must
+    /// not fix the choice to "draws nothing". Run in a child process of its own, as the choice is
+    /// the process's.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_settings_reading_leaves_the_renderer_choice_to_the_start() {
+        const CHILD: &str = "NV_HOST_TEST_CHOICE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let _ = crate::fixes::Choice::read_with(false);
+            assert!(crate::game_ini::path().is_some());
+            engine_platform::d3d9real::want_backend(engine_platform::d3d9real::Backends::Wgpu);
+            assert!(engine_platform::d3d9real::wanted());
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::the_settings_reading_leaves_the_renderer_choice_to_the_start",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("NV_D3D9")
+            .env_remove("NV_D3D9_ADAPTER")
+            .env("HOME", std::env::temp_dir())
+            .env_remove("XDG_DATA_HOME")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("1 passed"), "{text}");
+        // The machine's part was not made by the settings' reading: no window system or card
+        // was asked there (those lines come only from the start's display part).
+        assert!(!text.contains("machine table: no display"), "{text}");
+    }
+
+    /// Review of #631 (round 2): the start's expected stop off Windows ends with a status of its
+    /// own (play.sh says it needs no report); any other error with 1.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_expected_stop_off_windows_has_its_own_status() {
+        let dir = scratch_installation("status");
+        // The right exe (a version check that passes), as the start makes the stop: where a stop
+        // is left (macOS, another processor) it has its own status; on Linux on x86-64 the start
+        // goes on.
+        let stop = super::stop_off_windows(&dir.join("FalloutNV.exe"), &|_| Ok(()));
+        let _ = std::fs::remove_dir_all(&dir);
+        match stop {
+            Err(err) => assert_eq!(super::error_status(&err), super::NOT_PROVIDED_STATUS),
+            Ok(()) => assert!(cfg!(target_arch = "x86_64") && !cfg!(target_vendor = "apple")),
+        }
+        assert_eq!(super::NOT_PROVIDED_STATUS, 69);
+        assert_eq!(super::error_status("FalloutNV.exe: not found"), 1);
+    }
+
+    /// Every refusal (macOS, another processor) has the expected stop's status, on every system;
+    /// any other error 1.
+    #[test]
+    fn every_refusal_has_the_expected_stops_status() {
+        for (x86_64, apple) in [(true, true), (false, true), (false, false)] {
+            let why = super::not_provided_on(x86_64, apple).unwrap_err();
+            assert_eq!(
+                super::error_status(&why),
+                super::NOT_PROVIDED_STATUS,
+                "{why}"
+            );
+        }
+        assert_eq!(super::NOT_PROVIDED_STATUS, 69);
+        assert_eq!(super::error_status("FalloutNV.exe: not found"), 1);
+        assert_eq!(
+            super::error_status("NV_CODE_PAGE=932: give 1252 (English, ...)"),
+            1
+        );
+        assert!(!super::FIRST_STARTS.starts_with(super::REFUSAL_START));
+    }
+
+    /// The display part of the machine table is made only after the renderer choice: before it,
+    /// an error naming the order, never a table that silently says the run draws nothing.
+    #[test]
+    fn the_display_part_waits_for_the_renderer_choice() {
+        let why = super::renderer_chosen_first(false).unwrap_err();
+        assert!(why.contains("before the run chose its renderer"), "{why}");
+        assert_eq!(super::renderer_chosen_first(true), Ok(()));
     }
 
     #[test]
