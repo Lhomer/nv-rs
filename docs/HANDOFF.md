@@ -33,8 +33,12 @@ machinery runs.
 - **M6 (lab):** `ragdoll-core::np_down` and `Np::down_frame`: a kept fall rests on whatever
   touches it (floor and walls, per-body loads), labelled for the AI and the log only; asked, it
   rises by balance (17 of 18 landings stand); too weak it settles. The downed limits take in a
-  living reach past the skeleton data (for Patrick to confirm). Next: M6 in the game (the host
-  keeping a downed actor, the AI's choices, dying while down, the logs).
+  living reach past the skeleton data (for Patrick to confirm).
+- **M6 (game):** `bNewPhysics` keeps a heavy hit's actor downed: drawn as simulated, its path
+  movement held, the AI's choice from its pose (fire from the ground, stand, wait; shots withheld
+  while it cannot aim), death puts the game's ragdoll on the pose drawn, three failed rises fall
+  back to M4's hand-over; `[np pose]`, `[np choice]`, `[np death]`. Not done: crawling to cover,
+  the shot's origin from the drawn weapon, creatures. Not run in the game.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 

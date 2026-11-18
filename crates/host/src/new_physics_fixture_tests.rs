@@ -297,6 +297,8 @@ fn fall_run(speed: f32) -> Fell {
     f.make_character();
     crate::active_ragdoll::clear();
     crate::knockdown::clear();
+    // M4's hand-over: the fall not kept downed (M6 keeps it).
+    set_keep_down(false);
     let was = crate::gunplay::tuning();
     crate::gunplay::set_tuning(crate::gunplay::Tuning {
         new_physics: true,
@@ -442,6 +444,7 @@ fn fall_run(speed: f32) -> Fell {
     };
     crate::active_ragdoll::clear();
     crate::knockdown::clear();
+    set_keep_down(true);
     crate::gunplay::set_tuning(was);
     out
 }
@@ -513,4 +516,262 @@ fn np_falls_into_the_games_ragdoll_on_fnvs_skeleton() {
     );
     assert!(r.rising < 300.0, "a body rising at {:.0}", r.rising);
     assert!(r.get_up, "the get-up watch does not have it");
+}
+
+/// What a downed run did (M6).
+struct Downed {
+    knock_state: u8,
+    /// The labels logged (in order, each once), whether the actor was downed and stood again.
+    labels: Vec<&'static str>,
+    was_down: bool,
+    stood_again: Option<f32>,
+    /// Drawn against simulated at most (degrees, units) while downed; the most the actor's
+    /// reference lay from the pelvis (flat, units) after it settled; whether the shots were
+    /// withheld while it could not aim (no target), and never once it stood.
+    readback: (f32, f32),
+    ref_off: f32,
+    withheld: bool,
+    withheld_after: bool,
+    /// The lowest bone under the floor (units); a death's bodies (placed, given velocities) and
+    /// the most a placed body lay from the pose drawn (units).
+    lowest: f32,
+    death: Option<(usize, usize)>,
+    death_off: f32,
+}
+
+/// A 4.35 m/s chest hit on FNV's skeleton with New Physics on and the fall kept (M6): the run
+/// through the real write, update, read-back and put-back for `seconds`; dead at `die_at` (s
+/// after the start) when given.
+fn down_run(seconds: f32, die_at: Option<f32>) -> Downed {
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut f = Fixture::new(
+        rig_fixture::fnv_skeleton(),
+        Ground {
+            collision: Some(0.0),
+            navmesh: -8.0,
+        },
+    );
+    f.make_character();
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    set_keep_down(true);
+    let was = crate::gunplay::tuning();
+    crate::gunplay::set_tuning(crate::gunplay::Tuning {
+        new_physics: true,
+        ..was
+    });
+    // The give-up's hand-over: not an AI thread, `CanKnockDown` yes, `KnockExplosion` into the
+    // ragdoll (knock state 2).
+    f.e.register_double(0x008c_7aa0, |_, _| 0u32.into_ret());
+    f.e.register_double(0x0088_45a0, |_, _| 1u32.into_ret());
+    f.e.register_double(crate::hit_force::KNOCK_EXPLOSION, |e, a| {
+        e.mem.set_u8(a[0] + 0x13c, 2);
+        0u32.into_ret()
+    });
+    // A body's position and rotation set (the death's hand-over).
+    f.e.register_double(0x00ca_8960, |e, a| {
+        let p = rig_fixture::read3(e, a[1]);
+        rig_fixture::write3(e, a[0] + 0x120, p);
+        for i in 0..4 {
+            let x = e.mem.f32(a[2] + 4 * i);
+            e.mem.set_f32(a[0] + 0x160 + 4 * i, x);
+        }
+        0u32.into_ret()
+    });
+    let body_nodes: Vec<usize> = model()
+        .bodies
+        .iter()
+        .map(|b| f.nodes.iter().position(|n| n.name == b.node).unwrap())
+        .collect();
+    let spine = model().body("Bip01 Spine2").unwrap();
+    let root = f.at[0];
+    let pelvis_node = f.at[body_nodes[model().root]];
+    f.animate();
+    let bodies_of = |f: &mut Fixture| crate::knockdown::tests_bodies(&mut f.e, ACTOR);
+    let keyframe = |f: &mut Fixture| {
+        for (node, body) in bodies_of(f) {
+            let (r, t) = f.world_of(node);
+            rig_fixture::write3(&mut f.e, body + 0x120, scale(t, 1.0 / rig_fixture::HK));
+            let q = ragdoll_core::active::qfrom_m(&r);
+            for (i, x) in [q[1], q[2], q[3], q[0]].into_iter().enumerate() {
+                f.e.mem.set_f32(body + 0x160 + 4 * i as u32, x);
+            }
+        }
+    };
+    keyframe(&mut f);
+    assert!(claim(&mut f.e, ACTOR));
+    let mut run = Downed {
+        knock_state: 0,
+        labels: Vec::new(),
+        was_down: false,
+        stood_again: None,
+        readback: (0.0, 0.0),
+        ref_off: 0.0,
+        withheld: false,
+        withheld_after: false,
+        lowest: f32::INFINITY,
+        death: None,
+        death_off: 0.0,
+    };
+    let start = Instant::now();
+    let mut hit_done = false;
+    let mut died = false;
+    let mut drawn_at_death: Vec<(M3, V3)> = Vec::new();
+    while start.elapsed() < Duration::from_secs_f32(seconds) {
+        std::thread::sleep(Duration::from_millis(16));
+        let t = start.elapsed().as_secs_f32();
+        let reference = f.reference();
+        rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, reference);
+        f.animate();
+        keyframe(&mut f);
+        if !hit_done && t > 0.2 {
+            hit_done = true;
+            let chest = f.world_of(f.at[body_nodes[spine]]).1;
+            hit(
+                &mut f.e,
+                ACTOR,
+                4.35 * model().mass,
+                add(chest, [0.0, 8.0, 4.0]),
+                [0.0, -1.0, 0.0],
+            );
+        }
+        if let Some(d) = die_at {
+            if t > d && !died && owns(ACTOR) {
+                died = true;
+                if let Some((p, _)) = drawn(ACTOR) {
+                    drawn_at_death = p;
+                }
+                f.e.mem.set_u32(ACTOR + 0x108, 1);
+            }
+        }
+        crate::active_ragdoll::apply(&mut f.e);
+        let down = is_down(ACTOR);
+        if let Some((p, _)) = drawn(ACTOR) {
+            if down {
+                for (k, &i) in body_nodes.iter().enumerate() {
+                    let w = f.world_of(f.at[i]);
+                    run.readback.0 = run
+                        .readback
+                        .0
+                        .max(ragdoll_core::np_skeleton::angle_between(&w.0, &p[k].0).to_degrees());
+                    run.readback.1 = run.readback.1.max(length(sub(w.1, p[k].1)));
+                }
+            }
+        }
+        if let Some((_, _, _)) = state(ACTOR) {
+            if let Some(l) = label_of(ACTOR) {
+                if run.labels.last() != Some(&l) {
+                    run.labels.push(l);
+                }
+            }
+        }
+        if down {
+            run.was_down = true;
+            run.withheld |= withholds_fire(ACTOR);
+            if t > 1.8 {
+                let pelvis = f.world_of(pelvis_node).1;
+                let at = rig_fixture::read3(&f.e, ACTOR + 0x30);
+                run.ref_off = run
+                    .ref_off
+                    .max(length([pelvis[0] - at[0], pelvis[1] - at[1], 0.0]));
+            }
+        } else if run.was_down && owns(ACTOR) && run.stood_again.is_none() {
+            run.stood_again = Some(t);
+        }
+        if run.stood_again.is_some() {
+            run.withheld_after |= withholds_fire(ACTOR);
+        }
+        // The bones with bodies or between them (the fingers and thumbs are the animation's, past
+        // the hand's capsule: a palm pressed to the floor puts their tips a few units through it).
+        let lowest = (1..f.nodes.len())
+            .filter(|&i| {
+                let n = &f.nodes[i].name;
+                n.starts_with("Bip01 ") && !n.contains("Finger") && !n.contains("Thumb")
+            })
+            .map(|i| f.world_of(f.at[i]).1[2])
+            .fold(f32::INFINITY, f32::min);
+        if owns(ACTOR) {
+            run.lowest = run.lowest.min(lowest);
+        }
+        crate::active_ragdoll::after_draw(&mut f.e);
+        crate::active_ragdoll::unwrite(&mut f.e);
+        if died && run.death.is_none() {
+            if let Some(d) = deaths().first() {
+                run.death = Some((d.1, d.2));
+                for (node, body) in bodies_of(&mut f) {
+                    let Some(k) = body_nodes.iter().position(|&i| f.at[i] == node) else {
+                        continue;
+                    };
+                    if let Some(d) = drawn_at_death.get(k) {
+                        let p = scale(rig_fixture::read3(&f.e, body + 0x120), rig_fixture::HK);
+                        run.death_off = run.death_off.max(length(sub(p, d.1)));
+                    }
+                }
+                break;
+            }
+        }
+    }
+    run.knock_state = f.e.mem.u8(rig_fixture::PROCESS_AT + 0x13c);
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    crate::gunplay::set_tuning(was);
+    run
+}
+
+/// M6 on FNV's skeleton: a 4.35 m/s hit past any step is kept downed (no hand-over to the game's
+/// ragdoll: knock state 0), drawn is simulated within 0.5 degrees and 0.5 units every downed
+/// frame, the actor's reference follows the pelvis (within 15 units once settled), its shots are
+/// withheld while it cannot aim (no target), the labels are logged as they change; asked to
+/// stand (no target: the AI's choice), it stands by its balance again within 8 s and its shots
+/// are not withheld then; no bone more than 3 units under the floor (the fingers and thumbs
+/// aside: the animation's, past the hand's capsule).
+#[test]
+fn np_downed_on_fnvs_skeleton_stands_again() {
+    let r = down_run(10.0, None);
+    eprintln!(
+        "RESULT np M6 downed on FNV's skeleton: knock state {}, labels {:?}, stood again at {:?} s, read-back {:.3} deg / {:.3} u, the reference at most {:.1} u from the pelvis, withheld {} (after {}), lowest {:.1} u",
+        r.knock_state, r.labels, r.stood_again, r.readback.0, r.readback.1, r.ref_off, r.withheld, r.withheld_after, r.lowest
+    );
+    assert_eq!(r.knock_state, 0, "handed to the game's ragdoll");
+    assert!(r.was_down, "never downed");
+    assert!(
+        r.readback.0 <= 0.5 && r.readback.1 <= 0.5,
+        "{:?}",
+        r.readback
+    );
+    assert!(
+        r.ref_off < 15.0,
+        "the reference {:.1} from the pelvis",
+        r.ref_off
+    );
+    assert!(r.withheld && !r.withheld_after);
+    assert!(r.labels.len() >= 2, "{:?}", r.labels);
+    assert!(
+        r.stood_again.is_some_and(|t| t < 8.0),
+        "{:?}",
+        r.stood_again
+    );
+    assert!(r.lowest > -3.0, "{:.1}", r.lowest);
+}
+
+/// Dying while downed: the game's ragdoll takes the body from the pose drawn (each of its 18
+/// bodies placed within 1.5 units of it) and moving as New Physics' bodies were (each given its
+/// velocity); New Physics lets go.
+#[test]
+fn np_dies_while_downed_on_fnvs_skeleton() {
+    let r = down_run(4.0, Some(2.5));
+    eprintln!(
+        "RESULT np M6 dies while downed: labels {:?}, bodies placed and given velocities {:?}, at most {:.2} u off the pose drawn",
+        r.labels, r.death, r.death_off
+    );
+    assert!(r.was_down);
+    assert!(
+        r.death.is_some_and(|d| d.0 == 18 && d.1 == 18),
+        "{:?}",
+        r.death
+    );
+    assert!(r.death_off < 1.5, "{:.2}", r.death_off);
+    assert!(!owns(ACTOR));
 }

@@ -238,9 +238,19 @@ names the actor by its form id:
    game's ragdoll moving as it was (`[np fall] handed to its ragdoll: 18 bodies moving on; the
    root body at ... units/s`), then the usual get-up.
 6. **Off**: with `bNewPhysics=0` nothing says `[np ...]` and the reactions are as before.
+7. **Downed** (a heavy hit, as in 5, now keeps the NPC down; M6): it falls, comes to rest where
+   the fall leaves it (against a wall it slides down and stays propped), and gets up by itself
+   within a few seconds: it sits up, pulls its feet in, pushes up through a kneel or a squat and
+   stands. Look for `[np pose] lying` / `seated` / `propped`, `[np choice] stand`, then
+   `[np pose] standing again`. With you in its sights and its gun arm free it may fire from the
+   ground first (`[np choice] fire`, its shots wider); otherwise it holds fire. Kill it while it
+   is down: it should go limp from exactly where it lay (`[np death]`), no jump or fling. If it
+   cannot get up after three tries it collapses into the game's own ragdoll and get-up
+   (`[np choice] give up`, then `[np fall]`).
 
-What to report besides the clip: a pop or jump at the hit, at a step's landing or at the hand-over
-to the ragdoll; feet sliding; an NPC that keeps stepping or never settles; any `[np let go] its
+What to report besides the clip: a pop or jump at the hit, at a step's landing, at the hand-over
+to the ragdoll or at a death while down; a downed NPC sliding along the ground or walking while it
+lies; one stuck half way up; feet sliding; an NPC that keeps stepping or never settles; any `[np let go] its
 pose went bad`. Each `[np reaction]` line ends with the read-back (drawn against simulated, want at
 most 0.5 degrees and 0.5 units): a larger value means the game moved the bones after New Physics
 wrote them. The clips sample each actor New Physics has every frame as `"np":{...}` (docs/GUNPLAY.md

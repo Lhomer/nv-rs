@@ -702,8 +702,41 @@ the AI asking again a second after a rise gives up) 17 stand, in 3.4 to 7.8 s. T
 200 rad/s, `np_body::MAX_SPEED`, `MAX_SPIN`) never used after a fall's impact. Videos:
 `np_m6_fall_rise`, `np_m6_wall`, `np_m6_weak`, `np_m6_hit_rising` (`examples/np_frames.rs m6`).
 The solver's other changes (the floor's Coulomb friction, no bounce, the walls) leave the M1 and M2
-tests as they were. Next (M6, the game): the host keeping a downed actor, the AI's choices
-(fire from the ground, crawl to cover, stand), dying while down, `[np pose]` / `[np choice]`.
+tests as they were.
+
+**M6, downed but active: the game** (`new_physics.rs`). With `bNewPhysics=1` a hit past any step
+now keeps the actor downed instead of handing it to the game's ragdoll (M4's hand-over is kept
+for a collapse it cannot rise from). Each frame the downed body is drawn as simulated (the same
+write, update, read-back and put-back), the actor's reference follows the pelvis, and the game's
+path movement is held for it (`ActorMover::Update`, `009dc120`, wrapped in `crate::knockdown`:
+run, its move delta zeroed for a downed actor). The AI's choice is made from the pose it has
+(`downed`): settle (its first second down); **fire** from the ground (its weapon arm free and its
+combat target, the actor's `0x42c`, within 100 degrees of the torso's facing: the game's own
+attacks go ahead, each shot wider as a support hand 0.6 off a two-handed grip, `crate::one_hand`;
+at most 4 s before it tries to stand); **stand** (the controller pursues balance, M6 lab); a
+second's **wait** after a rise gives up. Whenever the choice is not fire, its shots are withheld
+(`crate::gunplay`'s `TESObjectWEAP::Fire` hook skips them). After three rises give up it collapses
+into the game's ragdoll and the knockdowns' get-up (M4's hand-over). **Dying** (downed or standing)
+puts the game's ragdoll's bodies on the pose drawn, moving as New Physics' bodies were
+(`knockdown::place_bodies`), so the death neither jumps back to the animation nor flings. The log
+says `[np pose]` as the label changes (pelvis height, tilt, the loads on feet, seat, hands and a
+wall, the weapon arm, the target's angle, the legs' push against the weight), `[np choice]` as
+the choice changes (with the reads behind it), `[np death]`; the clips' `"np"` sample has
+`"label"` and `"choice"`. Fixture tests on FNV's skeleton (`new_physics_fixture_tests.rs`): a
+4.35 m/s hit is kept downed (knock state 0), drawn is simulated (0.000 degrees, 0.000 units) every
+downed frame, the reference within 0.7 units of the pelvis, the shots withheld while it cannot aim
+and not once it stands; it lands lying, sits up, rises and is standing by its balance 7.1 s after
+the start (its second try; the fixture's frames run 24 ms), no bone more than 0.6 units under the
+floor (the fingers and thumbs aside: the animation's, past the hand's capsule, a few units through
+the floor when a palm presses it); dying 2.5 s in, its 18 bodies are placed on the pose drawn
+(0.00 units off) and given its velocities, and New Physics lets go. The M4 fall test runs with
+the downed keeping off (`set_keep_down`, tests only).
+
+**Not done in M6 (for a later pass):** crawling to cover (the combat controller's cover point as
+the body's travel goal: `FindCombatLocation` `0099ac20`); the shot's origin and direction from the
+weapon as drawn (the game aims its NPC shots from the weapon node as animated, `fire_locate`, so a
+downed actor's shot leaves from where its weapon would be standing; only the spread follows the
+pose); a creature's downed body (New Physics takes human skeletons only). Not run in the game.
 
 ### bdf710a: the get-up hoisted upside down, the stagger's slide, the head's nod, the launch along the ground (Patrick, 2026-11-17, clip 1456)
 

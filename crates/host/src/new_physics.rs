@@ -47,6 +47,9 @@ const PLAYER: u32 = 0x011d_ea3c;
 /// `Actor::HitMe_ov2` (the physical hit reaction) and the crippled-limb idle's setting byte.
 pub const HIT_ME_OV2: u32 = 0x008a_4af0;
 pub const CRIPPLE_IDLE: u32 = 0x011d_f760;
+/// `ActorMover::Update` (`009dc120`, thiscall: the mover, the frame's time): the game's path
+/// movement, held for a downed actor (`crate::knockdown` wraps it).
+pub const ACTOR_MOVER_UPDATE: u32 = 0x009d_c120;
 
 /// How long after its last hit, standing calm, an actor is handed back to its animation (s), and
 /// how far its drawn body may be off the animation then (game units).
@@ -94,6 +97,13 @@ struct NpActor {
     soft_most: f32,
     /// The steps already logged (`[np step]`).
     steps_logged: usize,
+    /// Downed (M6): the label last logged, the AI's choice now and how long it has held, the
+    /// rises that gave up, seconds firing from the ground.
+    label: Option<&'static str>,
+    choice: &'static str,
+    choice_for: f32,
+    fails: u32,
+    fired: f32,
 }
 
 /// One frame's figures of an actor New Physics has (the clips' `"np"` sample).
@@ -298,6 +308,11 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             outside_most: 0.0,
             soft_most: 0.0,
             steps_logged: 0,
+            label: None,
+            choice: "",
+            choice_for: 0.0,
+            fails: 0,
+            fired: 0.0,
         });
     true
 }
@@ -380,6 +395,37 @@ pub fn apply(e: &mut Engine) {
         }
         let process = e.mem.u32(a.actor + PROCESS);
         let life = e.mem.u32(a.actor + LIFE_STATE);
+        if matches!(life, 1 | 2) && !a.drawn.is_empty() {
+            // Dead (downed or standing): the game's ragdoll takes the body from the pose drawn,
+            // moving as New Physics' bodies were (no jump back to the animation, nothing flung).
+            if let Some(np) = a.np.as_ref() {
+                let now: Vec<(M3, V3)> = a
+                    .nodes
+                    .iter()
+                    .map(|&n| {
+                        (
+                            read9(e, n + WORLD_ROTATION),
+                            read3(e, n + WORLD_TRANSLATION),
+                        )
+                    })
+                    .collect();
+                let (shown, animated, velocities) = handing(&a.nodes, &a.drawn, &now, &np.states);
+                let (moved, given) =
+                    crate::knockdown::place_bodies(e, a.actor, &shown, &animated, &velocities);
+                note(format!(
+                    "{:08X}: [np death] {}: its ragdoll's {moved} bodies on the pose drawn, {given} \
+                     moving as New Physics' were",
+                    a.id,
+                    a.label.map_or("standing", |l| l)
+                ));
+                DEATHS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push((a.actor, moved, given));
+            }
+            summary(&a);
+            continue;
+        }
         if process == 0 || e.mem.u8(process + KNOCK_STATE) != 0 || matches!(life, 1 | 2) {
             note(format!(
                 "{:08X}: [np let go] {} (the game's own ragdoll has it)",
@@ -405,6 +451,7 @@ pub fn apply(e: &mut Engine) {
         let floor = read3(e, a.actor + REFR_POSITION)[2];
         if a.np.is_none() {
             let mut np = Np::new(model().clone(), &a.taken_pose, 1.0);
+            np.keep_down = KEEP_DOWN.load(std::sync::atomic::Ordering::Relaxed);
             if dt > 0.0 {
                 let r = model().root;
                 np.set_anim_velocity(scale(sub(anim[r].1, a.taken_pose[r].1), 1.0 / dt));
@@ -512,6 +559,21 @@ pub fn apply(e: &mut Engine) {
             ));
         }
         a.steps_logged = np.balance.taken.len();
+        if np.down.is_some() {
+            let give_up = downed(e, &mut a, dt);
+            if give_up {
+                a.choice = "give up";
+            }
+        } else if a.label.is_some() {
+            note(format!(
+                "{:08X}: [np pose] standing again (its balance has it)",
+                a.id
+            ));
+            a.label = None;
+            a.choice = "";
+            a.fails = 0;
+        }
+        let Some(np) = a.np.as_mut() else { continue };
         // The steps' move is the actor's.
         let mv = np.take_move();
         if length(mv) > 1e-3 {
@@ -519,31 +581,14 @@ pub fn apply(e: &mut Engine) {
             crate::knockdown::place(e, a.actor, add(at, mv));
             a.moved = add(a.moved, mv);
         }
-        if np.phase() == Phase::Falling {
+        if (np.phase() == Phase::Falling && np.down.is_none()) || a.choice == "give up" {
             // Out of steps (or past any step's reach): the game's ragdoll takes it, moving as its
             // bodies were (`crate::knockdown::hand_over`; the get-up is the knockdowns' own).
             let k = ragdoll_core::np_body::UNITS;
-            let velocities: Vec<(u32, V3, V3)> = a
-                .nodes
-                .iter()
-                .zip(&np.states)
-                .map(|(&n, s)| (n, scale(s.v, k), s.w))
-                .collect();
             let r = model().root;
             let pelvis = length(scale(np.states[r].v, k));
             let (_, com_v) = np.model.centre_of_mass(&np.states);
-            let shown: Vec<(u32, M3, V3)> = a
-                .nodes
-                .iter()
-                .zip(&a.drawn)
-                .map(|(&n, d)| (n, d.0, d.1))
-                .collect();
-            let animated: Vec<(u32, M3, V3)> = a
-                .nodes
-                .iter()
-                .zip(&anim)
-                .map(|(&n, d)| (n, d.0, d.1))
-                .collect();
+            let (shown, animated, velocities) = handing(&a.nodes, &a.drawn, &anim, &np.states);
             match crate::knockdown::hand_over(e, a.actor, &shown, &animated, &velocities) {
                 Ok(n) => note(format!(
                     "{:08X}: [np fall] handed to its ragdoll: {n} bodies moving on; the root body \
@@ -594,7 +639,200 @@ pub fn apply(e: &mut Engine) {
     let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
     // Claimed during the frame (a hit while this ran): kept too.
     keep.append(&mut actors);
+    // Only actors still downed have their shots withheld.
+    WITHHELD
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|w| keep.iter().any(|a| a.actor == *w && a.label.is_some()));
     *actors = keep;
+}
+
+/// A downed body (M6) is kept rather than handed to the game's ragdoll (tests of the M4
+/// hand-over turn it off).
+static KEEP_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+#[cfg(test)]
+pub(crate) fn set_keep_down(on: bool) {
+    KEEP_DOWN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The deaths New Physics handed to the game's ragdoll (actor, bodies placed, given velocities).
+static DEATHS: Mutex<Vec<(u32, usize, usize)>> = Mutex::new(Vec::new());
+pub fn deaths() -> Vec<(u32, usize, usize)> {
+    DEATHS.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// The downed actors whose shots are withheld now (they cannot aim from the pose they have).
+static WITHHELD: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Downed, how long the body settles before the AI chooses (s), how long it fires from the
+/// ground before it tries to stand (s), its shots' extra spread (as a support hand this far off a
+/// two-handed grip, `crate::one_hand`), the rises that may give up before it collapses into the
+/// game's ragdoll (the knockdowns' get-up).
+pub const DOWN_SETTLE: f32 = 1.0;
+pub const FIRE_DOWN: f32 = 4.0;
+pub const DOWN_SPREAD: f32 = 0.6;
+pub const DOWN_TRIES: u32 = 3;
+/// After a rise gives up, the AI waits this long before it tries again (s).
+pub const RISE_AGAIN: f32 = 1.0;
+
+/// Combat target (the actor's `combatTarget`, slot 0x42c).
+const COMBAT_TARGET: u32 = 0x42c;
+
+/// Whether `actor` is downed and its shots are withheld (it cannot aim from the pose it has):
+/// `crate::gunplay`'s fire hook skips the shot.
+pub fn withholds_fire(actor: u32) -> bool {
+    WITHHELD
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(&actor)
+}
+
+/// The label of `actor`'s downed pose (none while it stands).
+pub fn label_of(actor: u32) -> Option<&'static str> {
+    ACTORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|a| a.actor == actor)
+        .and_then(|a| a.label)
+}
+
+/// Whether New Physics has `actor` downed (the game's path movement is held for it).
+pub fn is_down(actor: u32) -> bool {
+    ACTORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .any(|a| a.actor == actor && a.label.is_some())
+}
+
+/// The pose to hand to the game's ragdoll: each body's node with its drawn world (`drawn`), its
+/// animated world (`animated`: where the game kept the bodies), and its body's velocities (game
+/// units a second, rad/s).
+#[allow(clippy::type_complexity)]
+fn handing(
+    nodes: &[u32],
+    drawn: &[(M3, V3)],
+    animated: &[(M3, V3)],
+    states: &[ragdoll_core::np_body::State],
+) -> (Vec<(u32, M3, V3)>, Vec<(u32, M3, V3)>, Vec<(u32, V3, V3)>) {
+    let k = ragdoll_core::np_body::UNITS;
+    let velocities = nodes
+        .iter()
+        .zip(states)
+        .map(|(&n, s)| (n, scale(s.v, k), s.w))
+        .collect();
+    let shown = nodes
+        .iter()
+        .zip(drawn)
+        .map(|(&n, d)| (n, d.0, d.1))
+        .collect();
+    let animated = nodes
+        .iter()
+        .zip(animated)
+        .map(|(&n, d)| (n, d.0, d.1))
+        .collect();
+    (shown, animated, velocities)
+}
+
+/// The downed AI's frame (M6): the pose's label logged as it changes (`[np pose]`), the reads,
+/// and a choice from them (`[np choice]`): settle; fire from the ground (the weapon arm free and
+/// the target within the shoulder's reach; its shots wider); stand (the controller pursues
+/// balance); wait. Answers true when the rises have given up [`DOWN_TRIES`] times: the collapse
+/// goes to the game's ragdoll and the knockdowns' get-up.
+fn downed(e: &mut Engine, a: &mut NpActor, dt: f32) -> bool {
+    let Some(np) = a.np.as_mut() else {
+        return false;
+    };
+    let Some(d) = np.down.as_ref() else {
+        return false;
+    };
+    let label = d.labeler.label.name();
+    let reading = d.reading;
+    let since = d.since;
+    let failed = d.rise_failed;
+    let push = np.push();
+    let target = e.mem.u32(a.actor + COMBAT_TARGET);
+    let to_target = (target != 0 && target != a.actor).then(|| {
+        let at = read3(e, target + REFR_POSITION);
+        let me = read3(e, a.actor + REFR_POSITION);
+        sub(at, me)
+    });
+    let rd = ragdoll_core::np_down::reads(&reading, to_target, push);
+    if a.label != Some(label) {
+        a.label = Some(label);
+        note(format!(
+            "{:08X}: [np pose] {label}: pelvis {:.0} u up, torso tilted {:.0} degrees, feet {:.0} N, \
+             seat {:.0} N, hands {:.0} N, a wall {:.0} N; weapon arm {}, target {:.0} degrees off, \
+             push {:.0} N for {:.0} N",
+            a.id,
+            reading.pelvis_height * ragdoll_core::np_body::UNITS,
+            reading.tilt.to_degrees(),
+            reading.feet,
+            reading.seat,
+            reading.hands,
+            reading.back_wall,
+            if rd.arm_free { "free" } else { "carrying" },
+            rd.aim_off,
+            push,
+            reading.weight
+        ));
+    }
+    if failed && a.choice == "stand" {
+        a.fails += 1;
+        if let Some(d) = np.down.as_mut() {
+            d.rise_failed = false;
+        }
+    }
+    let choice = if since < DOWN_SETTLE {
+        "settle"
+    } else if a.fails >= DOWN_TRIES {
+        "give up"
+    } else if rd.can_aim && to_target.is_some() && a.fired < FIRE_DOWN {
+        "fire"
+    } else if a.choice == "wait" && a.fails > 0 && a.choice_for < RISE_AGAIN {
+        "wait"
+    } else if failed {
+        // A rise gave up this frame: a moment's rest before the next.
+        "wait"
+    } else if np.rise || rd.can_push_up {
+        "stand"
+    } else {
+        "wait"
+    };
+    if choice == "fire" {
+        a.fired += dt;
+        crate::one_hand::set(a.actor, DOWN_SPREAD);
+    }
+    np.rise = choice == "stand";
+    {
+        let mut w = WITHHELD.lock().unwrap_or_else(|p| p.into_inner());
+        w.retain(|&x| x != a.actor);
+        if choice != "fire" {
+            w.push(a.actor);
+        }
+    }
+    if choice != a.choice {
+        note(format!(
+            "{:08X}: [np choice] {choice} (from {label}; aim {}, push up {}, crawl {}, a target {}, \
+             rises given up {}{})",
+            a.id,
+            rd.can_aim,
+            rd.can_push_up,
+            rd.can_crawl,
+            to_target.is_some(),
+            a.fails,
+            if choice == "fire" {
+                format!(", shots wider as a hand {DOWN_SPREAD} off the grip")
+            } else {
+                String::new()
+            }
+        ));
+        a.choice = choice;
+        a.choice_for = 0.0;
+    }
+    a.choice_for += dt;
+    choice == "give up"
 }
 
 /// A reaction's summary when New Physics lets go of an actor.
@@ -627,7 +865,7 @@ fn phase_name(p: Phase) -> &'static str {
 }
 
 /// The clips' sample of an actor New Physics has (`crate::room_record`): `"np":{...}` with its
-/// balance's phase, the spine top off its animation (degrees), the capture point outside the feet
+/// balance's phase, its downed pose's label and the AI's choice (null standing), the spine top off its animation (degrees), the capture point outside the feet
 /// (m), the most a joint is softened, the body's centre's speed against the animation's (units a
 /// second), the hips lowered (m), the foot swinging (0 left, 1 right, or null), the catching steps,
 /// the actor's move (units), the read-back (degrees, units: drawn against simulated), the seconds
@@ -639,8 +877,14 @@ pub fn sample_field(actor: u32) -> String {
     };
     let n = &a.now;
     format!(
-        "\"np\":{{\"phase\":{},\"spine\":{},\"outside\":{},\"soft\":{},\"centre_speed\":{},\"lower\":{},\"swinging\":{},\"steps\":{},\"moved\":{},\"readback\":[{},{}],\"since_hit\":{},\"dt\":{}}}",
+        "\"np\":{{\"phase\":{},\"label\":{},\"choice\":{},\"spine\":{},\"outside\":{},\"soft\":{},\"centre_speed\":{},\"lower\":{},\"swinging\":{},\"steps\":{},\"moved\":{},\"readback\":[{},{}],\"since_hit\":{},\"dt\":{}}}",
         room_events::text(if n.phase.is_empty() { "taken" } else { n.phase }),
+        a.label.map_or("null".to_string(), room_events::text),
+        if a.choice.is_empty() {
+            "null".to_string()
+        } else {
+            room_events::text(a.choice)
+        },
         room_events::num(n.spine),
         room_events::num(n.outside),
         room_events::num(n.soft),
@@ -701,6 +945,8 @@ pub fn clear() {
     ROOTS.lock().unwrap_or_else(|p| p.into_inner()).clear();
     *LAST.lock().unwrap_or_else(|p| p.into_inner()) = None;
     FALLS.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    WITHHELD.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    DEATHS.lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
 
 #[cfg(test)]

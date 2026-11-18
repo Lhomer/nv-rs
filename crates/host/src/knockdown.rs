@@ -352,7 +352,26 @@ pub fn install(e: &mut Engine) {
         );
         Ret::default()
     });
+    e.register(crate::new_physics::ACTOR_MOVER_UPDATE, |e, a| {
+        // The game's path movement: run, its move held for an actor New Physics has downed (the
+        // body moves itself; the actor's reference follows its pelvis).
+        engine::units::fallout_ai::actormover::actor_mover_update(
+            e,
+            Ptr::new(a[0]),
+            f32::from_bits(a[1]),
+        );
+        if a[0] != 0 && crate::new_physics::is_down(e.mem.u32(a[0] + MOVER_ACTOR)) {
+            for o in [0u32, 4, 8] {
+                e.mem.set_f32(a[0] + MOVER_DELTA + o, 0.0);
+            }
+        }
+        Ret::default()
+    });
 }
+
+/// `ActorMover`'s actor and its last update's move delta (`CachedMoveDelta`, a point).
+const MOVER_ACTOR: u32 = 0x28;
+const MOVER_DELTA: u32 = 0x10;
 
 /// After the game applied the hit `hit` to `target`: a knockdown or a stagger (module
 /// documentation). Each decision on a living character is logged ([`note`]).
@@ -964,20 +983,7 @@ pub(crate) fn hand_over(
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .push((actor, Instant::now()));
-    let moved = start_from(e, actor, shown, Some(animated));
-    let scale = hk_scale(e);
-    let mut given = 0;
-    for (node, body) in bodies(e, actor) {
-        let Some(&(_, v, w)) = velocities.iter().find(|x| x.0 == node) else {
-            continue;
-        };
-        if linear(e, body).is_none() {
-            continue;
-        }
-        set_velocity(e, SET_LINEAR_VELOCITY, body, v.map(|x| x / scale));
-        set_velocity(e, SET_ANGULAR_VELOCITY, body, w);
-        given += 1;
-    }
+    let (moved, given) = place_bodies(e, actor, shown, animated, velocities);
     note(format!(
         "{who}: [np fall] into its ragdoll (knock state {state}): {moved} bodies on the pose drawn, \
          {given} moving as New Physics' bodies were (no launch)"
@@ -1006,6 +1012,33 @@ pub(crate) fn hand_over(
     down.retain(|d| d.0 != actor);
     down.push((actor, id, 0, stood[2], Instant::now()));
     Ok(given)
+}
+
+/// `actor`'s Havok bodies set on the pose `shown` (moved with their nodes from `animated`, where
+/// they were kept) and given `velocities` (each body's node, linear game units a second, angular
+/// rad/s): answers the bodies moved and those given a velocity.
+pub(crate) fn place_bodies(
+    e: &mut Engine,
+    actor: u32,
+    shown: Worlds,
+    animated: Worlds,
+    velocities: &[(u32, [f32; 3], [f32; 3])],
+) -> (usize, usize) {
+    let moved = start_from(e, actor, shown, Some(animated));
+    let scale = hk_scale(e);
+    let mut given = 0;
+    for (node, body) in bodies(e, actor) {
+        let Some(&(_, v, w)) = velocities.iter().find(|x| x.0 == node) else {
+            continue;
+        };
+        if linear(e, body).is_none() {
+            continue;
+        }
+        set_velocity(e, SET_LINEAR_VELOCITY, body, v.map(|x| x / scale));
+        set_velocity(e, SET_ANGULAR_VELOCITY, body, w);
+        given += 1;
+    }
+    (moved, given)
 }
 
 pub fn knock_down(

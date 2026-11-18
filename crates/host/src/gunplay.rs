@@ -755,6 +755,10 @@ fn start_punch(s: &mut State, punch: Punch) {
 pub fn install(e: &mut Engine) {
     ON.store(true, Ordering::Relaxed);
     e.register(WEAPON_FIRE, |e, a| {
+        // A downed actor New Physics has that cannot aim from its pose: the shot is withheld.
+        if a[1] != 0 && crate::new_physics::withholds_fire(a[1]) {
+            return Ret::default();
+        }
         fn_00523150(e, Ptr::new(a[0]), Ptr::new(a[1]));
         if on() && a[0] != 0 && a[1] != 0 && a[1] == e.global::<u32>(PLAYER) {
             shot(e, a[0], a[1]);
