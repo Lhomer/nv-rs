@@ -811,6 +811,49 @@ first 0.19 / 0.18 s (63.6 / 53.7 units of the fall's own motion), drawn exactly 
 off, nothing taken; the old system's fallback said. On d02bbd13 the same fixture drew the 9mm
 11.5 degrees off with its centre at 0.393 m/s, and the rifle never down, 265 degrees off.
 
+**Fix from Patrick's Play clip 2026-11-17_22-08-25_803260d_PLAY** (`bNewPhysics=1` from the
+mods profile's `Fallout.ini`: 2 of 7 10mm hits at 0.52 m/s went "downed (unreachable)" in 2 to 4
+frames; downed, he flickered between the animation and a headstand; the rifle at 4.29 m/s left him
+tumbling about 2 m up). Causes and fixes:
+- **The flicker.** The drawn pose hung on the bones' locals when the worlds were worked out
+  again, and something (the AI threads' animation pass, most likely) set the animation's locals
+  between the write and the draw: 446 of 1170 downed frames were drawn as the animation. Now at
+  the world pass's first call, right before it culls and skins the actors, every body node's
+  world is set from New Physics' body itself, parents first, and the nodes under each from it
+  with their own locals (`new_physics::read_drawn`, `set_subtree`); it is checked straight after
+  and again after the pass (`after_world_pass`). What wrote over the write is said for each
+  hit's first frames and for up to 8 frames after them in which something did: `[np locals]` (the
+  body locals changed since the write, how many are the animation's again, the worlds off the
+  body before they were set) and `[np drawn]`. The put-back puts the game's locals back only over
+  what was written: a local the game wrote since is its own and stays.
+- **The instant falls and the launch.** The floor followed the animated feet each frame: a
+  walk's feet took it off the body's (no foot down: the capture point counted 1 m outside, past
+  "unreachable", a fall at 0.12 m/s), or up into them (`feet 40912 N`, the headstand and the
+  launch). The floor is now taken once, at the take: the collision floor under the reference
+  (the game's ray cast, else the reference's height), or the animated feet's lowest point when
+  within 12 units of it, kept against the reference's height (`[np floor]`). A surface pushes out
+  what already lay inside it as a substep began at 1 m/s at most (`np_body::MAX_OUT`); sinking in
+  is pushed out whole. No foot down measures the support from the feet's soles as they are, never
+  "unreachable" on its own (`Balance::supported`).
+- **The outcome.** `[np outcome]` is said 2 s after the hit (or at the next hit, a let-go or the
+  hand-over), not at the fall: the result is what it first came to (`fell`, `downed`, `died`),
+  then drawn-vs-sim at the world pass, the frames drawn as the animation, the frames written
+  over before the world pass (set back), and the most the floor carried (body weights).
+Fixture tests on the game's own update (`np_walking_*`, downed kept): the animation walks at 0.15
+m/s and turns at 10 degrees a second, each foot lifted 5 units in turn and the whole pose bobbing
+2.5 units, the stance's feet 3 and 7 units under the reference; every other frame, between the
+write and the world pass, a writer sets the animation's locals on every node and works the worlds
+out from them; dt 0.016 and 0.033; the bodies measured where the world pass draws them. They fail
+on 803260db (the 10mm drawn 31-33 degrees off the body and as the animation on every writer
+frame; at the 7 unit stance it fell, the floor carrying up to 269 body weights; the rifle at the
+7 unit stance launched, the pelvis 164 units up, down only after 0.82 s). Now: the 10mm on the
+chest, the head and the right thigh drawn 0.000 degrees and 0.000 units off the body every frame,
+never as the animation, the floor at most 2.68 body weights, no fall (one catching step); the
+rifle down (the pelvis under 30 units) after 0.33 to 0.35 s, the pelvis at most 67 units over the
+floor; off, nothing taken. Not run in the game: whether the AI threads write over the bodies
+*during* the world pass shows only in the game's `[np drawn] ... written over during the world
+pass` lines.
+
 **Not done in M6 (for a later pass):** crawling to cover (the combat controller's cover point as
 the body's travel goal: `FindCombatLocation` `0099ac20`); the shot's origin and direction from the
 weapon as drawn (the game aims its NPC shots from the weapon node as animated, `fire_locate`, so a

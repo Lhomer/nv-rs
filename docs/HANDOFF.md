@@ -49,6 +49,12 @@ machinery runs.
   subtrees are set from the locals after it (`refresh_bodies`). The fixture runs the game's own
   update now (`Fixture::game_update`). Also the floor from the animated feet, no actor move unless
   drawn, per-hit logs and `[np outcome]`. Not run in the game.
+- **Clip 803260d fix:** the bodies' worlds are set from New Physics' body at the world pass,
+  never from the locals (something sets the animation's locals between the write and the draw:
+  `[np locals]` says what); the floor taken once at the take (collision floor, or the animated
+  feet within 12 units of it); surfaces push out what lay inside at 1 m/s at most; no foot down is
+  not "unreachable" on its own; `[np outcome]` after 2 s. Tests `np_walking_*` (walking, turning
+  animation, a writer of the locals every other frame). Not run in the game.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 

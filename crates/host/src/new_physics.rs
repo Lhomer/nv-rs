@@ -116,6 +116,21 @@ struct NpActor {
     /// The bodies at the top of the body tree (no body above them): their worlds and their
     /// subtrees' are set from their locals after the update (`refresh_bodies`).
     tops: Vec<u32>,
+    /// The bodies parents first (each after the body above it): the order their worlds are set
+    /// in at the world pass (`at_world_pass`).
+    order: Vec<usize>,
+    /// Written this frame (cleared at the put-back): its worlds are set at the world pass.
+    written_now: bool,
+    /// Each body's local as the animation had it and as written this frame (the world pass's
+    /// `[np locals]`: what wrote over them between).
+    anim_locals: Vec<(M3, V3)>,
+    wrote_locals: Vec<(M3, V3)>,
+    /// The floor against the reference's height, taken at the take (game units): the animated
+    /// feet's lowest point when within [`FLOOR_NEAR`] of it, else 0. Never the animated feet's
+    /// each frame (Patrick's 803260d clip).
+    floor_offset: Option<f32>,
+    /// The world pass's lines said since the last hit.
+    pass_logs: u32,
 }
 
 /// One hit's outcome as it goes (`[np outcome]`): the hit, then the most the spine's top went off
@@ -130,7 +145,22 @@ struct Outcome {
     spine_peak: f32,
     drawn_most: (f32, f32),
     set_most: u32,
+    /// How it came out (a fall, downed, died) once it did; measured on until [`OUTCOME_SECONDS`]
+    /// after the hit all the same.
+    result: Option<String>,
+    /// The frames drawn nearer the animation than the body at the world pass (after its worlds
+    /// were set), and the frames something had written over the body's nodes before it (set
+    /// back from the body).
+    as_animation: u32,
+    overwritten: u32,
+    /// The most the floor carried in a frame (body weights).
+    floor_most: f32,
+    /// Seconds since the hit.
+    since: f32,
 }
+
+/// A hit's outcome is measured this long (s), whatever came of it, before `[np outcome]`.
+pub const OUTCOME_SECONDS: f32 = 2.0;
 
 /// One frame's figures of an actor New Physics has (the clips' `"np"` sample).
 #[derive(Clone, Copy, Debug, Default)]
@@ -152,7 +182,10 @@ struct Now {
 }
 
 static ACTORS: Mutex<Vec<NpActor>> = Mutex::new(Vec::new());
-static WRITTEN: Mutex<Vec<(u32, (M3, V3))>> = Mutex::new(Vec::new());
+/// The locals written this frame: the node, the game's own (put back), and what was written (the
+/// game's own is put back only over it: a local the game wrote since is its own and stays).
+#[allow(clippy::type_complexity)]
+static WRITTEN: Mutex<Vec<(u32, (M3, V3), (M3, V3))>> = Mutex::new(Vec::new());
 static ROOTS: Mutex<Vec<(u32, Vec<u32>)>> = Mutex::new(Vec::new());
 /// The falls handed over (actor, the root body's speed and the body's centre's, game units a
 /// second): the tests' and the log's.
@@ -277,7 +310,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
         }
     }
     // Each body's chain up to the nearest body above it.
-    let chains = nodes
+    let chains: Vec<(Option<usize>, Vec<u32>)> = nodes
         .iter()
         .map(|&n| {
             let mut between = Vec::new();
@@ -301,6 +334,20 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
         .filter(|(_, c): &(&u32, &(Option<usize>, Vec<u32>))| c.0.is_none())
         .map(|(&n, _)| n)
         .collect();
+    // Parents first: each body after the bodies above it.
+    let depth = |mut b: usize| {
+        let mut d = 0;
+        while let Some(up) = chains[b].0 {
+            b = up;
+            d += 1;
+            if d > 32 {
+                break;
+            }
+        }
+        d
+    };
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    order.sort_by_key(|&b| depth(b));
     let id = e.mem.u32(actor + FORM_ID);
     note(format!(
         "{id:08X}: [np take] New Physics has it (its 18 bodies' nodes found): the current reactions \
@@ -340,6 +387,12 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             hit_frames: 0,
             outcome: None,
             tops,
+            order,
+            written_now: false,
+            anim_locals: Vec::new(),
+            wrote_locals: Vec::new(),
+            floor_offset: None,
+            pass_logs: 0,
         });
     true
 }
@@ -367,11 +420,7 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
     let impulse = scale(direction, p);
     a.since_hit = 0.0;
     // The last hit's outcome said as it stands now; this one's begins.
-    let now = if a.label.is_some() {
-        "downed".to_string()
-    } else {
-        stood_or_stepped(a)
-    };
+    let now = outcome_now(a);
     close_outcome(a.id, &mut a.outcome, &now);
     a.hit_frames = 0;
     a.outcome = Some(Outcome {
@@ -382,7 +431,13 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
         spine_peak: 0.0,
         drawn_most: (0.0, 0.0),
         set_most: 0,
+        result: None,
+        as_animation: 0,
+        overwritten: 0,
+        floor_most: 0.0,
+        since: 0.0,
     });
+    a.pass_logs = 0;
     note(format!(
         "{:08X}: [np hit] {} N s on {} ({:.2} m/s on its {:.0} kg)",
         a.id,
@@ -454,13 +509,15 @@ pub fn apply(e: &mut Engine) {
                 a.label.map_or("standing", |l| l)
             ));
             a.handing = Some("death");
-            close_outcome(a.id, &mut a.outcome, "died");
+            came_out(&mut a.outcome, "died".to_string());
             a.handing_frames = 0;
         }
         if a.handing.is_none()
             && (process == 0 || e.mem.u8(process + KNOCK_STATE) != 0 || matches!(life, 1 | 2))
         {
             LET_GOS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let now = outcome_now(&a);
+            close_outcome(a.id, &mut a.outcome, &format!("{now}, let go to the game"));
             note(format!(
                 "{:08X}: [np let go] {} (the game's own ragdoll has it)",
                 a.id,
@@ -491,12 +548,40 @@ pub fn apply(e: &mut Engine) {
         // [`FLOOR_NEAR`] of the reference's height, else the reference's: a pose whose feet stand
         // a few units off the reference (Patrick's d02bbd1 clip) was pushed out of the floor
         // on its first frame, or dropped to it.
-        let reference_z = read3(e, a.actor + REFR_POSITION)[2];
-        let feet_z = feet_floor(&anim);
-        let floor = match feet_z {
-            Some(z) if (z - reference_z).abs() <= FLOOR_NEAR => z,
-            _ => reference_z,
-        };
+        // The floor: the reference's height and the offset taken at the take (the animated
+        // feet's lowest point then, within [`FLOOR_NEAR`] of it: no kick at the take, Patrick's
+        // d02bbd1 clip), never the animated feet's each frame (his 803260d clip: a walk's feet
+        // took the floor off the body's, and up into them).
+        let reference = read3(e, a.actor + REFR_POSITION);
+        let reference_z = reference[2];
+        let offset =
+            match a.floor_offset {
+                Some(o) => o,
+                None => {
+                    // The collision floor under the reference (the game's ray cast), else the
+                    // reference's height; the animated feet's lowest point when within
+                    // [`FLOOR_NEAR`] of it.
+                    let cast = crate::active_ragdoll::floor_under(e, reference);
+                    let base = cast.unwrap_or(reference_z);
+                    let feet = feet_floor(&anim);
+                    let (z, from) = match feet {
+                        Some(z) if (z - base).abs() <= FLOOR_NEAR => (z, "the animated feet"),
+                        _ if cast.is_some() => (base, "the collision floor"),
+                        _ => (base, "the reference"),
+                    };
+                    note(format!(
+                    "{:08X}: [np floor] {from} at the take: the reference's height {:+.1} units \
+                     (the collision floor {}, the animated feet {}), kept",
+                    a.id,
+                    z - reference_z,
+                    cast.map_or("not found".to_string(), |c| format!("{:+.1}", c - reference_z)),
+                    feet.map_or("none".to_string(), |f| format!("{:+.1}", f - reference_z)),
+                ));
+                    a.floor_offset = Some(z - reference_z);
+                    z - reference_z
+                }
+            };
+        let floor = reference_z + offset;
         if a.np.is_none() {
             // Made on the first frame's animated pose, still: its animation's velocity is
             // measured from the frames that follow (`Np`), never from the pose at the hit.
@@ -533,6 +618,8 @@ pub fn apply(e: &mut Engine) {
         a.frames += 1;
         // The bodies written as the nodes' locals, parents first.
         let mut ok = true;
+        a.anim_locals.clear();
+        a.wrote_locals.clear();
         for (b, &node) in a.nodes.iter().enumerate() {
             let (anc, between) = &a.chains[b];
             let mut up = match anc {
@@ -556,13 +643,13 @@ pub fn apply(e: &mut Engine) {
                 ok = false;
                 break;
             }
-            written.push((
-                node,
-                (
-                    read9(e, node + LOCAL_ROTATION),
-                    read3(e, node + LOCAL_TRANSLATION),
-                ),
-            ));
+            let was = (
+                read9(e, node + LOCAL_ROTATION),
+                read3(e, node + LOCAL_TRANSLATION),
+            );
+            written.push((node, was, (lr, lt)));
+            a.anim_locals.push(was);
+            a.wrote_locals.push((lr, lt));
             write9(e, node + LOCAL_ROTATION, &lr);
             write3(e, node + LOCAL_TRANSLATION, lt);
         }
@@ -588,6 +675,7 @@ pub fn apply(e: &mut Engine) {
             refresh_bodies(e, &a.tops);
         }
         roots.push((a.root, a.tops.clone()));
+        a.written_now = true;
         // Read back: what the update left in the nodes against the simulated bodies.
         let mut most = (0.0f32, 0.0f32);
         let mut each = Vec::new();
@@ -604,8 +692,12 @@ pub fn apply(e: &mut Engine) {
         }
         a.readback = most;
         if let Some(o) = a.outcome.as_mut() {
-            o.drawn_most = (o.drawn_most.0.max(most.0), o.drawn_most.1.max(most.1));
             o.set_most = o.set_most.max(set_directly);
+            o.since += dt;
+            let weight = model().mass * ragdoll_core::np_body::GRAVITY;
+            o.floor_most = o
+                .floor_most
+                .max(np.report.floor_load.iter().sum::<f32>() / weight);
             let spine = model().body("Bip01 Spine2").unwrap_or(0);
             o.spine_peak = o.spine_peak.max(
                 ragdoll_core::np_skeleton::angle_between(&drawn[spine].0, &anim[spine].0)
@@ -716,11 +808,12 @@ pub fn apply(e: &mut Engine) {
                 a.id, a.steps, np.balance.outside
             ));
             a.handing = Some(reason);
-            close_outcome(a.id, &mut a.outcome, &format!("fell ({reason})"));
+            came_out(&mut a.outcome, format!("fell ({reason})"));
             a.handing_frames = 0;
         }
         if a.handing.is_some() {
             a.handing_frames += 1;
+            close_if_due(&mut a);
             keep.push(a);
             continue;
         }
@@ -740,6 +833,7 @@ pub fn apply(e: &mut Engine) {
                 continue;
             }
         }
+        close_if_due(&mut a);
         keep.push(a);
     }
     WRITTEN
@@ -767,9 +861,9 @@ const FRAME_SECONDS: u32 = 0x011d_ea30;
 /// The task queue's test (true while the game's AI threads use it: `KnockExplosion` and the
 /// bodies' setters wait for the main thread).
 const AI_THREAD: u32 = 0x008c_7aa0;
-/// The floor is taken from the animated feet when they stand within this of the reference's
-/// height (game units).
-const FLOOR_NEAR: f32 = 8.0;
+/// At the take the floor is taken from the animated feet when they stand within this of the
+/// collision floor (game units).
+const FLOOR_NEAR: f32 = 12.0;
 /// The actor is moved by the body only while drawn within this of it (degrees, units).
 const MOVE_DRAWN: (f32, f32) = (1.0, 1.0);
 
@@ -893,44 +987,153 @@ pub fn main_thread(e: &mut Engine) {
         .extend(back);
 }
 
-/// At the world pass's first call (`crate::active_ragdoll::world_pass`, what the frame draws):
-/// for a take's first frames, each body's node against what New Physics wrote (`[np drawn]`):
-/// anything the game's own passes (its AI threads' ragdoll-controller pass) wrote over it after
-/// the write shows here.
+/// The world pass's lines (`[np drawn]`, `[np locals]`) said for each hit's first frames, and for
+/// at most this many frames after them in which something wrote over the body.
+const PASS_LOG_FRAMES: u32 = 8;
+
+/// Each body's node's world against `drawn` (the most degrees and units off), and whether a body
+/// off its animation by over 2 degrees or 1 unit is drawn nearer its animation (`anim`) than the
+/// body.
+fn drawn_against(
+    e: &Engine,
+    nodes: &[u32],
+    drawn: &[(M3, V3)],
+    anim: &[(M3, V3)],
+) -> ((f32, f32), bool) {
+    let mut most = (0.0f32, 0.0f32);
+    let mut as_anim = false;
+    for (b, &node) in nodes.iter().enumerate() {
+        let w = read_world(e, node);
+        let deg = ragdoll_core::np_skeleton::angle_between(&w.r, &drawn[b].0).to_degrees();
+        let u = length(sub(w.t, drawn[b].1));
+        most = (most.0.max(deg), most.1.max(u));
+        if let Some(an) = anim.get(b) {
+            let off = ragdoll_core::np_skeleton::angle_between(&drawn[b].0, &an.0).to_degrees();
+            let off_u = length(sub(drawn[b].1, an.1));
+            let to_anim = ragdoll_core::np_skeleton::angle_between(&w.r, &an.0).to_degrees()
+                + length(sub(w.t, an.1));
+            if (off > 2.0 || off_u > 1.0) && to_anim < deg + u {
+                as_anim = true;
+            }
+        }
+    }
+    (most, as_anim)
+}
+
+/// At the world pass's first call (`crate::active_ragdoll::world_pass`, right before it culls and
+/// skins the actors): each body's node's world set from New Physics' body itself, parents first,
+/// and every node under it from it with its own local (`crate::active_ragdoll::set_subtree`),
+/// never from the bodies' locals (Patrick's 803260d clip: the locals written over between the
+/// write and the draw, 446 of 1170 downed frames were drawn as the animation). Before, what wrote
+/// over the write is measured and said (`[np locals]`: the body locals changed since the write
+/// and how many are the animation's again; the worlds off the body); after, the worlds are
+/// checked against the body (`[np drawn]`).
 pub fn read_drawn(e: &mut Engine) {
-    let actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
-    for a in actors.iter() {
-        if a.hit_frames == 0 || a.hit_frames > READBACK_LOG_FRAMES || a.drawn.len() != a.nodes.len()
-        {
+    let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+    for a in actors.iter_mut() {
+        if !a.written_now || a.drawn.len() != a.nodes.len() {
             continue;
         }
-        let mut most = (0.0f32, 0.0f32);
-        let mut off = Vec::new();
+        // What the nodes hold as the pass begins.
+        let (before, before_anim) = drawn_against(e, &a.nodes, &a.drawn, &a.anim_last);
+        let (mut changed, mut animation) = (0u32, 0u32);
         for (b, &node) in a.nodes.iter().enumerate() {
-            let w = read_world(e, node);
-            let deg = ragdoll_core::np_skeleton::angle_between(&w.r, &a.drawn[b].0).to_degrees();
-            let u = length(sub(w.t, a.drawn[b].1));
-            most = (most.0.max(deg), most.1.max(u));
-            if deg > 0.5 || u > 0.5 {
-                off.push(format!(
-                    "{} {deg:.1}/{u:.1}",
-                    model().bodies[b].node.trim_start_matches("Bip01 ")
-                ));
+            let now = (
+                read9(e, node + LOCAL_ROTATION),
+                read3(e, node + LOCAL_TRANSLATION),
+            );
+            if a.wrote_locals.get(b).is_some_and(|w| *w != now) {
+                changed += 1;
+                if a.anim_locals.get(b).is_some_and(|an| *an == now) {
+                    animation += 1;
+                }
             }
         }
-        note(format!(
-            "{:08X}: [np drawn] frame {} after the hit: drawn against written at most {:.2} \
-             degrees, {:.2} units{}",
-            a.id,
-            a.hit_frames,
-            most.0,
-            most.1,
-            if off.is_empty() {
-                String::new()
-            } else {
-                format!(" (moved after the write: {})", off.join(", "))
+        let over = changed > 0 || before.0 > 1.0 || before.1 > 1.0;
+        // Set from the body.
+        for &b in &a.order {
+            let node = a.nodes[b];
+            let world = Xf {
+                r: a.drawn[b].0,
+                t: a.drawn[b].1,
+                s: e.mem.f32(node + WORLD_SCALE),
+            };
+            crate::active_ragdoll::set_subtree(e, node, world, 0);
+        }
+        let (after, as_anim) = drawn_against(e, &a.nodes, &a.drawn, &a.anim_last);
+        if let Some(o) = a.outcome.as_mut() {
+            o.drawn_most = (o.drawn_most.0.max(after.0), o.drawn_most.1.max(after.1));
+            o.as_animation += u32::from(as_anim);
+            o.overwritten += u32::from(over);
+        }
+        let first = a.hit_frames <= READBACK_LOG_FRAMES;
+        if a.outcome.is_some() && (first || (over && a.pass_logs < PASS_LOG_FRAMES)) {
+            if !first {
+                a.pass_logs += 1;
             }
-        ));
+            note(format!(
+                "{:08X}: [np locals] frame {} after the hit: {changed} of {} body locals changed \
+                 since the write ({animation} the animation's again), the worlds {:.2} degrees, \
+                 {:.2} units off the body{}",
+                a.id,
+                a.hit_frames,
+                a.nodes.len(),
+                before.0,
+                before.1,
+                if before_anim {
+                    " (drawn as the animation)"
+                } else {
+                    ""
+                }
+            ));
+            note(format!(
+                "{:08X}: [np drawn] frame {} after the hit: the {} bodies' worlds set from the \
+                 body at the world pass: drawn against simulated at most {:.2} degrees, {:.2} \
+                 units{}",
+                a.id,
+                a.hit_frames,
+                a.nodes.len(),
+                after.0,
+                after.1,
+                if as_anim {
+                    ", drawn as the animation"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+}
+
+/// After the world pass (`crate::active_ragdoll::world_pass`): the bodies' nodes checked against
+/// New Physics' body again: anything that wrote over them while the pass drew (the AI threads)
+/// is said and counted.
+pub fn after_world_pass(e: &mut Engine) {
+    let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+    for a in actors.iter_mut() {
+        if !a.written_now || a.drawn.len() != a.nodes.len() {
+            continue;
+        }
+        let (off, as_anim) = drawn_against(e, &a.nodes, &a.drawn, &a.anim_last);
+        if off.0 <= 1.0 && off.1 <= 1.0 {
+            continue;
+        }
+        if let Some(o) = a.outcome.as_mut() {
+            o.drawn_most = (o.drawn_most.0.max(off.0), o.drawn_most.1.max(off.1));
+            o.as_animation += u32::from(as_anim);
+        }
+        if a.outcome.is_some() && a.pass_logs < PASS_LOG_FRAMES {
+            a.pass_logs += 1;
+            note(format!(
+                "{:08X}: [np drawn] frame {} after the hit: written over during the world pass: \
+                 {:.2} degrees, {:.2} units off the body after it{}",
+                a.id,
+                a.hit_frames,
+                off.0,
+                off.1,
+                if as_anim { " (as the animation)" } else { "" }
+            ));
+        }
     }
 }
 
@@ -1057,7 +1260,7 @@ fn downed(e: &mut Engine, a: &mut NpActor, dt: f32) -> bool {
              outside the feet)",
             a.id, np.balance.outside
         ));
-        close_outcome(a.id, &mut a.outcome, &format!("downed ({reason})"));
+        came_out(&mut a.outcome, format!("downed ({reason})"));
     }
     if a.label != Some(label) {
         a.label = Some(label);
@@ -1145,6 +1348,34 @@ fn stood_or_stepped(a: &NpActor) -> String {
     }
 }
 
+/// How the open hit came out now: what it came to (a fall, downed, died) once it did, else downed,
+/// stood or stepped N.
+fn outcome_now(a: &NpActor) -> String {
+    match a.outcome.as_ref().and_then(|o| o.result.clone()) {
+        Some(r) => r,
+        None if a.label.is_some() => "downed".to_string(),
+        None => stood_or_stepped(a),
+    }
+}
+
+/// The open hit's outcome said once it has been measured [`OUTCOME_SECONDS`].
+fn close_if_due(a: &mut NpActor) {
+    if a.outcome
+        .as_ref()
+        .is_some_and(|o| o.since >= OUTCOME_SECONDS)
+    {
+        let now = outcome_now(a);
+        close_outcome(a.id, &mut a.outcome, &now);
+    }
+}
+
+/// The open hit came to `result` (the first thing it came to is kept); it is measured on.
+fn came_out(outcome: &mut Option<Outcome>, result: String) {
+    if let Some(o) = outcome.as_mut() {
+        o.result.get_or_insert(result);
+    }
+}
+
 /// The open hit's outcome said (`[np outcome]`) with `result`, and closed.
 fn close_outcome(id: u32, outcome: &mut Option<Outcome>, result: &str) {
     let Some(o) = outcome.take() else {
@@ -1152,7 +1383,9 @@ fn close_outcome(id: u32, outcome: &mut Option<Outcome>, result: &str) {
     };
     note(format!(
         "{:08X}: [np outcome] hit {:.1} N s / {:.2} m/s on {} -> {result}, peak spine {:.1} \
-         deg, drawn-vs-sim max {:.2} deg / {:.2} u, world set directly {} bones",
+         deg, drawn-vs-sim max {:.2} deg / {:.2} u at the world pass, {} frames drawn as the \
+         animation, {} frames written over before the world pass (set back), world set \
+         directly {} bones, floor at most {:.1} body weights, over {:.2} s",
         id,
         o.impulse,
         o.speed,
@@ -1160,7 +1393,11 @@ fn close_outcome(id: u32, outcome: &mut Option<Outcome>, result: &str) {
         o.spine_peak,
         o.drawn_most.0,
         o.drawn_most.1,
-        o.set_most
+        o.as_animation,
+        o.overwritten,
+        o.set_most,
+        o.floor_most,
+        o.since
     ));
 }
 
@@ -1181,11 +1418,7 @@ fn refresh_bodies(e: &mut Engine, tops: &[u32]) {
 }
 
 fn summary(a: &mut NpActor) {
-    let result = if a.label.is_some() {
-        "downed".to_string()
-    } else {
-        stood_or_stepped(a)
-    };
+    let result = outcome_now(a);
     close_outcome(a.id, &mut a.outcome, &result);
     note(format!(
         "{:08X}: [np reaction] {} frames ({:.2} s since its last hit): spine top at most {:.1} \
@@ -1254,9 +1487,16 @@ pub fn sample_field(actor: u32) -> String {
 /// trees updated with them.
 pub fn unwrite(e: &mut Engine) {
     let written = std::mem::take(&mut *WRITTEN.lock().unwrap_or_else(|p| p.into_inner()));
-    for (node, (r, t)) in written.into_iter().rev() {
-        write9(e, node + LOCAL_ROTATION, &r);
-        write3(e, node + LOCAL_TRANSLATION, t);
+    for (node, (r, t), (wr, wt)) in written.into_iter().rev() {
+        // Only over what was written: a local the game wrote since (its animation's pass on
+        // its AI threads) is its own and newer than ours.
+        if read9(e, node + LOCAL_ROTATION) == wr && read3(e, node + LOCAL_TRANSLATION) == wt {
+            write9(e, node + LOCAL_ROTATION, &r);
+            write3(e, node + LOCAL_TRANSLATION, t);
+        }
+    }
+    for a in ACTORS.lock().unwrap_or_else(|p| p.into_inner()).iter_mut() {
+        a.written_now = false;
     }
     let roots = std::mem::take(&mut *ROOTS.lock().unwrap_or_else(|p| p.into_inner()));
     for (root, tops) in roots {
@@ -1292,6 +1532,17 @@ pub fn rel_speed(actor: u32) -> Option<f32> {
             let v = np.balance.rel_v;
             length([v[0], v[1], 0.0])
         })
+}
+
+/// The floor's load on `actor`'s body over the last frame (N, the frame's mean, every body's).
+pub fn floor_force(actor: u32) -> Option<f32> {
+    ACTORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|a| a.actor == actor)
+        .and_then(|a| a.np.as_ref())
+        .map(|np| np.report.floor_load.iter().sum())
 }
 
 /// The balance's phase and catching steps of `actor`.

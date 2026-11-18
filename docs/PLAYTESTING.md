@@ -256,9 +256,11 @@ most 0.5 degrees and 0.5 units): a larger value means the game moved the bones a
 wrote them. For each take's first frames the log has `[np balance]` (the frame's time, the
 animation's and the body's speeds, the capture point), `[np readback]` (each body as written
 against its node after the update) and `[np drawn]` (each body as the frame drew it), counted from
-each hit; and each hit ends in one `[np outcome]` line (stood, stepped N, fell, downed or died;
-its peak spine, drawn against simulated, the body worlds set directly): send these lines with the
-clip. The clips sample each actor New Physics has every frame as `"np":{...}` (docs/GUNPLAY.md
+each hit; `[np locals]` (what wrote over the write before the world pass) and `[np floor]` (the
+floor taken at the take); and each hit ends in one `[np outcome]` line 2 s after it (stood,
+stepped N, fell, downed or died; its peak spine, drawn against simulated at the world pass, the
+frames drawn as the animation, the frames written over before the world pass, the most the floor
+carried): send these lines with the clip. The clips sample each actor New Physics has every frame as `"np":{...}` (docs/GUNPLAY.md
 "M5").
 
 **To check in game (not yet run):** a pistol, a rifle, an automatic and a shotgun kick up by their weight and come mostly back without fighting the mouse; the weapon lags a little behind fast turns and settles back, and bobs while walking (if it moves the wrong way, say so); a melee hit that connects and a shotgun or magnum shot punch the weapon and the view and snap back, and game time never slows; melee connects a little further; kills push bodies harder, more with a sledgehammer than a knife; a .44 Magnum or hunting rifle kill severs the struck limb, an anti-materiel rifle can explode it; the five Settings rows show, move, save and come back after a restart. The Test Range: Main menu > Test Range starts without a save in the cell the game's log names (`Test Range: started in ...`); the targets stand in the clear line you are turned to face, up to 100 m (say if one stands in a wall); Home opens its menu (Weapons opens the container, Fill Ammo, Make Targets Hostile/Passive, Respawn Targets, Exit to Main Menu); a save there says "Saving is off" and the Saves folder is unchanged. No DLC message boxes or Caravan Pack / Gun Runners' Arsenal / pack "added" notifications appear in the range (the log says `Test Range: ... not shown (a range game)` for each); a normal new game or a save still shows them. In the range you take no damage and no limb stays crippled, you are never over-encumbered, the Pip-Boy holds every weapon, armour, aid item, weapon mod and 1,000 of each ammo, and no tutorial or help (V.A.T.S., Pip-Boy, level-up, hardcore) appears; back on the main menu and in a normal game all of that is as before.

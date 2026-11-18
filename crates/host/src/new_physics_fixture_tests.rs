@@ -1387,3 +1387,364 @@ fn old_reactions_set_the_worlds_directly_on_the_real_update() {
     eprintln!("RESULT old reactions on the real update: worlds set directly said {said}");
     assert!(said, "the old system's fallback did not run");
 }
+
+/// What a run on the game's own update with a walking, turning animation and a writer of the
+/// animation's locals drew, as the world pass saw it.
+struct WalkRun {
+    claimed: bool,
+    /// The most a body as the world pass saw it lay off New Physics' body (degrees, units), on
+    /// any frame; the frames it was drawn nearer its animation than the body (the body off its
+    /// animation by over 2 degrees or 1 unit).
+    drawn_off: (f32, f32),
+    drawn_as_animation: u32,
+    fell: bool,
+    /// The most the floor carried in a frame, in body weights (the frame's mean).
+    floor_most: f32,
+    /// Seconds from the hit until the pelvis as drawn is under 30 units over the floor, and the
+    /// most it was drawn over the floor after the hit (units).
+    pelvis_down_after: Option<f32>,
+    pelvis_high: f32,
+    /// The animated feet's most lift (units) and the animation's speed (m/s).
+    lift: f32,
+    anim_speed: f32,
+}
+
+/// How far the gait's swinging foot is lifted (units), its speed (m/s) and turn (degrees a
+/// second), its period (s).
+const WALK_LIFT: f32 = 5.0;
+const WALK_SPEED: f32 = 0.15;
+const WALK_TURN: f32 = 10.0;
+const WALK_PERIOD: f32 = 1.2;
+const WALK_BOB: f32 = 2.5;
+
+/// A hit of `speed` m/s on `body` with New Physics on the game's own update
+/// (`Fixture::game_update`, the blend collision objects, downed kept), the animation walking at
+/// [`WALK_SPEED`] and turning at [`WALK_TURN`] with each foot lifted [`WALK_LIFT`] units in turn
+/// and the whole animation bobbing [`WALK_BOB`] units up and down twice a stride, the stance's
+/// feet `under` units under the reference's height; `dt` the game's frame seconds.
+/// Every other frame, between the write and the world pass, a writer (the AI threads' animation
+/// pass) sets the animation's locals on every node and works the worlds out from them. Each frame
+/// the bodies' nodes are measured where the world pass draws them (after
+/// `crate::active_ragdoll::read_drawn`, what the world pass runs first).
+fn walk_run(speed: f32, body: &str, dt: f32, on: bool, seconds: f32, under: f32) -> WalkRun {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static AI_BUSY: AtomicBool = AtomicBool::new(false);
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut nodes = rig_fixture::fnv_skeleton();
+    let turn_z = |r: &M3, deg: f32| {
+        let (s, c) = deg.to_radians().sin_cos();
+        let rz: M3 = [c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0];
+        ragdoll_core::flinch::mul(r, &rz)
+    };
+    for (name, deg) in [
+        ("Bip01 L UpperArm", 50.0f32),
+        ("Bip01 R UpperArm", 50.0),
+        ("Bip01 L Forearm", 30.0),
+        ("Bip01 R Forearm", 30.0),
+        ("Bip01 L Calf", -12.0),
+        ("Bip01 R Calf", -12.0),
+        ("Bip01 Spine1", 6.0),
+    ] {
+        if let Some(n) = nodes.iter_mut().find(|n| n.name == name) {
+            n.r = turn_z(&n.r, deg);
+        }
+    }
+    let at: V3 = [-72152.0, 8282.0, 223.0];
+    let mut f = Fixture::new(
+        nodes,
+        Ground {
+            collision: Some(at[2]),
+            navmesh: at[2] - 8.0,
+        },
+    );
+    f.game_update();
+    f.make_character();
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    set_keep_down(true);
+    let was = crate::gunplay::tuning();
+    crate::gunplay::set_tuning(crate::gunplay::Tuning {
+        new_physics: on,
+        ..was
+    });
+    f.e.register_double(0x008c_7aa0, |_, _| {
+        u32::from(AI_BUSY.load(Ordering::Relaxed)).into_ret()
+    });
+    f.e.register_double(0x0088_45a0, |_, _| 1u32.into_ret());
+    f.e.register_double(crate::hit_force::KNOCK_EXPLOSION, |e, a| {
+        e.mem.set_u8(a[0] + 0x13c, 2);
+        0u32.into_ret()
+    });
+    f.e.register_double(0x00ca_8960, |e, a| {
+        let p = rig_fixture::read3(e, a[1]);
+        rig_fixture::write3(e, a[0] + 0x120, p);
+        0u32.into_ret()
+    });
+    let body_nodes: Vec<usize> = model()
+        .bodies
+        .iter()
+        .map(|b| f.nodes.iter().position(|n| n.name == b.node).unwrap())
+        .collect();
+    let struck = model().body(body).unwrap();
+    let root = f.at[0];
+    let pelvis = f.at[body_nodes[model().root]];
+    let feet = ["Bip01 L Foot", "Bip01 R Foot"].map(|n| model().body(n).unwrap());
+    let legs = [
+        ["Bip01 L Thigh", "Bip01 L Calf"],
+        ["Bip01 R Thigh", "Bip01 R Calf"],
+    ]
+    .map(|p| p.map(|n| f.nodes.iter().position(|x| x.name == n).unwrap()));
+    let rest: Vec<M3> = f.nodes.iter().map(|n| n.r).collect();
+    let k = ragdoll_core::np_body::UNITS;
+    let foot_low = |f: &Fixture, side: usize| {
+        let b = feet[side];
+        let (r, t) = f.world_of(f.at[body_nodes[b]]);
+        let def = &model().bodies[b];
+        def.ends
+            .iter()
+            .map(|e| add(t, apply_m(&r, scale(*e, k)))[2] - def.radius * k)
+            .fold(f32::INFINITY, f32::min)
+    };
+    // Each leg's swing: the thigh forward by `a`, the calf back by twice it.
+    let pose_leg = |f: &mut Fixture, side: usize, a: f32| {
+        let [thigh, calf] = legs[side];
+        f.nodes[thigh].r = turn_z(&rest[thigh], a);
+        f.nodes[calf].r = turn_z(&rest[calf], -2.0 * a);
+    };
+    rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, [0.0; 3]);
+    f.animate();
+    let low0 = foot_low(&f, 0);
+    // The swing's angle that lifts the foot WALK_LIFT units (its sign the one that lifts it).
+    let mut swing = 0.0f32;
+    for sign in [1.0f32, -1.0] {
+        for i in 1..=80 {
+            let a = sign * i as f32 * 0.5;
+            pose_leg(&mut f, 0, a);
+            f.animate();
+            if foot_low(&f, 0) - low0 >= WALK_LIFT {
+                swing = a;
+                break;
+            }
+        }
+        if swing != 0.0 {
+            break;
+        }
+    }
+    pose_leg(&mut f, 0, 0.0);
+    f.animate();
+    assert!(swing != 0.0, "no swing lifts the foot");
+    let anim0: Vec<(M3, V3)> = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
+    let low = ragdoll_core::np_body::lowest_point(model(), &model().states_from_nodes(&anim0)) * k;
+    let drop = [0.0, 0.0, -low - under];
+    let floor = at[2] - under;
+    rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, at);
+    let mut run = WalkRun {
+        claimed: false,
+        drawn_off: (0.0, 0.0),
+        drawn_as_animation: 0,
+        fell: false,
+        floor_most: 0.0,
+        pelvis_down_after: None,
+        pelvis_high: 0.0,
+        lift: 0.0,
+        anim_speed: 0.0,
+    };
+    let frames = (seconds / dt).round() as u32;
+    let hit_frame = (0.4 / dt).round() as u32;
+    let weight = model().mass * 9.81;
+    let mut yaw = 0.0f32;
+    let mut last_root: Option<V3> = None;
+    for frame in 0..frames {
+        let t = frame as f32 * dt;
+        f.e.mem.set_f32(0x011d_ea30, dt);
+        AI_BUSY.store(false, Ordering::Relaxed);
+        main_thread(&mut f.e);
+        // The walk: the reference carried on along its facing and turned, each foot lifted in
+        // turn.
+        yaw += WALK_TURN * dt;
+        let (s, c) = yaw.to_radians().sin_cos();
+        let mut reference = f.reference();
+        if frame > 0 {
+            reference = add(
+                reference,
+                [-s * WALK_SPEED * k * dt, c * WALK_SPEED * k * dt, 0.0],
+            );
+            rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, reference);
+        }
+        let phase = (std::f32::consts::TAU * t / WALK_PERIOD).sin();
+        pose_leg(&mut f, 0, swing * phase.max(0.0).sqrt());
+        pose_leg(&mut f, 1, swing * (-phase).max(0.0).sqrt());
+        let yaw_m: M3 = [c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0];
+        rig_fixture::write9(&mut f.e, root + rig_fixture::LOCAL_ROTATION, &yaw_m);
+        // The gait's bob: the whole animation WALK_BOB up and down twice a stride (both feet
+        // off the stance's height).
+        let bob = WALK_BOB * (2.0 * std::f32::consts::TAU * t / WALK_PERIOD).cos();
+        let root_at = add(add(reference, drop), [0.0, 0.0, bob]);
+        rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, root_at);
+        f.animate();
+        for side in 0..2 {
+            run.lift = run.lift.max(foot_low(&f, side) - (low0 + root_at[2]));
+        }
+        if let Some(was) = last_root.filter(|_| frame < hit_frame) {
+            let flat = sub(root_at, was);
+            run.anim_speed = run.anim_speed.max(length([flat[0], flat[1], 0.0]) / k / dt);
+        }
+        last_root = Some(root_at);
+        let anim: Vec<(M3, V3)> = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
+        let locals: Vec<(M3, V3)> =
+            f.at.iter()
+                .map(|&n| {
+                    (
+                        rig_fixture::read9(&f.e, n + rig_fixture::LOCAL_ROTATION),
+                        rig_fixture::read3(&f.e, n + rig_fixture::LOCAL_TRANSLATION),
+                    )
+                })
+                .collect();
+        if frame == hit_frame {
+            run.claimed = claim(&mut f.e, ACTOR);
+            let point = add(anim[struck].1, [0.0, 6.0, 2.0]);
+            hit(
+                &mut f.e,
+                ACTOR,
+                speed * model().mass,
+                point,
+                [0.0, -1.0, 0.0],
+            );
+        }
+        AI_BUSY.store(true, Ordering::Relaxed);
+        crate::active_ragdoll::apply(&mut f.e);
+        // The writer: every other frame the animation's locals set again and the worlds worked
+        // out from them, after the write and before the world pass.
+        if frame % 2 == 1 {
+            for (i, &n) in f.at.iter().enumerate().skip(1) {
+                rig_fixture::write9(&mut f.e, n + rig_fixture::LOCAL_ROTATION, &locals[i].0);
+                rig_fixture::write3(&mut f.e, n + rig_fixture::LOCAL_TRANSLATION, locals[i].1);
+            }
+            f.update();
+        }
+        // The world pass.
+        crate::active_ragdoll::read_drawn(&mut f.e);
+        if owns(ACTOR) {
+            if let Some((p, _)) = drawn(ACTOR) {
+                let (mut most, mut as_anim) = ((0.0f32, 0.0f32), false);
+                for (b, &i) in body_nodes.iter().enumerate() {
+                    let w = f.world_of(f.at[i]);
+                    let deg = ragdoll_core::np_skeleton::angle_between(&w.0, &p[b].0).to_degrees();
+                    let u = length(sub(w.1, p[b].1));
+                    most = (most.0.max(deg), most.1.max(u));
+                    let sim_anim = (
+                        ragdoll_core::np_skeleton::angle_between(&p[b].0, &anim[b].0).to_degrees(),
+                        length(sub(p[b].1, anim[b].1)),
+                    );
+                    let drawn_anim = (
+                        ragdoll_core::np_skeleton::angle_between(&w.0, &anim[b].0).to_degrees(),
+                        length(sub(w.1, anim[b].1)),
+                    );
+                    if (sim_anim.0 > 2.0 || sim_anim.1 > 1.0)
+                        && drawn_anim.0 + drawn_anim.1 < deg + u
+                    {
+                        as_anim = true;
+                    }
+                }
+                run.drawn_off = (run.drawn_off.0.max(most.0), run.drawn_off.1.max(most.1));
+                run.drawn_as_animation += u32::from(as_anim);
+            }
+            if let Some(n) = floor_force(ACTOR) {
+                run.floor_most = run.floor_most.max(n / weight);
+            }
+            if let Some((phase, _, _)) = state(ACTOR) {
+                run.fell |= phase == ragdoll_core::np_balance::Phase::Falling;
+            }
+            run.fell |= label_of(ACTOR).is_some();
+        }
+        if frame > hit_frame {
+            let height = f.world_of(pelvis).1[2] - floor;
+            run.pelvis_high = run.pelvis_high.max(height);
+            if height < 30.0 && run.pelvis_down_after.is_none() {
+                run.pelvis_down_after = Some((frame - hit_frame) as f32 * dt);
+            }
+        }
+        crate::active_ragdoll::after_draw(&mut f.e);
+        crate::active_ragdoll::unwrite(&mut f.e);
+    }
+    AI_BUSY.store(false, Ordering::Relaxed);
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    crate::gunplay::set_tuning(was);
+    run
+}
+
+/// Patrick's 803260d clip's 10mm (0.52 m/s) on the chest, the head and the right thigh, the
+/// animation walking and turning, a writer of its locals every other frame, dt 0.016 and 0.033,
+/// the stance's feet 3 and 7 units under the reference (where the floor taken from the animated
+/// feet switched to the reference's and back):
+/// no fall; every frame each body drawn at the world pass within 1 degree and 1 unit of New
+/// Physics' body (never drawn as the animation); the floor never carrying 3 body weights.
+#[test]
+fn np_walking_a_10mm_hit_is_drawn_and_stands() {
+    let mut failed = Vec::new();
+    for body in ["Bip01 Spine2", "Bip01 Head", "Bip01 R Thigh"] {
+        for (dt, under) in [(0.016f32, 3.0f32), (0.033, 3.0), (0.016, 7.0), (0.033, 7.0)] {
+            let r = walk_run(0.52, body, dt, true, 2.4, under);
+            eprintln!(
+                "RESULT np walking 0.52 m/s {body} dt {dt} feet {under} u under: drawn off the body at the world pass at most {:.3} deg / {:.3} u, {} frames drawn as the animation, floor at most {:.2} body weights, fell {} (feet lifted {:.1} u, the animation at {:.2} m/s)",
+                r.drawn_off.0, r.drawn_off.1, r.drawn_as_animation, r.floor_most, r.fell, r.lift, r.anim_speed
+            );
+            assert!(r.claimed);
+            assert!((r.lift - WALK_LIFT).abs() < 1.0, "lift {}", r.lift);
+            if r.drawn_off.0 > 1.0 || r.drawn_off.1 > 1.0 || r.drawn_as_animation > 0 {
+                failed.push(format!(
+                    "{body} dt {dt} under {under}: drawn off {:?}, {} as the animation",
+                    r.drawn_off, r.drawn_as_animation
+                ));
+            }
+            if r.floor_most >= 3.0 {
+                failed.push(format!(
+                    "{body} dt {dt} under {under}: floor {:.2} body weights",
+                    r.floor_most
+                ));
+            }
+            if r.fell {
+                failed.push(format!("{body} dt {dt} under {under}: fell"));
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// The clip's rifle (4.29 m/s) on the chest with the same walk, writer and stances: down (the pelvis as
+/// drawn under 30 units over the floor) within 0.6 s, and the pelvis as drawn never over 80
+/// units over the floor (the clip's launched him 206 units up).
+#[test]
+fn np_walking_a_rifle_hit_goes_down_and_stays_on_the_floor() {
+    let mut failed = Vec::new();
+    for (dt, under) in [(0.016f32, 3.0f32), (0.033, 3.0), (0.016, 7.0), (0.033, 7.0)] {
+        let r = walk_run(4.29, "Bip01 Spine2", dt, true, 2.4, under);
+        eprintln!(
+            "RESULT np walking 4.29 m/s dt {dt} feet {under} u under: pelvis under 30 u after {:?} s, at most {:.1} u over the floor, drawn off the body at the world pass at most {:.3} deg / {:.3} u, {} frames drawn as the animation, floor at most {:.2} body weights",
+            r.pelvis_down_after, r.pelvis_high, r.drawn_off.0, r.drawn_off.1, r.drawn_as_animation, r.floor_most
+        );
+        if !r.pelvis_down_after.is_some_and(|t| t <= 0.6) {
+            failed.push(format!(
+                "dt {dt} under {under}: down after {:?}",
+                r.pelvis_down_after
+            ));
+        }
+        if r.pelvis_high > 80.0 {
+            failed.push(format!(
+                "dt {dt} under {under}: pelvis {:.1} u up",
+                r.pelvis_high
+            ));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// `bNewPhysics=0` with the walk and the writer: nothing is taken.
+#[test]
+fn np_walking_off_takes_nothing() {
+    let r = walk_run(0.52, "Bip01 Spine2", 0.033, false, 0.8, 3.0);
+    assert!(!r.claimed && r.drawn_off == (0.0, 0.0) && r.floor_most == 0.0);
+}

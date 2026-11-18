@@ -1025,6 +1025,7 @@ pub fn world_pass(e: &mut Engine, a: &[u32]) -> Ret {
         a[3] as u8,
         a[4] as u8,
     );
+    crate::new_physics::after_world_pass(e);
     Ret::default()
 }
 

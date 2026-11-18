@@ -50,6 +50,12 @@ pub const MAX_FRAME: f32 = 0.05;
 /// upset flinging the body (a hit's impulse spins the struck body up to 150 rad/s for a substep
 /// before the joints share it; a light neck whips past 170 at a fall's impact).
 pub const MAX_SPEED: f32 = 30.0;
+/// The most a surface pushes out what already lay inside it as a substep began (m/s): a floor
+/// that came up into the body (its height changed between frames) lets it out at this, never in
+/// one substep (Patrick's 803260d clip: the floor following the animated feet came up into them,
+/// "feet 40912 N", and the body was launched two metres up). Sinking in this substep is pushed
+/// out whole.
+pub const MAX_OUT: f32 = 1.0;
 pub const MAX_SPIN: f32 = 200.0;
 
 /// A body: its node, mass, inertia about its centre of mass in its own frame, the centre of mass
@@ -546,7 +552,7 @@ impl Model {
             }
             let slip: &[usize] = tracking.map_or(&[], |t| &t.slip);
             let grip: &[usize] = tracking.map_or(&[], |t| &t.grip);
-            let loads = self.surfaces(states, &prev, &surfaces, slip);
+            let loads = self.surfaces(states, &prev, &surfaces, slip, h);
             // Each surface's push this substep as a force (N), the frame's mean.
             let to_force = 1.0 / (h * h * substeps as f32);
             for &(b, k, lambda, _, _) in &loads {
@@ -851,6 +857,7 @@ impl Model {
         prev: &[State],
         surfaces: &[Plane],
         slip: &[usize],
+        h: f32,
     ) -> Vec<(usize, usize, f32, V3, V3)> {
         let mut loads = Vec::new();
         for (i, def) in self.bodies.iter().enumerate() {
@@ -861,6 +868,14 @@ impl Model {
                     let n = sf.n;
                     let centre = add(states[i].x, qrot(states[i].q, local));
                     let depth = def.radius - dot(sub(centre, sf.p), n);
+                    if depth <= 0.0 {
+                        continue;
+                    }
+                    // What lay inside as the substep began is let out at [`MAX_OUT`] at most;
+                    // what sank in since, whole.
+                    let was = add(prev[i].x, qrot(prev[i].q, local));
+                    let inside = (def.radius - dot(sub(was, sf.p), n)).max(0.0);
+                    let depth = depth.min((depth - inside).max(0.0) + inside.min(MAX_OUT * h));
                     if depth <= 0.0 {
                         continue;
                     }

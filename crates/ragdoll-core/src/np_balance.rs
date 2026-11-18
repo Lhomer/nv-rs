@@ -131,6 +131,8 @@ pub struct Balance {
     /// Why it fell: "steps" (out of steps), "unreachable" (past any step's reach at once),
     /// "path" (moving, knocked too far off its path); empty while it has not.
     pub fall_reason: &'static str,
+    /// Whether a foot stood on the floor as the support was last measured.
+    pub supported: bool,
     /// The last frame's centre of mass velocity against the animation's (m/s).
     pub rel_v: V3,
 }
@@ -201,6 +203,7 @@ impl Balance {
             lower: 0.0,
             knocked: None,
             fall_reason: "",
+            supported: true,
             rel_v: [0.0; 3],
         }
     }
@@ -244,6 +247,16 @@ impl Balance {
             let b = self.feet[side];
             if Some(side) != swinging && Self::planted(model, &states[b], b, floor) {
                 pts.extend(Self::sole(model, &states[b], b));
+            }
+        }
+        // No foot down (the feet a little off the floor, both swinging with the animation): the
+        // feet's soles as they are, never "no support" on its own (Patrick's 803260d clip: a
+        // floor that left the feet made the capture point 1 m outside, past
+        // [`UNREACHABLE`], and he fell at 0.12 m/s).
+        self.supported = !pts.is_empty();
+        if pts.is_empty() {
+            for side in 0..2 {
+                pts.extend(Self::sole(model, &states[self.feet[side]], self.feet[side]));
             }
         }
         self.support = hull(&pts);
