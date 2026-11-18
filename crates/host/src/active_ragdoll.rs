@@ -3078,7 +3078,7 @@ fn hold_write_to_shown(
 
 /// `node`'s world set to `world`, and every node under it worked out from it with its own local
 /// (the update's own rule), at most [`MOST_DEPTH`] deep.
-fn set_subtree(e: &mut Engine, node: u32, world: pose::Xf, depth: u32) {
+pub(crate) fn set_subtree(e: &mut Engine, node: u32, world: pose::Xf, depth: u32) {
     write9(e, node + WORLD_ROTATION, &world.r);
     write3(e, node + WORLD_TRANSLATION, world.t);
     e.mem.set_f32(node + WORLD_SCALE, world.s);

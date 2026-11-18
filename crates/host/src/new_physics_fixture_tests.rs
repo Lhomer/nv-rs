@@ -1080,3 +1080,310 @@ fn np_game_path_off_takes_nothing() {
     let r = game_path(0.32, 0.016, false, true, 0.3);
     assert!(!r.claimed && r.held == 0.0);
 }
+
+// --- The game's own update (Patrick's clip 2026-11-17_21-16-42_d02bbd1). -------------------------
+
+/// What a run on the game's update did.
+struct RealRun {
+    claimed: bool,
+    /// The most a body as drawn lay off New Physics' body (degrees, units), on any frame.
+    drawn_off: (f32, f32),
+    /// The most the body's centre moved against its animation (m/s), whether it fell or went down.
+    rel_most: f32,
+    fell: bool,
+    /// Seconds from the hit until the pelvis as drawn is under 30 units over the floor; how far
+    /// the pelvis as drawn travelled (flat, units) while the body as drawn stood upright (its
+    /// spine's top within 20 degrees of its standing tilt, the pelvis over 50 units): an upright
+    /// slide, not the fall's own motion.
+    pelvis_down_after: Option<f32>,
+    upright_slide: f32,
+    /// How long after the hit the body was last drawn upright (s).
+    upright_until: f32,
+}
+
+/// A hit of `speed` m/s on `body` with New Physics on the game's own update
+/// (`Fixture::game_update`: no double for `00a59c60`, the body nodes' blend collision objects),
+/// downed bodies kept (`KEEP_DOWN`, the game's), from a non-bind animated pose (the arms down, the
+/// knees and elbows bent) with the feet 3 units under the reference's height; `dt` the game's
+/// frame seconds, 0.3 units of jitter on the root, the AI threads busy at the draw's set-up.
+fn real_run(speed: f32, body: &str, dt: f32, on: bool, seconds: f32) -> RealRun {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static AI_BUSY: AtomicBool = AtomicBool::new(false);
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut nodes = rig_fixture::fnv_skeleton();
+    // Not the bind pose: each of these turned about its own z (degrees).
+    for (name, deg) in [
+        ("Bip01 L UpperArm", 50.0f32),
+        ("Bip01 R UpperArm", 50.0),
+        ("Bip01 L Forearm", 30.0),
+        ("Bip01 R Forearm", 30.0),
+        ("Bip01 L Calf", -12.0),
+        ("Bip01 R Calf", -12.0),
+        ("Bip01 Spine1", 6.0),
+    ] {
+        if let Some(n) = nodes.iter_mut().find(|n| n.name == name) {
+            let (c, s) = deg.to_radians().sin_cos();
+            let rz: M3 = [s, -c, 0.0, c, s, 0.0, 0.0, 0.0, 1.0];
+            n.r = ragdoll_core::flinch::mul(&n.r, &rz);
+        }
+    }
+    let at: V3 = [-72152.0, 8282.0, 223.0];
+    let mut f = Fixture::new(
+        nodes,
+        Ground {
+            collision: Some(at[2]),
+            navmesh: at[2] - 8.0,
+        },
+    );
+    f.game_update();
+    f.make_character();
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    set_keep_down(true);
+    let was = crate::gunplay::tuning();
+    crate::gunplay::set_tuning(crate::gunplay::Tuning {
+        new_physics: on,
+        ..was
+    });
+    f.e.register_double(0x008c_7aa0, |_, _| {
+        u32::from(AI_BUSY.load(Ordering::Relaxed)).into_ret()
+    });
+    f.e.register_double(0x0088_45a0, |_, _| 1u32.into_ret());
+    f.e.register_double(crate::hit_force::KNOCK_EXPLOSION, |e, a| {
+        e.mem.set_u8(a[0] + 0x13c, 2);
+        0u32.into_ret()
+    });
+    f.e.register_double(0x00ca_8960, |e, a| {
+        let p = rig_fixture::read3(e, a[1]);
+        rig_fixture::write3(e, a[0] + 0x120, p);
+        0u32.into_ret()
+    });
+    let body_nodes: Vec<usize> = model()
+        .bodies
+        .iter()
+        .map(|b| f.nodes.iter().position(|n| n.name == b.node).unwrap())
+        .collect();
+    let struck = model().body(body).unwrap();
+    let root = f.at[0];
+    let pelvis = f.at[body_nodes[model().root]];
+    // The feet 3 units under the reference's height: the root set below it by the animated
+    // feet's lowest point and 3 more.
+    rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, [0.0; 3]);
+    f.animate();
+    let anim0: Vec<(M3, V3)> = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
+    let low = ragdoll_core::np_body::lowest_point(model(), &model().states_from_nodes(&anim0))
+        * ragdoll_core::np_body::UNITS;
+    let drop = [0.0, 0.0, -low - 3.0];
+    rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, at);
+    let mut run = RealRun {
+        claimed: false,
+        drawn_off: (0.0, 0.0),
+        rel_most: 0.0,
+        fell: false,
+        pelvis_down_after: None,
+        upright_slide: 0.0,
+        upright_until: 0.0,
+    };
+    let frames = (seconds / dt).round() as u32;
+    let hit_frame = (0.1 / dt).round() as u32;
+    let mut seed = 0x2468_ace1u32;
+    let mut jitter = || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let a = (seed >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU;
+        [0.3 * a.cos(), 0.3 * a.sin(), 0.0]
+    };
+    let mut last_pelvis: Option<V3> = None;
+    let spine_top = f.at[body_nodes[model().body("Bip01 Spine2").unwrap()]];
+    let up_of = |r: &M3| r[8].clamp(-1.0, 1.0).acos().to_degrees();
+    let spine_up = up_of(&f.world_of(spine_top).0);
+    for frame in 0..frames {
+        f.e.mem.set_f32(0x011d_ea30, dt);
+        AI_BUSY.store(false, Ordering::Relaxed);
+        main_thread(&mut f.e);
+        let reference = f.reference();
+        rig_fixture::write3(
+            &mut f.e,
+            root + rig_fixture::LOCAL_TRANSLATION,
+            add(add(reference, drop), jitter()),
+        );
+        f.animate();
+        let anim: Vec<(M3, V3)> = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
+        if frame == hit_frame {
+            run.claimed = claim(&mut f.e, ACTOR);
+            let point = add(anim[struck].1, [0.0, 6.0, 2.0]);
+            hit(
+                &mut f.e,
+                ACTOR,
+                speed * model().mass,
+                point,
+                [0.0, -1.0, 0.0],
+            );
+        }
+        AI_BUSY.store(true, Ordering::Relaxed);
+        crate::active_ragdoll::apply(&mut f.e);
+        if owns(ACTOR) {
+            if let Some((p, _)) = drawn(ACTOR) {
+                for (k, &i) in body_nodes.iter().enumerate() {
+                    let w = f.world_of(f.at[i]);
+                    run.drawn_off.0 = run
+                        .drawn_off
+                        .0
+                        .max(ragdoll_core::np_skeleton::angle_between(&w.0, &p[k].0).to_degrees());
+                    run.drawn_off.1 = run.drawn_off.1.max(length(sub(w.1, p[k].1)));
+                }
+            }
+            if let Some(v) = rel_speed(ACTOR) {
+                run.rel_most = run.rel_most.max(v);
+            }
+            if let Some((phase, _, _)) = state(ACTOR) {
+                run.fell |= phase == ragdoll_core::np_balance::Phase::Falling;
+            }
+            run.fell |= label_of(ACTOR).is_some();
+        }
+        if frame > hit_frame {
+            let ref_now = f.reference();
+            let p = f.world_of(pelvis).1;
+            let height = p[2] - ref_now[2];
+            if height < 30.0 && run.pelvis_down_after.is_none() {
+                run.pelvis_down_after = Some((frame - hit_frame) as f32 * dt);
+            }
+            // Upright: the spine's top as drawn within 20 degrees of its standing tilt.
+            let tilt = (up_of(&f.world_of(spine_top).0) - spine_up).abs();
+            if let Some(was) = last_pelvis {
+                if height > 50.0 && tilt < 20.0 {
+                    run.upright_slide += length([p[0] - was[0], p[1] - was[1], 0.0]);
+                    run.upright_until = (frame - hit_frame) as f32 * dt;
+                }
+            }
+            last_pelvis = Some(p);
+        }
+        crate::active_ragdoll::after_draw(&mut f.e);
+        crate::active_ragdoll::unwrite(&mut f.e);
+    }
+    AI_BUSY.store(false, Ordering::Relaxed);
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    crate::gunplay::set_tuning(was);
+    run
+}
+
+/// The clip's 9mm (0.32 m/s) on the chest and on the left upper arm, on the game's own update:
+/// each frame each body is drawn within 1 degree and 1 unit of New Physics' body, the body's
+/// centre never moves against its animation more than 10% faster than the hit made it (the
+/// ground's reaction as a struck arm swings the body round its feet adds up to 6%; the clip's
+/// take kick took 0.32 m/s to 1.04, d02bbd13's fixture to 0.39), no fall.
+#[test]
+fn np_real_update_a_light_hit_is_drawn() {
+    for body in ["Bip01 Spine2", "Bip01 L UpperArm"] {
+        for dt in [0.004f32, 0.016] {
+            let r = real_run(0.32, body, dt, true, 1.2);
+            eprintln!(
+                "RESULT np real update 0.32 m/s {body} dt {dt}: drawn off the body at most {:.3} deg / {:.3} u, centre against the animation at most {:.3} m/s, fell {}",
+                r.drawn_off.0, r.drawn_off.1, r.rel_most, r.fell
+            );
+            assert!(r.claimed);
+            assert!(
+                r.drawn_off.0 <= 1.0 && r.drawn_off.1 <= 1.0,
+                "{body} dt {dt}: drawn off {:?}",
+                r.drawn_off
+            );
+            assert!(
+                r.rel_most <= 0.32 * 1.10,
+                "{body} dt {dt}: {:.3} m/s",
+                r.rel_most
+            );
+            assert!(!r.fell, "{body} dt {dt}: fell");
+        }
+    }
+}
+
+/// The clip's rifle (4.83 m/s) on the game's own update, downed kept: the pelvis as drawn is
+/// under 30 units over the floor within 0.6 s of the hit, and it never slides upright (the clip
+/// slid 270 units standing): drawn upright (the spine's top within 20 degrees of its standing
+/// tilt) no later than 0.4 s after the hit, and meanwhile the pelvis as drawn travels no further
+/// than the hit's speed carries it (the fall's own motion).
+#[test]
+fn np_real_update_a_heavy_hit_goes_down() {
+    for dt in [0.004f32, 0.016] {
+        let r = real_run(4.83, "Bip01 Spine2", dt, true, 1.2);
+        eprintln!(
+            "RESULT np real update 4.83 m/s dt {dt}: pelvis under 30 u after {:?} s, the pelvis travelled {:.1} u while drawn upright (upright until {:.2} s), drawn off the body at most {:.3} deg / {:.3} u",
+            r.pelvis_down_after, r.upright_slide, r.upright_until, r.drawn_off.0, r.drawn_off.1
+        );
+        assert!(
+            r.pelvis_down_after.is_some_and(|t| t <= 0.6),
+            "dt {dt}: {:?}",
+            r.pelvis_down_after
+        );
+        assert!(
+            r.upright_until <= 0.4 && r.upright_slide <= 4.83 * 70.0 * r.upright_until.max(dt),
+            "dt {dt}: slid {:.1}",
+            r.upright_slide
+        );
+    }
+}
+
+/// `bNewPhysics=0` on the game's own update: nothing is taken.
+#[test]
+fn np_real_update_off_takes_nothing() {
+    let r = real_run(0.32, "Bip01 Spine2", 0.016, false, 0.3);
+    assert!(!r.claimed && r.drawn_off == (0.0, 0.0));
+}
+
+/// The old system's own fallback on the same fixture (the game's update, the blend collision
+/// objects): its write is not taken by the update, and it sets the worlds directly
+/// (`[target drawn] ... worlds set directly`).
+#[test]
+fn old_reactions_set_the_worlds_directly_on_the_real_update() {
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut f = Fixture::new(
+        rig_fixture::fnv_skeleton(),
+        Ground {
+            collision: Some(0.0),
+            navmesh: -8.0,
+        },
+    );
+    f.game_update();
+    crate::active_ragdoll::clear();
+    let was = crate::gunplay::tuning();
+    crate::gunplay::set_tuning(crate::gunplay::Tuning {
+        new_physics: false,
+        ..was
+    });
+    crate::room_events::set_on(true);
+    let _ = crate::room_events::take();
+    f.animate();
+    crate::active_ragdoll::apply(&mut f.e);
+    crate::active_ragdoll::after_draw(&mut f.e);
+    crate::active_ragdoll::unwrite(&mut f.e);
+    let chest = f.world("Bip01 Spine2").unwrap().1;
+    crate::active_ragdoll::hit(
+        &mut f.e,
+        ACTOR,
+        0.8 * 80.0,
+        80.0,
+        add(chest, [0.0, 8.0, 4.0]),
+        [0.0, -1.0, 0.0],
+        false,
+    );
+    let mut said = false;
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(16));
+        f.animate();
+        crate::active_ragdoll::apply(&mut f.e);
+        crate::active_ragdoll::after_draw(&mut f.e);
+        crate::active_ragdoll::unwrite(&mut f.e);
+        said |= crate::room_events::take()
+            .iter()
+            .any(|l| l.contains("[target drawn]") && l.contains("worlds set directly"));
+    }
+    crate::room_events::set_on(false);
+    crate::active_ragdoll::clear();
+    crate::gunplay::set_tuning(was);
+    eprintln!("RESULT old reactions on the real update: worlds set directly said {said}");
+    assert!(said, "the old system's fallback did not run");
+}

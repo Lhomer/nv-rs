@@ -769,6 +769,48 @@ frame, `0x008c7aa0` true at the draw and false at the main thread's update, fram
 fall; 4.35 m/s (M4's hand-over) knocked down 1 frame after the hit on the main thread, the game's
 bodies' centre 1.000 of New Physics', never let go; off, nothing taken.
 
+**Fix from Patrick's clip 2026-11-17_21-16-42_d02bbd1** (`bNewPhysics=1`: the 9mm hits did
+nothing visible, the rifle hits left him upright sliding about 270 units back; the read-back never
+under the body's own angle off its animation, `[np drawn]` equal to `[np readback]`). Causes and
+fixes:
+- **The write was never drawn.** `NiAVObject::Update` (`00a59c60`) runs each node's
+  `UpdateWorldData` (`00a68c60`), which hands a node with a collision object to it (its `+0x90`);
+  FNV's 18 body nodes each have a `bhkBlendCollisionObject`, whose `UpdateWorldData` (`00c817d0`)
+  does nothing while the thread block's word at `+0x2c0` is 3, the mode the no-controller update
+  holds (`crate::active_ragdoll::update`). So the update left exactly the nodes New Physics writes
+  as the animation had them (the old system met the same and sets the worlds directly:
+  `hold_write_to_shown`). Now after the update each body tree's top has its world worked out
+  from its parent's and its local, and every node under it from it (`refresh_bodies`, the old
+  system's `set_subtree`): before the animation is read, after the write (when the update left a
+  body off what was written: the count goes in the logs), and after the put-back. The fixture
+  had hidden it twice: it doubled `00a59c60` with its own update, which always takes the locals,
+  and its nodes had no collision objects. `rig_fixture::Fixture::game_update` now runs the
+  game's own update, translated (`00a59c60`, `NiNode::UpdateDownwardPass`, `UpdateWorldData`,
+  `00a68bf0`, the upward pass, the blend collision object's `UpdateWorldData`), on nodes laid out
+  as `NiNode`s with a blend collision object on each body node; the old system's own fallback
+  (`[target drawn] ... worlds set directly`) fires on it too.
+- **The kick at the take.** The floor was the reference's height whatever the animation's feet:
+  feet a few units under it were pushed out on the first frame (the centre went 0.32 to 1.04 m/s
+  in the clip). The floor is now the animated feet's lowest point when that lies within 8 units
+  of the reference's height.
+- **The upright slide.** The actor was moved by the body's move even while the pose was not
+  drawn. Now only while the frame's write is drawn (within 1 degree and 1 unit).
+- **The logs.** `[np balance]`, `[np readback]` and `[np drawn]` count from each hit, not each
+  take; a fall kept downed says `[np fall] <reason>: kept downed`; each hit ends in one
+  `[np outcome]` line (`hit N s / m/s on <body> -> stood | stepped N | fell (reason) | downed
+  (reason) | died, peak spine, drawn-vs-sim max, world set directly N bones`); the clips' phase
+  says `downed` while New Physics keeps it down.
+Fixture tests on the game's own update (`np_real_update_*`: no double for `00a59c60`, the blend
+collision objects, downed kept, a non-bind pose with the feet 3 units under the reference's
+height, dt 0.004 and 0.016, the AI threads busy at the draw), failing on d02bbd13 but the switch's:
+the 9mm on the chest and on the left upper arm drawn 0.000 degrees and at most 0.001 units off
+the body each frame, the centre against its animation at most 0.321 / 0.320 m/s (chest) and 0.340
+/ 0.337 m/s (arm; the ground's reaction as the arm swings the body round its feet), no fall; the
+rifle (4.83 m/s) drawn down (the pelvis under 30 units) 0.35 s after the hit, upright only its
+first 0.19 / 0.18 s (63.6 / 53.7 units of the fall's own motion), drawn exactly as simulated;
+off, nothing taken; the old system's fallback said. On d02bbd13 the same fixture drew the 9mm
+11.5 degrees off with its centre at 0.393 m/s, and the rifle never down, 265 degrees off.
+
 **Not done in M6 (for a later pass):** crawling to cover (the combat controller's cover point as
 the body's travel goal: `FindCombatLocation` `0099ac20`); the shot's origin and direction from the
 weapon as drawn (the game aims its NPC shots from the weapon node as animated, `fire_locate`, so a

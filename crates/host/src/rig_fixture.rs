@@ -277,6 +277,105 @@ impl Fixture {
         Fixture { e, nodes, at }
     }
 
+    /// The game's own update in place of the double (`NiAVObject::Update`, `00a59c60`, and what
+    /// it runs, translated): each node an `NiNode` as the update reads it (its children at
+    /// `+0xa0`/`+0xa6`, no flags, no bound), and each node with a ragdoll body given a
+    /// `bhkBlendCollisionObject` at `+0x1c` as FNV's skeleton has: `NiAVObject::UpdateWorldData`
+    /// (`00a68c60`) hands such a node's world to it (its `+0x90`, `00c817d0`), which does nothing
+    /// while the thread block's word at `+0x2c0` is 3 (the no-controller update's "nodes only").
+    pub fn game_update(&mut self) {
+        const CHILD_LISTS: u32 = BASE + 0xd_0000;
+        const BLENDS: u32 = BASE + 0xe_0000;
+        const BLEND_VTABLE: u32 = BASE + 0xe_f000;
+        let e = &mut self.e;
+        for (addr, f) in [
+            engine::entry!(
+                0x00a5_9c60,
+                engine::units::nimain::run_00a59c60::fn_00a59c60(Ptr, u32)
+            ),
+            engine::entry!(
+                0x00a5_dd70,
+                engine::units::nimain::ninode::ni_node_update_downward_pass(Ptr, u32, u32)
+            ),
+            engine::entry!(
+                0x00a5_db30,
+                engine::units::nimain::ninode::ni_node_update_upward_pass(Ptr)
+            ),
+            engine::entry!(
+                0x00a5_e2d0,
+                engine::units::nimain::ninode::ni_node_update_world_bound(Ptr)
+            ),
+            engine::entry!(
+                0x00a6_8c60,
+                engine::units::nimain::niavobject_xenon::ni_av_object_update_world_data(
+                    Ptr<engine::types::NiAVObject>,
+                    u32
+                )
+            ),
+            engine::entry!(
+                0x00a6_8bf0,
+                engine::units::nimain::run_00a68bf0::fn_00a68bf0(
+                    Ptr<engine::types::NiAVObject>
+                )
+            ),
+            engine::entry!(
+                0x0062_c250,
+                engine::units::fallout_shared_havok::teshavokutilities::fn_0062c250(
+                    Ptr, Ptr, Ptr
+                ) -> Ptr
+            ),
+            engine::entry!(
+                0x00c8_17d0,
+                engine::units::bshavok::bhkblendcollisionobject::bhk_blend_collision_object_update_world_data(
+                    Ptr, u32
+                )
+            ),
+        ] {
+            e.register(addr, f);
+        }
+        // An update data of no time, no controllers (`NiUpdateData`: its byte `+4` clear).
+        e.register_double(UPDATE_DATA, |e, a| {
+            for i in 0..4 {
+                e.mem.set_u32(a[0] + 4 * i, 0);
+            }
+            a[0].into_ret()
+        });
+        e.mem.set_u32(NODE_VTABLE + 0xa4, 0x00a5_dd70);
+        e.mem.set_u32(NODE_VTABLE + 0xb8, 0x00a6_8c60);
+        e.mem.set_u32(NODE_VTABLE + 0xbc, 0x00a5_e2d0);
+        e.mem.set_u32(NODE_VTABLE + 0xfc, 0x00a5_db30);
+        e.mem.set_u32(GEOMETRY_VTABLE + 0xa4, NOTHING);
+        e.mem.set_u32(BLEND_VTABLE + 0x90, 0x00c8_17d0);
+        let mut list = CHILD_LISTS;
+        let mut blend = BLENDS;
+        for (i, n) in self.nodes.iter().enumerate() {
+            let node = self.at[i];
+            let mut kids: Vec<u32> = (0..self.nodes.len())
+                .filter(|&c| self.nodes[c].parent == Some(i))
+                .map(|c| self.at[c])
+                .collect();
+            if i == 0 {
+                kids.push(GEOMETRY);
+            }
+            for (k, c) in kids.iter().enumerate() {
+                e.mem.set_u32(list + 4 * k as u32, *c);
+            }
+            e.mem.set_u32(node + 0xa0, list);
+            e.mem.set_u16(node + 0xa6, kids.len() as u16);
+            e.mem.set_u32(node + 0x30, 0);
+            e.mem.set_u32(node + 0x20, 0);
+            list += 4 * (kids.len() as u32 + 1);
+            if n.body {
+                e.mem.set_u32(blend, BLEND_VTABLE);
+                e.mem.set_u32(blend + 8, node);
+                e.mem.set_u32(node + 0x1c, blend);
+                blend += 0x40;
+            } else {
+                e.mem.set_u32(node + 0x1c, 0);
+            }
+        }
+    }
+
     /// The node named `name` (its address), when there is one.
     pub fn node(&self, name: &str) -> Option<u32> {
         self.nodes

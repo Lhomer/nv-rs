@@ -44,6 +44,11 @@ machinery runs.
   let go), the 3D updated before the write; `[np balance]`, `[np readback]`, `[np drawn]`, the
   fall's reason. The game's 44-75 degree read-back is not reproduced: the next clip's
   `[np drawn]` lines say whether the AI threads write over us.
+- **Clip d02bbd1 fix:** the write was never drawn: the no-controller update leaves the 18 body
+  nodes (their `bhkBlendCollisionObject`s do nothing in its mode 3); now their worlds and
+  subtrees are set from the locals after it (`refresh_bodies`). The fixture runs the game's own
+  update now (`Fixture::game_update`). Also the floor from the animated feet, no actor move unless
+  drawn, per-hit logs and `[np outcome]`. Not run in the game.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 
