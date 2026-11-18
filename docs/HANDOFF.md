@@ -38,6 +38,13 @@ machinery runs.
   (`0088e8d0`, counted), the platform's TLS and critical section, a broad phase finding no pairs.
   `Fixture::add_actor` gives a second actor its own tree.
 
+- **The racing-animation tests (c08805c1's two failures), fixed:** since c08805c1 the reference
+  moves at the main thread's safe point, after the frame's animation update in some frames; the
+  snapshot taken then still had its root where the reference was, while New Physics had already
+  taken the move (`take_move`), so the stance foot was pulled back by the step for a frame (the
+  floor at 3.01 and 6.26 body weights). `move_reference` now moves that snapshot's root with the
+  reference. Both tests pass unchanged.
+
 ### Claude, 2026-11-18 (New Physics: barriers, the rise's pace, the arms' push, bursts)
 
 - **Done (Patrick's 10:08/10:10 clips on abcb629e):**

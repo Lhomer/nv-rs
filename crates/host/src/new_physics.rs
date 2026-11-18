@@ -1544,8 +1544,18 @@ fn move_reference(e: &mut Engine, a: &mut NpActor) {
             // operations open: then given back, tried again next frame.
             if crate::knockdown::place_in_world(e, a.actor, to) {
                 // The height it was given too: the animation comes moved by it (never a jump).
-                let dz = read3(e, a.actor + REFR_POSITION)[2] - at[2];
+                let now = read3(e, a.actor + REFR_POSITION);
+                let dz = now[2] - at[2];
                 np.anim_moved([0.0, 0.0, dz / k]);
+                // The animation's snapshot taken before this move (its root where the reference
+                // was) moved with it: New Physics took the move already (`take_move`), so the
+                // pose it steps toward until the game's next animation update is the moved one
+                // (moved at the main thread's safe point, after the frame's animation update,
+                // the old snapshot pulled the stance foot back by the step: the floor at 3.01
+                // and 6.26 body weights in the racing-animation tests).
+                if let Some(s) = a.snap.as_mut() {
+                    s.root.t = add(s.root.t, sub(now, at));
+                }
                 a.moved = add(a.moved, mv);
                 // Its own move, not the game's: the ground's velocity is measured from here.
                 a.ref_after = Some(read3(e, a.actor + REFR_POSITION));
