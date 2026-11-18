@@ -20,3 +20,9 @@ pub fn window_titled(_e: &mut Engine, _handle: u32, _title: &[u8]) {}
 
 /// No window layer's window to move (`super::window_moved` keeps the game's rectangles).
 pub fn window_moved(_e: &mut Engine, _handle: u32, _rect: [i32; 4], _flags: u32) {}
+
+/// No window layer to list the monitors (the activity's window is the game's): the machine table
+/// goes on without its display lines (`crate::machine_table::this_display` names why).
+pub(super) fn monitors() -> Result<Vec<crate::machine_table::Monitor>, String> {
+    Err("no window layer on this system lists the monitors".to_string())
+}
