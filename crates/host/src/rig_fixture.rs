@@ -226,6 +226,8 @@ impl Fixture {
         e.mem.set_f32(HK_TO_GAME, HK);
         // The process manager's lists (`jip::commands::jip_fn_effect::high_actors`): empty.
         e.mem.map(0x011e_0000, 0x2000);
+        // Whether an AI thread's task runs now (`008c7aa0`): none, unless a test says so.
+        e.register_double(0x008c_7aa0, |_, _| 0u32.into_ret());
         FLOOR.with(|f| f.set(ground.collision));
         SLOPE.with(|f| f.set(None));
         WORLD.with(|w| *w.borrow_mut() = None);

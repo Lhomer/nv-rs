@@ -3238,12 +3238,21 @@ pub(crate) fn world_state(e: &Engine, world: u32) -> String {
     )
 }
 
-/// New Physics' move of `actor` to `at` ([`place`]) made under the world's own lock, as
-/// `hkpWorld::stepDeltaTime` takes it, and only with none of its critical operations open:
+/// New Physics' move of `actor` to `at` ([`place`]): only with the AI threads' tasks joined
+/// (`008c7aa0` false), then under the world's own lock, as `hkpWorld::stepDeltaTime` takes it,
+/// and only with none of its critical operations open:
 /// answers false (nothing moved: try again) when they are (another thread's work on the world;
 /// the phantom's update queued then, and the flush of it ran it over and over: Patrick's 13:17
 /// crash). An actor whose controller is in no world is placed as it is.
 pub(crate) fn place_in_world(e: &mut Engine, actor: u32, at: [f32; 3]) -> bool {
+    // Only at the main thread's safe point, the AI threads' tasks joined: the AI's movers
+    // (`00931620` < `0092f260` < `008a62b0`) and the bullets (`00c73170` < `009b8030`) move their
+    // controllers there without this lock, and a broad-phase update racing theirs lost a count
+    // (+0x94 at -1), ran op-17 records at -1 and overwrote the actor-value table at `011d61c8`
+    // (Patrick's 14:05 crash: be260264 moved "on an AI thread").
+    if e.call(AI_THREAD, &[]).bool() {
+        return false;
+    }
     let controller = e.call(CHAR_CONTROLLER, &args![actor]).u32();
     let world = if controller != 0 {
         controller_world(e, controller)

@@ -42,6 +42,21 @@ machinery runs.
     move back and tries next frame.
   - `[np proxy]` lines log `00cac920`'s callers.
   - Open: no test drives the real Havok chain with a second thread.
+- **14:05 crash (be260264), fixed:** `place_in_world` ran at the draw's set-up (`apply`) while
+  the AI threads' movers (`00931620`) and bullets (`00c73170`) moved their controllers without
+  `00c91180`. `+0x94` went to -1, op-17 records ran, and the actor-value table at `011d61c8`
+  was overwritten.
+  - The reference move is now `move_reference`, called from `main_thread`, only when
+    `008c7aa0` says no AI task runs. `place_in_world` refuses otherwise.
+  - `ref_after` is updated by the move.
+  - `[np table]` says any change to `011d61c8..+0x134` while New Physics has an actor.
+- **Open after the 14:05 fix:**
+  - `np_full_cycle_with_a_racing_animation` (floor 3.01) and
+    `np_slope_walking_with_a_racing_animation` (6.26) fail on standing step landings: the move
+    now comes at the next main-thread point.
+  - The 14:06 running issues (the runner taken at 0 m/s: `set_anim_velocity` is never called)
+    and the 14:09 knockdown issues are not started.
+  - Tests a-g are not written.
 - **Cripple reaction, the 13:17 note:** the earlier fix cleared the byte at `011df760`: the low
   byte of the Setting's vtable pointer, not its value (`+4`, read through `00408d60`). Now
   `00408d60` is hooked (`knockdown::setting_value_address`): on the thread running the game's

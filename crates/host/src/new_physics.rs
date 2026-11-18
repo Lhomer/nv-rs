@@ -945,63 +945,9 @@ pub fn apply(e: &mut Engine) {
             a.fails = 0;
         }
         let Some(np) = a.np.as_mut() else { continue };
-        // The steps' move is the actor's, only while the pose is drawn (an actor moved under a
-        // pose not drawn slid along upright: Patrick's d02bbd1 clip).
-        let held = a.readback.0 <= MOVE_DRAWN.0 && a.readback.1 <= MOVE_DRAWN.1;
-        let mv = if held { np.take_move() } else { [0.0; 3] };
-        // Under MOVE_LEAST it is given back and gathered until it is not (moved nearly every
-        // frame, "0 of 0 units", each a broad-phase update of its controller: Patrick's 13:17
-        // crash).
-        let k = ragdoll_core::np_body::UNITS;
-        if length(mv) > 1e-3 && length(mv) < MOVE_LEAST {
-            np.give_back(scale([mv[0], mv[1], 0.0], 1.0 / k));
-        }
-        if length(mv) >= MOVE_LEAST {
-            // New Physics owns the reference while it has the actor: moved only by it (a step's
-            // end, a rise's end), its height the ground's under it (kept as far over the ground as
-            // it stood at the take): released 22 units over the ground, it dropped (the tester's
-            // 08:13 clip).
-            let at = read3(e, a.actor + REFR_POSITION);
-            // Swept: never through a wall or a crate on the way, and its capsule clear of them
-            // where it ends (Patrick's 10:08 and 10:10 clips: moved 193 and 213 units in one
-            // frame, through what lay between).
-            let (to_flat, said) = swept_move(e, a.actor, at, mv);
-            let mut moved = sub(to_flat, at);
-            if length([moved[0], moved[1], 0.0]) < MOVE_LEAST {
-                moved = [0.0; 3];
-            }
-            let left = sub(mv, [moved[0], moved[1], 0.0]);
-            if length(left) > 1e-3 {
-                np.give_back(scale(left, 1.0 / k));
-            }
-            if let Some(why) = said {
-                note(format!(
-                    "{:08X}: [np move] the actor moved {:.0} of {:.0} units to the body: {why}",
-                    a.id,
-                    length([moved[0], moved[1], 0.0]),
-                    length(mv)
-                ));
-            }
-            let mv = [moved[0], moved[1], 0.0];
-            if length(mv) >= MOVE_LEAST {
-                let mut to = add(at, mv);
-                let over = a.floor_lift.unwrap_or(0.0) - a.floor_offset.unwrap_or(0.0);
-                if let Some(g) = crate::active_ragdoll::floor_under(e, [to[0], to[1], at[2] + 30.0])
-                {
-                    to[2] = g + over;
-                }
-                // Under the world's own lock, and never while another thread has its critical
-                // operations open: then given back, tried again next frame.
-                if crate::knockdown::place_in_world(e, a.actor, to) {
-                    // The height it was given too: the animation comes moved by it (never a jump).
-                    let dz = read3(e, a.actor + REFR_POSITION)[2] - at[2];
-                    np.anim_moved([0.0, 0.0, dz / k]);
-                    a.moved = add(a.moved, mv);
-                } else {
-                    np.give_back(scale(mv, 1.0 / k));
-                }
-            }
-        }
+        // The steps' move is made at the main thread's safe point ([`move_reference`] from
+        // [`main_thread`]), never here: at the draw's set-up the AI threads' movers and bullets
+        // move their controllers without the world's lock (Patrick's 14:05 crash).
         // Its movement held while New Physics has it (the mover's at its update too).
         crate::knockdown::hold_controller(e, a.actor);
         a.ref_after = Some(read3(e, a.actor + REFR_POSITION));
@@ -1118,6 +1064,42 @@ fn world_said(e: &mut Engine) {
             },
             crate::knockdown::world_state(e, w)
         ));
+    }
+}
+
+/// The game's static actor-value table (`011d61c8`, 0x134 bytes; `HitMe` reads it by limb):
+/// compared each frame with what it held when first seen while New Physics had an actor, and
+/// any change said (`[np table]`: the word, before and after, and the world's state), once a
+/// change. Patrick's 14:05 crash: it was overwritten (pi/2 at a limb's entry) 24 frames after
+/// the world's queue ran records at a lock count of -1.
+fn table_watched(e: &mut Engine) {
+    const TABLE: u32 = 0x011d_61c8;
+    const WORDS: u32 = 0x134 / 4;
+    static SEEN: Mutex<Option<Vec<u32>>> = Mutex::new(None);
+    let owned = !ACTORS.lock().unwrap_or_else(|p| p.into_inner()).is_empty();
+    if !owned || !e.mem.is_mapped(TABLE) {
+        return;
+    }
+    let now: Vec<u32> = (0..WORDS).map(|i| e.mem.u32(TABLE + 4 * i)).collect();
+    let mut seen = SEEN.lock().unwrap_or_else(|p| p.into_inner());
+    match seen.as_ref() {
+        None => *seen = Some(now),
+        Some(was) if *was != now => {
+            let changed: Vec<String> = was
+                .iter()
+                .zip(&now)
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .take(8)
+                .map(|(i, (a, b))| format!("+{:#x} {a:#010x} -> {b:#010x}", 4 * i))
+                .collect();
+            note(format!(
+                "[np table] the actor-value table at 011d61c8 changed: {}",
+                changed.join(", ")
+            ));
+            *seen = Some(now);
+        }
+        _ => {}
     }
 }
 
@@ -1545,6 +1527,71 @@ pub fn let_gos() -> u32 {
     LET_GOS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The reference moved by New Physics' steps and rise (what `take_move` hands it), swept and
+/// placed under the world's lock ([`crate::knockdown::place_in_world`]): at the main thread's
+/// safe point only, the AI threads' tasks joined; a move it cannot make yet is given back.
+fn move_reference(e: &mut Engine, a: &mut NpActor) {
+    let Some(np) = a.np.as_mut() else { return };
+    // The steps' move is the actor's, only while the pose is drawn (an actor moved under a
+    // pose not drawn slid along upright: Patrick's d02bbd1 clip).
+    let held = a.readback.0 <= MOVE_DRAWN.0 && a.readback.1 <= MOVE_DRAWN.1;
+    let mv = if held { np.take_move() } else { [0.0; 3] };
+    // Under MOVE_LEAST it is given back and gathered until it is not (moved nearly every
+    // frame, "0 of 0 units", each a broad-phase update of its controller: Patrick's 13:17
+    // crash).
+    let k = ragdoll_core::np_body::UNITS;
+    if length(mv) > 1e-3 && length(mv) < MOVE_LEAST {
+        np.give_back(scale([mv[0], mv[1], 0.0], 1.0 / k));
+    }
+    if length(mv) >= MOVE_LEAST {
+        // New Physics owns the reference while it has the actor: moved only by it (a step's
+        // end, a rise's end), its height the ground's under it (kept as far over the ground as
+        // it stood at the take): released 22 units over the ground, it dropped (the tester's
+        // 08:13 clip).
+        let at = read3(e, a.actor + REFR_POSITION);
+        // Swept: never through a wall or a crate on the way, and its capsule clear of them
+        // where it ends (Patrick's 10:08 and 10:10 clips: moved 193 and 213 units in one
+        // frame, through what lay between).
+        let (to_flat, said) = swept_move(e, a.actor, at, mv);
+        let mut moved = sub(to_flat, at);
+        if length([moved[0], moved[1], 0.0]) < MOVE_LEAST {
+            moved = [0.0; 3];
+        }
+        let left = sub(mv, [moved[0], moved[1], 0.0]);
+        if length(left) > 1e-3 {
+            np.give_back(scale(left, 1.0 / k));
+        }
+        if let Some(why) = said {
+            note(format!(
+                "{:08X}: [np move] the actor moved {:.0} of {:.0} units to the body: {why}",
+                a.id,
+                length([moved[0], moved[1], 0.0]),
+                length(mv)
+            ));
+        }
+        let mv = [moved[0], moved[1], 0.0];
+        if length(mv) >= MOVE_LEAST {
+            let mut to = add(at, mv);
+            let over = a.floor_lift.unwrap_or(0.0) - a.floor_offset.unwrap_or(0.0);
+            if let Some(g) = crate::active_ragdoll::floor_under(e, [to[0], to[1], at[2] + 30.0]) {
+                to[2] = g + over;
+            }
+            // Under the world's own lock, and never while another thread has its critical
+            // operations open: then given back, tried again next frame.
+            if crate::knockdown::place_in_world(e, a.actor, to) {
+                // The height it was given too: the animation comes moved by it (never a jump).
+                let dz = read3(e, a.actor + REFR_POSITION)[2] - at[2];
+                np.anim_moved([0.0, 0.0, dz / k]);
+                a.moved = add(a.moved, mv);
+                // Its own move, not the game's: the ground's velocity is measured from here.
+                a.ref_after = Some(read3(e, a.actor + REFR_POSITION));
+            } else {
+                np.give_back(scale(mv, 1.0 / k));
+            }
+        }
+    }
+}
+
 /// On the main thread's update (`crate::knockdown::frame`, while the task queue is free): each
 /// actor waiting for the game's ragdoll is handed to it. A fall or a give-up: `KnockExplosion` at
 /// strength 0 and its bodies on the pose drawn, moving as New Physics' bodies were
@@ -1552,6 +1599,20 @@ pub fn let_gos() -> u32 {
 /// ragdoll's bodies put on the pose drawn with those velocities (`knockdown::place_bodies`).
 pub fn main_thread(e: &mut Engine) {
     world_said(e);
+    table_watched(e);
+    // The steps' moves, here only with the AI threads' tasks joined.
+    if !e.call(AI_THREAD, &[]).bool() {
+        let mut list: Vec<NpActor> =
+            std::mem::take(&mut *ACTORS.lock().unwrap_or_else(|p| p.into_inner()));
+        for a in list.iter_mut() {
+            if a.handing.is_none() {
+                move_reference(e, a);
+            }
+        }
+        let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+        list.extend(std::mem::take(&mut *actors));
+        *actors = list;
+    }
     let waiting: Vec<NpActor> = {
         let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
         if !actors.iter().any(|a| a.handing.is_some()) {

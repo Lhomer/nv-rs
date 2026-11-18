@@ -112,6 +112,8 @@ fn np_run(speed: f32, seconds: f32, on: bool) -> Run {
                 [0.0, -1.0, 0.0],
             );
         }
+        // The main thread's frame (the game's: its safe point for New Physics' moves).
+        main_thread(&mut f.e);
         crate::active_ragdoll::apply(&mut f.e);
         crate::active_ragdoll::read_drawn(&mut f.e);
         let now: Vec<(M3, V3)> = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
