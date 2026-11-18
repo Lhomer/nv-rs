@@ -212,7 +212,7 @@ const NPC: u8 = 0x2a;
 const CREA: u8 = 0x2b;
 /// `HitData`: the aggressor, the target, the impact point and direction.
 const HIT_AGGRESSOR: u32 = 0x00;
-const HIT_TARGET: u32 = 0x04;
+pub(crate) const HIT_TARGET: u32 = 0x04;
 const HIT_POINT: u32 = 0x38;
 const HIT_DIRECTION: u32 = 0x44;
 const HIT_WEAPON: u32 = 0x30;
@@ -316,6 +316,11 @@ pub fn install(e: &mut Engine) {
         );
         update(e, a)
     });
+    install_setting_value(e);
+    e.register(PROXY_SET_POSITION, |e, a| {
+        proxy_set_position(e, a[0], a[1]);
+        Ret::default()
+    });
     e.register(HIT_ME, |e, a| {
         hit_me_hooked(e, a, |e, a| {
             actor_hit_me(e, Ptr::new(a[0]), Ptr::new(a[1]), a[2] as u8)
@@ -405,17 +410,47 @@ pub(crate) fn hold_controller(e: &mut Engine, actor: u32) {
 pub(crate) const MOVER_ACTOR: u32 = 0x28;
 pub(crate) const MOVER_DELTA: u32 = 0x10;
 
-/// After the game applied the hit `hit` to `target`: a knockdown or a stagger (module
-/// documentation). Each decision on a living character is logged ([`note`]).
+thread_local! {
+    /// The game's hits to an actor New Physics has running on this thread now: the
+    /// crippled-limb idle's setting reads off for them (and for nothing else).
+    static NO_CRIPPLE_IDLE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// `Setting::GetValue`'s address-of (`00408d60`, `ECX` = the setting: its value's address,
+/// `+4`), the game's own but for the crippled-limb idle's setting (`011df760`) while this
+/// thread runs the game's hit to an actor New Physics has ([`hit_me_hooked`]): its value read as
+/// off there (the static byte the null case answers, `01202800`, at 0), so `HitMe` never asks
+/// for the cripple reaction's idle. The setting itself is never written (its value is shared by
+/// every thread: cleared and put back around a hit, it read off for another thread's hit to an
+/// actor New Physics does not have, and two such hits at once could leave it off for good).
+pub(crate) fn setting_value_address(e: &mut Engine, setting: u32) -> u32 {
+    if setting == crate::new_physics::CRIPPLE_IDLE && NO_CRIPPLE_IDLE.with(std::cell::Cell::get) > 0
+    {
+        e.mem.set_u8(SETTING_EMPTY_BYTE, 0);
+        return SETTING_EMPTY_BYTE;
+    }
+    engine::units::unplaced::run_00408c30::fn_00408d60(e, Ptr::new(setting)).addr()
+}
+
+/// Registers [`setting_value_address`] for `00408d60` (from [`install`]).
+pub(crate) fn install_setting_value(e: &mut Engine) {
+    e.register(SETTING_VALUE_ADDRESS, |e, a| {
+        setting_value_address(e, a[0]).into_ret()
+    });
+}
+
+/// `Setting::GetValue`'s address-of (`00408d60`) and the static byte its null case answers.
+pub(crate) const SETTING_VALUE_ADDRESS: u32 = 0x0040_8d60;
+const SETTING_EMPTY_BYTE: u32 = 0x0120_2800;
+
 /// `Actor::HitMe` as hooked: `game` is the game's own (`actor_p3::actor_hit_me`). New Physics
 /// takes the actor before the game's hit runs, so none of the game's reactions plays for it:
 /// `HitMe_ov2` and `KnockExplosion` check `crate::new_physics::owns`, and the one-off reaction to
-/// a limb crippled by the hit, the idle `HitMe` picks (`TESIdleManager::GetIdleToPlay`) and
-/// starts when the crippled-limb idle's setting (`011df760`) is on, the limb struck and the
-/// limb's value at 0 (engine-fallout-ai actor_p3.rs `hit_me_death`, 13544-13579), is kept off by
-/// clearing that setting around it. Also for a hit run on an AI thread to an actor New Physics
-/// already has (claimed only on the main thread, such a hit played the cripple reaction over
-/// it). The crippled state, its effects and the limping locomotion are the game's, untouched.
+/// a limb crippled by the hit (`actor_p3::hit_me_cripple_idle`: the idle
+/// `TESIdleManager::GetIdleToPlay` picks, set as the process's idle) never comes, its setting
+/// reading off on this thread while the game's hit runs ([`setting_value_address`]). Also for a
+/// hit run on an AI thread to an actor New Physics already has. The crippled state, its effects
+/// and the limping locomotion are the game's, untouched.
 pub(crate) fn hit_me_hooked(e: &mut Engine, a: &[u32], game: impl FnOnce(&mut Engine, &[u32])) {
     let queued = e.call(AI_THREAD, &[]).bool();
     let np = if queued {
@@ -423,20 +458,20 @@ pub(crate) fn hit_me_hooked(e: &mut Engine, a: &[u32], game: impl FnOnce(&mut En
     } else {
         crate::new_physics::claim(e, a[0])
     };
-    let cripple = np.then(|| {
-        let was = e.mem.u8(crate::new_physics::CRIPPLE_IDLE);
-        e.mem.set_u8(crate::new_physics::CRIPPLE_IDLE, 0);
-        was
-    });
+    if np {
+        NO_CRIPPLE_IDLE.with(|n| n.set(n.get() + 1));
+    }
     game(e, a);
-    if let Some(was) = cripple {
-        e.mem.set_u8(crate::new_physics::CRIPPLE_IDLE, was);
+    if np {
+        NO_CRIPPLE_IDLE.with(|n| n.set(n.get() - 1));
     }
     if !queued {
         after_hit(e, a[0], a[1]);
     }
 }
 
+/// After the game applied the hit `hit` to `target`: a knockdown or a stagger (module
+/// documentation). Each decision on a living character is logged ([`note`]).
 fn after_hit(e: &mut Engine, target: u32, hit: u32) {
     let t = crate::gunplay::tuning();
     if !crate::gunplay::is_on() || hit == 0 || target == 0 {
@@ -3063,6 +3098,118 @@ fn set_controller_velocity(e: &mut Engine, controller: u32, v: [f32; 3]) {
         }
         e.call(CONTROLLER_SET_VELOCITY, &args![controller, at]);
     });
+}
+
+/// The `hkpWorld` the character controller's shape phantom is in (its `bhkShapePhantom` at
+/// `+0x594`, that one's Havok phantom at `+8`, the phantom's world at `+8`), 0 for none.
+fn controller_world(e: &Engine, controller: u32) -> u32 {
+    let wrapper = e.mem.u32(controller + 0x594);
+    if wrapper == 0 {
+        return 0;
+    }
+    let phantom = e.mem.u32(wrapper + 8);
+    if phantom == 0 {
+        return 0;
+    }
+    e.mem.u32(phantom + 8)
+}
+
+/// The Havok world's lock as `hkpWorld::stepDeltaTime` takes it (`00c91180`, the recursive Havok
+/// lock and `m_isLocked`) and its release (`00c91190`).
+const WORLD_LOCK: u32 = 0x00c9_1180;
+const WORLD_UNLOCK: u32 = 0x00c9_1190;
+/// `hkpCharacterProxy::setPosition`.
+pub(crate) const PROXY_SET_POSITION: u32 = 0x00ca_c920;
+
+thread_local! {
+    /// New Physics' move of its actor running on this thread now ([`place_in_world`]).
+    static NP_PLACING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+static PROXY_MOVES_SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// `hkpCharacterProxy::setPosition` (`00cac920`), the game's own, its callers said: the first few
+/// and any made while the controller's world has critical operations open (`+0x94`, `+0x98`:
+/// its phantom's broad-phase update then queues itself, and run from a flush while another thread
+/// holds them it queued itself again without end: Patrick's 13:17 crash).
+pub(crate) fn proxy_set_position(e: &mut Engine, proxy: u32, position: u32) {
+    let phantom = e.mem.u32(proxy + 0x30);
+    let world = if phantom != 0 {
+        e.mem.u32(phantom + 8)
+    } else {
+        0
+    };
+    let open = world != 0 && (e.mem.u32(world + 0x94) != 0 || e.mem.u32(world + 0x98) != 0);
+    let said = PROXY_MOVES_SAID.load(std::sync::atomic::Ordering::Relaxed);
+    if said < 8 || (open && said < 64) {
+        PROXY_MOVES_SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let chain: Vec<String> = e
+            .call_stack
+            .iter()
+            .rev()
+            .skip(1)
+            .take(6)
+            .map(|a| format!("{a:08x}"))
+            .collect();
+        note(format!(
+            "[np proxy] hkpCharacterProxy::setPosition {proxy:08X} from {} ({}), the world's \
+             critical operations {} / {}{}",
+            chain.join(" < "),
+            if NP_PLACING.with(std::cell::Cell::get) {
+                "New Physics' move"
+            } else {
+                "not New Physics'"
+            },
+            if world != 0 {
+                e.mem.u32(world + 0x94)
+            } else {
+                0
+            },
+            if world != 0 {
+                e.mem.u32(world + 0x98)
+            } else {
+                0
+            },
+            if e.call(AI_THREAD, &[]).bool() {
+                ", on an AI thread"
+            } else {
+                ""
+            }
+        ));
+    }
+    engine::units::havok_sdk::hkpcharacterproxy::hkp_character_proxy_set_position(
+        e,
+        Ptr::new(proxy),
+        Ptr::new(position),
+    );
+}
+
+/// New Physics' move of `actor` to `at` ([`place`]) made under the world's own lock, as
+/// `hkpWorld::stepDeltaTime` takes it, and only with none of its critical operations open:
+/// answers false (nothing moved: try again) when they are (another thread's work on the world;
+/// the phantom's update queued then, and the flush of it ran it over and over: Patrick's 13:17
+/// crash). An actor whose controller is in no world is placed as it is.
+pub(crate) fn place_in_world(e: &mut Engine, actor: u32, at: [f32; 3]) -> bool {
+    let controller = e.call(CHAR_CONTROLLER, &args![actor]).u32();
+    let world = if controller != 0 {
+        controller_world(e, controller)
+    } else {
+        0
+    };
+    NP_PLACING.with(|p| p.set(true));
+    let moved = if world == 0 {
+        place(e, actor, at);
+        true
+    } else {
+        e.call(WORLD_LOCK, &args![world]);
+        let open = e.mem.u32(world + 0x94) != 0 || e.mem.u32(world + 0x98) != 0;
+        if !open {
+            place(e, actor, at);
+        }
+        e.call(WORLD_UNLOCK, &args![world]);
+        !open
+    };
+    NP_PLACING.with(|p| p.set(false));
+    moved
 }
 
 /// The actor's reference and character controller set at `at`, the controller's velocity zero.

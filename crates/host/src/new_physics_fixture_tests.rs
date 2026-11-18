@@ -3636,22 +3636,35 @@ fn np_planted_hands_hold_still() {
     assert!(bad.is_empty(), "{bad:#?}");
 }
 
-/// Patrick's addendum: the game's one-off reaction to a limb crippled by a hit (the idle
-/// `Actor::HitMe` picks and starts when the crippled-limb idle's setting `011df760` is on) never
-/// comes for an actor New Physics has: the game's hit, run through the hook
-/// (`knockdown::hit_me_hooked`), reads the setting off for it on the main thread (the hit that
-/// takes it) and on an AI thread (a later hit, already taken), the setting is put back after,
-/// and New Physics keeps the actor through the hits and the frames after (its reaction runs on,
-/// no animation jump). With New Physics off the game's hit reads the setting on, as before. The
-/// game's `HitMe` itself stands in as what it reads of the setting (the fixture has no hit data
-/// or limbs' values for its whole body).
+/// Patrick's addendum 2 (his 13:17 note: the cripple reaction still played). The game's
+/// one-off reaction to a limb crippled by a hit (`actor_p3::hit_me_cripple_idle`, the section of
+/// `Actor::HitMe` that asks `TESIdleManager::GetIdleToPlay` for an idle and sets it as the
+/// process's, `HighProcess::SetCurrentProcessIdle`) runs, the game's own, inside the hooked hit
+/// (`knockdown::hit_me_hooked`, `Setting::GetValue`'s address-of hooked as the game is) on a real
+/// `Setting` at `011df760` (its vtable word and its value 1 at `+4`): a leg's crippling hit on
+/// the main thread, then an arm's on an AI thread. With New Physics on neither asks for an idle
+/// nor sets one; with it off each does both. The setting's words are unchanged either way, and the
+/// limp (the game's `Actor::ConditionModifiedCallback` on the legs' value 0x48 crippled: its
+/// replacement locomotion requested) comes as before.
 #[test]
 fn np_crippling_hits_never_start_the_cripple_reaction() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use engine::units::fallout_ai::actor_p3::hit_me_cripple_idle;
+    use engine::units::fallout_ai::actor_p6::actor_condition_modified_callback;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     static AI_THREAD: AtomicBool = AtomicBool::new(false);
+    static ASKED: AtomicU32 = AtomicU32::new(0);
+    static SET: AtomicU32 = AtomicU32::new(0);
+    static LIMP: AtomicU32 = AtomicU32::new(0);
     let _one = crate::active_ragdoll::tests::SERIAL
         .lock()
         .unwrap_or_else(|p| p.into_inner());
+    // The game's data: the setting, the idle manager's pointer, the static byte, 2.0.
+    const SETTING_VTABLE: u32 = 0x0102_5b84;
+    const PAGE: u32 = 0x7400_0000;
+    const HIT: u32 = PAGE;
+    const OWNER_VTABLE: u32 = PAGE + 0x400;
+    const PROCESS_VTABLE: u32 = PAGE + 0x800;
+    const IDLE: u32 = PAGE + 0xc00;
     let mut failed = Vec::new();
     for on in [true, false] {
         let mut f = Fixture::new(
@@ -3665,45 +3678,109 @@ fn np_crippling_hits_never_start_the_cripple_reaction() {
         f.make_character();
         crate::active_ragdoll::clear();
         crate::knockdown::clear();
+        crate::knockdown::install_setting_value(&mut f.e);
         let was = crate::gunplay::tuning();
         crate::gunplay::set_tuning(crate::gunplay::Tuning {
             new_physics: on,
+            knockdowns: false,
             ..was
         });
+        for page in [
+            0x011d_f000u32,
+            0x011c_b000,
+            0x0120_2000,
+            0x0101_1000,
+            0x011d_9000,
+            PAGE,
+        ] {
+            f.e.mem.map(page, 0x1000);
+        }
+        f.e.mem.set_u32(CRIPPLE_IDLE, SETTING_VTABLE);
+        f.e.mem.set_u32(CRIPPLE_IDLE + 4, 1);
+        f.e.mem.set_u32(0x011c_b6a0, PAGE + 0xf00);
+        f.e.mem.set_f64(0x0101_1590, 2.0);
         f.e.register_double(0x008c_7aa0, |_, _| {
             u32::from(AI_THREAD.load(Ordering::Relaxed)).into_ret()
         });
         f.e.register_double(0x0088_45a0, |_, _| 1u32.into_ret());
+        // The idle manager's answer, and the process's idle set: counted.
+        ASKED.store(0, Ordering::Relaxed);
+        SET.store(0, Ordering::Relaxed);
+        LIMP.store(0, Ordering::Relaxed);
+        f.e.register_double(0x0060_0950, |_, _| {
+            ASKED.fetch_add(1, Ordering::Relaxed);
+            IDLE.into_ret()
+        });
+        f.e.register_double(0x0049_8d30, |_, _| 0u32.into_ret());
+        let vt = f.e.mem.u32(ACTOR);
+        // Actor slots: `+0x230` false (it may react), `+0x1e4` its animation, `+0x360` false.
+        f.e.register_double(PAGE + 0xe00, |_, _| 0u32.into_ret());
+        f.e.register_double(PAGE + 0xe04, |_, _| (PAGE + 0xd00).into_ret());
+        f.e.mem.set_u32(vt + 0x230, PAGE + 0xe00);
+        f.e.mem.set_u32(vt + 0x1e4, PAGE + 0xe04);
+        f.e.mem.set_u32(vt + 0x360, PAGE + 0xe00);
+        // Its actor values (`+0xa4`): 0x48, the legs' mobility, at 0 (crippled).
+        f.e.mem.set_u32(ACTOR + 0xa4, OWNER_VTABLE);
+        f.e.register_double(PAGE + 0xe08, |_, _| 0u32.into_ret());
+        f.e.register_double(PAGE + 0xe0c, |_, _| Ret {
+            st0: 0.0,
+            ..Ret::default()
+        });
+        f.e.mem.set_u32(OWNER_VTABLE + 0x08, PAGE + 0xe08);
+        f.e.mem.set_u32(OWNER_VTABLE + 0x0c, PAGE + 0xe0c);
+        // Its process's `SetCurrentProcessIdle` (`+0x71c`) and `+0x614`.
+        let process = f.e.mem.u32(ACTOR + rig_fixture::PROCESS);
+        let pvt = match f.e.mem.u32(process) {
+            0 => {
+                f.e.mem.set_u32(process, PROCESS_VTABLE);
+                PROCESS_VTABLE
+            }
+            v => v,
+        };
+        f.e.register_double(PAGE + 0xe10, |_, _| {
+            SET.fetch_add(1, Ordering::Relaxed);
+            Ret::default()
+        });
+        f.e.mem.set_u32(pvt + 0x71c, PAGE + 0xe10);
+        f.e.mem.set_u32(pvt + 0x614, PAGE + 0xe00);
+        // The limp: the legs' conditions at 0, the locomotion change asked for.
+        f.e.register_double(0x0064_6800, |_, _| Ret {
+            st0: 0.0,
+            ..Ret::default()
+        });
+        f.e.register_double(0x008b_7360, |_, _| {
+            LIMP.fetch_add(1, Ordering::Relaxed);
+            Ret::default()
+        });
+        f.e.register_double(0x0088_48e0, |_, _| Ret::default());
         room_events::set_on(true);
         let _ = room_events::take();
-        // The crippled-limb idle's setting (the game's data page), on as in the game.
-        f.e.mem.map(CRIPPLE_IDLE & !0xfff, 0x1000);
-        f.e.mem.set_u8(CRIPPLE_IDLE, 1);
-        let mut seen = Vec::new();
-        let mut restored = Vec::new();
-        let spine = model().body("Bip01 Spine2").unwrap();
-        let body_nodes: Vec<usize> = model()
-            .bodies
-            .iter()
-            .map(|b| f.nodes.iter().position(|n| n.name == b.node).unwrap())
-            .collect();
-        // A leg's crippling hit on the main thread, then an arm's on an AI thread a few frames
-        // on, each followed by New Physics' hit (as `after_hit` gives it the hit's momentum).
-        let mut jumps = 0;
+        let mut asked = Vec::new();
+        let mut set = Vec::new();
         let mut kept = on;
-        for (thread, (point_body, speed)) in [
-            (false, ("Bip01 L Calf", 0.5f32)),
-            (true, ("Bip01 R UpperArm", 0.4)),
-        ] {
+        let mut jumps = 0;
+        for (thread, limb) in [(false, 6u32), (true, 3)] {
+            f.e.set(
+                engine::Ptr::<engine::units::fallout_ai::hitdata::HitData>::new(HIT),
+                engine::units::fallout_ai::hitdata::HitData::eDamageLimb,
+                limb,
+            );
+            f.e.mem.set_u32(HIT + crate::knockdown::HIT_TARGET, ACTOR);
+            let (a0, s0) = (ASKED.load(Ordering::Relaxed), SET.load(Ordering::Relaxed));
             AI_THREAD.store(thread, Ordering::Relaxed);
-            crate::knockdown::hit_me_hooked(&mut f.e, &[ACTOR, 0, 0], |e, _| {
-                seen.push(e.mem.u8(CRIPPLE_IDLE));
+            crate::knockdown::hit_me_hooked(&mut f.e, &[ACTOR, HIT, 0], |e, a| {
+                hit_me_cripple_idle(
+                    e,
+                    engine::Ptr::new(a[0]),
+                    engine::Ptr::new(a[1]),
+                    0,
+                    0,
+                    true,
+                )
             });
             AI_THREAD.store(false, Ordering::Relaxed);
-            restored.push(f.e.mem.u8(CRIPPLE_IDLE));
-            let b = model().body(point_body).unwrap_or(spine);
-            let at = f.world_of(f.at[body_nodes[b]]).1;
-            hit(&mut f.e, ACTOR, speed * model().mass, at, [0.0, -1.0, 0.0]);
+            asked.push(ASKED.load(Ordering::Relaxed) - a0);
+            set.push(SET.load(Ordering::Relaxed) - s0);
             for _ in 0..20 {
                 f.e.mem.set_f32(0x011d_ea30, 0.016);
                 main_thread(&mut f.e);
@@ -3722,14 +3799,32 @@ fn np_crippling_hits_never_start_the_cripple_reaction() {
                 .count();
         }
         room_events::set_on(false);
+        let words = (f.e.mem.u32(CRIPPLE_IDLE), f.e.mem.u32(CRIPPLE_IDLE + 4));
+        actor_condition_modified_callback(
+            &mut f.e,
+            engine::Ptr::new(ACTOR + 0xa4),
+            0x48,
+            1.0,
+            -1.0,
+            engine::Ptr::new(0),
+        );
+        let limp = LIMP.load(Ordering::Relaxed);
         eprintln!(
-            "RESULT np cripple reaction, New Physics {on}: the game's hit read the cripple \
-             reaction's setting {seen:?} (main thread, AI thread), put back {restored:?}, kept \
-             by New Physics {kept}, animation jumps {jumps}"
+            "RESULT np cripple reaction, New Physics {on}: idles asked for {asked:?}, set {set:?} \
+             (the leg's hit on the main thread, the arm's on an AI thread); the setting's words \
+             {:#x} {:#x}; the limp's locomotion asked {limp}; kept by New Physics {kept}, \
+             animation jumps {jumps}",
+            words.0, words.1
         );
         let want = if on { [0, 0] } else { [1, 1] };
-        if seen != want || restored != [1, 1] {
-            failed.push(format!("on {on}: read {seen:?}, put back {restored:?}"));
+        if asked != want || set != want {
+            failed.push(format!("on {on}: asked {asked:?}, set {set:?}"));
+        }
+        if words != (SETTING_VTABLE, 1) {
+            failed.push(format!("on {on}: the setting's words {words:x?}"));
+        }
+        if limp == 0 {
+            failed.push(format!("on {on}: no limp"));
         }
         if on && (!kept || jumps != 0) {
             failed.push(format!("on {on}: kept {kept}, jumps {jumps}"));

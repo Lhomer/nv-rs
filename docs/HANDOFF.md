@@ -32,7 +32,21 @@ machinery runs.
   - The tests on a slope are chaotic: sub-millimetre floor changes swing a catching step's
     landing between 2 and 4 body weights. A standing foot can read 3 cm over its own ground (the
     feet's mean floor carried into plants).
-- **Cripple reaction (addendum 2):** the game's one-off reaction to a limb crippled by a hit is
+- **13:17 crash (0a4bb9a6), fixed in part:** New Physics moved its actor's controller
+  (`knockdown::place`, SetPosition `005620e0` -> proxy `00cac920` -> phantom `00c9e990` ->
+  `updateBroadPhase` `00d07ec0`) nearly every frame, while another thread had the world's
+  critical operations open; the flush re-ran op 17 without end.
+  - It now moves only by 0.5 u or more (`MOVE_LEAST`).
+  - It moves under the world's own lock (`00c91180`/`00c91190`, as `stepDeltaTime` takes it), and
+    only with `+0x94` and `+0x98` both 0 (`knockdown::place_in_world`); otherwise it gives the
+    move back and tries next frame.
+  - `[np proxy]` lines log `00cac920`'s callers.
+  - Open: no test drives the real Havok chain with a second thread.
+- **Cripple reaction, the 13:17 note:** the earlier fix cleared the byte at `011df760`: the low
+  byte of the Setting's vtable pointer, not its value (`+4`, read through `00408d60`). Now
+  `00408d60` is hooked (`knockdown::setting_value_address`): on the thread running the game's
+  hit to an actor New Physics has, the setting reads off. Nothing is written to it.
+- **Cripple reaction (addendum 2, superseded above):** the game's one-off reaction to a limb crippled by a hit is
   the idle `Actor::HitMe` picks and starts in `hit_me_death` (engine-fallout-ai actor_p3.rs
   13544-13579, the crippled-limb idle's setting `011df760`). `knockdown::hit_me_hooked` clears
   that setting around the game's hit for an actor New Physics has, now also for a hit on an AI

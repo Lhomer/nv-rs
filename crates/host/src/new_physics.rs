@@ -13,8 +13,8 @@
 //! body's move against its animation after a step is the actor's: its reference moved by it.
 //!
 //! While it has an actor the game's own reaction to its hits is not played: the physical hit
-//! reaction (`Actor::HitMe_ov2`, `008a4af0`), the crippled-limb idle (the setting byte `011df760`
-//! cleared around `Actor::HitMe`), `KnockExplosion` from `HitMe` (`crate::hit_force`'s wrapper),
+//! reaction (`Actor::HitMe_ov2`, `008a4af0`), the crippled-limb idle (its `Setting` at `011df760`
+//! read as off on the thread running `Actor::HitMe`: `knockdown::setting_value_address`), `KnockExplosion` from `HitMe` (`crate::hit_force`'s wrapper),
 //! and the controller's stored push.
 
 use crate::room_events;
@@ -44,7 +44,8 @@ const WORLD_ROTATION: u32 = 0x68;
 const WORLD_TRANSLATION: u32 = 0x8c;
 const WORLD_SCALE: u32 = 0x98;
 const PLAYER: u32 = 0x011d_ea3c;
-/// `Actor::HitMe_ov2` (the physical hit reaction) and the crippled-limb idle's setting byte.
+/// `Actor::HitMe_ov2` (the physical hit reaction) and the crippled-limb idle's `Setting` (its
+/// value at `+4`).
 pub const HIT_ME_OV2: u32 = 0x008a_4af0;
 pub const CRIPPLE_IDLE: u32 = 0x011d_f760;
 /// `ActorMover::Update` (`009dc120`, thiscall: the mover, the frame's time): the game's path
@@ -948,7 +949,14 @@ pub fn apply(e: &mut Engine) {
         // pose not drawn slid along upright: Patrick's d02bbd1 clip).
         let held = a.readback.0 <= MOVE_DRAWN.0 && a.readback.1 <= MOVE_DRAWN.1;
         let mv = if held { np.take_move() } else { [0.0; 3] };
-        if length(mv) > 1e-3 {
+        // Under MOVE_LEAST it is given back and gathered until it is not (moved nearly every
+        // frame, "0 of 0 units", each a broad-phase update of its controller: Patrick's 13:17
+        // crash).
+        let k = ragdoll_core::np_body::UNITS;
+        if length(mv) > 1e-3 && length(mv) < MOVE_LEAST {
+            np.give_back(scale([mv[0], mv[1], 0.0], 1.0 / k));
+        }
+        if length(mv) >= MOVE_LEAST {
             // New Physics owns the reference while it has the actor: moved only by it (a step's
             // end, a rise's end), its height the ground's under it (kept as far over the ground as
             // it stood at the take): released 22 units over the ground, it dropped (the tester's
@@ -958,10 +966,13 @@ pub fn apply(e: &mut Engine) {
             // where it ends (Patrick's 10:08 and 10:10 clips: moved 193 and 213 units in one
             // frame, through what lay between).
             let (to_flat, said) = swept_move(e, a.actor, at, mv);
-            let moved = sub(to_flat, at);
+            let mut moved = sub(to_flat, at);
+            if length([moved[0], moved[1], 0.0]) < MOVE_LEAST {
+                moved = [0.0; 3];
+            }
             let left = sub(mv, [moved[0], moved[1], 0.0]);
-            if length(left) > 0.5 {
-                np.give_back(scale(left, 1.0 / ragdoll_core::np_body::UNITS));
+            if length(left) > 1e-3 {
+                np.give_back(scale(left, 1.0 / k));
             }
             if let Some(why) = said {
                 note(format!(
@@ -972,16 +983,24 @@ pub fn apply(e: &mut Engine) {
                 ));
             }
             let mv = [moved[0], moved[1], 0.0];
-            let mut to = add(at, mv);
-            let over = a.floor_lift.unwrap_or(0.0) - a.floor_offset.unwrap_or(0.0);
-            if let Some(g) = crate::active_ragdoll::floor_under(e, [to[0], to[1], at[2] + 30.0]) {
-                to[2] = g + over;
+            if length(mv) >= MOVE_LEAST {
+                let mut to = add(at, mv);
+                let over = a.floor_lift.unwrap_or(0.0) - a.floor_offset.unwrap_or(0.0);
+                if let Some(g) = crate::active_ragdoll::floor_under(e, [to[0], to[1], at[2] + 30.0])
+                {
+                    to[2] = g + over;
+                }
+                // Under the world's own lock, and never while another thread has its critical
+                // operations open: then given back, tried again next frame.
+                if crate::knockdown::place_in_world(e, a.actor, to) {
+                    // The height it was given too: the animation comes moved by it (never a jump).
+                    let dz = read3(e, a.actor + REFR_POSITION)[2] - at[2];
+                    np.anim_moved([0.0, 0.0, dz / k]);
+                    a.moved = add(a.moved, mv);
+                } else {
+                    np.give_back(scale(mv, 1.0 / k));
+                }
             }
-            crate::knockdown::place(e, a.actor, to);
-            // The height it was given too: the animation comes moved by it (never a jump).
-            let dz = read3(e, a.actor + REFR_POSITION)[2] - at[2];
-            np.anim_moved([0.0, 0.0, dz / ragdoll_core::np_body::UNITS]);
-            a.moved = add(a.moved, mv);
         }
         // Its movement held while New Physics has it (the mover's at its update too).
         crate::knockdown::hold_controller(e, a.actor);
@@ -1063,6 +1082,8 @@ const AI_THREAD: u32 = 0x008c_7aa0;
 /// At the take the floor is taken from the animated feet when they stand within this of the
 /// collision floor (game units).
 const FLOOR_NEAR: f32 = 12.0;
+/// New Physics moves its actor only by this much or more (game units); less is gathered.
+const MOVE_LEAST: f32 = 0.5;
 /// The actor is moved by the body only while drawn within this of it (degrees, units).
 const MOVE_DRAWN: (f32, f32) = (1.0, 1.0);
 

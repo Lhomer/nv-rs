@@ -13476,6 +13476,59 @@ fn hit_me_death_category(form_type: u32) -> u32 {
     }
 }
 
+/// `Actor::HitMe`'s reaction to a limb crippled by the hit (a section of [`hit_me_death`]): when
+/// actor slot `0x230` answers false, the crippled-limb idle's setting (the `Setting` at
+/// `011df760`, its value at `+4` through `00408d60`) is on, the hit damaged a limb, the cripple
+/// roll was made and the actor's value `0x48` is at most 0, the idle `TESIdleManager::
+/// GetIdleToPlay` picks (with the hit's source) is started: for the player at once (and VATS
+/// playback quit), for another actor as its process's idle (`HighProcess::SetCurrentProcessIdle`,
+/// process slot `0x71c`).
+pub fn hit_me_cripple_idle(
+    e: &mut Engine,
+    this: Ptr<Actor>,
+    hit: Ptr<HitData>,
+    source: u32,
+    player: u32,
+    cripple_roll: bool,
+) {
+    if e.vcall(this.addr(), ACTOR_SLOT_230, &args![]).bool() {
+        return;
+    }
+    let enabled = e
+        .call(SETTING_GET_BOOL_POINTER, &args![SETTING_CRIPPLE_IDLE])
+        .u32();
+    if e.mem.u8(enabled) != 0
+        && e.get(hit, HitData::eDamageLimb) != -1
+        && cripple_roll
+        && e.vcall(this.addr() + 0xa4, 0x08, &args![0x48u32]).i32() <= 0
+    {
+        let manager = e.global::<u32>(IDLE_MANAGER);
+        let idle = e
+            .call(IDLE_MANAGER_GET_IDLE_TO_PLAY, &args![manager, this, source])
+            .u32();
+        let animation = e.vcall(this.addr(), ACTOR_SLOT_1E4, &args![]).u32();
+        if idle != 0
+            && animation != 0
+            && !e
+                .call(ANIMATION_SPECIAL_IDLE_WORKING, &args![animation, idle])
+                .bool()
+        {
+            if this.addr() == player {
+                let section = e.call(IDLE_FORM_GET_ANIM_GROUP_SECTION, &args![idle]).u32();
+                e.call(
+                    ANIMATION_START_IDLE,
+                    &args![animation, idle, this, section, 2u32],
+                );
+                e.call(VATS_QUIT_PLAYBACK, &args![VATS_SINGLETON, 0u32, 0u32]);
+            } else {
+                let acquire = typed_call!(leaf::FAMILY, 0x008d_8520, leaf::word_at_68(e, this));
+                e.vcall(acquire, PROCESS_SLOT_SET_IDLE, &args![idle]);
+                e.vcall(acquire, PROCESS_SLOT_614, &args![0x10u32]);
+            }
+        }
+    }
+}
+
 /// `0089bfaf`..`0089c5be`: for an actor with a 3D object in a loaded cell,
 /// the death handling (`008b43a0`), the aggressor's kill notice, the idle that
 /// reacts to a crippled limb and the stun.
@@ -13540,40 +13593,8 @@ fn hit_me_death(e: &mut Engine, s: &mut HitMe) {
         if e.call(ACTOR_GETTER_87F9C0, &args![this]).f64() > zero && aggressor != 0 {
             e.call(AGGRESSOR_KILL_NOTICE, &args![aggressor, hit]);
         }
-    } else if !e.vcall(this.addr(), ACTOR_SLOT_230, &args![]).bool() {
-        let enabled = e
-            .call(SETTING_GET_BOOL_POINTER, &args![SETTING_CRIPPLE_IDLE])
-            .u32();
-        if e.mem.u8(enabled) != 0
-            && e.get(hit, HitData::eDamageLimb) != -1
-            && s.cripple_roll
-            && e.vcall(this.addr() + 0xa4, 0x08, &args![0x48u32]).i32() <= 0
-        {
-            let manager = e.global::<u32>(IDLE_MANAGER);
-            let idle = e
-                .call(IDLE_MANAGER_GET_IDLE_TO_PLAY, &args![manager, this, source])
-                .u32();
-            let animation = e.vcall(this.addr(), ACTOR_SLOT_1E4, &args![]).u32();
-            if idle != 0
-                && animation != 0
-                && !e
-                    .call(ANIMATION_SPECIAL_IDLE_WORKING, &args![animation, idle])
-                    .bool()
-            {
-                if this.addr() == s.player {
-                    let section = e.call(IDLE_FORM_GET_ANIM_GROUP_SECTION, &args![idle]).u32();
-                    e.call(
-                        ANIMATION_START_IDLE,
-                        &args![animation, idle, this, section, 2u32],
-                    );
-                    e.call(VATS_QUIT_PLAYBACK, &args![VATS_SINGLETON, 0u32, 0u32]);
-                } else {
-                    let acquire = typed_call!(leaf::FAMILY, 0x008d_8520, leaf::word_at_68(e, this));
-                    e.vcall(acquire, PROCESS_SLOT_SET_IDLE, &args![idle]);
-                    e.vcall(acquire, PROCESS_SLOT_614, &args![0x10u32]);
-                }
-            }
-        }
+    } else {
+        hit_me_cripple_idle(e, this, hit, source, s.player, s.cripple_roll);
     }
     e.mem.set_u8(this.addr() + 0x1b1, 0);
     if s.dead {
