@@ -134,6 +134,19 @@ struct NpActor {
     /// Downed: the combat target's direction (game units, none without one) and the aim's angle
     /// off it (degrees) the last frame.
     aim: Option<(Option<V3>, f32)>,
+    /// The ground cast under each of [`GROUND_SAMPLES`] (where it was cast from, flat, and the
+    /// height found; none: not cast, or nothing found), cast again past [`GROUND_RECAST`].
+    grounds: Vec<Option<(V3, Option<f32>)>>,
+    /// The actor's reference after New Physics last moved it (the game's own move since is the
+    /// ground's, `Np::ground_v`).
+    ref_after: Option<V3>,
+    /// The floor-load lines (`[np floor load]`) said since the last hit, and the last frame's
+    /// floor (game units).
+    floor_logs: u32,
+    floor_was: Option<f32>,
+    /// What the floor taken at the take stood over the collision floor under the reference
+    /// (game units; none: no collision floor found): standing, each body's ground raised by it.
+    floor_lift: Option<f32>,
 }
 
 /// One hit's outcome as it goes (`[np outcome]`): the hit, then the most the spine's top went off
@@ -399,6 +412,11 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             floor_offset: None,
             pass_logs: 0,
             aim: None,
+            grounds: Vec::new(),
+            ref_after: None,
+            floor_logs: 0,
+            floor_was: None,
+            floor_lift: None,
         });
     true
 }
@@ -444,6 +462,7 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
         since: 0.0,
     });
     a.pass_logs = 0;
+    a.floor_logs = 0;
     note(format!(
         "{:08X}: [np hit] {} N s on {} ({:.2} m/s on its {:.0} kg)",
         a.id,
@@ -584,6 +603,7 @@ pub fn apply(e: &mut Engine) {
                     feet.map_or("none".to_string(), |f| format!("{:+.1}", f - reference_z)),
                 ));
                     a.floor_offset = Some(z - reference_z);
+                    a.floor_lift = cast.map(|c| z - c);
                     z - reference_z
                 }
             };
@@ -599,7 +619,56 @@ pub fn apply(e: &mut Engine) {
             a.np = Some(np);
         }
         let Some(np) = a.np.as_mut() else { continue };
+        // The ground the game itself moved the actor along since New Physics last placed it.
+        np.ground_v = match a.ref_after {
+            Some(was) if dt > 0.0 => {
+                let d = sub(reference, was);
+                scale([d[0], d[1], 0.0], 1.0 / (dt * ragdoll_core::np_body::UNITS))
+            }
+            _ => [0.0; 3],
+        };
+        // Each body's own floor, the ground cast under it (downed: never the reference's height
+        // and an offset, a flat plane that follows the reference, Patrick's 23:41 clip).
+        let pose = if a.drawn.len() == a.nodes.len() {
+            a.drawn.clone()
+        } else {
+            anim.clone()
+        };
+        let (planes, under_pelvis, under_feet) = ground_planes(e, &mut a.grounds, &pose, floor);
+        // Each body's ground raised by what the feet stood over it at the take (the floor taken
+        // then, kept): its shape from the casts, never a flat plane that follows the reference
+        // (downed, it pushed shins and knees into a slope; standing, it rose under a planted foot
+        // as the reference walked up the slope and pushed the body up at 3 to 4 body weights).
+        let lift = a.floor_lift.unwrap_or(0.0);
+        let lifted = |planes: Vec<ragdoll_core::np_body::Plane>| {
+            planes
+                .into_iter()
+                .map(|p| ragdoll_core::np_body::Plane {
+                    p: add(p.p, [0.0, 0.0, lift / ragdoll_core::np_body::UNITS]),
+                    n: p.n,
+                })
+                .collect::<Vec<_>>()
+        };
+        let floor = if np.down.is_some() {
+            // Its movement held while it is down (the mover's at its update too).
+            crate::knockdown::hold_controller(e, a.actor);
+            if planes.is_empty() {
+                np.floors = Vec::new();
+                floor
+            } else {
+                np.floors = lifted(planes);
+                under_pelvis + lift
+            }
+        } else if let (Some(_), Some(feet)) = (a.floor_lift, under_feet) {
+            np.floors = lifted(planes);
+            feet + lift
+        } else {
+            np.floors = Vec::new();
+            floor
+        };
         let drawn = np.frame(&anim, floor, dt);
+        floor_load_said(&mut a, floor, dt);
+        let Some(np) = a.np.as_mut() else { continue };
         a.anim_last = anim.clone();
         a.hit_frames += 1;
         if a.hit_frames <= BALANCE_LOG_FRAMES {
@@ -794,6 +863,7 @@ pub fn apply(e: &mut Engine) {
             crate::knockdown::place(e, a.actor, add(at, mv));
             a.moved = add(a.moved, mv);
         }
+        a.ref_after = Some(read3(e, a.actor + REFR_POSITION));
         if a.handing.is_none()
             && ((np.phase() == Phase::Falling && np.down.is_none()) || a.choice == "give up")
         {
@@ -891,6 +961,178 @@ fn feet_floor(anim: &[(M3, V3)]) -> Option<f32> {
         .reduce(f32::min)
 }
 
+/// The bodies the ground is cast under (each foot, each calf: the knees, the pelvis, each hand).
+const GROUND_SAMPLES: [&str; 7] = [
+    "Bip01 L Foot",
+    "Bip01 R Foot",
+    "Bip01 L Calf",
+    "Bip01 R Calf",
+    "Bip01 NonAccum",
+    "Bip01 L Hand",
+    "Bip01 R Hand",
+];
+/// A sample moved this far (flat, game units) since its cast is cast again.
+const GROUND_RECAST: f32 = 6.0;
+/// The steepest ground taken (its slope's tangent), and how much a few samples in a line lean
+/// to flat (game units squared, each).
+const GROUND_STEEPEST: f32 = 1.2;
+const GROUND_FLAT_BIAS: f32 = 4.0;
+
+/// Each body's own floor (world, metres) from the ground cast under [`GROUND_SAMPLES`] in `pose`
+/// (each body's node's world, game units), cached and cast again past [`GROUND_RECAST`]: the
+/// plane fitted through them (its slope, leaning to flat for samples in a line), through the
+/// cast nearest each body; `flat` (game units) where nothing was found. Also the ground under
+/// the pelvis and under the feet (their mean; game units).
+fn ground_planes(
+    e: &mut Engine,
+    cache: &mut Vec<Option<(V3, Option<f32>)>>,
+    pose: &[(M3, V3)],
+    flat: f32,
+) -> (Vec<ragdoll_core::np_body::Plane>, f32, Option<f32>) {
+    let m = model();
+    let k = ragdoll_core::np_body::UNITS;
+    cache.resize(GROUND_SAMPLES.len(), None);
+    let mut found: Vec<V3> = Vec::new();
+    let mut pelvis = flat;
+    let mut feet = Vec::new();
+    for (i, name) in GROUND_SAMPLES.iter().enumerate() {
+        let Some(at) = m.body(name).and_then(|b| pose.get(b)).map(|p| p.1) else {
+            continue;
+        };
+        let stale = cache[i].map_or(true, |(xy, _)| {
+            length([at[0] - xy[0], at[1] - xy[1], 0.0]) > GROUND_RECAST
+        });
+        if stale {
+            cache[i] = Some((
+                [at[0], at[1], 0.0],
+                crate::active_ragdoll::floor_under(e, at),
+            ));
+        }
+        if let Some((xy, Some(z))) = cache[i] {
+            found.push([xy[0], xy[1], z]);
+            if *name == "Bip01 NonAccum" {
+                pelvis = z;
+            }
+            if name.ends_with("Foot") {
+                feet.push(z);
+            }
+        }
+    }
+    let feet = (!feet.is_empty()).then(|| feet.iter().sum::<f32>() / feet.len() as f32);
+    if found.is_empty() {
+        return (Vec::new(), flat, None);
+    }
+    // z = a (x - x0) + b (y - y0) + c, least squares, leaning to flat.
+    let n = found.len() as f32;
+    let mean = scale(found.iter().fold([0.0; 3], |s, p| add(s, *p)), 1.0 / n);
+    let (mut sxx, mut syy, mut sxy, mut sxz, mut syz) = (0.0f32, 0.0, 0.0, 0.0, 0.0);
+    for p in &found {
+        let (x, y, z) = (p[0] - mean[0], p[1] - mean[1], p[2] - mean[2]);
+        sxx += x * x;
+        syy += y * y;
+        sxy += x * y;
+        sxz += x * z;
+        syz += y * z;
+    }
+    sxx += GROUND_FLAT_BIAS * n;
+    syy += GROUND_FLAT_BIAS * n;
+    let det = sxx * syy - sxy * sxy;
+    let (mut a, mut b) = if det.abs() > 1e-6 {
+        ((sxz * syy - syz * sxy) / det, (syz * sxx - sxz * sxy) / det)
+    } else {
+        (0.0, 0.0)
+    };
+    let steep = (a * a + b * b).sqrt();
+    if steep > GROUND_STEEPEST {
+        a *= GROUND_STEEPEST / steep;
+        b *= GROUND_STEEPEST / steep;
+    }
+    let normal = ragdoll_core::flinch::unit([-a, -b, 1.0]).unwrap_or([0.0, 0.0, 1.0]);
+    let planes = pose
+        .iter()
+        .map(|(_, t)| {
+            let near = found
+                .iter()
+                .min_by(|p, q| {
+                    let d = |c: &V3| length([c[0] - t[0], c[1] - t[1], 0.0]);
+                    d(p).total_cmp(&d(q))
+                })
+                .copied()
+                .unwrap_or([t[0], t[1], flat]);
+            ragdoll_core::np_body::Plane {
+                p: scale(near, 1.0 / k),
+                n: normal,
+            }
+        })
+        .collect();
+    (planes, pelvis, feet)
+}
+
+/// The floor's load past [`FLOOR_LOAD_SAID`] body weights in a frame said with its source
+/// (`[np floor load]`, a few a hit): the bodies that carried it, what the balance was doing
+/// (a step landing, planted feet, downed), and how far the floor moved since the last frame.
+const FLOOR_LOAD_SAID: f32 = 3.0;
+const FLOOR_LOGS: u32 = 6;
+
+fn floor_load_said(a: &mut NpActor, floor: f32, dt: f32) {
+    let was = a.floor_was.replace(floor);
+    let Some(np) = a.np.as_ref() else {
+        return;
+    };
+    let weight = model().mass * ragdoll_core::np_body::GRAVITY;
+    let load = &np.report.floor_load;
+    let total: f32 = load.iter().sum();
+    if total / weight <= FLOOR_LOAD_SAID || a.floor_logs >= FLOOR_LOGS {
+        return;
+    }
+    a.floor_logs += 1;
+    let mut top: Vec<(usize, f32)> = load.iter().copied().enumerate().collect();
+    top.sort_by(|x, y| y.1.total_cmp(&x.1));
+    let bodies = top
+        .iter()
+        .take(3)
+        .map(|(b, n)| {
+            format!(
+                "{} {:.1}",
+                model().bodies[*b].node.trim_start_matches("Bip01 "),
+                n / weight
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let bal = &np.balance;
+    let doing = if np.down.is_some() {
+        "downed".to_string()
+    } else if let Some(st) = bal.step {
+        if st.t >= st.time {
+            format!(
+                "a step landing ({} foot pressed down)",
+                if st.side == 0 { "left" } else { "right" }
+            )
+        } else {
+            "a step swinging".to_string()
+        }
+    } else {
+        format!(
+            "{}, {} feet planted",
+            phase_name(np.phase()),
+            bal.plants.iter().filter(|p| p.is_some()).count()
+        )
+    };
+    let (_, com_v) = np.model.centre_of_mass(&np.states);
+    note(format!(
+        "{:08X}: [np floor load] {:.1} body weights (dt {dt:.3}): {bodies}; {doing}; the floor \
+         moved {:+.1} units since the last frame; the body's centre at {:+.2} m/s up and down, \
+         {:.2} m/s across; the fastest body {:.2} m/s",
+        a.id,
+        total / weight,
+        was.map_or(0.0, |w| floor - w),
+        com_v[2],
+        length([com_v[0], com_v[1], 0.0]),
+        np.states.iter().map(|s| length(s.v)).fold(0.0f32, f32::max)
+    ));
+}
+
 /// `[np balance]` for a take's first frames, `[np readback]` and `[np drawn]` for its first.
 const BALANCE_LOG_FRAMES: u32 = 6;
 const READBACK_LOG_FRAMES: u32 = 3;
@@ -934,6 +1176,25 @@ pub fn main_thread(e: &mut Engine) {
             a.anim_last.clone()
         };
         let (shown, animated, velocities) = handing(&a.nodes, &a.drawn, &anim, &np.states);
+        // The hand-over's source said: the pose drawn against the animation the game had its
+        // bodies at (a downed body handed over lies far off a standing animation: the 23:41
+        // clip's give-up was drawn 180 degrees, 122 units off).
+        let apart = shown
+            .iter()
+            .zip(&animated)
+            .map(|(d, an)| {
+                (
+                    ragdoll_core::np_skeleton::angle_between(&d.1, &an.1).to_degrees(),
+                    length(sub(d.2, an.2)),
+                )
+            })
+            .fold((0.0f32, 0.0f32), |m, x| (m.0.max(x.0), m.1.max(x.1)));
+        note(format!(
+            "{:08X}: [np hand-over] {reason}: the pose drawn at most {:.0} degrees, {:.0} units off \
+             the animation the game had its ragdoll's bodies at; its bodies put on the pose drawn \
+             ({} frames after it was asked)",
+            a.id, apart.0, apart.1, a.handing_frames
+        ));
         let k = ragdoll_core::np_body::UNITS;
         let pelvis = length(scale(np.states[model().root].v, k));
         let (_, com_v) = np.model.centre_of_mass(&np.states);

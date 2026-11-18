@@ -4187,7 +4187,7 @@ fn ground_point(e: &mut Engine, actor: u32, at: V3) -> Option<V3> {
 /// feet planted on it went into the floor, Patrick's 19-43-08 clip).
 pub(crate) fn floor_under(e: &mut Engine, at: V3) -> Option<f32> {
     #[cfg(test)]
-    if let Some(f) = crate::rig_fixture::FLOOR.with(std::cell::Cell::get) {
+    if let Some(f) = crate::rig_fixture::floor_at(at) {
         return (f <= at[2] + FLOOR_FROM - 5.0).then_some(f);
     }
     let from = [at[0], at[1], at[2] + FLOOR_FROM];

@@ -107,6 +107,15 @@ pub const RISE_ARMS_TILT: f32 = 0.5;
 pub const LIMITS_SETTLE: f32 = 0.3;
 /// A rise with nothing to push from (or too weak) this long gives up (s).
 pub const RISE_NO_PUSH: f32 = 0.5;
+/// A rise lasts at most this long (s, from the AI's wish to stand, whatever the frames read):
+/// then it gives up (the AI waits, or after its tries the body goes to the game's ragdoll).
+/// Patrick's 23:41 clip rose for 7 and 17 s, sliding. Counted from the wish, 2 and 3 s cut
+/// short the flat floor's rise (`np_downed_on_fnvs_skeleton_stands_again`: standing again
+/// within 8 s); 4 s does not.
+pub const RISE_MOST: f32 = 4.0;
+/// Standing again: the body's centre slower than this (m/s) against the ground it is carried on
+/// ([`Np::ground_v`]).
+pub const STAND_STILL: f32 = 0.4;
 /// While the feet lie further than this from the hips (m, flat) the rise goes toward them.
 pub const RISE_FEET_OUT: f32 = 0.15;
 /// Rising from the floor, each foot's goal lies this share of its leg in front of its hip (a hip
@@ -171,6 +180,12 @@ pub struct Np {
     anim_v: V3,
     /// The walls the body may rest on (m; the floor is the frame's).
     pub walls: Vec<Plane>,
+    /// Each body's own floor (world, metres: the ground under it, a slope's; empty: the frame's
+    /// flat floor).
+    pub floors: Vec<Plane>,
+    /// The ground's velocity under the body (m/s): what the game itself moved the actor by this
+    /// frame (none once its movement is held); standing again is measured against it.
+    pub ground_v: V3,
     /// Keep a fallen body (M6, downed but active) rather than answer [`Phase::Falling`] for the
     /// game's ragdoll to take it.
     pub keep_down: bool,
@@ -250,6 +265,8 @@ impl Np {
             origin,
             anim_v: [0.0; 3],
             walls: Vec::new(),
+            floors: Vec::new(),
+            ground_v: [0.0; 3],
             keep_down: false,
             down: None,
             rise: false,
@@ -280,6 +297,9 @@ impl Np {
         let size = crate::flinch::length(impulse);
         self.muscles.hit(&self.model, body, size);
         self.since_hit = Some(0.0);
+        // Each hit's catching steps are its own (steps were counted across hits while the
+        // animation moved: 13 by Patrick's 23:41 clip, and a 0.69 m/s hit fell "steps").
+        self.balance.steps = 0;
     }
 
     /// One frame of `dt`: the body driven toward `anim` (each body's node's world, game units),
@@ -297,8 +317,17 @@ impl Np {
                 n: w.n,
             })
             .collect();
+        let floors = std::mem::take(&mut self.floors);
+        self.floors = floors
+            .iter()
+            .map(|w| Plane {
+                p: sub(w.p, scale(self.origin, to_m)),
+                n: w.n,
+            })
+            .collect();
         let out = self.frame_local(&local, floor, dt);
         self.walls = walls;
+        self.floors = floors;
         shift_by(&out, self.origin)
     }
 
@@ -518,6 +547,7 @@ impl Np {
                 Vec::new()
             },
             soft_limits: self.stood_up < LIMITS_SETTLE,
+            floors: self.floors.clone(),
         };
         self.stood_up += dt;
         self.report = self.model.step_world(
@@ -619,8 +649,13 @@ impl Np {
         down.lifting_was = down.lifting;
         down.lifting = false;
         down.arms = false;
-        if rising && !airborne {
+        // A rise's clock runs while the wish holds, whatever the frame reads (a body tumbling on
+        // a slope read airborne now and then, and each such frame began the rise again: the
+        // clip rose for 7 and 17 s).
+        if rising_wish {
             down.rising += dt;
+        }
+        if rising && !airborne {
             if reading.pelvis_height > down.rise_best + RISE_GAINED {
                 down.rise_best = reading.pelvis_height;
                 down.rise_stall = 0.0;
@@ -786,14 +821,24 @@ impl Np {
                 down.rise_best = 0.0;
                 down.rise_stall = 0.0;
             }
-        } else {
-            if rising_wish && !rising {
-                self.rise = false;
-                down.rise_failed = true;
-                down.no_push = 0.0;
-            }
+        } else if rising_wish && !rising {
+            self.rise = false;
+            down.rise_failed = true;
+            down.no_push = 0.0;
             down.rising = 0.0;
             down.rise_best = 0.0;
+        } else if !rising_wish {
+            down.rising = 0.0;
+            down.rise_best = 0.0;
+        }
+        // At most [`RISE_MOST`]: then it gives up (the AI waits, or gives up into the game's
+        // ragdoll after its tries).
+        if self.rise && down.rising > RISE_MOST {
+            self.rise = false;
+            down.rise_failed = true;
+            down.rising = 0.0;
+            down.rise_best = 0.0;
+            down.rise_stall = 0.0;
         }
         let drives: Vec<Drive> = targets
             .iter()
@@ -823,6 +868,7 @@ impl Np {
             // the legs' footing) to the downed ones (the animation's and the reach, which stay);
             // hard otherwise.
             soft_limits: down.since < LIMITS_SETTLE,
+            floors: self.floors.clone(),
         };
         self.report = self.model.step_world(
             &mut self.states,
@@ -838,7 +884,9 @@ impl Np {
         if down.lifting {
             now.pushed = (now.weight - now.total).max(0.0);
         }
-        if classify(&now, false) == Label::Standing && crate::flinch::length(now.com_v) < 0.4 {
+        if classify(&now, false) == Label::Standing
+            && crate::flinch::length(sub(now.com_v, self.ground_v)) < STAND_STILL
+        {
             down.stood += dt;
         } else {
             down.stood = 0.0;

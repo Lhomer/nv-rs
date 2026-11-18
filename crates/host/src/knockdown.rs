@@ -353,25 +353,49 @@ pub fn install(e: &mut Engine) {
         Ret::default()
     });
     e.register(crate::new_physics::ACTOR_MOVER_UPDATE, |e, a| {
-        // The game's path movement: run, its move held for an actor New Physics has downed (the
-        // body moves itself; the actor's reference follows its pelvis).
-        engine::units::fallout_ai::actormover::actor_mover_update(
-            e,
-            Ptr::new(a[0]),
-            f32::from_bits(a[1]),
-        );
-        if a[0] != 0 && crate::new_physics::is_down(e.mem.u32(a[0] + MOVER_ACTOR)) {
-            for o in [0u32, 4, 8] {
-                e.mem.set_f32(a[0] + MOVER_DELTA + o, 0.0);
-            }
-        }
+        mover_update(e, a[0], |e| {
+            engine::units::fallout_ai::actormover::actor_mover_update(
+                e,
+                Ptr::new(a[0]),
+                f32::from_bits(a[1]),
+            );
+        });
         Ret::default()
     });
 }
 
+/// The game's path movement (`ActorMover::Update`, `run`), held before it applies for an actor
+/// New Physics has downed: not run, its move delta zero and its character controller's velocity
+/// zero (the body moves itself; the actor's reference follows its pelvis). 5402dadc ran it and
+/// zeroed the delta after: the reference still glided 30 to 34 units a second (Patrick's 23:41
+/// clip).
+pub(crate) fn mover_update(e: &mut Engine, mover: u32, run: impl FnOnce(&mut Engine)) {
+    let actor = if mover != 0 {
+        e.mem.u32(mover + MOVER_ACTOR)
+    } else {
+        0
+    };
+    if actor != 0 && crate::new_physics::is_down(actor) {
+        for o in [0u32, 4, 8] {
+            e.mem.set_f32(mover + MOVER_DELTA + o, 0.0);
+        }
+        hold_controller(e, actor);
+        return;
+    }
+    run(e);
+}
+
+/// `actor`'s character controller's velocity set to zero (New Physics holds a downed actor).
+pub(crate) fn hold_controller(e: &mut Engine, actor: u32) {
+    let controller = e.call(CHAR_CONTROLLER, &args![actor]).u32();
+    if controller != 0 {
+        set_controller_velocity(e, controller, [0.0; 3]);
+    }
+}
+
 /// `ActorMover`'s actor and its last update's move delta (`CachedMoveDelta`, a point).
-const MOVER_ACTOR: u32 = 0x28;
-const MOVER_DELTA: u32 = 0x10;
+pub(crate) const MOVER_ACTOR: u32 = 0x28;
+pub(crate) const MOVER_DELTA: u32 = 0x10;
 
 /// After the game applied the hit `hit` to `target`: a knockdown or a stagger (module
 /// documentation). Each decision on a living character is logged ([`note`]).

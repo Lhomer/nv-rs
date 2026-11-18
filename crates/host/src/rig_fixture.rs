@@ -79,7 +79,7 @@ const BODIES: u32 = BASE + 0xa_0000;
 const BODY_SIZE: u32 = 0x200;
 pub const ACTOR: u32 = BASE + 0xc_0000;
 pub const PROCESS_AT: u32 = BASE + 0xc_1000;
-const CONTROLLER: u32 = BASE + 0xc_2000;
+pub const CONTROLLER: u32 = BASE + 0xc_2000;
 const NODE_VTABLE: u32 = BASE + 0xc_3000;
 const PROCESS_VTABLE: u32 = BASE + 0xc_4000;
 const PATHING: u32 = BASE + 0xc_5000;
@@ -120,6 +120,17 @@ pub struct Fixture {
 thread_local! {
     /// The collision floor the tests' casts meet (`crate::active_ragdoll::floor_under`).
     pub static FLOOR: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+    /// Its slope (a point's x and y, the rise along x and along y: units a unit), none flat.
+    pub static SLOPE: std::cell::Cell<Option<[f32; 4]>> = const { std::cell::Cell::new(None) };
+}
+
+/// The tests' collision floor under `at` ([`FLOOR`], tilted by [`SLOPE`]).
+pub fn floor_at(at: V3) -> Option<f32> {
+    let f = FLOOR.with(std::cell::Cell::get)?;
+    Some(match SLOPE.with(std::cell::Cell::get) {
+        Some([x0, y0, gx, gy]) => f + gx * (at[0] - x0) + gy * (at[1] - y0),
+        None => f,
+    })
 }
 
 impl Fixture {
@@ -134,6 +145,7 @@ impl Fixture {
         // The process manager's lists (`jip::commands::jip_fn_effect::high_actors`): empty.
         e.mem.map(0x011e_0000, 0x2000);
         FLOOR.with(|f| f.set(ground.collision));
+        SLOPE.with(|f| f.set(None));
         let at: Vec<u32> = (0..nodes.len() as u32)
             .map(|i| BASE + i * NODE_SIZE)
             .collect();

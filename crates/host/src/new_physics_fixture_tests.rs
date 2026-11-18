@@ -1937,3 +1937,501 @@ fn np_a_light_hit_never_walks_into_a_fall() {
     }
     assert!(failed.is_empty(), "{failed:#?}");
 }
+
+/// A run on a slope ([`slope_run`]).
+struct Slope {
+    /// The hits: seconds from the start, m/s, the struck body.
+    hits: Vec<(f32, f32, &'static str)>,
+    /// The slope (degrees, rising along +y, the way the actor walks) and the collision floor's
+    /// depth under the reference (units: not at the animated feet).
+    slope: f32,
+    below: f32,
+    /// The walk (m/s, along +y) and whether the game's mover moves it (the fake `ActorMover`
+    /// update setting the character controller's velocity, through
+    /// `crate::knockdown::mover_update`) rather than the test.
+    walk: f32,
+    mover: bool,
+    seconds: f32,
+}
+
+/// What a [`slope_run`] found.
+#[derive(Debug)]
+struct SlopeRun {
+    claimed: bool,
+    /// Downed: the most frames in a row some body lay more than 1 unit under its own ground
+    /// (the slope under each capsule's end), and the deepest (units).
+    under_frames: u32,
+    under_most: f32,
+    /// When it was first downed (s), the reference's fastest second while downed (units a
+    /// second, from half a second after it went down), when it stood again or gave up (s after
+    /// it went down).
+    downed_at: Option<f32>,
+    ref_speed: f32,
+    /// The game's own movement of the reference while downed (its mover and controller; units a
+    /// second over the time downed).
+    game_speed: f32,
+    stood_after: Option<f32>,
+    gave_up_after: Option<f32>,
+    /// Each hit's catching steps (until the next hit or the end).
+    steps: Vec<u32>,
+    fell: bool,
+    /// The most the floor carried in a frame (body weights) and the lines said.
+    floor_most: f32,
+    notes: Vec<String>,
+}
+
+/// The game's own frame on FNV's skeleton (`Fixture::game_update`, the blend collision objects,
+/// downed kept) on a slope of `slope` degrees, the collision floor `below` units under the
+/// reference, which the game's controller seats on it; the animation walking up it at `walk`
+/// m/s, each foot lifted 5 units in turn; the writer of the animation's locals every frame, the
+/// game's frame seconds anywhere from 0.008 to 0.038.
+fn slope_run(cfg: &Slope) -> SlopeRun {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static AI_BUSY: AtomicBool = AtomicBool::new(false);
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut nodes = rig_fixture::fnv_skeleton();
+    let turn_z = |r: &M3, deg: f32| {
+        let (s, c) = deg.to_radians().sin_cos();
+        let rz: M3 = [c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0];
+        ragdoll_core::flinch::mul(r, &rz)
+    };
+    for (name, deg) in [
+        ("Bip01 L UpperArm", 50.0f32),
+        ("Bip01 R UpperArm", 50.0),
+        ("Bip01 L Forearm", 30.0),
+        ("Bip01 R Forearm", 30.0),
+        ("Bip01 L Calf", -12.0),
+        ("Bip01 R Calf", -12.0),
+        ("Bip01 Spine1", 6.0),
+    ] {
+        if let Some(n) = nodes.iter_mut().find(|n| n.name == name) {
+            n.r = turn_z(&n.r, deg);
+        }
+    }
+    let at: V3 = [-72152.0, 8282.0, 223.0];
+    let rise = cfg.slope.to_radians().tan();
+    let mut f = Fixture::new(
+        nodes,
+        Ground {
+            collision: Some(at[2] - cfg.below),
+            navmesh: at[2] - cfg.below - 8.0,
+        },
+    );
+    rig_fixture::SLOPE.with(|s| s.set(Some([at[0], at[1], 0.0, rise])));
+    let ground = |p: V3| rig_fixture::floor_at(p).unwrap_or(at[2] - cfg.below);
+    f.game_update();
+    f.make_character();
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    set_keep_down(true);
+    let was = crate::gunplay::tuning();
+    crate::gunplay::set_tuning(crate::gunplay::Tuning {
+        new_physics: true,
+        ..was
+    });
+    f.e.register_double(0x008c_7aa0, |_, _| {
+        u32::from(AI_BUSY.load(Ordering::Relaxed)).into_ret()
+    });
+    f.e.register_double(0x0088_45a0, |_, _| 1u32.into_ret());
+    f.e.register_double(crate::hit_force::KNOCK_EXPLOSION, |e, a| {
+        e.mem.set_u8(a[0] + 0x13c, 2);
+        0u32.into_ret()
+    });
+    f.e.register_double(0x00ca_8960, |e, a| {
+        let p = rig_fixture::read3(e, a[1]);
+        rig_fixture::write3(e, a[0] + 0x120, p);
+        0u32.into_ret()
+    });
+    // The actor's `ActorMover` (its actor at +0x28).
+    const MOVER: u32 = 0x0300_2000;
+    f.e.mem.map(MOVER, 0x1000);
+    f.e.mem
+        .set_u32(MOVER + crate::knockdown::MOVER_ACTOR, ACTOR);
+    let velocity_at = rig_fixture::CONTROLLER + 0x700;
+    let body_nodes: Vec<usize> = model()
+        .bodies
+        .iter()
+        .map(|b| f.nodes.iter().position(|n| n.name == b.node).unwrap())
+        .collect();
+    let root = f.at[0];
+    let feet = ["Bip01 L Foot", "Bip01 R Foot"].map(|n| model().body(n).unwrap());
+    let legs = [
+        ["Bip01 L Thigh", "Bip01 L Calf"],
+        ["Bip01 R Thigh", "Bip01 R Calf"],
+    ]
+    .map(|p| p.map(|n| f.nodes.iter().position(|x| x.name == n).unwrap()));
+    let rest: Vec<M3> = f.nodes.iter().map(|n| n.r).collect();
+    let k = ragdoll_core::np_body::UNITS;
+    let foot_low = |f: &Fixture, side: usize| {
+        let b = feet[side];
+        let (r, t) = f.world_of(f.at[body_nodes[b]]);
+        let def = &model().bodies[b];
+        def.ends
+            .iter()
+            .map(|e| add(t, apply_m(&r, scale(*e, k)))[2] - def.radius * k)
+            .fold(f32::INFINITY, f32::min)
+    };
+    let pose_leg = |f: &mut Fixture, side: usize, a: f32| {
+        let [thigh, calf] = legs[side];
+        f.nodes[thigh].r = turn_z(&rest[thigh], a);
+        f.nodes[calf].r = turn_z(&rest[calf], -2.0 * a);
+    };
+    rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, [0.0; 3]);
+    f.animate();
+    let low0 = foot_low(&f, 0);
+    let mut swing = 0.0f32;
+    for i in 1..=80 {
+        let a = i as f32 * 0.5;
+        pose_leg(&mut f, 0, a);
+        f.animate();
+        if foot_low(&f, 0) - low0 >= WALK_LIFT {
+            swing = a;
+            break;
+        }
+    }
+    pose_leg(&mut f, 0, 0.0);
+    f.animate();
+    let anim0: Vec<(M3, V3)> = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
+    let low = ragdoll_core::np_body::lowest_point(model(), &model().states_from_nodes(&anim0)) * k;
+    // The animated feet 1 unit under the reference (the clip's take: -0.7).
+    let drop = [0.0, 0.0, -low - 1.0];
+    rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, at);
+    room_events::set_on(true);
+    let _ = room_events::take();
+    let mut run = SlopeRun {
+        claimed: false,
+        under_frames: 0,
+        under_most: 0.0,
+        downed_at: None,
+        ref_speed: 0.0,
+        game_speed: 0.0,
+        stood_after: None,
+        gave_up_after: None,
+        steps: Vec::new(),
+        fell: false,
+        floor_most: 0.0,
+        notes: Vec::new(),
+    };
+    let weight = model().mass * 9.81;
+    let mut seed = 0x2468_1357u32;
+    let mut t = 0.0f32;
+    let mut frame = 0u32;
+    let mut hits = cfg.hits.clone();
+    let mut steps_at: Option<u32> = None;
+    let mut under_run = 0u32;
+    let mut down_refs: Vec<(f32, V3)> = Vec::new();
+    let mut was_down = false;
+    let (mut game_moved, mut down_time) = (0.0f32, 0.0f32);
+    let cos = cfg.slope.to_radians().cos();
+    while t < cfg.seconds {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let dt = 0.008 + 0.030 * ((seed >> 8) as f32 / (1u32 << 24) as f32);
+        t += dt;
+        f.e.mem.set_f32(0x011d_ea30, dt);
+        AI_BUSY.store(false, Ordering::Relaxed);
+        // The game's movement: its mover (held by New Physics while downed) or the AI's walk,
+        // then its controller seating the reference on the slope.
+        let mut reference = f.reference();
+        if cfg.mover {
+            let want = [0.0, cfg.walk * k, 0.0];
+            crate::knockdown::mover_update(&mut f.e, MOVER, |e| {
+                rig_fixture::write3(e, velocity_at, want);
+                rig_fixture::write3(e, MOVER + crate::knockdown::MOVER_DELTA, scale(want, dt));
+            });
+            let v = rig_fixture::read3(&f.e, velocity_at);
+            reference = add(reference, scale(v, dt));
+            if is_down(ACTOR) {
+                game_moved += length(v) * dt;
+                down_time += dt;
+            }
+        } else if !is_down(ACTOR) {
+            reference = add(reference, [0.0, cfg.walk * k * dt, 0.0]);
+        }
+        reference[2] = ground(reference) + cfg.below;
+        rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, reference);
+        main_thread(&mut f.e);
+        let reference = f.reference();
+        let phase = (std::f32::consts::TAU * t / WALK_PERIOD).sin();
+        let walking = if is_down(ACTOR) || cfg.walk == 0.0 {
+            0.0
+        } else {
+            1.0
+        };
+        pose_leg(&mut f, 0, walking * swing * phase.max(0.0).sqrt());
+        pose_leg(&mut f, 1, walking * swing * (-phase).max(0.0).sqrt());
+        let root_at = add(reference, drop);
+        rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, root_at);
+        f.animate();
+        let anim: Vec<(M3, V3)> = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
+        let locals: Vec<(M3, V3)> =
+            f.at.iter()
+                .map(|&n| {
+                    (
+                        rig_fixture::read9(&f.e, n + rig_fixture::LOCAL_ROTATION),
+                        rig_fixture::read3(&f.e, n + rig_fixture::LOCAL_TRANSLATION),
+                    )
+                })
+                .collect();
+        if hits.first().is_some_and(|h| t >= h.0) {
+            let (_, speed, body) = hits.remove(0);
+            run.claimed |= claim(&mut f.e, ACTOR);
+            let now = state(ACTOR).map_or(0, |s| s.1);
+            if let Some(was) = steps_at.replace(now) {
+                run.steps.push(now - was);
+            }
+            let struck = model().body(body).unwrap();
+            hit(
+                &mut f.e,
+                ACTOR,
+                speed * model().mass,
+                add(anim[struck].1, [0.0, 6.0, 2.0]),
+                [0.0, -1.0, 0.0],
+            );
+        }
+        AI_BUSY.store(true, Ordering::Relaxed);
+        crate::active_ragdoll::apply(&mut f.e);
+        // The writer: the animation's locals set again every frame, the worlds from them.
+        for (i, &n) in f.at.iter().enumerate().skip(1) {
+            rig_fixture::write9(&mut f.e, n + rig_fixture::LOCAL_ROTATION, &locals[i].0);
+            rig_fixture::write3(&mut f.e, n + rig_fixture::LOCAL_TRANSLATION, locals[i].1);
+        }
+        f.update();
+        crate::active_ragdoll::read_drawn(&mut f.e);
+        let down = is_down(ACTOR);
+        if owns(ACTOR) {
+            if let Some(n) = floor_force(ACTOR) {
+                run.floor_most = run.floor_most.max(n / weight);
+            }
+            if let Some((phase, _, _)) = state(ACTOR) {
+                run.fell |= phase == ragdoll_core::np_balance::Phase::Falling;
+            }
+            run.fell |= down;
+        }
+        if down {
+            run.downed_at.get_or_insert(t);
+            down_refs.push((t, f.reference()));
+            // Each capsule's ends against the slope under them.
+            let mut under = 0.0f32;
+            if let Some((p, _)) = drawn(ACTOR) {
+                for (b, def) in model().bodies.iter().enumerate() {
+                    let (r, x) = p[b];
+                    for e in def.ends {
+                        let q = add(x, apply_m(&r, scale(e, k)));
+                        let d = (q[2] - ground(q)) * cos - def.radius * k;
+                        under = under.max(-d);
+                    }
+                }
+            }
+            run.under_most = run.under_most.max(under);
+            under_run = if under > 1.0 { under_run + 1 } else { 0 };
+            run.under_frames = run.under_frames.max(under_run);
+        } else if was_down && owns(ACTOR) && run.stood_after.is_none() {
+            run.stood_after = run.downed_at.map(|d| t - d);
+        }
+        if run.gave_up_after.is_none()
+            && run.downed_at.is_some()
+            && (f.e.mem.u8(rig_fixture::PROCESS_AT + 0x13c) != 0 || !falls().is_empty())
+        {
+            run.gave_up_after = run.downed_at.map(|d| t - d);
+        }
+        was_down |= down;
+        if std::env::var_os("NP_TRACE").is_some() {
+            let pel = drawn(ACTOR).map(|p| p.0[model().root].1);
+            eprintln!(
+                "TRACE t {t:.3} dt {dt:.3} floor {:.2} state {:?} ref {:?} pelvis {:?} down {down} label {:?} v {:?} {}",
+                floor_force(ACTOR).unwrap_or(0.0) / weight,
+                state(ACTOR).map(|s| (s.0, s.1)),
+                f.reference().map(|x| x.round()),
+                pel.map(|p| p.map(|x| x.round())),
+                label_of(ACTOR),
+                rig_fixture::read3(&f.e, velocity_at),
+                sample_field(ACTOR)
+            );
+        }
+        crate::active_ragdoll::after_draw(&mut f.e);
+        crate::active_ragdoll::unwrite(&mut f.e);
+        for l in room_events::take() {
+            for key in [
+                "[np outcome]",
+                "[np fall]",
+                "[np floor load]",
+                "[np choice]",
+            ] {
+                if let Some(i) = l.find(key) {
+                    run.notes
+                        .push(l[i..].trim_end_matches(['"', '}']).to_string());
+                }
+            }
+        }
+        frame += 1;
+    }
+    let _ = frame;
+    if let Some(was) = steps_at {
+        run.steps
+            .push(state(ACTOR).map_or(0, |s| s.1).saturating_sub(was));
+    }
+    // The reference's fastest second while downed, from half a second after it went down.
+    if let Some(d) = run.downed_at {
+        let pts: Vec<&(f32, V3)> = down_refs.iter().filter(|p| p.0 >= d + 0.5).collect();
+        for (i, a) in pts.iter().enumerate() {
+            if let Some(b) = pts[i..].iter().find(|b| b.0 >= a.0 + 1.0) {
+                let s = sub(b.1, a.1);
+                run.ref_speed = run.ref_speed.max(length([s[0], s[1], 0.0]) / (b.0 - a.0));
+            }
+        }
+    }
+    if down_time > 0.0 {
+        run.game_speed = game_moved / down_time;
+    }
+    room_events::set_on(false);
+    AI_BUSY.store(false, Ordering::Relaxed);
+    rig_fixture::SLOPE.with(|s| s.set(None));
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    crate::gunplay::set_tuning(was);
+    run
+}
+
+/// Patrick's 23:41 clip (Goodsprings' slope): walking up a 20 degree slope at 0.45 m/s, the
+/// collision floor 7 units under the reference, a 4.3 m/s hit downs it; downed, no body lies more
+/// than 1 unit under its own ground for more than 2 frames running (a flat floor that followed
+/// the reference put shins and knees into the slope).
+#[test]
+fn np_slope_downed_lies_on_the_slope() {
+    let r = slope_run(&Slope {
+        hits: vec![(0.4, 4.3, "Bip01 Spine2")],
+        slope: 20.0,
+        below: 7.0,
+        walk: 0.45,
+        mover: false,
+        seconds: 5.0,
+    });
+    eprintln!(
+        "RESULT np slope downed: downed at {:?} s, a body more than 1 u under its ground for at most {} frames running, the deepest {:.1} u, floor at most {:.1} body weights",
+        r.downed_at, r.under_frames, r.under_most, r.floor_most
+    );
+    assert!(r.claimed && r.downed_at.is_some(), "{r:?}");
+    assert!(
+        r.under_frames <= 2,
+        "{} frames, {:.1} u",
+        r.under_frames,
+        r.under_most
+    );
+}
+
+/// The same, the game's mover and controller moving the reference at 30 units a second (the
+/// clip's glide) while it is downed: the game moves the reference under 2 units a second while it
+/// is down (New Physics holds the game's movement before it applies; the reference follows the
+/// pelvis, which the fall, the rises and a collapse move), and it stands within 4 s of going
+/// down or gives up into the game's ragdoll (a rise lasts at most 2 s).
+#[test]
+fn np_slope_downed_holds_the_games_movement() {
+    let r = slope_run(&Slope {
+        hits: vec![(0.4, 4.3, "Bip01 Spine2")],
+        slope: 20.0,
+        below: 7.0,
+        walk: 30.0 / 70.0,
+        mover: true,
+        seconds: 12.0,
+    });
+    eprintln!(
+        "RESULT np slope held: downed at {:?} s, the game moved the reference {:.2} u/s while down, the reference (following the pelvis) at most {:.1} u/s over a second, stood after {:?} s, gave up after {:?} s; {:?}",
+        r.downed_at, r.game_speed, r.ref_speed, r.stood_after, r.gave_up_after,
+        r.notes.iter().filter(|n| n.contains("[np choice]") || n.contains("[np fall]")).collect::<Vec<_>>()
+    );
+    assert!(r.downed_at.is_some(), "{r:?}");
+    assert!(r.game_speed < 2.0, "{:.2} u/s", r.game_speed);
+    assert!(
+        r.stood_after.is_some_and(|s| s <= 4.0) || r.gave_up_after.is_some(),
+        "stood {:?}, gave up {:?}",
+        r.stood_after,
+        r.gave_up_after
+    );
+}
+
+/// A walking AI (0.45 m/s up the slope) and each hit's steps its own: three 0.69 m/s hits 1.5 s
+/// apart, no fall and at most 3 catching steps each; a 0.28 m/s hit at most 1; a 4.3 m/s hit
+/// falls.
+#[test]
+fn np_slope_steps_are_each_hits_own() {
+    let mut failed = Vec::new();
+    let r = slope_run(&Slope {
+        hits: vec![
+            (0.4, 0.69, "Bip01 Spine2"),
+            (1.9, 0.69, "Bip01 Spine2"),
+            (3.4, 0.69, "Bip01 Spine2"),
+        ],
+        slope: 20.0,
+        below: 7.0,
+        walk: 0.45,
+        mover: false,
+        seconds: 5.5,
+    });
+    eprintln!(
+        "RESULT np slope three 0.69 m/s hits: steps {:?}, fell {}, floor at most {:.2} body weights; {:?}",
+        r.steps, r.fell, r.floor_most,
+        r.notes.iter().filter(|n| n.contains("[np fall]") || n.contains("[np outcome]")).collect::<Vec<_>>()
+    );
+    if r.fell || r.steps.iter().any(|&s| s > 3) || r.steps.len() != 3 {
+        failed.push(format!("0.69: steps {:?}, fell {}", r.steps, r.fell));
+    }
+    let r = slope_run(&Slope {
+        hits: vec![(0.4, 0.28, "Bip01 Spine2")],
+        slope: 20.0,
+        below: 7.0,
+        walk: 0.45,
+        mover: false,
+        seconds: 3.5,
+    });
+    eprintln!(
+        "RESULT np slope 0.28 m/s: steps {:?}, fell {}, floor at most {:.2} body weights",
+        r.steps, r.fell, r.floor_most
+    );
+    if r.fell || r.steps.iter().any(|&s| s > 1) {
+        failed.push(format!("0.28: steps {:?}, fell {}", r.steps, r.fell));
+    }
+    let r = slope_run(&Slope {
+        hits: vec![(0.4, 4.3, "Bip01 Spine2")],
+        slope: 20.0,
+        below: 7.0,
+        walk: 0.45,
+        mover: false,
+        seconds: 2.0,
+    });
+    eprintln!("RESULT np slope 4.3 m/s: fell {}", r.fell);
+    if !r.fell {
+        failed.push("4.3: no fall".to_string());
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// The floor under 3 body weights for hits up to 0.7 m/s on the slope (the clip's 19 to 32 on
+/// 0.28 to 0.69 m/s hits), walking up it at 0.45 m/s.
+#[test]
+fn np_slope_light_hits_load_the_floor_under_three_weights() {
+    let mut failed = Vec::new();
+    for speed in [0.28f32, 0.5, 0.69] {
+        let r = slope_run(&Slope {
+            hits: vec![(0.4, speed, "Bip01 Spine2")],
+            slope: 20.0,
+            below: 7.0,
+            walk: 0.45,
+            mover: false,
+            seconds: 3.0,
+        });
+        eprintln!(
+            "RESULT np slope {speed} m/s: floor at most {:.2} body weights; {:?}",
+            r.floor_most,
+            r.notes
+                .iter()
+                .filter(|n| n.contains("[np floor load]"))
+                .collect::<Vec<_>>()
+        );
+        if r.floor_most >= 3.0 {
+            failed.push(format!("{speed}: {:.2} body weights", r.floor_most));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}

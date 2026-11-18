@@ -59,6 +59,10 @@ machinery runs.
   a field), checked to be a mapped reference; a planted foot the animation moves is let go once
   standing again (no more steps with no hit); `[np outcome]` waits for the steps to settle. Not run
   in the game.
+- **5402dadc slope clip fix:** per-body floor planes from ground casts (standing and downed); the
+  game's mover and controller held while downed; standing measured against the ground's motion;
+  rises capped at 4 s; steps per hit; `[np floor load]` and `[np hand-over]` say the sources. Not
+  run in the game.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 

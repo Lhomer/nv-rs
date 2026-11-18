@@ -874,6 +874,45 @@ lowered under 0.05 m, the floor under 3 body weights, the outcome said once. The
 body weights on the floor at 0.32 m/s did not show in the fixture (at most 2.7). Not run in the
 game.
 
+**Fix from the tester's 5402dadc clip (23:41, a .44 Revolver on Goodsprings' slope: 27 hits, 9
+downed falls, no crash).**
+- **The floor on a slope.** The floor was one flat height, the reference's plus the take's offset,
+  and the reference follows the pelvis while downed (the game's controller seating it on the
+  slope): bodies away from it went into the slope. Now each body has its own floor plane: the
+  ground cast (`floor_under`) under each foot, calf (knee), the pelvis and each hand, cached and
+  cast again past 6 units, a plane fitted through them, through the cast nearest each body
+  (`ground_planes`, `np_body::Tracking::floors`), raised by what the feet stood over the
+  collision floor at the take. Standing too (a flat plane at the reference's height rose under a
+  planted foot as the reference walked up the slope and pushed the body up at 3 to 4 body
+  weights: the fixture's floor-load source). A step's and the plants' heights move with the
+  floor. `MAX_OUT` kept.
+- **Rising that never ended, sliding.** The game's movement is held before it applies while New
+  Physics has it downed: the `ActorMover` update is not run, its delta and the character
+  controller's velocity are zero (`knockdown::mover_update`; 5402dadc ran it and zeroed the delta
+  after), and the controller's velocity is zeroed at the draw too. Standing again is measured
+  against the ground the game moved it on (`Np::ground_v`, none once held). A rise lasts at most 4
+  s from the AI's wish (`RISE_MOST`; frames that read airborne no longer start it again: the clip
+  rose for 7 and 17 s); 2 and 3 s cut short the flat floor's rise in the existing stand-again
+  test, so 4 s.
+- **Steps across hits.** A hit's catching steps count from none (`Np::hit`), and standing settled
+  starts them again moving or not (5402dadc only standing still: they added up to 13 while the AI
+  walked, and a 0.69 m/s hit fell "steps").
+- **The sources, said.** `[np floor load]` names each frame past 3 body weights: the bodies that
+  carried it, what the balance was doing, how far the floor moved, the body's centre's speed.
+  `[np hand-over]` says how far the pose drawn lay off the animation the game had its ragdoll's
+  bodies at (a downed body against a standing animation: the clip's 180 degrees, 122 units).
+Tests (the game's own update, the locals' writer every frame, dt 0.008 to 0.038, a 20 degree
+slope, the collision floor 7 units under the reference): downed after a 4.3 m/s hit, no body more
+than 1 unit under its ground for more than 2 frames (5402dadc: 24 frames, 3.2 units; now 0, the
+deepest 0.0); the game's mover and controller moving the reference 30 units a second while
+downed: the game moves it 0.00 units a second (5402dadc: 30.00), and it gives up into the game's
+ragdoll 8.8 s after going down (the reference follows the pelvis, so the fall's tumble down the
+slope and the rises still move it); walking up at 0.45 m/s, three 0.69 m/s hits take 1, 0 and 0
+steps, no fall; 0.28 m/s none; 4.3 m/s falls (this one passes on 5402dadc too: walking at 0.45
+m/s the balance is moving and takes no steps; `np_balance`'s tests of the step count fail on it);
+the floor at most 1.94, 2.33 and 2.41 body weights for 0.28, 0.5 and 0.69 m/s (5402dadc: 4.08
+at 0.69). Not run in the game.
+
 **Not done in M6 (for a later pass):** crawling to cover (the combat controller's cover point as
 the body's travel goal: `FindCombatLocation` `0099ac20`); the shot's origin and direction from the
 weapon as drawn (the game aims its NPC shots from the weapon node as animated, `fire_locate`, so a

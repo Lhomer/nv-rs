@@ -141,6 +141,8 @@ pub struct Balance {
     pub supported: bool,
     /// Each animated foot's place the last frame (m, the shift aside).
     pub anim_feet: [Option<V3>; 2],
+    /// The floor's height the last frame (m).
+    pub floor_was: Option<f32>,
     /// The last frame's centre of mass velocity against the animation's (m/s).
     pub rel_v: V3,
 }
@@ -213,6 +215,7 @@ impl Balance {
             fall_reason: "",
             supported: true,
             anim_feet: [None, None],
+            floor_was: None,
             rel_v: [0.0; 3],
         }
     }
@@ -302,6 +305,21 @@ impl Balance {
         let flat = |a: V3| [a[0], a[1], 0.0];
         self.capture = add(flat(com), scale(flat(rel_v), 1.0 / omega));
         self.moving = length(flat(anim_v)) > MOVING;
+        // The footing moves with the floor: a step's heights and the plants' (a floor that rose
+        // under a step held to the heights it was planned at, walking up a slope, pressed the
+        // foot into it at 4 body weights).
+        if let Some(was) = self.floor_was.replace(floor) {
+            let dz = floor - was;
+            if dz != 0.0 && dz.abs() < 0.5 {
+                if let Some(st) = self.step.as_mut() {
+                    st.from[2] += dz;
+                    st.to[2] += dz;
+                }
+                for p in self.plants.iter_mut().flatten() {
+                    p.0[2] += dz;
+                }
+            }
+        }
         // Standing again: a planted foot the animation itself moves goes with it.
         for side in 0..2 {
             let at = sub(anim[self.feet[side]].x, self.shift);
@@ -458,7 +476,11 @@ impl Balance {
                 self.since = 0.0;
                 ask.falling = true;
                 ask.hold_across = 0.0;
+                return ask;
             }
+            // Settled on its path as standing does: the steps start again (they were counted
+            // across hits while the animation moved).
+            self.settle();
             return ask;
         }
         // Just landed: no step until the landed foot stands (or a moment passes).
@@ -492,13 +514,9 @@ impl Balance {
             }
             return ask;
         }
+        self.settle();
         match self.phase {
-            Phase::Recovering if self.since >= SETTLE => {
-                self.phase = Phase::Standing;
-                self.since = 0.0;
-            }
             Phase::Standing if self.since >= SETTLE && !self.moving => {
-                self.steps = 0;
                 // A foot back on its animated place lets go of its plant.
                 for side in 0..2 {
                     let b = self.feet[side];
@@ -610,6 +628,19 @@ impl Balance {
     }
 
     /// The shift handed to the actor (it moves by it; the animation comes moved): taken off.
+    /// Recovered for [`SETTLE`]: standing; standing for [`SETTLE`], moving or not: its catching
+    /// steps start again.
+    fn settle(&mut self) {
+        match self.phase {
+            Phase::Recovering if self.since >= SETTLE => {
+                self.phase = Phase::Standing;
+                self.since = 0.0;
+            }
+            Phase::Standing if self.since >= SETTLE => self.steps = 0,
+            _ => {}
+        }
+    }
+
     pub fn take(&mut self, by: V3) {
         self.shift = sub(self.shift, by);
         self.shift_from = sub(self.shift_from, by);
@@ -711,5 +742,61 @@ mod tests {
         assert!((outside(&h, [0.5, 0.5]) + 0.5).abs() < 1e-5);
         assert!((outside(&h, [2.0, 0.5]) - 1.0).abs() < 1e-5);
         assert!((outside(&[[0.0, 0.0], [1.0, 0.0]], [0.5, 0.2]) - 0.2).abs() < 1e-5);
+    }
+
+    /// FNV's body in its bind pose, the floor under its lowest point (m).
+    fn standing() -> (Model, Vec<State>, f32) {
+        let sk = crate::np_skeleton::Skeleton::fnv();
+        let m = Model::from_skeleton(&sk);
+        let w = sk.bind_worlds();
+        let nodes: Vec<(crate::flinch::M3, V3)> = m
+            .bodies
+            .iter()
+            .map(|b| {
+                let x = w[sk.node(&b.node).unwrap()];
+                (x.r, x.t)
+            })
+            .collect();
+        let s = m.states_from_nodes(&nodes);
+        let floor = crate::np_body::lowest_point(&m, &s);
+        (m, s, floor)
+    }
+
+    /// Each hit's catching steps are its own (Patrick's 23:41 clip: the AI walked, the steps added
+    /// up across hits to 13 and a 0.69 m/s hit fell "steps"): a balance standing again past
+    /// [`SETTLE`] starts its steps again while its animation moves too (5402dadc only while it
+    /// stood still).
+    #[test]
+    fn the_steps_start_again_once_settled_while_moving() {
+        let (m, s, floor) = standing();
+        let mut b = Balance::new(&m);
+        b.phase = Phase::Standing;
+        b.since = SETTLE + 0.1;
+        b.steps = 2;
+        let moving = [MOVING * 1.5, 0.0, 0.0];
+        let s_moving: Vec<State> = s.iter().map(|x| State { v: moving, ..*x }).collect();
+        b.update(&m, &s_moving, &s, moving, floor, 1.0 / 60.0);
+        assert!(b.moving);
+        assert_eq!(b.steps, 0, "the steps were kept while moving");
+    }
+
+    /// A new hit's catching steps count from none.
+    #[test]
+    fn a_hit_starts_its_steps_from_none() {
+        let sk = crate::np_skeleton::Skeleton::fnv();
+        let m = Model::from_skeleton(&sk);
+        let w = sk.bind_worlds();
+        let nodes: Vec<(crate::flinch::M3, V3)> = m
+            .bodies
+            .iter()
+            .map(|b| {
+                let x = w[sk.node(&b.node).unwrap()];
+                (x.r, x.t)
+            })
+            .collect();
+        let mut np = crate::np::Np::new(m, &nodes, 1.0);
+        np.balance.steps = 2;
+        np.hit(0, nodes[0].1, [0.0, -20.0, 0.0]);
+        assert_eq!(np.balance.steps, 0);
     }
 }

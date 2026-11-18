@@ -149,6 +149,10 @@ pub struct Tracking {
     /// Limits brought back at most [`LIMIT_STEP`] a substep (a downed body, whose limits move
     /// under it as its goals change); otherwise at once.
     pub soft_limits: bool,
+    /// Each body's own floor (world, metres; empty: the frame's flat floor for every body): the
+    /// ground under it, a slope's included (a flat floor at one height pushed a downed body's
+    /// shins and knees into a 20 degree slope: Patrick's 23:41 clip).
+    pub floors: Vec<Plane>,
 }
 
 /// A pull on a body this frame (the root's support, a swinging foot's carry): a spring and damper
@@ -495,6 +499,7 @@ impl Model {
                 lim
             })
             .collect();
+        let floors: &[Plane] = tracking.map_or(&[], |t| &t.floors);
         for sub_i in 0..substeps {
             let prev: Vec<State> = states.to_vec();
             // The muscles' hold of the weight below each joint (a torque pair on the joint).
@@ -552,7 +557,7 @@ impl Model {
             }
             let slip: &[usize] = tracking.map_or(&[], |t| &t.slip);
             let grip: &[usize] = tracking.map_or(&[], |t| &t.grip);
-            let loads = self.surfaces(states, &prev, &surfaces, slip, h);
+            let loads = self.surfaces(states, &prev, &surfaces, floors, slip, h);
             // Each surface's push this substep as a force (N), the frame's mean.
             let to_force = 1.0 / (h * h * substeps as f32);
             for &(b, k, lambda, _, _) in &loads {
@@ -629,13 +634,17 @@ impl Model {
                 states[r].v = add(states[r].v, dv);
             }
             self.friction(states, &loads, h, slip, grip);
-            self.grip_friction(states, &surfaces, h, grip);
+            self.grip_friction(states, &surfaces, floors, h, grip);
         }
         for (i, def) in self.bodies.iter().enumerate() {
+            let fl = floor_of(&surfaces, floors, i);
             for e in def.ends {
                 let p = add(states[i].x, qrot(states[i].q, sub(e, def.com)));
-                if p[2] - def.radius <= floor + 0.005 {
-                    report.contacts.push((i, [p[0], p[1], floor]));
+                let d = dot(sub(p, fl.p), fl.n) - def.radius;
+                if d <= 0.005 {
+                    report
+                        .contacts
+                        .push((i, sub(p, scale(fl.n, d + def.radius))));
                 }
                 for (k, w) in surfaces.iter().enumerate().skip(1) {
                     let d = dot(sub(p, w.p), w.n) - def.radius;
@@ -856,15 +865,18 @@ impl Model {
         states: &mut [State],
         prev: &[State],
         surfaces: &[Plane],
+        floors: &[Plane],
         slip: &[usize],
         h: f32,
     ) -> Vec<(usize, usize, f32, V3, V3)> {
         let mut loads = Vec::new();
         for (i, def) in self.bodies.iter().enumerate() {
             let grips = !slip.contains(&i);
+            let fl = floor_of(surfaces, floors, i);
             for e in def.ends {
                 let local = sub(e, def.com);
                 for (k, sf) in surfaces.iter().enumerate() {
+                    let sf = if k == 0 { &fl } else { sf };
                     let n = sf.n;
                     let centre = add(states[i].x, qrot(states[i].q, local));
                     let depth = def.radius - dot(sub(centre, sf.p), n);
@@ -942,14 +954,23 @@ impl Model {
     /// The gripping bodies' friction (the standing feet): each capsule end touching a surface
     /// (within 2 mm) has its contact point's slide slowed by the weight's friction, pushed or
     /// not (the root's support carries the weight the legs put through them).
-    fn grip_friction(&self, states: &mut [State], surfaces: &[Plane], h: f32, grip: &[usize]) {
+    fn grip_friction(
+        &self,
+        states: &mut [State],
+        surfaces: &[Plane],
+        floors: &[Plane],
+        h: f32,
+        grip: &[usize],
+    ) {
         for &i in grip {
             let Some(def) = self.bodies.get(i) else {
                 continue;
             };
+            let fl = floor_of(surfaces, floors, i);
             for e in def.ends {
                 let local = sub(e, def.com);
-                for sf in surfaces {
+                for (k, sf) in surfaces.iter().enumerate() {
+                    let sf = if k == 0 { &fl } else { sf };
                     let n = sf.n;
                     let centre = add(states[i].x, qrot(states[i].q, local));
                     if dot(sub(centre, sf.p), n) - def.radius > 0.002 {
@@ -1154,6 +1175,15 @@ pub const MIN_RADIUS: f32 = 0.08;
 
 /// `inertia` with every principal value at least a [`MIN_RADIUS`] ball's of mass `m` (added on
 /// the diagonal: the capsule's own axes are kept).
+/// Body `i`'s floor: its own (`floors`, when given for every body), else the frame's flat one
+/// (`surfaces[0]`).
+fn floor_of(surfaces: &[Plane], floors: &[Plane], i: usize) -> Plane {
+    match floors.get(i) {
+        Some(f) if floors.len() > i => *f,
+        _ => surfaces[0],
+    }
+}
+
 fn floor_inertia(inertia: M3, m: f32) -> M3 {
     let least = 0.4 * m * MIN_RADIUS * MIN_RADIUS;
     let mut out = inertia;
