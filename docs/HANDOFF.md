@@ -91,6 +91,14 @@ machinery runs.
     The seed must be what the game does with the reference after the take: find which movers still
     move a runner's controller while New Physics holds `ActorMover::Update`, then seed from that
     (or hold them too).
+  - Tried on 21a1b52 (not committed): the patch plus `cycle_run` and `slope_run` moving their walker
+    as the game moves a runner under New Physics (the AI's movement keeps setting the controller's
+    velocity while it stands; only `ActorMover::Update` held). Worse: `np_full_cycle` floor 5.07
+    body weights, `np_slope_walking` a step with no hit, the slab 2.91 u inside and 8.58 body
+    weights, the arms' 0.17, tests a and b as before. So the seed is not the blocker: the balance
+    does not yet handle a reference the game keeps moving under a standing body (its plants and
+    steps are against a still reference). That is the work: plants that travel with a walk's or
+    run's stance (the animation's feet), steps measured against the moving reference, then the seed.
 - **Not started:** the 14:09 knockdown issues, tests c to g, the three ignored ce922331 tests.
 
 ### Claude, 2026-11-18 (New Physics: barriers, the rise's pace, the arms' push, bursts)
