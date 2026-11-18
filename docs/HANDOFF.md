@@ -7,6 +7,27 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-18 (the rise: the capsule glides, PLANCK as the reference)
+
+- PLANCK's source (docs/PLANCK_GETUP.md) fades its root and world-from-model rather than snapping
+  them. New Physics' downed reference (the capsule) now follows the pelvis in a per-frame budget:
+  as far as the body moves while it falls (still read as standing), 1.9 units (3 cm) a frame once
+  it lies, sits, crouches or rises, never more than 3 units behind the pelvis
+  (`ROOT_STEP`, `LAG_MOST`, `NpActor::root_budget` refilled at the draw's set-up). Height clamped
+  the same way.
+- Test `np_rise_holds_the_root_and_capsule_on_flat_slope_and_by_a_wall` (cycle runs: flat, a 10
+  degree slope, a wall beside the fall): downed and standing again in each; from the rise's start
+  to half a second after it stands, the root at most 1.90 units a frame of New Physics' own (the
+  game's walk taken out), the capsule never over the drawn feet standing, never under the floor.
+  On 231db2d: 6.4 to 6.7 units a frame.
+- The game's own get-up (knockdown, knock states 3 to 6) on the fixture already held the root, the
+  capsule and the stand on flat ground, a slope and by a wall (tried, all passed on 231db2d, so no
+  test was added for it).
+- Not done from the PLANCK list: zeroing the game ragdoll's velocities before the controller takes
+  over, capping the game's get-up motor force and recovery velocity, the bugged-rise detection
+  (PLANCK's own defaults are a 0 N get-up force and a knock-down again); see docs/PLANCK_GETUP.md
+  for what PLANCK does and does not do.
+
 ### Claude, 2026-11-18 (the 17:08 clip: hitboxes, VATS and the reference on the body drawn)
 
 - **Cause (Patrick's 17:08 clip, 21a1b52):** New Physics' pose existed only for the draw: written

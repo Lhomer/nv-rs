@@ -2584,6 +2584,12 @@ struct CycleRun {
     /// drawn (units, flat), and the most it jumped in a frame at a rise's end (units, flat).
     ref_pelvis: f32,
     ref_rise_jump: f32,
+    /// The most the root (the capsule's base) moved in a frame of New Physics' own, from its rise's
+    /// start (first read as rising) to half a second after it stood again; standing again, the most the capsule's base lay
+    /// over the lower drawn foot; from the fall on, under the floor (units).
+    root_step: f32,
+    over_feet: f32,
+    under_floor: f32,
     game_speed: f32,
     /// The light hits: how many, any fall from them, the most catching steps one took.
     light_hits: u32,
@@ -2773,6 +2779,8 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
     let mut catches_from = 0usize;
     let mut was_down = false;
     let (mut prev_down, mut last_ref) = (false, [0.0f32; 3]);
+    let mut settled = false;
+    let mut stood_at: Option<f32> = None;
     let mut downed_at = 0.0f32;
     let mut down_refs: Vec<(f32, V3, V3)> = Vec::new();
     let (mut game_moved, mut down_time) = (0.0f32, 0.0f32);
@@ -2802,6 +2810,7 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
         }
         reference[2] = ground(reference) + cfg.below;
         rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, reference);
+        let game_ref = reference;
         let walking = length(v) > 0.0;
         // The animation's update (its locals for this frame, the worlds, the snapshot).
         let animate = |f: &mut Fixture| {
@@ -2887,6 +2896,32 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
         if prev_down && !down {
             let j = sub(f.reference(), last_ref);
             run.ref_rise_jump = run.ref_rise_jump.max(length([j[0], j[1], 0.0]));
+        }
+        // From its first fall on: the root's (the capsule's base) move in a frame beyond the
+        // game's own walk (its controller's velocity over the frame), and the capsule's base
+        // against the drawn feet and the floor under it.
+        if run.downed > 0 || down {
+            // New Physics' own move this frame (from where the game's movement put it), from the
+            // rise's start (the body first read as rising) to half a second after it stands.
+            if down && label_of(ACTOR) == Some("rising") {
+                settled = true;
+            }
+            if !down && settled && stood_at.is_none() {
+                stood_at = Some(t);
+            }
+            if settled && stood_at.map_or(true, |s| t <= s + 0.5) {
+                let step = length(sub(f.reference(), game_ref));
+                run.root_step = run.root_step.max(step);
+            }
+            if let (false, Some((p, _))) = (down, drawn(ACTOR)) {
+                let feet = ["Bip01 L Foot", "Bip01 R Foot"]
+                    .iter()
+                    .map(|n| p[model().body(n).unwrap()].1[2])
+                    .fold(f32::INFINITY, f32::min);
+                let at = f.reference();
+                run.over_feet = run.over_feet.max(at[2] - feet);
+                run.under_floor = run.under_floor.max(ground(at) - at[2]);
+            }
         }
         prev_down = down;
         last_ref = f.reference();
@@ -3063,6 +3098,7 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
             if !was_down {
                 run.downed += 1;
                 downed_at = t;
+                settled = false;
                 down_refs.clear();
                 upright_at = None;
             }
@@ -4250,4 +4286,61 @@ fn np_the_animation_never_reads_the_write() {
     assert!(r.frames >= 170);
     assert_eq!(r.locals_not_anim, 0);
     assert_eq!(r.snap_not_anim, 0);
+}
+
+/// The rise (Patrick's 14:09 clip: rises fell back to lying, the reference jumped 1.3 m on
+/// standing again; the queued get-up work after PLANCK, adamhynek/activeragdoll): New Physics'
+/// actor downed by a 4.8 m/s hit and rising by itself, on flat ground, on a 10 degree slope and
+/// with a wall beside where it falls. From the rise's start (the body first read as rising) to
+/// half a second after it stands again, its root (the controller's capsule base) never moves more than 2 units (3 cm) in a frame
+/// of New Physics' own; standing again the capsule's base never lies over the drawn feet, nor
+/// ever more than a unit under the floor; and it stands again.
+#[test]
+fn np_rise_holds_the_root_and_capsule_on_flat_slope_and_by_a_wall() {
+    let mut failed = Vec::new();
+    for (name, slope, below, boxes) in [
+        ("flat", 0.0f32, 1.0f32, Vec::new()),
+        ("slope", 10.0, 4.0, Vec::new()),
+        (
+            "wall",
+            0.0,
+            1.0,
+            vec![block((-200.0, 200.0), (-96.0, -82.0), 1.0, 150.0)],
+        ),
+    ] {
+        let r = cycle_run(&Cycle {
+            slope,
+            below,
+            boxes,
+            seconds: 14.0,
+            ..Default::default()
+        });
+        eprintln!(
+            "RESULT np rise {name}: downed {}, stood {}, the root at most {:.2} u in a frame, the \
+             capsule {:.2} u over the feet, {:.2} u under the floor",
+            r.downed, r.stood, r.root_step, r.over_feet, r.under_floor
+        );
+        if r.downed == 0 || r.stood == 0 {
+            failed.push(format!("{name}: downed {}, stood {}", r.downed, r.stood));
+        }
+        if r.root_step > 2.0 {
+            failed.push(format!(
+                "{name}: the root moved {:.2} u in a frame",
+                r.root_step
+            ));
+        }
+        if r.over_feet > 0.0 {
+            failed.push(format!(
+                "{name}: the capsule {:.2} u over the feet",
+                r.over_feet
+            ));
+        }
+        if r.under_floor > 1.0 {
+            failed.push(format!(
+                "{name}: the capsule {:.2} u under the floor",
+                r.under_floor
+            ));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
 }

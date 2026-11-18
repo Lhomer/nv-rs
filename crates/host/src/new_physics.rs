@@ -151,6 +151,11 @@ struct NpActor {
     /// The pose its bodies were last held to (each drawn node, its world): where the game's
     /// ragdoll takes them from at a hand-over.
     held: Vec<(u32, M3, V3)>,
+    /// What the reference may still move this frame (game units; [`ROOT_STEP`] each frame at the
+    /// draw's set-up, spent by the downed follow at the main thread's safe point).
+    root_budget: f32,
+    /// The pelvis drawn at the last frame's set-up (game units): how far the body moved.
+    pelvis_last: Option<V3>,
     /// The body's last frames since its last hit (the frame's time, each body's velocity and
     /// spin at its end): the hand-over's velocities, their mean.
     history: std::collections::VecDeque<(f32, Vec<(V3, V3)>)>,
@@ -550,6 +555,8 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             snap: Some(snapshot(e, root, &tree)),
             holds: Vec::new(),
             held: Vec::new(),
+            root_budget: ROOT_STEP,
+            pelvis_last: None,
             history: std::collections::VecDeque::new(),
             jumps_said: 0,
             walls: Vec::new(),
@@ -883,6 +890,20 @@ pub fn apply(e: &mut Engine) {
         }
         roots.push((a.root, a.tops.clone()));
         a.written_now = true;
+        // The reference's room this frame: the body's own move while it falls (not yet read as
+        // lying, seated, propped, crouched or rising: it keeps up, never outruns it), else
+        // `ROOT_STEP` (the capsule glides through the rise).
+        let pelvis_now = a.drawn.get(model().root).map(|d| d.1);
+        let body_moved = match (pelvis_now, a.pelvis_last) {
+            (Some(p), Some(q)) => length([p[0] - q[0], p[1] - q[1], 0.0]),
+            _ => 0.0,
+        };
+        a.root_budget = if a.label.map_or(true, |l| l == "standing") {
+            ROOT_STEP.max(body_moved)
+        } else {
+            ROOT_STEP
+        };
+        a.pelvis_last = pelvis_now;
         let set_directly = a.nodes.len() as u32;
         // The body's last frames (each body's centre and turn, and the frame's time): the
         // hand-over's velocities.
@@ -1102,7 +1123,12 @@ fn world_said(e: &mut Engine) {
 }
 
 /// Downed, the reference follows the pelvis once it lies this far from it (game units, flat).
-const DOWN_FOLLOW: f32 = 6.0;
+const DOWN_FOLLOW: f32 = 1.0;
+/// The most the reference (the controller's capsule) moves in one frame once the downed body is
+/// read as lying or rising (game units: 3 cm); while it falls, as far as the body.
+const ROOT_STEP: f32 = 1.9;
+/// Downed, the reference never lags the pelvis by more than this (game units, flat).
+const LAG_MOST: f32 = 3.0;
 /// New Physics moves its actor only by this much or more (game units); less is gathered.
 const MOVE_LEAST: f32 = 0.5;
 /// The actor is moved by the body only while drawn within this of it (degrees, units).
@@ -1540,9 +1566,17 @@ fn move_reference(e: &mut Engine, a: &mut NpActor) {
             return;
         };
         let at = read3(e, a.actor + REFR_POSITION);
-        let mv = [pelvis[0] - at[0], pelvis[1] - at[1], 0.0];
+        let mut mv = [pelvis[0] - at[0], pelvis[1] - at[1], 0.0];
         if length(mv) < DOWN_FOLLOW {
             return;
+        }
+        // A few centimetres a frame at most: the capsule glides after the body, never jumps
+        // (PLANCK's fade of the root, adamhynek/activeragdoll: a root that snaps to the ragdoll
+        // pops the capsule).
+        // ... but never more than `LAG_MOST` behind the pelvis.
+        let budget = a.root_budget.max(length(mv) - LAG_MOST);
+        if length(mv) > budget {
+            mv = scale(mv, budget / length(mv));
         }
         let (to_flat, _) = swept_move(e, a.actor, at, mv);
         let mut to = [to_flat[0], to_flat[1], at[2]];
@@ -1550,10 +1584,16 @@ fn move_reference(e: &mut Engine, a: &mut NpActor) {
             return;
         }
         if let Some(g) = crate::active_ragdoll::floor_under(e, [to[0], to[1], at[2] + 30.0]) {
-            to[2] = g + a.floor_lift.unwrap_or(0.0) - a.floor_offset.unwrap_or(0.0);
+            let z = g + a.floor_lift.unwrap_or(0.0) - a.floor_offset.unwrap_or(0.0);
+            let flat = length([to[0] - at[0], to[1] - at[1], 0.0]);
+            let room = (a.root_budget * a.root_budget - flat * flat)
+                .max(0.0)
+                .sqrt();
+            to[2] = at[2] + (z - at[2]).clamp(-room, room);
         }
         if crate::knockdown::place_in_world(e, a.actor, to) {
             let now = read3(e, a.actor + REFR_POSITION);
+            a.root_budget = (a.root_budget - length(sub(now, at))).max(0.0);
             let k = ragdoll_core::np_body::UNITS;
             np.anim_moved(scale(sub(now, at), 1.0 / k));
             if let Some(s) = a.snap.as_mut() {
