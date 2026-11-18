@@ -3635,3 +3635,111 @@ fn np_planted_hands_hold_still() {
         .collect();
     assert!(bad.is_empty(), "{bad:#?}");
 }
+
+/// Patrick's addendum: the game's one-off reaction to a limb crippled by a hit (the idle
+/// `Actor::HitMe` picks and starts when the crippled-limb idle's setting `011df760` is on) never
+/// comes for an actor New Physics has: the game's hit, run through the hook
+/// (`knockdown::hit_me_hooked`), reads the setting off for it on the main thread (the hit that
+/// takes it) and on an AI thread (a later hit, already taken), the setting is put back after,
+/// and New Physics keeps the actor through the hits and the frames after (its reaction runs on,
+/// no animation jump). With New Physics off the game's hit reads the setting on, as before. The
+/// game's `HitMe` itself stands in as what it reads of the setting (the fixture has no hit data
+/// or limbs' values for its whole body).
+#[test]
+fn np_crippling_hits_never_start_the_cripple_reaction() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static AI_THREAD: AtomicBool = AtomicBool::new(false);
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut failed = Vec::new();
+    for on in [true, false] {
+        let mut f = Fixture::new(
+            rig_fixture::fnv_skeleton(),
+            Ground {
+                collision: Some(-1.0),
+                navmesh: -9.0,
+            },
+        );
+        f.game_update();
+        f.make_character();
+        crate::active_ragdoll::clear();
+        crate::knockdown::clear();
+        let was = crate::gunplay::tuning();
+        crate::gunplay::set_tuning(crate::gunplay::Tuning {
+            new_physics: on,
+            ..was
+        });
+        f.e.register_double(0x008c_7aa0, |_, _| {
+            u32::from(AI_THREAD.load(Ordering::Relaxed)).into_ret()
+        });
+        f.e.register_double(0x0088_45a0, |_, _| 1u32.into_ret());
+        room_events::set_on(true);
+        let _ = room_events::take();
+        // The crippled-limb idle's setting (the game's data page), on as in the game.
+        f.e.mem.map(CRIPPLE_IDLE & !0xfff, 0x1000);
+        f.e.mem.set_u8(CRIPPLE_IDLE, 1);
+        let mut seen = Vec::new();
+        let mut restored = Vec::new();
+        let spine = model().body("Bip01 Spine2").unwrap();
+        let body_nodes: Vec<usize> = model()
+            .bodies
+            .iter()
+            .map(|b| f.nodes.iter().position(|n| n.name == b.node).unwrap())
+            .collect();
+        // A leg's crippling hit on the main thread, then an arm's on an AI thread a few frames
+        // on, each followed by New Physics' hit (as `after_hit` gives it the hit's momentum).
+        let mut jumps = 0;
+        let mut kept = on;
+        for (thread, (point_body, speed)) in [
+            (false, ("Bip01 L Calf", 0.5f32)),
+            (true, ("Bip01 R UpperArm", 0.4)),
+        ] {
+            AI_THREAD.store(thread, Ordering::Relaxed);
+            crate::knockdown::hit_me_hooked(&mut f.e, &[ACTOR, 0, 0], |e, _| {
+                seen.push(e.mem.u8(CRIPPLE_IDLE));
+            });
+            AI_THREAD.store(false, Ordering::Relaxed);
+            restored.push(f.e.mem.u8(CRIPPLE_IDLE));
+            let b = model().body(point_body).unwrap_or(spine);
+            let at = f.world_of(f.at[body_nodes[b]]).1;
+            hit(&mut f.e, ACTOR, speed * model().mass, at, [0.0, -1.0, 0.0]);
+            for _ in 0..20 {
+                f.e.mem.set_f32(0x011d_ea30, 0.016);
+                main_thread(&mut f.e);
+                f.animate();
+                crate::active_ragdoll::apply(&mut f.e);
+                crate::active_ragdoll::read_drawn(&mut f.e);
+                crate::active_ragdoll::after_draw(&mut f.e);
+                crate::active_ragdoll::unwrite(&mut f.e);
+                if on && !owns(ACTOR) {
+                    kept = false;
+                }
+            }
+            jumps += room_events::take()
+                .iter()
+                .filter(|l| l.contains("[np jump]"))
+                .count();
+        }
+        room_events::set_on(false);
+        eprintln!(
+            "RESULT np cripple reaction, New Physics {on}: the game's hit read the cripple \
+             reaction's setting {seen:?} (main thread, AI thread), put back {restored:?}, kept \
+             by New Physics {kept}, animation jumps {jumps}"
+        );
+        let want = if on { [0, 0] } else { [1, 1] };
+        if seen != want || restored != [1, 1] {
+            failed.push(format!("on {on}: read {seen:?}, put back {restored:?}"));
+        }
+        if on && (!kept || jumps != 0) {
+            failed.push(format!("on {on}: kept {kept}, jumps {jumps}"));
+        }
+        if !on && owns(ACTOR) {
+            failed.push("off: taken".to_string());
+        }
+        crate::active_ragdoll::clear();
+        crate::knockdown::clear();
+        crate::gunplay::set_tuning(was);
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}

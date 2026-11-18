@@ -32,6 +32,11 @@ machinery runs.
   - The tests on a slope are chaotic: sub-millimetre floor changes swing a catching step's
     landing between 2 and 4 body weights. A standing foot can read 3 cm over its own ground (the
     feet's mean floor carried into plants).
+- **Cripple reaction (addendum 2):** the game's one-off reaction to a limb crippled by a hit is
+  the idle `Actor::HitMe` picks and starts in `hit_me_death` (engine-fallout-ai actor_p3.rs
+  13544-13579, the crippled-limb idle's setting `011df760`). `knockdown::hit_me_hooked` clears
+  that setting around the game's hit for an actor New Physics has, now also for a hit on an AI
+  thread to an actor already taken. The limping locomotion and the crippled state are untouched.
 
 ### Claude, 2026-11-17 (New Physics approved: M0, the joint limits and the switch)
 

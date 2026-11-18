@@ -317,23 +317,9 @@ pub fn install(e: &mut Engine) {
         update(e, a)
     });
     e.register(HIT_ME, |e, a| {
-        let queued = e.call(AI_THREAD, &[]).bool();
-        // New Physics takes the actor before the game's hit runs, so its own reaction is not
-        // played: the crippled-limb idle's setting cleared around it (`HitMe_ov2` and
-        // `KnockExplosion` check `crate::new_physics::owns`).
-        let np = !queued && crate::new_physics::claim(e, a[0]);
-        let cripple = np.then(|| {
-            let was = e.mem.u8(crate::new_physics::CRIPPLE_IDLE);
-            e.mem.set_u8(crate::new_physics::CRIPPLE_IDLE, 0);
-            was
+        hit_me_hooked(e, a, |e, a| {
+            actor_hit_me(e, Ptr::new(a[0]), Ptr::new(a[1]), a[2] as u8)
         });
-        actor_hit_me(e, Ptr::new(a[0]), Ptr::new(a[1]), a[2] as u8);
-        if let Some(was) = cripple {
-            e.mem.set_u8(crate::new_physics::CRIPPLE_IDLE, was);
-        }
-        if !queued {
-            after_hit(e, a[0], a[1]);
-        }
         Ret::default()
     });
     e.register(crate::new_physics::HIT_ME_OV2, |e, a| {
@@ -421,6 +407,36 @@ pub(crate) const MOVER_DELTA: u32 = 0x10;
 
 /// After the game applied the hit `hit` to `target`: a knockdown or a stagger (module
 /// documentation). Each decision on a living character is logged ([`note`]).
+/// `Actor::HitMe` as hooked: `game` is the game's own (`actor_p3::actor_hit_me`). New Physics
+/// takes the actor before the game's hit runs, so none of the game's reactions plays for it:
+/// `HitMe_ov2` and `KnockExplosion` check `crate::new_physics::owns`, and the one-off reaction to
+/// a limb crippled by the hit, the idle `HitMe` picks (`TESIdleManager::GetIdleToPlay`) and
+/// starts when the crippled-limb idle's setting (`011df760`) is on, the limb struck and the
+/// limb's value at 0 (engine-fallout-ai actor_p3.rs `hit_me_death`, 13544-13579), is kept off by
+/// clearing that setting around it. Also for a hit run on an AI thread to an actor New Physics
+/// already has (claimed only on the main thread, such a hit played the cripple reaction over
+/// it). The crippled state, its effects and the limping locomotion are the game's, untouched.
+pub(crate) fn hit_me_hooked(e: &mut Engine, a: &[u32], game: impl FnOnce(&mut Engine, &[u32])) {
+    let queued = e.call(AI_THREAD, &[]).bool();
+    let np = if queued {
+        crate::gunplay::is_on() && crate::new_physics::owns(a[0])
+    } else {
+        crate::new_physics::claim(e, a[0])
+    };
+    let cripple = np.then(|| {
+        let was = e.mem.u8(crate::new_physics::CRIPPLE_IDLE);
+        e.mem.set_u8(crate::new_physics::CRIPPLE_IDLE, 0);
+        was
+    });
+    game(e, a);
+    if let Some(was) = cripple {
+        e.mem.set_u8(crate::new_physics::CRIPPLE_IDLE, was);
+    }
+    if !queued {
+        after_hit(e, a[0], a[1]);
+    }
+}
+
 fn after_hit(e: &mut Engine, target: u32, hit: u32) {
     let t = crate::gunplay::tuning();
     if !crate::gunplay::is_on() || hit == 0 || target == 0 {
