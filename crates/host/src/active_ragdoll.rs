@@ -1130,6 +1130,7 @@ fn drawn_against(e: &mut Engine, bones: &[u32], refs: &[(u32, M3, V3)]) -> (f32,
 /// spine top and head as its skinned geometry's bones have them, against their animated world
 /// (`Rig::drawn_offset`, `drawn_turn`; the pose log's).
 pub(crate) fn read_drawn(e: &mut Engine) {
+    crate::new_physics::read_drawn(e);
     let wanted: Vec<(u32, u32, Vec<(u32, M3, V3)>)> = {
         let rigs = RIGS.lock().unwrap_or_else(|p| p.into_inner());
         rigs.iter()

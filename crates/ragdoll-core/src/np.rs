@@ -74,6 +74,16 @@ pub const MOVING_LEGS: (f32, f32) = (4.0, 2.0);
 /// Falling: the muscles' share (the ragdoll's until the game takes it, M4).
 pub const FALLING_MUSCLES: f32 = 0.25;
 
+/// The animation's velocity is measured across this much of its recent frames (s), once it has
+/// at least [`ANIM_V_LEAST`] of them.
+pub const ANIM_V_WINDOW: f32 = 0.12;
+pub const ANIM_V_LEAST: f32 = 0.06;
+
+/// `pose` (body-node worlds, game units) moved by `by` (game units).
+fn shift_by(pose: &[(M3, V3)], by: V3) -> Vec<(M3, V3)> {
+    pose.iter().map(|(r, x)| (*r, add(*x, by))).collect()
+}
+
 /// A rise's pelvis must gain this (m) to count as progress.
 pub const RISE_GAINED: f32 = 0.01;
 /// Rising, a joint's goal lies at most this far from where the joint is (rad): the muscles' effort
@@ -150,6 +160,14 @@ pub struct Np {
     /// The animation's centre of mass last frame (unshifted, m) for its velocity, and that
     /// velocity (m/s; set by [`Np::set_anim_velocity`] for the first frame).
     anim_com: Option<V3>,
+    /// The animation's centre of mass over the last [`ANIM_V_WINDOW`] (the clock's time, m,
+    /// local): its velocity is measured across them, frames where the pose did not advance left
+    /// out.
+    anim_samples: std::collections::VecDeque<(f32, V3)>,
+    /// The game's position of the local frame the body is simulated in (game units; the actor's
+    /// first root, flat): far from the world's origin an f32's last digits are millimetres, and
+    /// a substep's velocity from them tenths of a metre a second.
+    pub origin: V3,
     anim_v: V3,
     /// The walls the body may rest on (m; the floor is the frame's).
     pub walls: Vec<Plane>,
@@ -214,7 +232,11 @@ impl Np {
     /// The body set on the animated pose `anim` (each body's node's world, game units), still;
     /// muscles at `strength`.
     pub fn new(model: Model, anim: &[(M3, V3)], strength: f32) -> Np {
-        let states = model.states_from_nodes(anim);
+        let origin = anim
+            .get(model.root)
+            .map_or([0.0; 3], |r| [r.1[0].round(), r.1[1].round(), 0.0]);
+        let anim = shift_by(anim, scale(origin, -1.0));
+        let states = model.states_from_nodes(&anim);
         let muscles = Muscles::new(&model, strength);
         let bodies = Bodies::new(&model);
         let root_kd_turn = ROOT_SUPPORT
@@ -224,6 +246,8 @@ impl Np {
         Np {
             balance,
             anim_com: None,
+            anim_samples: std::collections::VecDeque::new(),
+            origin,
             anim_v: [0.0; 3],
             walls: Vec::new(),
             keep_down: false,
@@ -250,6 +274,7 @@ impl Np {
         if body >= self.states.len() || !impulse.iter().all(|x| x.is_finite()) {
             return;
         }
+        let at = sub(at, self.origin);
         self.model
             .impulse(&mut self.states, body, scale(at, 1.0 / UNITS), impulse);
         let size = crate::flinch::length(impulse);
@@ -261,16 +286,57 @@ impl Np {
     /// moved by the balance's shift, the floor at `floor` (game units); answers each body's node's
     /// world to draw.
     pub fn frame(&mut self, anim: &[(M3, V3)], floor: f32, dt: f32) -> Vec<(M3, V3)> {
+        // Simulated about `origin`: in, and back out.
+        let local = shift_by(anim, scale(self.origin, -1.0));
+        let to_m = 1.0 / UNITS;
+        let walls = std::mem::take(&mut self.walls);
+        self.walls = walls
+            .iter()
+            .map(|w| Plane {
+                p: sub(w.p, scale(self.origin, to_m)),
+                n: w.n,
+            })
+            .collect();
+        let out = self.frame_local(&local, floor, dt);
+        self.walls = walls;
+        shift_by(&out, self.origin)
+    }
+
+    fn frame_local(&mut self, anim: &[(M3, V3)], floor: f32, dt: f32) -> Vec<(M3, V3)> {
         let unshifted = self.model.states_from_nodes(anim);
         let (com_now, _) = self.model.centre_of_mass(&unshifted);
-        let anim_v = match (self.anim_com, dt > 0.0) {
-            (Some(was), true) => scale(sub(com_now, was), 1.0 / dt),
-            _ => self.anim_v,
-        };
-        self.anim_v = anim_v;
         let jumped = self
             .anim_com
             .is_some_and(|was| crate::flinch::length(sub(com_now, was)) * UNITS > JUMP);
+        if jumped {
+            self.anim_samples.clear();
+        }
+        // The animation's velocity across the last [`ANIM_V_WINDOW`] of frames whose pose
+        // advanced (at least [`ANIM_V_LEAST`] of them; until then the seed): a frame's own
+        // difference over its time was the noise of a fraction of a unit at 250 frames a second.
+        let now_t = self.t + dt;
+        let advanced = self.anim_samples.back().map_or(true, |&(_, c)| {
+            crate::flinch::length(sub(com_now, c)) > 1e-6
+        });
+        if dt > 0.0 && advanced {
+            self.anim_samples.push_back((now_t, com_now));
+            while self.anim_samples.len() > 2
+                && self
+                    .anim_samples
+                    .get(1)
+                    .is_some_and(|s| now_t - s.0 >= ANIM_V_WINDOW)
+            {
+                self.anim_samples.pop_front();
+            }
+            if let (Some(&(t0, c0)), Some(&(t1, c1))) =
+                (self.anim_samples.front(), self.anim_samples.back())
+            {
+                if t1 - t0 >= ANIM_V_LEAST {
+                    self.anim_v = scale(sub(c1, c0), 1.0 / (t1 - t0));
+                }
+            }
+        }
+        let anim_v = self.anim_v;
         self.anim_com = Some(com_now);
         let shift = self.balance.shift;
         let anim_states: Vec<State> = unshifted
@@ -865,6 +931,7 @@ impl Np {
     /// walking when it is taken): the bodies move with it.
     pub fn set_anim_velocity(&mut self, v: V3) {
         self.anim_v = scale(v, 1.0 / UNITS);
+        self.anim_samples.clear();
         for s in &mut self.states {
             s.v = self.anim_v;
         }
@@ -890,6 +957,10 @@ impl Np {
         self.balance.take(by);
         if let Some(c) = self.anim_com.as_mut() {
             *c = add(*c, by);
+        }
+        // The actor moved: the animation comes moved by it, which is not its own motion.
+        for s in self.anim_samples.iter_mut() {
+            s.1 = add(s.1, by);
         }
         scale(by, UNITS)
     }

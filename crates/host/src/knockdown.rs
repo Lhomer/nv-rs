@@ -1387,6 +1387,7 @@ fn pending_knock_downs(e: &mut Engine) {
 /// is down, getting up or followed long enough, its fall's damage (module documentation).
 pub fn frame(e: &mut Engine) {
     pending_knock_downs(e);
+    crate::new_physics::main_thread(e);
     let followed: Vec<Followed> = DOWN.lock().unwrap_or_else(|p| p.into_inner()).clone();
     bowling(e, &followed);
     launches(e);

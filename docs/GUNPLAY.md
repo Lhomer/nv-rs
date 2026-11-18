@@ -732,6 +732,43 @@ the floor when a palm presses it); dying 2.5 s in, its 18 bodies are placed on t
 (0.00 units off) and given its velocities, and New Physics lets go. The M4 fall test runs with
 the downed keeping off (`set_keep_down`, tests only).
 
+**Fix from Patrick's clip 2026-11-17_18-59-52_7825515** (`bNewPhysics=1`; 39 hits of 25.9 N s,
+a 9mm at 0.32 m/s, on a Powder Ganger: each taken, fallen in 2 to 3 frames with no step,
+"not handed over (on an AI thread): let go", drawn 44 to 75 degrees and 38 to 58 units off what
+was written). Causes and fixes:
+- **A spurious fall.** The animation's velocity was the pose at `HitMe` against the first frame's,
+  over the wall clock's frame, then each frame's raw change over its time: at 250 frames a second
+  a fraction of a unit of animation (and the root's unit between the hit and the first frame)
+  was metres a second, and the capture point flew out. Now `Np` is made on the first frame's
+  pose, still; the animation's velocity is its centre's move across the last 0.12 s of frames
+  whose pose advanced (at least 0.06 s of them; `np::ANIM_V_WINDOW`), the actor's own moves taken
+  out; the step is the game's frame time (`011dea30`, what its AI threads step the world by: 0 in
+  a menu, slowed with the time), not the wall clock. The body is simulated about a local origin
+  (the actor's first root, `Np::origin`): at (-72152, 8282) an f32's last digit is 0.06 mm, a
+  substep's velocity from it 0.24 m/s. And the solver's substeps are a 960th of a second whatever
+  the frame (`np_body::SUBSTEP`): cut 16 to a frame, the same hit recoiled 4.3 degrees at 250 frames
+  a second and 7.9 at 30 (now 6.6 to 6.8).
+- **The hand-over could not happen.** New Physics runs at the draw's set-up, while the game's AI
+  threads use the task queue, where `KnockExplosion` is refused. A fall (and the downed AI's
+  give-up, and a death's bodies) now waits for the main thread's update
+  (`new_physics::main_thread`, from `crate::knockdown::frame`), the body simulated and drawn
+  meanwhile; a fall is never let go: if the game refuses it, New Physics keeps it downed.
+- **The read-back.** The 3D is now brought up to its locals before the animation is read and
+  written against (a root moved since its worlds were updated was a unit off every bone). The
+  game's 44 to 75 degrees are not reproduced in the fixture: the log now says, for a take's first
+  3 frames, each body's read-back (`[np readback]`) and, at the world pass, each body as drawn
+  against as written (`[np drawn]`: a bone the game's AI threads' ragdoll-controller pass wrote
+  after us shows there), and for its first 6 frames the balance (`[np balance]`: the frame's
+  time, the animation's speed, the body's against it, the capture point outside the feet, the
+  phase); `[np fall]` says its reason (steps, unreachable, path).
+Fixture tests on the game's path (`np_game_path_*`: the actor at (-72152, 8282, 223), claim and
+hit in one frame, the root moved a unit before the first frame's draw, 0.3 units of jitter a
+frame, `0x008c7aa0` true at the draw and false at the main thread's update, frame times 0.004 and
+0.016 s), each failing on 7825515 but the switch's: 0.32 m/s stands throughout, no step, the spine
+6.5 and 6.3 degrees, held, drawn as written (0.000 degrees, 0.008 units); 0.8 m/s one step, no
+fall; 4.35 m/s (M4's hand-over) knocked down 1 frame after the hit on the main thread, the game's
+bodies' centre 1.000 of New Physics', never let go; off, nothing taken.
+
 **Not done in M6 (for a later pass):** crawling to cover (the combat controller's cover point as
 the body's travel goal: `FindCombatLocation` `0099ac20`); the shot's origin and direction from the
 weapon as drawn (the game aims its NPC shots from the weapon node as animated, `fire_locate`, so a

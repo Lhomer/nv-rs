@@ -128,6 +128,11 @@ pub struct Balance {
     pub lower: f32,
     /// Moving: seconds since it was knocked off its path (its path follows it meanwhile).
     pub knocked: Option<f32>,
+    /// Why it fell: "steps" (out of steps), "unreachable" (past any step's reach at once),
+    /// "path" (moving, knocked too far off its path); empty while it has not.
+    pub fall_reason: &'static str,
+    /// The last frame's centre of mass velocity against the animation's (m/s).
+    pub rel_v: V3,
 }
 
 /// What the balance asks of the body this frame.
@@ -195,6 +200,8 @@ impl Balance {
             },
             lower: 0.0,
             knocked: None,
+            fall_reason: "",
+            rel_v: [0.0; 3],
         }
     }
 
@@ -269,6 +276,7 @@ impl Balance {
         let height = (com[2] - floor).max(0.2);
         let omega = (GRAVITY / height).sqrt();
         let rel_v = sub(v, anim_v);
+        self.rel_v = rel_v;
         let flat = |a: V3| [a[0], a[1], 0.0];
         self.capture = add(flat(com), scale(flat(rel_v), 1.0 / omega));
         self.moving = length(flat(anim_v)) > MOVING;
@@ -409,6 +417,7 @@ impl Balance {
                 self.knocked = None;
             }
             if length(flat(rel_v)) / omega > PATH_FALL {
+                self.fall_reason = "path";
                 self.phase = Phase::Falling;
                 self.since = 0.0;
                 ask.falling = true;
@@ -430,6 +439,11 @@ impl Balance {
             };
         if out {
             if self.steps >= MAX_STEPS || self.outside > UNREACHABLE {
+                self.fall_reason = if self.steps >= MAX_STEPS {
+                    "steps"
+                } else {
+                    "unreachable"
+                };
                 self.phase = Phase::Falling;
                 self.since = 0.0;
                 ask.falling = true;

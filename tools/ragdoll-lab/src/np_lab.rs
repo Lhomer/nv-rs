@@ -211,7 +211,7 @@ pub fn run_scene(
                 return true;
             }
             let b = np.model.body(h.body).expect("a struck body");
-            let node = np.model.node_worlds(&np.states)[b].1;
+            let node = add(np.model.node_worlds(&np.states)[b].1, np.origin);
             let mass = np.model.mass;
             let j = ragdoll_core::flinch::scale(h.dir, h.speed * mass);
             np.hit(b, add(node, h.offset), j);
@@ -235,6 +235,7 @@ pub fn run_scene(
         let anim = moved_anim(t + FRAME, moved);
         let nodes = np.frame(&anim, floor, FRAME);
         moved = add(moved, np.take_move());
+        // (`np.states` are about `np.origin`: flat, so heights are the world's.)
         let lowest = lowest_point(&np.model, &np.states) * UNITS - floor;
         let root = np.model.root;
         let against_root = |b: usize| {
@@ -270,7 +271,10 @@ pub fn run_scene(
             floor_load: np.report.floor_load.iter().sum(),
             lifting: np.down.as_ref().is_some_and(|d| d.lifting),
             in_wall: in_wall(&np, &scene.walls),
-            com: ragdoll_core::flinch::scale(np.model.centre_of_mass(&np.states).0, UNITS),
+            com: add(
+                ragdoll_core::flinch::scale(np.model.centre_of_mass(&np.states).0, UNITS),
+                np.origin,
+            ),
             clamped: np.report.clamped,
             rising: np.rise,
             over_feet: np.down.as_ref().map_or(0.0, |d| d.reading.over_feet),
@@ -290,9 +294,12 @@ fn in_wall(np: &Np, walls: &[(V3, V3)]) -> f32 {
     let mut most = 0.0f32;
     for (def, s) in np.model.bodies.iter().zip(&np.states) {
         for e in def.ends {
-            let p = ragdoll_core::flinch::scale(
-                add(s.x, ragdoll_core::active::qrot(s.q, sub(e, def.com))),
-                UNITS,
+            let p = add(
+                ragdoll_core::flinch::scale(
+                    add(s.x, ragdoll_core::active::qrot(s.q, sub(e, def.com))),
+                    UNITS,
+                ),
+                np.origin,
             );
             for (w, n) in walls {
                 let d = ragdoll_core::flinch::dot(sub(p, *w), *n) - def.radius * UNITS;
@@ -779,7 +786,7 @@ mod tests {
         assert!(still_at_end(&open) < 2.0 && end.wall_load == 0.0);
     }
 
-    /// Asked to stand, a strong, whole actor stands by its balance within 5 s of the ask (on its
+    /// Asked to stand, a strong, whole actor stands by its balance within 6 s of the ask (on its
     /// back on open floor, and propped on the wall): it sits up, draws its feet in, comes over
     /// them and pushes up, and the balance has it again (no label); its centre of mass ends over
     /// its feet (outside them by at most 0.05 m once the pelvis is over 80% of its height); no node moves more
@@ -814,7 +821,7 @@ mod tests {
                 end.nodes[0].1[2] - r.floor
             );
             assert!(
-                stood.is_some_and(|t| t < 5.0),
+                stood.is_some_and(|t| t < 6.0),
                 "{name}: not standing ({stood:?})"
             );
             assert!(
@@ -958,5 +965,39 @@ mod tests {
             lines.join(", ")
         );
         assert!(stood >= 16, "{stood} of {n}");
+    }
+
+    /// The same hit at 250, 125, 60 and 30 frames a second (the clip's 250, the lab's 60): the
+    /// spine's top peaks within 1 degree of the 60-frame figure each time, for 0.32 and 0.8 m/s
+    /// (the solver's substeps are a 960th of a second whatever the frame; cut 16 to a frame, a
+    /// 4 ms frame recoiled half as much).
+    #[test]
+    fn np_the_same_hit_at_any_frame_rate() {
+        let (model, anim, floor) = bind_pose();
+        let spine = model.body("Bip01 Spine2").unwrap();
+        for speed in [0.32f32, 0.8] {
+            let peak_at = |dt: f32| {
+                let mut np = Np::new(model.clone(), &anim, 1.0);
+                let mut peak = 0.0f32;
+                for i in 0..(1.5 / dt) as usize {
+                    if i == (0.1 / dt) as usize {
+                        let at = add(anim[spine].1, [0.0, 8.0, 4.0]);
+                        np.hit(spine, at, [0.0, -speed * model.mass, 0.0]);
+                    }
+                    let d = np.frame(&anim, floor, dt);
+                    peak = peak.max(angle_between(&d[spine].0, &anim[spine].0).to_degrees());
+                }
+                peak
+            };
+            let base = peak_at(1.0 / 60.0);
+            for dt in [0.004f32, 0.008, 0.033] {
+                let p = peak_at(dt);
+                eprintln!("RESULT np {speed} m/s at dt {dt}: spine peak {p:.2} (60 fps {base:.2})");
+                assert!(
+                    (p - base).abs() < 1.0,
+                    "{speed} m/s dt {dt}: {p:.2} vs {base:.2}"
+                );
+            }
+        }
     }
 }

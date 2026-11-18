@@ -32,8 +32,11 @@ use crate::np_skeleton::{Limit, Measure, Skeleton, HAVOK_UNITS};
 pub const UNITS: f32 = crate::UNITS_PER_METRE;
 /// Gravity (m/s²).
 pub const GRAVITY: f32 = 9.81;
-/// Substeps a frame.
+/// Substeps a 60th of a second (the solver's step is a 960th whatever the frame's length:
+/// [`SUBSTEP`]), and the most a frame takes.
 pub const SUBSTEPS: usize = 16;
+pub const SUBSTEP: f32 = 1.0 / (60.0 * SUBSTEPS as f32);
+pub const MAX_SUBSTEPS: usize = 48;
 /// How far past the animated pose's own value a limit is widened (radians, 3 degrees).
 pub const LIMIT_MARGIN: f32 = 0.052;
 /// Downed, the most a joint limit turns its joint back in a substep (rad; 9.6 rad/s at 16
@@ -456,7 +459,11 @@ impl Model {
         if dt <= 0.0 || states.len() != self.bodies.len() {
             return report;
         }
-        let h = dt / SUBSTEPS as f32;
+        // Substeps of one length whatever the frame's (`SUBSTEP`): the same body at 250 frames a
+        // second as at 60 (a frame cut in 16 made a 4 ms frame's substeps a quarter as long,
+        // and the recoil half as large).
+        let substeps = ((dt / SUBSTEP).round() as usize).clamp(1, MAX_SUBSTEPS);
+        let h = dt / substeps as f32;
         // The limits widened by the animated pose's own values.
         let widened: Vec<Limit> = self
             .joints
@@ -482,7 +489,7 @@ impl Model {
                 lim
             })
             .collect();
-        for sub_i in 0..SUBSTEPS {
+        for sub_i in 0..substeps {
             let prev: Vec<State> = states.to_vec();
             // The muscles' hold of the weight below each joint (a torque pair on the joint).
             for (j, def) in self.joints.iter().enumerate() {
@@ -522,7 +529,7 @@ impl Model {
                 self.pin(states, def);
                 let soft = tracking.is_some_and(|t| t.soft_limits);
                 let out = self.limit(states, def, &widened[j], soft);
-                if sub_i == SUBSTEPS - 1 {
+                if sub_i == substeps - 1 {
                     report.limit_most = report.limit_most.max(out);
                 }
                 if let Some(d) = drives.get(j) {
@@ -541,7 +548,7 @@ impl Model {
             let grip: &[usize] = tracking.map_or(&[], |t| &t.grip);
             let loads = self.surfaces(states, &prev, &surfaces, slip);
             // Each surface's push this substep as a force (N), the frame's mean.
-            let to_force = 1.0 / (h * h * SUBSTEPS as f32);
+            let to_force = 1.0 / (h * h * substeps as f32);
             for &(b, k, lambda, _, _) in &loads {
                 if k == 0 {
                     report.floor_load[b] += lambda * to_force;

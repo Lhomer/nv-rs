@@ -39,6 +39,11 @@ machinery runs.
   while it cannot aim), death puts the game's ragdoll on the pose drawn, three failed rises fall
   back to M4's hand-over; `[np pose]`, `[np choice]`, `[np death]`. Not done: crawling to cover,
   the shot's origin from the drawn weapon, creatures. Not run in the game.
+- **Clip 7825515 fix:** the spurious fall (the animation's velocity over 0.12 s of the game's
+  frames, a local origin, substeps of a 960th), the fall's hand-over on the main thread (never
+  let go), the 3D updated before the write; `[np balance]`, `[np readback]`, `[np drawn]`, the
+  fall's reason. The game's 44-75 degree read-back is not reproduced: the next clip's
+  `[np drawn]` lines say whether the AI threads write over us.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 

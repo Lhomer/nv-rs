@@ -89,8 +89,13 @@ fn np_run(speed: f32, seconds: f32, on: bool) -> Run {
     let start = Instant::now();
     let mut hit_done = false;
     let mut before: Option<Vec<(M3, V3)>> = None;
+    let mut wall = Instant::now();
     while start.elapsed() < Duration::from_secs_f32(seconds) {
         std::thread::sleep(Duration::from_millis(16));
+        // The game's frame seconds (New Physics' step): this run's wall clock frame.
+        f.e.mem
+            .set_f32(0x011d_ea30, wall.elapsed().as_secs_f32().min(0.05));
+        wall = Instant::now();
         // The game's frame: the root where the actor is, the animation's pose.
         let reference = f.reference();
         rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, reference);
@@ -354,8 +359,15 @@ fn fall_run(speed: f32) -> Fell {
     // The last frame's time (s), as New Physics measures it: from one frame's run to the next.
     let mut frame = 0.0f32;
     let mut last_run: Option<Instant> = None;
+    let mut wall = Instant::now();
     while start.elapsed() < Duration::from_secs_f32(2.0) {
         std::thread::sleep(Duration::from_millis(16));
+        // The game's frame seconds (New Physics' step): this run's wall clock frame.
+        f.e.mem
+            .set_f32(0x011d_ea30, wall.elapsed().as_secs_f32().min(0.05));
+        wall = Instant::now();
+        // The main thread's update: what waits for it (a fall's or a death's hand-over).
+        main_thread(&mut f.e);
         if f.e.mem.u8(rig_fixture::PROCESS_AT + 0x13c) != 0 {
             break;
         }
@@ -619,13 +631,29 @@ fn down_run(seconds: f32, die_at: Option<f32>) -> Downed {
     let mut hit_done = false;
     let mut died = false;
     let mut drawn_at_death: Vec<(M3, V3)> = Vec::new();
+    let mut wall = Instant::now();
     while start.elapsed() < Duration::from_secs_f32(seconds) {
         std::thread::sleep(Duration::from_millis(16));
+        // The game's frame seconds (New Physics' step): this run's wall clock frame.
+        f.e.mem
+            .set_f32(0x011d_ea30, wall.elapsed().as_secs_f32().min(0.05));
+        wall = Instant::now();
+        // The pose last drawn, then the main thread's update: what waits for it (a fall's or a
+        // death's hand-over takes that pose).
+        if died && owns(ACTOR) {
+            if let Some((p, _)) = drawn(ACTOR) {
+                drawn_at_death = p;
+            }
+        }
+        main_thread(&mut f.e);
         let t = start.elapsed().as_secs_f32();
         let reference = f.reference();
         rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, reference);
         f.animate();
-        keyframe(&mut f);
+        // The game keyframes a living actor's bodies to its animation, not a dead one's.
+        if !died {
+            keyframe(&mut f);
+        }
         if !hit_done && t > 0.2 {
             hit_done = true;
             let chest = f.world_of(f.at[body_nodes[spine]]).1;
@@ -774,4 +802,281 @@ fn np_dies_while_downed_on_fnvs_skeleton() {
     );
     assert!(r.death_off < 1.5, "{:.2}", r.death_off);
     assert!(!owns(ACTOR));
+}
+
+// --- The in-game path (Patrick's clip 2026-11-17_18-59-52_7825515). -----------------------------
+
+/// What a run on the in-game path did.
+struct GamePath {
+    claimed: bool,
+    /// Every frame New Physics had it standing (the balance's phase), its catching steps, how
+    /// long it held it (s), the spine top's peak off its animation (degrees), the most drawn lay
+    /// off what was written (degrees, units), whether it ever fell.
+    standing_throughout: bool,
+    steps: u32,
+    held: f32,
+    spine_peak: f32,
+    readback: (f32, f32),
+    fell: bool,
+    /// The frames from the hit to a knock state other than 0, the game's bodies' centre against
+    /// New Physics' (a ratio), New Physics' let-gos.
+    knocked_after: Option<u32>,
+    centre_ratio: f32,
+    let_gos: u32,
+}
+
+/// The run the game makes (`docs/GUNPLAY.md`, the clip): the actor at (-72152, 8282, 223); each
+/// frame, the main thread's update (`main_thread`, the AI threads idle: `0x008c7aa0` false) and
+/// the animation (0.3 units of jitter on the root each frame), then the draw's set-up
+/// (`active_ragdoll::apply` with `0x008c7aa0` true: the AI threads use the task queue); the
+/// game's frame seconds `dt`. The hit is the `HitMe` wrapper's: claim and hit in one frame, the
+/// root moved 1 unit after it with its worlds not yet updated (the first frame's draw).
+fn game_path(speed: f32, dt: f32, on: bool, keep_down: bool, seconds: f32) -> GamePath {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static AI_BUSY: AtomicBool = AtomicBool::new(false);
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let at: V3 = [-72152.0, 8282.0, 223.0];
+    let mut f = Fixture::new(
+        rig_fixture::fnv_skeleton(),
+        Ground {
+            collision: Some(at[2]),
+            navmesh: at[2] - 8.0,
+        },
+    );
+    f.make_character();
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    set_keep_down(keep_down);
+    let was = crate::gunplay::tuning();
+    crate::gunplay::set_tuning(crate::gunplay::Tuning {
+        new_physics: on,
+        ..was
+    });
+    rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, at);
+    f.e.register_double(0x008c_7aa0, |_, _| {
+        u32::from(AI_BUSY.load(Ordering::Relaxed)).into_ret()
+    });
+    f.e.register_double(0x0088_45a0, |_, _| 1u32.into_ret());
+    f.e.register_double(crate::hit_force::KNOCK_EXPLOSION, |e, a| {
+        e.mem.set_u8(a[0] + 0x13c, 2);
+        0u32.into_ret()
+    });
+    f.e.register_double(0x00ca_8960, |e, a| {
+        let p = rig_fixture::read3(e, a[1]);
+        rig_fixture::write3(e, a[0] + 0x120, p);
+        for i in 0..4 {
+            let x = e.mem.f32(a[2] + 4 * i);
+            e.mem.set_f32(a[0] + 0x160 + 4 * i, x);
+        }
+        0u32.into_ret()
+    });
+    let body_nodes: Vec<usize> = model()
+        .bodies
+        .iter()
+        .map(|b| f.nodes.iter().position(|n| n.name == b.node).unwrap())
+        .collect();
+    let spine = model().body("Bip01 Spine2").unwrap();
+    let root = f.at[0];
+    let bodies_of = |f: &mut Fixture| crate::knockdown::tests_bodies(&mut f.e, ACTOR);
+    let keyframe = |f: &mut Fixture| {
+        for (node, body) in bodies_of(f) {
+            let (r, t) = f.world_of(node);
+            rig_fixture::write3(&mut f.e, body + 0x120, scale(t, 1.0 / rig_fixture::HK));
+            let q = ragdoll_core::active::qfrom_m(&r);
+            for (i, x) in [q[1], q[2], q[3], q[0]].into_iter().enumerate() {
+                f.e.mem.set_f32(body + 0x160 + 4 * i as u32, x);
+            }
+        }
+    };
+    let lets_before = let_gos();
+    let mut run = GamePath {
+        claimed: false,
+        standing_throughout: true,
+        steps: 0,
+        held: 0.0,
+        spine_peak: 0.0,
+        readback: (0.0, 0.0),
+        fell: false,
+        knocked_after: None,
+        centre_ratio: 0.0,
+        let_gos: 0,
+    };
+    let frames = (seconds / dt).round() as u32;
+    let hit_frame = (0.1 / dt).round() as u32;
+    let mut seed = 0x1234_5678u32;
+    let mut jitter = || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let a = (seed >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU;
+        [0.3 * a.cos(), 0.3 * a.sin(), 0.0]
+    };
+    for frame in 0..frames {
+        f.e.mem.set_f32(0x011d_ea30, dt);
+        // The main thread's update: the hand-overs waiting, then the animation.
+        AI_BUSY.store(false, Ordering::Relaxed);
+        main_thread(&mut f.e);
+        let knock = f.e.mem.u8(rig_fixture::PROCESS_AT + 0x13c);
+        if knock != 0 && run.knocked_after.is_none() && frame > hit_frame {
+            run.knocked_after = Some(frame - hit_frame);
+            // The game's bodies against New Physics' at the hand-over.
+            let mass: f32 = model().bodies.iter().map(|b| b.mass).sum();
+            let mut momentum = [0.0f32; 3];
+            for (node, body) in bodies_of(&mut f) {
+                let Some(k) = body_nodes.iter().position(|&i| f.at[i] == node) else {
+                    continue;
+                };
+                let v = scale(rig_fixture::read3(&f.e, body + 0x10), rig_fixture::HK);
+                momentum = add(momentum, scale(v, model().bodies[k].mass));
+            }
+            let centre = length(momentum) / mass;
+            if let Some(fall) = falls().first() {
+                run.centre_ratio = centre / fall.centre.max(1e-3);
+            }
+        }
+        let reference = f.reference();
+        rig_fixture::write3(
+            &mut f.e,
+            root + rig_fixture::LOCAL_TRANSLATION,
+            add(reference, jitter()),
+        );
+        f.animate();
+        keyframe(&mut f);
+        let anim: Vec<(M3, V3)> = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
+        if frame == hit_frame {
+            // `HitMe`'s wrapper: claim, the game's hit, then the hit measured (one frame).
+            run.claimed = claim(&mut f.e, ACTOR);
+            hit(
+                &mut f.e,
+                ACTOR,
+                speed * model().mass,
+                add(anim[spine].1, [0.0, 8.0, 4.0]),
+                [0.0, -1.0, 0.0],
+            );
+            // The root moved a unit since, its worlds not yet brought up to it.
+            let r = rig_fixture::read3(&f.e, root + rig_fixture::LOCAL_TRANSLATION);
+            rig_fixture::write3(
+                &mut f.e,
+                root + rig_fixture::LOCAL_TRANSLATION,
+                add(r, [0.0, 1.0, 0.0]),
+            );
+        }
+        // The draw's set-up, the AI threads mid-frame.
+        AI_BUSY.store(true, Ordering::Relaxed);
+        crate::active_ragdoll::apply(&mut f.e);
+        if owns(ACTOR) {
+            if let Some((p, _)) = drawn(ACTOR) {
+                for (k, &i) in body_nodes.iter().enumerate() {
+                    let w = f.world_of(f.at[i]);
+                    run.readback.0 = run
+                        .readback
+                        .0
+                        .max(ragdoll_core::np_skeleton::angle_between(&w.0, &p[k].0).to_degrees());
+                    run.readback.1 = run.readback.1.max(length(sub(w.1, p[k].1)));
+                }
+                run.spine_peak = run.spine_peak.max(
+                    ragdoll_core::np_skeleton::angle_between(&p[spine].0, &anim[spine].0)
+                        .to_degrees(),
+                );
+            }
+            if let Some((phase, steps, _)) = state(ACTOR) {
+                run.steps = run.steps.max(steps);
+                if phase != ragdoll_core::np_balance::Phase::Standing {
+                    run.standing_throughout = false;
+                }
+                if phase == ragdoll_core::np_balance::Phase::Falling {
+                    run.fell = true;
+                }
+            }
+            run.held += dt;
+        }
+        crate::active_ragdoll::after_draw(&mut f.e);
+        crate::active_ragdoll::unwrite(&mut f.e);
+    }
+    run.let_gos = let_gos() - lets_before;
+    AI_BUSY.store(false, Ordering::Relaxed);
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    set_keep_down(true);
+    crate::gunplay::set_tuning(was);
+    run
+}
+
+/// The clip's hit: a 0.32 m/s chest hit (25.9 N s, a 9mm) at 250 and 60 frames a second on the
+/// game's path: New Physics stands throughout (no step, never falling), the spine's top peaks
+/// 5 to 8 degrees, it has the actor at least 0.5 s, and draws what it wrote (0.5 degrees, 0.5
+/// units).
+#[test]
+fn np_game_path_a_light_hit_stands() {
+    for dt in [0.004f32, 0.016] {
+        let r = game_path(0.32, dt, true, true, 1.5);
+        eprintln!(
+            "RESULT np game path 0.32 m/s dt {dt}: standing throughout {}, steps {}, spine peak {:.1} deg, held {:.2} s, read-back {:.3} deg / {:.3} u, fell {}",
+            r.standing_throughout, r.steps, r.spine_peak, r.held, r.readback.0, r.readback.1, r.fell
+        );
+        assert!(r.claimed);
+        assert!(
+            r.standing_throughout && !r.fell,
+            "dt {dt}: not standing throughout"
+        );
+        assert_eq!(r.steps, 0, "dt {dt}");
+        assert!(
+            (5.0..=8.0).contains(&r.spine_peak),
+            "dt {dt}: spine {:.1}",
+            r.spine_peak
+        );
+        assert!(r.held >= 0.5, "dt {dt}: held {:.2} s", r.held);
+        assert!(
+            r.readback.0 <= 0.5 && r.readback.1 <= 0.5,
+            "dt {dt}: read-back {:?}",
+            r.readback
+        );
+    }
+}
+
+/// 0.8 m/s on the game's path: at least one catching step, no fall.
+#[test]
+fn np_game_path_a_medium_hit_steps() {
+    for dt in [0.004f32, 0.016] {
+        let r = game_path(0.8, dt, true, true, 2.5);
+        eprintln!(
+            "RESULT np game path 0.8 m/s dt {dt}: steps {}, fell {}, spine peak {:.1} deg, read-back {:.3} deg / {:.3} u",
+            r.steps, r.fell, r.spine_peak, r.readback.0, r.readback.1
+        );
+        assert!(r.steps >= 1, "dt {dt}: no step");
+        assert!(!r.fell, "dt {dt}: it fell");
+        assert!(r.readback.0 <= 0.5 && r.readback.1 <= 0.5, "dt {dt}");
+    }
+}
+
+/// 4.35 m/s on the game's path (M4's hand-over: the downed keeping off): the fall is handed to
+/// the game's ragdoll on the main thread within 3 frames of the hit (knock state 2), the game's
+/// bodies' centre within 2% of New Physics', and New Physics never lets it go.
+#[test]
+fn np_game_path_a_heavy_hit_falls_on_the_main_thread() {
+    for dt in [0.004f32, 0.016] {
+        let r = game_path(4.35, dt, true, false, 0.4);
+        eprintln!(
+            "RESULT np game path 4.35 m/s dt {dt}: knocked {:?} frames after the hit, the game's centre {:.3} of New Physics', let-gos {}",
+            r.knocked_after, r.centre_ratio, r.let_gos
+        );
+        assert!(
+            r.knocked_after.is_some_and(|k| k <= 3),
+            "dt {dt}: {:?}",
+            r.knocked_after
+        );
+        assert!(
+            (r.centre_ratio - 1.0).abs() <= 0.02,
+            "dt {dt}: {:.3}",
+            r.centre_ratio
+        );
+        assert_eq!(r.let_gos, 0, "dt {dt}: let go");
+    }
+}
+
+/// `bNewPhysics=0` on the game's path: nothing is taken.
+#[test]
+fn np_game_path_off_takes_nothing() {
+    let r = game_path(0.32, 0.016, false, true, 0.3);
+    assert!(!r.claimed && r.held == 0.0);
 }
