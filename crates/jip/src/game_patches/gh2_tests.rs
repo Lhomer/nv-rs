@@ -1469,6 +1469,8 @@ fn load_pass_world(draws: &[u32]) -> Engine {
     e.map(0x011d_e000, 0x1000);
     e.map(0x011e_0000, 0x1000);
     e.mem.set_u32(THE_PLAYER_AT, PLAYER_REF);
+    // The player's teammate count (`+0xD68`, JIP's teammate perks step before O17's): none.
+    e.map((PLAYER_REF + 0xd68) & !0xfff, 0x1000);
     e.mem.set_u32(OTHER_ACTOR + 0x68, PROCESS);
     e.mem.set_u8(OTHER_ACTOR + 0x143, 0x90);
     e.mem.set_u32(HIGH_ACTORS_AT, OTHER_ACTOR);
@@ -1580,4 +1582,51 @@ fn o17_a_respawn_clears_the_mark() {
     assert_eq!(e.mem.u8(ACTOR + 0x143), 3);
     e.set_jip_patches(0);
     assert_eq!(reset_actor_flags_respawn(&mut e, &[ACTOR]), None);
+}
+
+/// O18's part of `DoOnLoadActorHook` (`uNPCPerks`): with the NPC perks patch on and O17 off, an
+/// actor with perks gets its lists made and the node is answered, no weapon mods dealt; a dead
+/// one is passed over; with both off no answer.
+#[test]
+fn o18_a_loaded_npc_gets_its_perks_on() {
+    let mut e = mods_world(&[]);
+    e.set_jip_patches(0);
+    assert_eq!(do_on_load_actor(&mut e, &[ACTOR]), None);
+    let block = e.mem.alloc(0xc0);
+    thread_local! { static O18_BLOCK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
+    O18_BLOCK.with(|b| b.set(block));
+    e.register(0x00aa_3e40, |_, _| Ret {
+        eax: O18_BLOCK.with(std::cell::Cell::get),
+        ..Ret::default()
+    });
+    crate::cosave::set_npc_perks_patch(&mut e, true);
+    let id = e.mem.u32(ACTOR + 0xc);
+    crate::cosave::npc_perks(&mut e).emplace(id);
+    e.mem.set_u32(ACTOR + 0x108, 1);
+    assert_eq!(do_on_load_actor(&mut e, &[ACTOR]), Some(0x7777));
+    let made = |e: &mut Engine| crate::cosave::npc_perks(e).get(&id).unwrap().entry_points;
+    assert_eq!(made(&mut e), 0, "dead");
+    e.mem.set_u32(ACTOR + 0x108, 0);
+    assert_eq!(do_on_load_actor(&mut e, &[ACTOR]), Some(0x7777));
+    assert_eq!(made(&mut e), block);
+    assert_eq!(e.mem.u8(ACTOR + 0x143) & 0x10, 0, "O17 off: not dealt");
+}
+
+/// H15 with its command: the first-person slot test answers JIP's mask, 0x7C at the start (slots
+/// 2 to 6, the game's own test); `ToggleBipedSlotVisibility 10 1` shows slot 10,
+/// `ToggleBipedSlotVisibility 3 0` hides slot 3.
+#[test]
+fn h15_toggle_biped_slot_visibility_changes_the_slots_loaded() {
+    use crate::commands::test_support::{call, engine, n};
+    let mut e = engine();
+    let shown = |e: &mut Engine| -> Vec<u32> {
+        (0..20)
+            .filter(|&slot| e.site(BIPED_SLOT_VISIBLE.addr(), &[slot]) == Some(1))
+            .collect()
+    };
+    assert_eq!(shown(&mut e), [2, 3, 4, 5, 6], "the game's slots");
+    call(&mut e, 0x28c4, &[n(10), n(1)]);
+    assert_eq!(shown(&mut e), [2, 3, 4, 5, 6, 10]);
+    call(&mut e, 0x28c4, &[n(3), n(0)]);
+    assert_eq!(shown(&mut e), [2, 4, 5, 6, 10]);
 }

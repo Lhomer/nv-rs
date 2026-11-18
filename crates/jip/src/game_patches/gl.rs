@@ -26,6 +26,10 @@
 //! None of these changes what the renderer receives for a light: G66 only skips the attach call
 //! when there is no node, where the original would crash.
 //!
+//! **GL-2, JIP's light data** (H03, H04, H05, H06, H07, H12; JIP's own, in whenever JIP answers
+//! "installed"): in [`lights`]. These do change light values with JIP installed (the animated
+//! lights); with JIP not installed nothing of them runs.
+//!
 //! Threads: the effect text (`BuildMenuString`, `Register`) runs on the main thread (menus, HUD);
 //! the list word is a lock-free `ext_free` word set and taken there. `FindTargets` and
 //! `CheckAddEffect` run wherever an actor casts or is hit (main and AI threads); their handlers keep
@@ -59,6 +63,45 @@ pub const CAST_SKILL_MODIFIERS: SiteSlot = SiteSlot::new(Owner::Jip, 0x0081_6519
 /// (words: the alchemy item, the active effect; answered: 1 to skip the entry, 0 to apply it).
 pub const CHEM_DURATION: SiteSlot = SiteSlot::new(Owner::Jip, 0x0082_36fd);
 
+/// H23's seam: `MagicCaster::FindTargets`' touch target call (`0x815EE6`; words: the caster; an
+/// answer other than 0 asks the caster's `+0x44` slot instead of `+0x18`).
+pub const CAST_IMMEDIATE_TARGET: SiteSlot = SiteSlot::new(Owner::Jip, 0x0081_5ee6);
+/// The `MagicCaster`'s byte JIP tests (`[ecx+0x7E]`: for an actor's caster at `+0x88`, the actor's
+/// `jipActorFlags2` at `+0x106`).
+const CASTER_JIP_FLAGS: u32 = 0x7e;
+
+// Translated from JIP LN NVSE 57.30 (5a30ac4), internal/hooks.h: CastSpellHook.
+/// H23: while `CastImmediate` casts (its bit [`crate::commands::jip_fn_effect::CAST_IMMEDIATE`]
+/// in the caster's byte `+0x7E`), the touch target comes from the caster's `+0x44` slot (the
+/// target as it is, without the casting animation's step) instead of `+0x18`. A caster that is
+/// not an actor's has its own byte there, which JIP reads as well.
+fn cast_immediate_target(e: &mut Engine, w: &[u32]) -> Option<u32> {
+    let flags = e.mem.u8(w[0] + CASTER_JIP_FLAGS);
+    Some(u32::from(
+        flags & crate::commands::jip_fn_effect::CAST_IMMEDIATE != 0,
+    ))
+}
+
+/// The group's own sites (JIP's light handling and H23).
+const fn jip_sites() -> [u32; 19] {
+    let mut out = [0; 19];
+    let mut i = 0;
+    while i < lights::SITES.len() {
+        out[i] = lights::SITES[i];
+        i += 1;
+    }
+    out[18] = CAST_IMMEDIATE_TARGET.addr();
+    out
+}
+const JIP_SITES: [u32; 19] = jip_sites();
+
+/// JIP's own handlers of the group: its light handling and H23 (with `CastImmediate`, which needs
+/// it, registered here: [`crate::commands::jip_fn_effect::AWAITING_H23`]).
+fn install_jip(e: &mut Engine) {
+    lights::install(e);
+    e.on_site(CAST_IMMEDIATE_TARGET, cast_immediate_target);
+}
+
 /// The group's rows and installers.
 pub const AREA: Area = Area {
     name: "GL",
@@ -73,9 +116,9 @@ pub const AREA: Area = Area {
     ],
     fix_wraps: &[],
     install_fixes,
-    jip_sites: &[],
-    jip_wraps: &[],
-    install_jip: super::nothing,
+    jip_sites: &JIP_SITES,
+    jip_wraps: &[lights::UPDATE_ANIMATED_LIGHT.addr()],
+    install_jip,
 };
 
 fn install_fixes(e: &mut Engine) {
@@ -280,3 +323,6 @@ fn cast_skill_modifiers(e: &mut Engine, words: &[u32]) -> Option<u32> {
 #[cfg(test)]
 #[path = "gl_tests.rs"]
 mod tests;
+
+#[path = "gl_lights.rs"]
+pub mod lights;

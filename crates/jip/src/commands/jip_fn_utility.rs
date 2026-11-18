@@ -7,14 +7,8 @@
 //! `engine_core::mod_files`: what a mod writes is kept in the port's own folder beside the saves,
 //! never in the game folder. 17 of its 19 commands.
 //!
-//! Left for later, each for its reason: `SetOptionalPatch` switches JIP's patches (the switch
-//! rows of step 3.9); `GetOptionalPatch` answers whether each switch's hook or patch is in (`HOOK_INSTALLED`,
-//! `s_patchInstallState`): the port's switch word (`Engine::jip_patches`) says what the player's
-//! ini asks for, and of the switch rows only O6 and O7 are on main (survey of 2026-11-15), so it
-//! would answer 1 for patches the port does not have (`bIgnoreDTDRFix` is on by default);
-//! it waits for those rows, or for a per-switch "in" state that each row sets. `SetOptionalPatch`
-//! must also do what JIP does on a switch: turning O1 (`bIgnoreDTDRFix`) off sets the last hit's
-//! damage threshold G121 shows back to `-FLT_MAX` (`gc::damage`, `s_VATSHitDT`).
+//! `GetOptionalPatch` and `SetOptionalPatch` are built in `jip_fn_utility_patches.rs` (on
+//! `game_patches::switches`).
 
 use super::arrays::{append_element, create_array, Element};
 use super::jip_fn_aux_variable::{array_values, overriding_mod};
@@ -204,19 +198,30 @@ fn editor_id_lookup(e: &mut Engine, text: &[u8]) -> u32 {
         let key = buffer.addr();
         e.mem.write(key, text);
         e.mem.set_u8(key + text.len() as u32, 0);
-        let vtbl = e.mem.u32(map);
-        let bucket = e.call(e.mem.u32(vtbl + 4), &args![map, key]).u32();
-        let equal = e.mem.u32(vtbl + 8);
-        let mut entry = e.mem.u32(e.mem.u32(map + 8) + 4 * bucket);
-        while entry != 0 {
-            let other = e.mem.u32(entry + 4);
-            if e.call(equal, &args![map, key, other]).u32() & 0xff != 0 {
-                return e.mem.u32(entry + 8);
-            }
-            entry = e.mem.u32(entry);
-        }
-        0
+        editor_id_lookup_at(e, key)
     })
+}
+
+/// `GameGlobals::EditorIDsMap()->Lookup(key)` (JIP's `NiTMap<UInt32, UInt32>::Lookup`, through
+/// `LookupFormByEDID`) for a text already in guest memory at `key`: the map's own bucket and
+/// compare functions (its vtable +4 and +8); the form, 0 for none or no map.
+pub(crate) fn editor_id_lookup_at(e: &mut Engine, key: u32) -> u32 {
+    let map = e.mem.u32(EDITOR_IDS_MAP);
+    if map == 0 {
+        return 0;
+    }
+    let vtbl = e.mem.u32(map);
+    let bucket = e.call(e.mem.u32(vtbl + 4), &args![map, key]).u32();
+    let equal = e.mem.u32(vtbl + 8);
+    let mut entry = e.mem.u32(e.mem.u32(map + 8) + 4 * bucket);
+    while entry != 0 {
+        let other = e.mem.u32(entry + 4);
+        if e.call(equal, &args![map, key, other]).u32() & 0xff != 0 {
+            return e.mem.u32(entry + 8);
+        }
+        entry = e.mem.u32(entry);
+    }
+    0
 }
 
 // Translated from JIP LN NVSE 57.30 (5a30ac4), internal/jip_core.cpp: StringToRef.

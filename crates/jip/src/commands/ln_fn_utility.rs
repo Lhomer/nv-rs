@@ -10,8 +10,8 @@
 //! `identity.rs`).
 //!
 //! Left for later, each for its reason: `GetFilesInFolder`, `GetFoldersInFolder` list a folder
-//! (`FindFirstFileA`; the seam has no folder listing yet); `Console` compiles and runs a script
-//! line (`JIPScriptRunner`, not built yet).
+//! (`FindFirstFileA`; the seam has no folder listing yet). `Console` compiles and runs a script
+//! line on JIP's script runner (`crate::script_runner::run_script_source`).
 
 use super::arrays::{create_array, create_string_map, set_element, Element};
 use super::forms::ListNode;
@@ -42,6 +42,7 @@ pub static COMMANDS: Handlers = &[
     (0x2300, get_form_count_type),
     (0x2327, get_default_message_time),
     (0x2328, set_default_message_time),
+    (0x2326, console_line),
 ];
 
 /// A form list's forms (`BGSListForm::list`, a `tList` at +0x18).
@@ -308,7 +309,7 @@ fn file_archived(e: &mut Engine, path: &[u8]) -> bool {
 /// `GetFileAttributesA` of `path` (`/` made `\`) through the seam: 1 when it is there as asked (a
 /// folder or a file), 0 when it is there as the other; when it is not there, a file found in an
 /// opened archive ([`file_archived`]) answers 2.
-fn file_exists_ex(e: &mut Engine, path: &mut [u8], folder: bool) -> u32 {
+pub(crate) fn file_exists_ex(e: &mut Engine, path: &mut [u8], folder: bool) -> u32 {
     backslashes(path);
     if engine_core::mod_files::directory_exists(e, path) {
         return u32::from(folder);
@@ -691,6 +692,27 @@ fn remove_ini_section(e: &mut Engine, w: &[u32]) -> Ret {
     if engine_core::mod_files::exists(e, &path)
         && engine_core::mod_files::remove_profile_section(e, &path, &section).is_ok()
     {
+        a.set_result(e, 1.0);
+    }
+    handled(true)
+}
+
+/// JIP's string buffer (`GetStrArgBuffer`) and `kCommandInfo_Console.numParams` (xNVSE's 21
+/// format parameters).
+const CONSOLE_BUFFER: usize = 0x4_0000;
+const CONSOLE_PARAMS: u32 = 21;
+
+// Translated from JIP LN NVSE 57.30 (5a30ac4), functions_ln/ln_fn_utility.h: Cmd_Console_Execute.
+/// `Console "text"`: the text compiled under the name "Console" into a temporary script and run
+/// once (`JIPScriptRunner::RunScriptSource`, no lambda capture): 1 when it compiled.
+fn console_line(e: &mut Engine, w: &[u32]) -> Ret {
+    let a = CommandArgs::new(w);
+    let f = nvse::commands::string::format_string_args_at(e, &a, 0, CONSOLE_PARAMS);
+    if !f.ok {
+        return handled(true);
+    }
+    let text = super::formatted_in_buffer(e, &f.text, CONSOLE_BUFFER, "Console");
+    if crate::script_runner::run_script_source(e, &text, b"Console", false) {
         a.set_result(e, 1.0);
     }
     handled(true)

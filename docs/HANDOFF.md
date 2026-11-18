@@ -69,6 +69,19 @@ machinery runs.
   cover the capture point (15 cm at least); hand-over inside the skeleton's limits with 3-frame
   velocities. Full-cycle fixture tests with a racing animation thread. Open: rising from a pose with
   the arms 50 degrees out failed all three tries in the fixture. Not run in the game.
+- **Merged** slaterain/main's 51 commits ac92f49 (#699) through 3fb7369 (#744) (Patrick's approval,
+  Nov 18): conflicts in `Cargo.toml` (members: upstream's new fomod, mod-archive and mod-install
+  with the fork's ragdoll-core), `d3d9-wgpu` `device.rs` (the fork's Record capture and upstream's
+  HDR watch both kept, their atomics' imports joined) and `lib.rs` (upstream's `NoFrame` export with
+  the fork's `want_vsync`), `engine-platform` `d3d9real.rs` (the fork's off-screen output and
+  upstream's `wgpu_cannot_draw` both kept), `game-profile` `game_ini.rs` (upstream's fourteen play
+  variables with the fork's rows chained), `DEPENDENCY-LOCK.sha256` (refreshed for the merged
+  Cargo.lock, which differs from upstream's by the fork's ragdoll-core only). After the merge: the
+  fork's `bRecordButton` joined upstream's ninth Display key in a test's format string; Android's
+  window layer (`elsewhere`) given upstream's new `run_on_main_thread`; `android/Cargo.lock` takes
+  upstream's raw-window-metal; upstream's new test that a short-name search of `ClassicPack*.bsa`
+  stops now expects the fork's answer (not found, no stop: Patrick's Linux room fix kept). JIP stays
+  off by default.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 

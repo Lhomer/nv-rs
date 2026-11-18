@@ -6,8 +6,15 @@
 //!   that multiplies (`mul`, `mad`, `dp2add`, `dp3`, `dp4`, the matrix instructions, `lrp`, `nrm`,
 //!   `crs`, `dst`, `pow`'s exponent). This is the rule Direct3D 9 hardware follows and drivers
 //!   still apply to Direct3D 9 shaders; an `nrm` of a zero vector is 0, not NaN.
-//! - **`rsq`, `log`, `pow`** take the absolute value of their source; `log(0)` is -infinity.
-//! - **`rcp`** of 1 is exactly 1.
+//! - **`rsq`, `log`, `pow`** take the absolute value of their source; `log(0)` is -infinity,
+//!   `rsq(0)` +infinity, `rsq` of an infinity 0, `pow(0, y)` 0, 1 or +infinity as y is above, at
+//!   or below 0.
+//! - **`rcp`** of 1 is exactly 1, of 0 +infinity, of an infinity 0.
+//!
+//!   These answers at 0 and infinity are given in the converted code, since SPIR-V leaves them
+//!   undefined and a driver may answer otherwise. `texldp`'s division by w is left as it is (no
+//!   report points at it). Metal compiles with fast math by default, which may fold them away:
+//!   unverified on a Mac.
 //! - **`cmp`** selects on `src0 >= 0`, **`cnd`** on `src0 > 0.5`, **`slt`/`sge`** give 1.0 or
 //!   0.0, **`frc`** is `x - floor(x)`, **`sincos`** writes cosine to x and sine to y.
 //! - **Saturation** clamps to [0, 1] (`saturate`, NaN to 0 as the hardware does).
@@ -458,20 +465,32 @@ fn dp4(a: vec4<f32>, b: vec4<f32>) -> f32 {
     let p = m4(a, b);
     return p.x + p.y + p.z + p.w;
 }
+// Direct3D 9's answers at 0 and infinity, given here because SPIR-V leaves them undefined (the
+// precision of 1 / x, inverseSqrt and log2 at 0 and infinity, exp2 of an infinity): rcp(0) and
+// rsq(0) are +infinity, rcp and rsq of an infinity 0, log(0) -infinity, pow(0, y) 0, 1 or
+// +infinity as y is above, at or below 0. Most drivers already give these; none need to. Metal
+// compiles with fast math by default and may fold the selects away: unverified on a Mac (to check
+// with tests/ops.rs when one runs them).
+fn inf() -> f32 {
+    return bitcast<f32>(0x7f800000u);
+}
 fn rcp(x: f32) -> f32 {
-    return select(1.0 / x, 1.0, x == 1.0);
+    return select(select(select(1.0 / x, 0.0, abs(x) == inf()), inf(), x == 0.0), 1.0, x == 1.0);
 }
 fn rsq(x: f32) -> f32 {
-    return select(inverseSqrt(abs(x)), 1.0, x == 1.0);
+    let a = abs(x);
+    return select(select(select(inverseSqrt(a), 0.0, a == inf()), inf(), a == 0.0), 1.0, a == 1.0);
 }
 fn lg(x: f32) -> f32 {
-    return log2(abs(x));
+    return select(log2(abs(x)), -inf(), x == 0.0);
 }
 fn pw(a: f32, b: f32) -> f32 {
-    return exp2(m1(b, log2(abs(a))));
+    let zero = select(select(1.0, inf(), b < 0.0), 0.0, b > 0.0);
+    return select(exp2(m1(b, lg(a))), zero, a == 0.0);
 }
 fn nrm(a: vec4<f32>) -> vec4<f32> {
-    return m4(a, vec4<f32>(inverseSqrt(dp3(a, a))));
+    let d = dp3(a, a);
+    return m4(a, vec4<f32>(select(inverseSqrt(d), inf(), d == 0.0)));
 }
 fn lrp(s: vec4<f32>, a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
     return m4(s, a - b) + b;
@@ -544,6 +563,13 @@ struct Gen<'a> {
     /// The sun shadows' variant ([`convert_with_sun`]): the register of the sun's light colour,
     /// whose every read is multiplied by the sun's visibility at the pixel.
     sun: Option<u32>,
+    /// The sun shadows' variant with the characters cast ([`convert_with_sun`]): the sampler of the
+    /// game's own projected actor shadows (`ShadowMap`), read as lit (white) so a character casts
+    /// one shadow, the sun's.
+    blank: Option<u32>,
+    /// The variant is a character's own lit draw (its vertex shader skinned): the characters'
+    /// layers allow it more ([`crate::sun_shadow::SKIN_RECEIVER_BIAS`]).
+    skinned: bool,
 }
 
 /// The register of the sun's light colour in a lit pixel shader of the game: `PSLightColor`'s first
@@ -568,18 +594,47 @@ pub fn sun_register(p: &Program) -> Option<u32> {
 /// [`convert`] of a lit pixel shader as the sun shadows' variant: its sun light colour
 /// ([`sun_register`]) times the sun's visibility, looked up in the maps of bind group 3
 /// (`crate::sun_shadow::LOOKUP`). An error for a shader without a sun register.
-pub fn convert_with_sun(p: &Program, link: &Link) -> Result<String, Error> {
+pub fn convert_with_sun(
+    p: &Program,
+    link: &Link,
+    characters: bool,
+    skinned: bool,
+) -> Result<String, Error> {
     let sun = sun_register(p)
         .ok_or_else(|| Error::Unsupported("no sun light colour to shadow".into()))?;
-    convert_inner(p, link, Some(sun))
+    let blank = if characters {
+        game_shadow_sampler(p)
+    } else {
+        None
+    };
+    convert_inner(p, link, Some(sun), blank, skinned)
+}
+
+/// The sampler of the game's own projected actor shadows in a lit pixel shader (`ShadowMap`, s6 in
+/// the SLS families: `f = mask.x (shadow - 1) + 1` multiplies the sun term, SLS2005 of package 010).
+pub fn game_shadow_sampler(p: &Program) -> Option<u32> {
+    (p.stage == Stage::Pixel)
+        .then(|| {
+            p.constants
+                .iter()
+                .find(|c| c.name == "ShadowMap" && c.set == 3)
+        })
+        .flatten()
+        .map(|c| u32::from(c.index))
 }
 
 /// Converts a shader to WGSL, linked as `link` says.
 pub fn convert(p: &Program, link: &Link) -> Result<String, Error> {
-    convert_inner(p, link, None)
+    convert_inner(p, link, None, None, false)
 }
 
-fn convert_inner(p: &Program, link: &Link, sun: Option<u32>) -> Result<String, Error> {
+fn convert_inner(
+    p: &Program,
+    link: &Link,
+    sun: Option<u32>,
+    blank: Option<u32>,
+    skinned: bool,
+) -> Result<String, Error> {
     if p.stage == Stage::Pixel && p.major < 2 {
         return Err(Error::Unsupported(format!("{} pixel shaders", p.profile())));
     }
@@ -604,6 +659,8 @@ fn convert_inner(p: &Program, link: &Link, sun: Option<u32>) -> Result<String, E
         temps: BTreeSet::new(),
         labels: BTreeSet::new(),
         sun,
+        blank,
+        skinned,
     };
     for ins in &p.ins {
         match ins.op {
@@ -693,9 +750,9 @@ impl Gen<'_> {
         );
         if self.sun.is_some() {
             self.out.push_str(&if self.vertex() {
-                crate::sun_shadow::lookup_wgsl_vertex()
+                crate::sun_shadow::lookup_wgsl_vertex(self.skinned)
             } else {
-                crate::sun_shadow::lookup_wgsl()
+                crate::sun_shadow::lookup_wgsl(self.skinned)
             });
         }
         if !self.sig.samplers.is_empty() {
@@ -1253,7 +1310,12 @@ impl Gen<'_> {
                 _ => format!("textureSampleBias(t{n}, s{n}, ({coords}).{c}, {bias})"),
             },
         };
-        let fixed = format!("fixup({call}, R.fix[{}][{}])", n / 4, n % 4);
+        let mut fixed = format!("fixup({call}, R.fix[{}][{}])", n / 4, n % 4);
+        // The game's actor shadows in the sun shadows' variant with the characters cast: lit where
+        // the characters cast this frame (`sun_chars`, [`crate::sun_shadow::LOOKUP`]).
+        if self.blank == Some(n) {
+            fixed = format!("mix({fixed}, vec4<f32>(1.0), sun_chars)");
+        }
         // ps_2_x and ps_3_0 allow a swizzle on the sampler: it applies to the result.
         Ok(if sampler.swizzle == 0xE4 {
             fixed

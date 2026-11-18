@@ -665,6 +665,7 @@ dependencies = [
  "mp3",
  "qos",
  "raw-window-handle",
+ "raw-window-metal",
  "vorbis",
  "windows 0.58.0",
  "winit",

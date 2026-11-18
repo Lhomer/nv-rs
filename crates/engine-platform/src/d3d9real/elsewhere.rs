@@ -26,3 +26,11 @@ pub fn window_moved(_e: &mut Engine, _handle: u32, _rect: [i32; 4], _flags: u32)
 pub(super) fn monitors() -> Result<Vec<crate::machine_table::Monitor>, String> {
     Err("no window layer on this system lists the monitors".to_string())
 }
+
+/// No window layer's loop to give the calling thread (macOS's need, upstream's #694): the game runs
+/// on it, and the process ends when the game returns (status 0) or stops with a panic (101, its
+/// message already printed).
+pub(super) fn run_on_main_thread(game: Box<dyn FnOnce() + Send>) -> ! {
+    let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(game));
+    crate::end_process(if ended.is_ok() { 0 } else { 101 })
+}

@@ -56,10 +56,8 @@ What this build can do today
 ----------------------------
 The program goes on to start the game, drawing with Vulkan, with the same play settings as the
 Windows preview. It is built and unit-tested on Linux, but it has never been started with the
-game's files there, so expect stops nobody has seen yet. Known to be missing on Linux today:
-- Sounds whose rate differs from your sound device's are not heard at first (most of the game's
-  sounds, until the game first changes a sound's pitch): the converter Windows uses for them is
-  being made for Linux.
+game's files there, so expect stops nobody has seen yet: you may be the first to start it. Known to
+be missing on Linux today:
 - Warnings that pop up in a window on Windows (a save that could not be copied) are only in the
   log.
 - A mod with its own loose shader files (HLSL) stops the game where it needs them compiled.
@@ -92,6 +90,12 @@ they are. A save and its .nvse file are copied together.
   ./play.sh --forget-game    forget the remembered game folder (it asks again)
   ./play.sh --import-saves   offer again to copy your saves from Steam's Proton folder
   ./play.sh --check          only check your game's version and say whether it can start
+  ./play.sh --mods           play with mods: the installed ones, then those you put in the "my
+                             mods" folder in nv-rs's own folder (as they would go in Data; it
+                             says where, and its READ ME says more), over a copy of the game
+                             folder made of links in nv-rs's own folder; your game folder is
+                             never changed, and saves made with mods stay apart
+                             (--mods --import-saves copies saves into them)
 
 
 Your files

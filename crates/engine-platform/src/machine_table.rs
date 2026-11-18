@@ -673,16 +673,38 @@ fn documents_too_long(documents: &str) -> bool {
     documents.len() + "\\My Games\\FalloutNV\\Saves\\".len() + 60 >= 260
 }
 
+/// The profile a run plays in: `mods` when `NV_PROFILE` says so (play.sh's `--mods`: saves and
+/// settings made with mods stay apart, as the Windows launcher's `userdata\mods`), else `game`.
+pub fn profile() -> &'static str {
+    match std::env::var("NV_PROFILE").as_deref() {
+        Ok("mods") => "mods",
+        _ => "game",
+    }
+}
+
 /// The game's Documents, roaming and local AppData folders inside nv-rs's own folder `own` (a
 /// full path of this system), as the Windows launcher lays its profile out (`game\Documents`,
-/// `game\AppData\Roaming`, `game\AppData\Local`): this system's paths.
+/// `game\AppData\Roaming`, `game\AppData\Local`, or `mods\...` for [`profile`] `mods`): this
+/// system's paths.
 pub fn game_folders(own: &std::path::Path) -> [std::path::PathBuf; 3] {
-    let game = own.join("game");
+    profile_folders(own, profile())
+}
+
+/// [`game_folders`] of the profile `profile` (`game` or `mods`), whatever this run's is.
+pub fn profile_folders(own: &std::path::Path, profile: &str) -> [std::path::PathBuf; 3] {
+    let game = own.join(profile);
     [
         game.join("Documents"),
         game.join("AppData").join("Roaming"),
         game.join("AppData").join("Local"),
     ]
+}
+
+/// The plugin list the game reads in the profile `profile`: its local AppData's
+/// `FalloutNV/plugins.txt` ([`profile_folders`]).
+pub fn plugins_txt(own: &std::path::Path, profile: &str) -> std::path::PathBuf {
+    let [_, _, local] = profile_folders(own, profile);
+    local.join("FalloutNV").join("plugins.txt")
 }
 
 /// The game's name of a full path of this system: on drive `Z:`, each `/` a `\` (decision 3;
@@ -730,7 +752,8 @@ pub struct Inputs {
 }
 
 /// The table's text and what could not be answered (each a line for the log; such a question
-/// then stops the run where the game asks it, saying it was not captured).
+/// then stops the run where the game asks it, saying it was not captured; the time zone is
+/// answered as UTC instead).
 pub fn write_table(inputs: &Inputs) -> (String, Vec<String>) {
     let mut table = String::from(WINDOWS_FIXED);
     // The game's code page and its OEM page, after the fixed answers' 1252 and 437 (a later line
@@ -755,7 +778,20 @@ pub fn write_table(inputs: &Inputs) -> (String, Vec<String>) {
         .and_then(|zone| zone_lines(zone, inputs.now))
     {
         Ok(lines) => table.push_str(&lines),
-        Err(why) => problems.push(format!("machine table: no time zone: {why}")),
+        // A zone that cannot be read or answered is UTC, as the C library takes a zone it cannot
+        // use (and as a missing zone file already answers, `read_zone`): without a zone the run
+        // would stop at the C runtime's first local time (`__tzset_nolock` 00ee2622: the save
+        // menu's file dates, a save's date).
+        Err(why) => {
+            problems.push(format!(
+                "machine table: the time zone cannot be read ({why}): the game is given UTC"
+            ));
+            let utc = parse_posix_tz("UTC0")
+                .map(Zone::from_rule)
+                .and_then(|zone| zone_lines(&zone, inputs.now))
+                .expect("UTC answers every year");
+            table.push_str(&utc);
+        }
     }
     let (id, leaf_0, leaf_1) = inputs.processor;
     table.push_str(&processor_lines(id, leaf_0, leaf_1));
@@ -773,13 +809,15 @@ pub struct DisplayInputs {
     pub card: Result<Card, String>,
 }
 
-/// The display half's lines, what could not be answered (lines for the log), and why the game
+/// The display half's lines, the lines for the start's log (the real card and the driver name
+/// the game is given, [`display::driver_note`]; what could not be answered), and why the game
 /// cannot draw on this card, if it cannot ([`Card::refusal`]: the start is then refused).
 pub fn display_part(inputs: &DisplayInputs) -> (String, Vec<String>, Option<String>) {
     let mut table = String::new();
     let mut problems = Vec::new();
     match &inputs.card {
         Ok(card) => {
+            problems.push(display::driver_note(card));
             table.push_str(&display::card_lines(card));
             let answers = display::honour_samples(display::CARD, &card.sample_counts);
             table.push_str(&display::honour_blending(&answers, card.float32_blendable));
