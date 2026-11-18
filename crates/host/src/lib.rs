@@ -17,6 +17,7 @@
 //! ("In the running game").
 
 pub mod active_ragdoll;
+pub mod av_table;
 pub mod balance;
 pub mod ballistics;
 pub mod cell_entry_wait;

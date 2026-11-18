@@ -13569,7 +13569,14 @@ fn hit_me_death(e: &mut Engine, s: &mut HitMe) {
         if source_flag {
             category = 0;
         }
-        let announce = if s.limb == -1 {
+        // nv-rs, a crash fix: the exe checks only for -1 here (fnv_decomp's `Actor::HitMe` too:
+        // `if (limbIndex != -1) avo.vf0c(limbIndex)`), but the limb-damage section
+        // (`hit_me_limb_damage`) returns with the body part's `cActorValue` set when it is
+        // outside 0..0x4c, and a creature's slot `+0xC` (`008d4870` < `008d4a80` < `00406d70`)
+        // then reads `[011d61c8 + 4 * limb]` past the actor-value table and its flag word at
+        // `+0x44` (Patrick's 14:49 crash: pi/2 read there, the read of `3fc9101f` faulted). A limb
+        // outside the table is taken as none, as -1 is.
+        let announce = if !(0..0x4d).contains(&s.limb) {
             true
         } else {
             e.vcall(this.addr() + 0xa4, 0x0c, &args![s.limb as u32])

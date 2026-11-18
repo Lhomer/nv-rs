@@ -7,6 +7,37 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-18 (the 14:49 crash: HitMe's limb past the actor-value table)
+
+- **14:49 crash (c08805c1, bNewPhysics=1), fixed:** `3fc9101f` in `00406d70` < `008d4870` <
+  `HitMe`, after the first pellet on Gecko FF001323 (the current reactions' actor; New Physics'
+  FF001322 was only stepping; every `[np world]`/`[np proxy]` line said 0 / 0, so not the
+  14:05 race). The cause is the index, not a writer: `Actor::HitMe`'s limb is the hit body
+  part's `cActorValue` (`BGSBodyPart +0x63`); the limb-damage section returns with it set when it
+  lies outside 0..0x4c, and the death section checks only for -1 before asking the creature's
+  actor-value owner (`008d4870` < `008d4a80` < `00406d70`), which reads `[011d61c8 + 4 * limb]`
+  past the table (pi/2 there in the fixture's crash, as in Patrick's). The exe does the same
+  (fnv_decomp's `Actor::HitMe` too): `actor_p3::hit_me_death` now treats a limb outside the
+  table as none (marked as an nv-rs crash fix).
+- **`crate::av_table`:** `00406d70` hooked (`knockdown::install`): an index outside the table or
+  an entry that is no mapped pointer is said before the read (`[av table] 00406d70 index N ...
+  from <calls>: [addr] = word`). The table is compared with its baseline (said once, `[av table]
+  baseline`) before and after every hit (`hit_me_hooked`), New Physics' write and the reactions'
+  (`active_ragdoll::apply`), New Physics' main-thread pass and the world pass; a change is said
+  with where it was seen (`[av table] changed, seen ...`). This replaces c08805c1's `[np table]`.
+- **Test `np_creature_hits_never_corrupt_the_actor_value_table`** (`av_table_tests.rs`): the
+  game's own `Actor::HitMe` through `hit_me_hooked` (and the knockdown and hit-reaction decisions
+  after it: 16 of 18 bones written a flinch) on a creature with Gecko-like body parts (one
+  `cActorValue` 0x55), 15 pellets, the tenth on lethal, while New Physics' actor steps; an AI
+  thread (`Engine::thread_view`, a second engine on the shared memory) runs an AI mover's
+  `hkpCharacterProxy::setPosition` chain to `hkpPhantom::updateBroadPhase` on the same world each
+  frame, while New Physics moves its actor through the controller's real `SetPosition` chain at
+  the main thread's safe point. On c08805c1's `hit_me_death` it faults reading `3fc9101f` in
+  `00406d70` < `008d4a80` < `008d4870` < `hit_me_death`, as the 14:49 log did. Stand-ins (no game
+  data in the fixture): the creature's slots, its process's actor values, the blood decals
+  (`0088e8d0`, counted), the platform's TLS and critical section, a broad phase finding no pairs.
+  `Fixture::add_actor` gives a second actor its own tree.
+
 ### Claude, 2026-11-18 (New Physics: barriers, the rise's pace, the arms' push, bursts)
 
 - **Done (Patrick's 10:08/10:10 clips on abcb629e):**

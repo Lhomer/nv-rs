@@ -848,6 +848,26 @@ impl Engine {
         self.context_for(None)
     }
 
+    /// Another engine on this one's memory, for a second OS thread (tests of races between the
+    /// game's threads): as a render helper's ([`Engine::helper_context`]), its plain functions
+    /// (test doubles stay here), a view of the same memory (shared first when it is not yet)
+    /// and the same kernel objects; its own call stack, guest stack for locals and TLS (none).
+    /// As [`crate::real_threads::fork_join`] does, the kernel and the device state live for good
+    /// from the first call (the view aliases them). The caller moves it to the other thread and
+    /// joins that thread before this engine goes.
+    pub fn thread_view(&mut self) -> Engine {
+        if !self.mem.is_shared() {
+            assert!(
+                self.mem.can_share(),
+                "thread_view with a memory diagnostic on"
+            );
+            self.kernel.leak();
+            self.device.leak();
+            self.mem.start_sharing();
+        }
+        self.helper_context()
+    }
+
     fn context_for(&self, real: Option<Box<crate::real_threads::Ctx>>) -> Engine {
         let mut e = Engine {
             mem: self.mem.view(),

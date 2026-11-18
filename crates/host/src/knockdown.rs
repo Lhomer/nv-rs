@@ -317,6 +317,7 @@ pub fn install(e: &mut Engine) {
         update(e, a)
     });
     install_setting_value(e);
+    crate::av_table::install(e);
     e.register(PROXY_SET_POSITION, |e, a| {
         proxy_set_position(e, a[0], a[1]);
         Ret::default()
@@ -461,7 +462,16 @@ pub(crate) fn hit_me_hooked(e: &mut Engine, a: &[u32], game: impl FnOnce(&mut En
     if np {
         NO_CRIPPLE_IDLE.with(|n| n.set(n.get() + 1));
     }
+    // The actor-value table checked around the game's hit (`crate::av_table`: Patrick's 14:05
+    // and 14:49 crashes read pi/2 from it inside `HitMe`).
+    let id = if e.mem.is_mapped(a[0] + FORM_ID) {
+        e.mem.u32(a[0] + FORM_ID)
+    } else {
+        0
+    };
+    crate::av_table::check(e, &format!("before HitMe on {id:08X}"));
     game(e, a);
+    crate::av_table::check(e, &format!("after HitMe on {id:08X}"));
     if np {
         NO_CRIPPLE_IDLE.with(|n| n.set(n.get() - 1));
     }

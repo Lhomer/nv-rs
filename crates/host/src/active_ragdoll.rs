@@ -1026,6 +1026,7 @@ pub fn world_pass(e: &mut Engine, a: &[u32]) -> Ret {
         a[4] as u8,
     );
     crate::new_physics::after_world_pass(e);
+    crate::av_table::check(e, "after the world pass (New Physics' worlds set)");
     Ret::default()
 }
 
@@ -1720,8 +1721,20 @@ fn yield_now(rig: &mut Rig, why: &str) {
 /// reacting actor's physical body stepped toward its animation and its bones posed (module
 /// documentation).
 pub fn apply(e: &mut Engine) {
+    // The actor-value table checked around each pass (`crate::av_table`: Patrick's 14:49 crash).
+    crate::av_table::check(e, "before New Physics' write");
     // New Physics' actors first (`crate::new_physics`: its own write, the same point).
     crate::new_physics::apply(e);
+    crate::av_table::check(
+        e,
+        "after New Physics' write, before the hit reactions' write",
+    );
+    reactions_apply(e);
+    crate::av_table::check(e, "after the hit reactions' write");
+}
+
+/// [`apply`]'s part for the hit reactions (the current system's rigs).
+fn reactions_apply(e: &mut Engine) {
     let dt = {
         let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
         let dt = last.map_or(0.0, |t| t.elapsed().as_secs_f32());

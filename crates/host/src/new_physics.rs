@@ -60,7 +60,7 @@ pub const LET_GO_OFF: f32 = 1.5;
 const MAX_DT: f32 = 0.05;
 
 /// FNV's ragdoll's model, made once.
-fn model() -> &'static Model {
+pub(crate) fn model() -> &'static Model {
     static M: OnceLock<Model> = OnceLock::new();
     M.get_or_init(Model::fnv)
 }
@@ -1067,42 +1067,6 @@ fn world_said(e: &mut Engine) {
     }
 }
 
-/// The game's static actor-value table (`011d61c8`, 0x134 bytes; `HitMe` reads it by limb):
-/// compared each frame with what it held when first seen while New Physics had an actor, and
-/// any change said (`[np table]`: the word, before and after, and the world's state), once a
-/// change. Patrick's 14:05 crash: it was overwritten (pi/2 at a limb's entry) 24 frames after
-/// the world's queue ran records at a lock count of -1.
-fn table_watched(e: &mut Engine) {
-    const TABLE: u32 = 0x011d_61c8;
-    const WORDS: u32 = 0x134 / 4;
-    static SEEN: Mutex<Option<Vec<u32>>> = Mutex::new(None);
-    let owned = !ACTORS.lock().unwrap_or_else(|p| p.into_inner()).is_empty();
-    if !owned || !e.mem.is_mapped(TABLE) {
-        return;
-    }
-    let now: Vec<u32> = (0..WORDS).map(|i| e.mem.u32(TABLE + 4 * i)).collect();
-    let mut seen = SEEN.lock().unwrap_or_else(|p| p.into_inner());
-    match seen.as_ref() {
-        None => *seen = Some(now),
-        Some(was) if *was != now => {
-            let changed: Vec<String> = was
-                .iter()
-                .zip(&now)
-                .enumerate()
-                .filter(|(_, (a, b))| a != b)
-                .take(8)
-                .map(|(i, (a, b))| format!("+{:#x} {a:#010x} -> {b:#010x}", 4 * i))
-                .collect();
-            note(format!(
-                "[np table] the actor-value table at 011d61c8 changed: {}",
-                changed.join(", ")
-            ));
-            *seen = Some(now);
-        }
-        _ => {}
-    }
-}
-
 /// New Physics moves its actor only by this much or more (game units); less is gathered.
 const MOVE_LEAST: f32 = 0.5;
 /// The actor is moved by the body only while drawn within this of it (degrees, units).
@@ -1599,7 +1563,13 @@ fn move_reference(e: &mut Engine, a: &mut NpActor) {
 /// ragdoll's bodies put on the pose drawn with those velocities (`knockdown::place_bodies`).
 pub fn main_thread(e: &mut Engine) {
     world_said(e);
-    table_watched(e);
+    crate::av_table::check(e, "before New Physics' main-thread pass");
+    main_thread_pass(e);
+    crate::av_table::check(e, "after New Physics' main-thread pass");
+}
+
+/// [`main_thread`]'s pass: the reference moves and the hand-overs.
+fn main_thread_pass(e: &mut Engine) {
     // The steps' moves, here only with the AI threads' tasks joined.
     if !e.call(AI_THREAD, &[]).bool() {
         let mut list: Vec<NpActor> =

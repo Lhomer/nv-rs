@@ -33,6 +33,9 @@ pub const WORLD_ROTATION: u32 = 0x68;
 pub const WORLD_TRANSLATION: u32 = 0x8c;
 pub const WORLD_SCALE: u32 = 0x98;
 
+/// A tree for the per-tree doubles: its actor, form id, nodes' addresses and nodes' parents.
+type Tree = (u32, u32, Vec<u32>, Vec<Option<usize>>);
+
 /// The game's calls answered here.
 const ACTOR_3D: u32 = 0x0043_fcd0;
 const CHILD_COUNT: u32 = 0x0043_b480;
@@ -115,6 +118,9 @@ pub struct Fixture {
     pub e: Engine,
     pub nodes: Vec<Node>,
     pub at: Vec<u32>,
+    /// Other actors' trees laid out beside it ([`Fixture::add_actor`]): each actor, its form id,
+    /// its nodes' addresses and its nodes.
+    pub others: Vec<(u32, u32, Vec<u32>, Vec<Node>)>,
 }
 
 thread_local! {
@@ -374,7 +380,112 @@ impl Fixture {
         e.register_double(IS_VALID_LOCATION, |_, _| 1u32.into_ret());
         let _ = PATHING;
         update_worlds(&mut e, &at);
-        Fixture { e, nodes, at }
+        Fixture {
+            e,
+            nodes,
+            at,
+            others: Vec::new(),
+        }
+    }
+
+    /// Another actor (`actor`, already laid out by the caller: its vtable, process and the rest)
+    /// given a tree of its own: `nodes` laid out at `base` (mapped here, `0x2_0000` bytes: the
+    /// nodes, their names, their child lists), each an `NiNode` as the game's update reads it (no
+    /// collision object), its 3D's root answered for it, its form id found, the node walk and the
+    /// update covering both trees. Call before [`Fixture::game_update`].
+    pub fn add_actor(&mut self, actor: u32, id: u32, nodes: Vec<Node>, base: u32) -> Vec<u32> {
+        let e = &mut self.e;
+        e.mem.map(base, 0x2_0000);
+        let at: Vec<u32> = (0..nodes.len() as u32)
+            .map(|i| base + i * NODE_SIZE)
+            .collect();
+        let mut name_at = base + 0x1_0000;
+        let mut list = base + 0x1_8000;
+        for (i, n) in nodes.iter().enumerate() {
+            let node = at[i];
+            e.mem.set_u32(node, NODE_VTABLE);
+            e.mem.set_u32(node + PARENT, n.parent.map_or(0, |p| at[p]));
+            e.mem.set_cstr(name_at, n.name.as_bytes());
+            e.mem.set_u32(node + NODE_NAME, name_at);
+            name_at += (n.name.len() as u32 + 16) & !15;
+            write9(e, node + LOCAL_ROTATION, &n.r);
+            write3(e, node + LOCAL_TRANSLATION, n.t);
+            e.mem.set_f32(node + LOCAL_SCALE, n.s);
+            let kids: Vec<u32> = (0..nodes.len())
+                .filter(|&c| nodes[c].parent == Some(i))
+                .map(|c| at[c])
+                .collect();
+            for (k, c) in kids.iter().enumerate() {
+                e.mem.set_u32(list + 4 * k as u32, *c);
+            }
+            e.mem.set_u32(node + 0xa0, list);
+            e.mem.set_u16(node + 0xa6, kids.len() as u16);
+            e.mem.set_u32(node + 0x1c, 0);
+            list += 4 * (kids.len() as u32 + 1);
+        }
+        update_worlds(e, &at);
+        self.others.push((actor, id, at.clone(), nodes));
+        // The doubles that answer per tree, now for every tree.
+        let mut trees: Vec<Tree> = vec![(
+            ACTOR,
+            ACTOR_ID,
+            self.at.clone(),
+            self.nodes.iter().map(|n| n.parent).collect(),
+        )];
+        for (a, i, at, nodes) in &self.others {
+            trees.push((*a, *i, at.clone(), nodes.iter().map(|n| n.parent).collect()));
+        }
+        let mut kids: std::collections::HashMap<u32, Vec<u32>> = Default::default();
+        for (_, _, at, parents) in &trees {
+            for (i, &node) in at.iter().enumerate() {
+                kids.insert(
+                    node,
+                    (0..at.len())
+                        .filter(|&c| parents[c] == Some(i))
+                        .map(|c| at[c])
+                        .collect(),
+                );
+            }
+        }
+        kids.entry(self.at[0]).or_default().push(GEOMETRY);
+        let kids2 = kids.clone();
+        let e = &mut self.e;
+        e.register_double(CHILD_COUNT, move |_, a| {
+            kids.get(&a[0]).map_or(0, |k| k.len() as u32).into_ret()
+        });
+        e.register_double(CHILD_AT, move |_, a| {
+            kids2
+                .get(&a[0])
+                .and_then(|k| k.get(a[1] as usize).copied())
+                .unwrap_or(0)
+                .into_ret()
+        });
+        let roots: Vec<(u32, u32, u32)> = trees.iter().map(|t| (t.0, t.1, t.2[0])).collect();
+        let roots2 = roots.clone();
+        e.register_double(ACTOR_3D, move |_, a| {
+            roots
+                .iter()
+                .find(|r| r.0 == a[0])
+                .map_or(0, |r| r.2)
+                .into_ret()
+        });
+        e.register_double(LOOKUP_FORM, move |_, a| {
+            roots2
+                .iter()
+                .find(|r| r.1 == a[0])
+                .map_or(0, |r| r.0)
+                .into_ret()
+        });
+        let orders: Vec<Vec<u32>> = trees.iter().map(|t| t.2.clone()).collect();
+        e.register_double(NODE_UPDATE, move |e, a| {
+            for order in &orders {
+                if order.contains(&a[0]) {
+                    update_worlds(e, order);
+                }
+            }
+            0u32.into_ret()
+        });
+        at
     }
 
     /// The game's own update in place of the double (`NiAVObject::Update`, `00a59c60`, and what
