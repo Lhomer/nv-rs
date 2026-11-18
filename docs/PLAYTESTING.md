@@ -215,10 +215,36 @@ Read in a launcher's play run from Fallout.ini's `[nv-rs Gunplay]`; each variabl
 | `NV_GUNPLAY_DETAILS_KEY` (`iDetailsKey`) | The key opening a highlighted gun's or ammo's detailed stats (DirectInput code, 37 = K); Settings > Controls "Detailed Stats Key" | 37 |
 | `NV_GUNPLAY_HIT_REACTIONS` (`iHitReactions`) * | Hit reactions: a hit too light to knock down makes the body flinch (the struck part kicks, the body twists and springs back); percent, 0 = off | 100 |
 | `NV_GUNPLAY_BALANCE` (`iBalance`) * | Balance: pushed past its feet by a hit too light to knock it down, an actor takes catch steps (more and longer for bigger hits), catches itself at a wall, steps off and falls at a ledge; percent, 0 = off | 100 |
-| `NV_GUNPLAY_NEW_PHYSICS` (`bNewPhysics`) * | New Physics: one balance controller in place of the hit reactions, catch steps and knockdowns (docs/GUNPLAY.md "New Physics"); being built: a hit human recoils and steps by it, creatures keep the current reactions; 0 = the current reactions | 0 |
+| `NV_GUNPLAY_NEW_PHYSICS` (`bNewPhysics`) * | New Physics: one balance controller in place of the hit reactions, catch steps and knockdowns (docs/GUNPLAY.md "New Physics"); being built: a hit human recoils, takes catching steps by it and past them falls into the game's ragdoll (below, "Testing New Physics"), creatures keep the current reactions; 0 = the current reactions | 0 |
 | `NV_TEST_RANGE_CELL` (`sTestRangeCell`) | The place the main menu's Test Range starts in: `auto` = the widest, longest clear flat floor of your FalloutNV.esm (a quiet, lit interior, or the Mojave's open ground away from its people and creatures), else a cell's editor id; missing ones fall back to the next best (docs/GUNPLAY.md, slice 2); the range never saves your games (its own prepared save is kept in `userdata\testrange\`, docs/GUNPLAY.md slice 2, item 9), Home opens its menu | `auto` |
 | `NV_TEST_RANGE_REBUILD` | `1`: this run's Test Range start makes its prepared save again (also: the range menu's Rebuild Saved Range, or delete `userdata\testrange\`) | unset |
 | `NV_PERKS_PER_LEVEL` (`[nv-rs Gameplay] sPerksPerLevel`) * | Perks per level, 0.5 (the original's one every second level) to 3 in halves; picked one after another on the level-up menu's perk page; Settings > Gameplay "Perks per Level"; from the next level-up (no perks made up for earlier levels) | 2 |
+
+**Testing New Physics** (`bNewPhysics=1`, or Settings > Gameplay "New Physics"; off by default and
+the current reactions untouched while off). Use the Test Range (Make Targets Passive) or any human
+NPC, and record each test with F9. For each, the log (`nv-rs-play-*.log`, and the clip's events)
+names the actor by its form id:
+
+1. **A light hit** (a 9mm pistol to the chest of a standing NPC): it recoils and comes back within
+   about 0.6 s with no step. Look for `[np take]`, `[np hit] ... (0.3 m/s ...)` and
+   `[np reaction] ... spine top at most 5 to 8 degrees ..., 0 catching steps`.
+2. **A medium hit** (a hunting rifle, .44 Magnum or a shotgun at close range, about 0.8 m/s): it
+   rocks back and takes one catching step back (sometimes a second, small stance step to square
+   its feet), then stands. `[np step] a catching step with the ... foot`; the reaction's spine
+   top about 11 to 17 degrees; the actor moved 20 to 40 units.
+3. **A side hit**: the near foot steps out sideways; the legs never cross.
+4. **A walking or running NPC hit**: it recoils and its walk goes on (no stop, no slide).
+5. **A heavy hit** (an anti-materiel rifle, about 4 m/s): no step; it falls straight into the
+   game's ragdoll moving as it was (`[np fall] handed to its ragdoll: 18 bodies moving on; the
+   root body at ... units/s`), then the usual get-up.
+6. **Off**: with `bNewPhysics=0` nothing says `[np ...]` and the reactions are as before.
+
+What to report besides the clip: a pop or jump at the hit, at a step's landing or at the hand-over
+to the ragdoll; feet sliding; an NPC that keeps stepping or never settles; any `[np let go] its
+pose went bad`. Each `[np reaction]` line ends with the read-back (drawn against simulated, want at
+most 0.5 degrees and 0.5 units): a larger value means the game moved the bones after New Physics
+wrote them. The clips sample each actor New Physics has every frame as `"np":{...}` (docs/GUNPLAY.md
+"M5").
 
 **To check in game (not yet run):** a pistol, a rifle, an automatic and a shotgun kick up by their weight and come mostly back without fighting the mouse; the weapon lags a little behind fast turns and settles back, and bobs while walking (if it moves the wrong way, say so); a melee hit that connects and a shotgun or magnum shot punch the weapon and the view and snap back, and game time never slows; melee connects a little further; kills push bodies harder, more with a sledgehammer than a knife; a .44 Magnum or hunting rifle kill severs the struck limb, an anti-materiel rifle can explode it; the five Settings rows show, move, save and come back after a restart. The Test Range: Main menu > Test Range starts without a save in the cell the game's log names (`Test Range: started in ...`); the targets stand in the clear line you are turned to face, up to 100 m (say if one stands in a wall); Home opens its menu (Weapons opens the container, Fill Ammo, Make Targets Hostile/Passive, Respawn Targets, Exit to Main Menu); a save there says "Saving is off" and the Saves folder is unchanged. No DLC message boxes or Caravan Pack / Gun Runners' Arsenal / pack "added" notifications appear in the range (the log says `Test Range: ... not shown (a range game)` for each); a normal new game or a save still shows them. In the range you take no damage and no limb stays crippled, you are never over-encumbered, the Pip-Boy holds every weapon, armour, aid item, weapon mod and 1,000 of each ammo, and no tutorial or help (V.A.T.S., Pip-Boy, level-up, hardcore) appears; back on the main menu and in a normal game all of that is as before.
 

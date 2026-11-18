@@ -25,6 +25,21 @@ struct Run {
     steps: u32,
     old_reactions: bool,
     claimed: bool,
+    /// The clips' `"np"` samples: how many, the most spine and capture point outside they gave,
+    /// the most catching steps, whether a step's swing showed, the sample once let go.
+    samples: u32,
+    sample_spine: f32,
+    sample_outside: f32,
+    sample_steps: u32,
+    sample_swinging: bool,
+    sample_after: String,
+}
+
+/// A number field of a sample (`"name":value`).
+fn field(sample: &str, name: &str) -> Option<f32> {
+    let at = sample.find(&format!("\"{name}\":"))? + name.len() + 3;
+    let end = sample[at..].find([',', '}', ']'])? + at;
+    sample[at..end].parse().ok()
 }
 
 fn np_run(speed: f32, seconds: f32, on: bool) -> Run {
@@ -64,6 +79,12 @@ fn np_run(speed: f32, seconds: f32, on: bool) -> Run {
         steps: 0,
         old_reactions: false,
         claimed,
+        samples: 0,
+        sample_spine: 0.0,
+        sample_outside: 0.0,
+        sample_steps: 0,
+        sample_swinging: false,
+        sample_after: String::new(),
     };
     let start = Instant::now();
     let mut hit_done = false;
@@ -122,6 +143,22 @@ fn np_run(speed: f32, seconds: f32, on: bool) -> Run {
             run.moved = moved;
         }
         run.old_reactions |= crate::active_ragdoll::reacting(ACTOR) && !owns(ACTOR);
+        // The clips' sample, as `crate::room_record` takes it each frame.
+        let sample = crate::active_ragdoll::sample_fields(ACTOR);
+        let np = &sample[sample.find("\"np\":").expect("an np field")..];
+        if np.starts_with("\"np\":{") {
+            run.samples += 1;
+            run.sample_spine = run.sample_spine.max(field(np, "spine").unwrap_or(f32::NAN));
+            run.sample_outside = run
+                .sample_outside
+                .max(field(np, "outside").unwrap_or(f32::NAN));
+            run.sample_steps = run
+                .sample_steps
+                .max(field(np, "steps").unwrap_or(0.0) as u32);
+            run.sample_swinging |= field(np, "swinging").is_some();
+        } else {
+            run.sample_after = np.to_string();
+        }
         crate::active_ragdoll::after_draw(&mut f.e);
         crate::active_ragdoll::unwrite(&mut f.e);
         // Put back: the nodes as the animation had them.
@@ -145,8 +182,8 @@ fn np_run(speed: f32, seconds: f32, on: bool) -> Run {
 fn np_draws_what_it_simulates_on_fnvs_skeleton() {
     let r = np_run(0.8, 3.0, true);
     eprintln!(
-        "RESULT np on FNV's skeleton 0.8 m/s: read-back {:.3} deg / {:.3} u, put back {:.3} u, spine peak {:.1} deg, {} catching steps, moved ({:.1}, {:.1}), lowest {:.1} u, step most {:.1} u / {:.1} deg",
-        r.readback.0, r.readback.1, r.put_back, r.spine_peak, r.steps, r.moved[0], r.moved[1], r.lowest, r.step_most.0, r.step_most.1
+        "RESULT np on FNV's skeleton 0.8 m/s: read-back {:.3} deg / {:.3} u, put back {:.3} u, spine peak {:.1} deg, {} catching steps, moved ({:.1}, {:.1}), lowest {:.1} u, step most {:.1} u / {:.1} deg; {} np samples, spine {:.1} deg, capture point {:.2} m out, {} steps, a swing {}",
+        r.readback.0, r.readback.1, r.put_back, r.spine_peak, r.steps, r.moved[0], r.moved[1], r.lowest, r.step_most.0, r.step_most.1, r.samples, r.sample_spine, r.sample_outside, r.sample_steps, r.sample_swinging
     );
     assert!(r.claimed, "not taken");
     assert!(
@@ -177,6 +214,15 @@ fn np_draws_what_it_simulates_on_fnvs_skeleton() {
         r.step_most
     );
     assert!(!r.old_reactions, "the current reactions had it");
+    // The clips' sample says the same, every frame New Physics has it.
+    assert!(r.samples > 30, "{} samples", r.samples);
+    assert!(
+        (r.sample_spine - r.spine_peak).abs() <= 0.5,
+        "sample spine {:.1} for {:.1}",
+        r.sample_spine,
+        r.spine_peak
+    );
+    assert!(r.sample_outside > 0.0 && r.sample_steps == r.steps && r.sample_swinging);
 }
 
 /// A 0.3 m/s hit: no step, the actor not moved, the spine's top 5 to 8 degrees; drawn is
@@ -207,6 +253,8 @@ fn np_a_small_hit_takes_no_step_on_fnvs_skeleton() {
 fn np_off_takes_nothing() {
     let r = np_run(0.8, 0.3, false);
     assert!(!r.claimed);
+    assert_eq!(r.samples, 0);
+    assert_eq!(r.sample_after, "\"np\":null");
     assert_eq!(r.steps, 0);
     assert!(!owns(ACTOR));
 }

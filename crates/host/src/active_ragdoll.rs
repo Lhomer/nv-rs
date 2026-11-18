@@ -3149,9 +3149,16 @@ fn spread_of_body(b: &active::Body, pi: usize) -> f32 {
 /// its physical body is on, the pelvis offset written (game units), the body's most spread (m),
 /// the base drift (reads a later pass moved, the most in tolerances), the animation jumps eased
 /// in, and how much of a dropped body's fade is left; `"body":null` when it is not reacting. Then
-/// `"down":{...}`, its drawn get-up (`crate::down_log`), `"down":null` when it is not down.
+/// `"down":{...}`, its drawn get-up (`crate::down_log`), `"down":null` when it is not down; then
+/// `"np":{...}`, New Physics' figures (`crate::new_physics::sample_field`), `"np":null` when New
+/// Physics does not have it.
 pub fn sample_fields(actor: u32) -> String {
-    format!("{},{}", body_fields(actor), crate::down_log::field(actor))
+    format!(
+        "{},{},{}",
+        body_fields(actor),
+        crate::down_log::field(actor),
+        crate::new_physics::sample_field(actor)
+    )
 }
 
 fn body_fields(actor: u32) -> String {

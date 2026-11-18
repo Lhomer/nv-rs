@@ -383,6 +383,11 @@ impl Np {
         Some(out)
     }
 
+    /// The animation's velocity (m/s) the last frame measured.
+    pub fn anim_velocity(&self) -> V3 {
+        self.anim_v
+    }
+
     /// The animation's velocity (game units a second) before its first frame (an actor already
     /// walking when it is taken): the bodies move with it.
     pub fn set_anim_velocity(&mut self, v: V3) {

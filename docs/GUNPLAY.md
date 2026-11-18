@@ -617,6 +617,35 @@ slow behind the chest within it), the centre not rising (-16 units a second; a h
 the get-up watch on. The fixture's bodies were spaced 0x100 apart, so each body's position (+0x120)
 fell on the next one's angular velocity: now 0x200. Not run in the game.
 
+**M5, what the game says** (`new_physics.rs`). The log's lines for an actor New Physics has, each
+named by its form id: `[np take]` (taken at its first hit), `[np hit]` (the momentum, the body
+struck, the speed it gives the whole body), `[np step]` as each step lands (catching or stance,
+the foot, where, the capture point still outside the feet, the hips lowered for reach), `[np fall]`
+(the hand-over to the ragdoll: bodies, the root body's and the centre's speeds), `[np let go]`
+(dead, knocked down by something else, or a bad pose) and `[np reaction]` when it is let go (the
+frames and the seconds since its last hit, the spine top's most off its animation, the joints'
+most softening, the capture point's most outside the feet, the catching steps, the actor's move,
+the read-back's most). The clips (`crate::room_record`) sample each actor New Physics has every
+frame, after `"body"` and `"down"`, as `"np":{"phase":"standing"|"stepping"|"recovering"|
+"falling","spine":degrees,"outside":m,"soft":0..0.8,"centre_speed":units/s,"lower":m,
+"swinging":0|1|null,"steps":n,"moved":units,"readback":[degrees,units],"since_hit":s,"dt":s}`
+(`"np":null` for one it does not have). The fixture test checks the samples against what it
+measures itself (the 0.8 m/s hit: 96 samples, spine 14.7 degrees as measured, the capture point
+0.15 m out, 1 step, a swing shown; off: `"np":null`). How Patrick tests it: docs/PLAYTESTING.md
+"Testing New Physics".
+
+The tuning, all in `ragdoll-core` (a change is a rebuild; none is a player setting yet):
+
+| What | Where | Value |
+|---|---|---|
+| Joint springs and dampers by body (N m/rad, N m s/rad), at least critically damped | `np_drive::GAINS`, `DAMPING` | thigh 500/50 ... hand 30/3; 1 |
+| A hit's softening: most, the hit that gives it (N s), per joint further, hold, ease back | `np_drive::SOFT_MOST`, `SOFT_FULL`, `SPREAD`, `SOFT_HOLD`, `RECOVER` | 0.8, 162, 0.6, 0.05 s, 0.55 s |
+| The bodies' tracking of the animation (1/s) | `np::TRACKING` | 90 |
+| A catching step: past the feet (m), longest (m), time (s), lift (m) | `np_balance::STEP_PAST`, `STEP_MOST`, `STEP_TIME`, `STEP_LIFT` | 0.08, 0.65, 0.3, 0.08 |
+| Steps before a fall; a fall at once past (m) | `np_balance::MAX_STEPS`, `UNREACHABLE` | 3, 0.9 |
+| Settling after a step (s); a stance step past (m) | `np_balance::SETTLE`, `STANCE_OFF` | 0.3, 0.1 |
+| Let go: calm for (s), within (units) of the animation | `new_physics::LET_GO_AFTER`, `LET_GO_OFF` | 1.5, 1.5 |
+
 ### bdf710a: the get-up hoisted upside down, the stagger's slide, the head's nod, the launch along the ground (Patrick, 2026-11-17, clip 1456)
 
 On FNV's skeleton (`tests-data/fnv_skeleton.txt`) the get-up fixture now runs knock state 6 as the

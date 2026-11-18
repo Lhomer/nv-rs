@@ -87,6 +87,32 @@ struct NpActor {
     steps: u32,
     moved: V3,
     frames: u32,
+    /// The last frame's figures (the clips' `"np"` sample).
+    now: Now,
+    /// The most the capture point stood outside the feet (m) and the most a joint was softened.
+    outside_most: f32,
+    soft_most: f32,
+    /// The steps already logged (`[np step]`).
+    steps_logged: usize,
+}
+
+/// One frame's figures of an actor New Physics has (the clips' `"np"` sample).
+#[derive(Clone, Copy, Debug, Default)]
+struct Now {
+    phase: &'static str,
+    /// The spine top off its animation (degrees).
+    spine: f32,
+    /// The capture point outside the feet (m; 0 inside).
+    outside: f32,
+    /// The most any joint is softened (0 to `np_drive::SOFT_MOST`).
+    soft: f32,
+    /// The body's centre's speed against the animation's (game units a second).
+    centre_speed: f32,
+    /// The hips lowered for a step's reach (m).
+    lower: f32,
+    /// A step swinging: the foot's side (0 left, 1 right).
+    swinging: Option<usize>,
+    dt: f32,
 }
 
 static ACTORS: Mutex<Vec<NpActor>> = Mutex::new(Vec::new());
@@ -268,6 +294,10 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             steps: 0,
             moved: [0.0; 3],
             frames: 0,
+            now: Now::default(),
+            outside_most: 0.0,
+            soft_most: 0.0,
+            steps_logged: 0,
         });
     true
 }
@@ -446,6 +476,42 @@ pub fn apply(e: &mut Engine) {
         );
         a.drawn = drawn;
         a.steps = np.balance.taken.iter().filter(|s| !s.2).count() as u32;
+        let k = ragdoll_core::np_body::UNITS;
+        let soft = np
+            .muscles
+            .softening()
+            .iter()
+            .cloned()
+            .fold(0.0f32, f32::max);
+        let (_, com_v) = np.model.centre_of_mass(&np.states);
+        a.now = Now {
+            phase: phase_name(np.phase()),
+            spine: ragdoll_core::np_skeleton::angle_between(&a.drawn[spine].0, &anim[spine].0)
+                .to_degrees(),
+            outside: np.balance.outside.max(0.0),
+            soft,
+            centre_speed: length(sub(scale(com_v, k), scale(np.anim_velocity(), k))),
+            lower: np.balance.lower,
+            swinging: np.balance.step.as_ref().map(|s| s.side),
+            dt,
+        };
+        a.outside_most = a.outside_most.max(a.now.outside);
+        a.soft_most = a.soft_most.max(soft);
+        // Each step as it lands: which foot, where, and how far the capture point still is.
+        for &(side, to, stance) in np.balance.taken.iter().skip(a.steps_logged) {
+            note(format!(
+                "{:08X}: [np step] {} step with the {} foot to ({:.0}, {:.0}); the capture point \
+                 {:.2} m outside the feet, the hips {:.2} m lowered",
+                a.id,
+                if stance { "a stance" } else { "a catching" },
+                if side == 0 { "left" } else { "right" },
+                to[0] * k,
+                to[1] * k,
+                np.balance.outside.max(0.0),
+                np.balance.lower
+            ));
+        }
+        a.steps_logged = np.balance.taken.len();
         // The steps' move is the actor's.
         let mv = np.take_move();
         if length(mv) > 1e-3 {
@@ -534,17 +600,60 @@ pub fn apply(e: &mut Engine) {
 /// A reaction's summary when New Physics lets go of an actor.
 fn summary(a: &NpActor) {
     note(format!(
-        "{:08X}: [np reaction] {} frames: spine top at most {:.1} degrees off its animation, {} \
-         catching steps, the actor moved {:.0} units; drawn against simulated at most {:.2} degrees \
-         and {:.2} units (want 0.5 and 0.5)",
+        "{:08X}: [np reaction] {} frames ({:.2} s since its last hit): spine top at most {:.1} \
+         degrees off its animation, joints softened at most {:.2}, the capture point at most {:.2} \
+         m outside the feet, {} catching steps, the actor moved {:.0} units; drawn against \
+         simulated at most {:.2} degrees and {:.2} units (want 0.5 and 0.5)",
         a.id,
         a.frames,
+        a.since_hit,
         a.spine_peak,
+        a.soft_most,
+        a.outside_most,
         a.steps,
         length(a.moved),
         a.readback_most.0,
         a.readback_most.1
     ));
+}
+
+fn phase_name(p: Phase) -> &'static str {
+    match p {
+        Phase::Standing => "standing",
+        Phase::Stepping => "stepping",
+        Phase::Recovering => "recovering",
+        Phase::Falling => "falling",
+    }
+}
+
+/// The clips' sample of an actor New Physics has (`crate::room_record`): `"np":{...}` with its
+/// balance's phase, the spine top off its animation (degrees), the capture point outside the feet
+/// (m), the most a joint is softened, the body's centre's speed against the animation's (units a
+/// second), the hips lowered (m), the foot swinging (0 left, 1 right, or null), the catching steps,
+/// the actor's move (units), the read-back (degrees, units: drawn against simulated), the seconds
+/// since its last hit and the frame's time (s); `"np":null` when New Physics does not have it.
+pub fn sample_field(actor: u32) -> String {
+    let actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(a) = actors.iter().find(|a| a.actor == actor) else {
+        return "\"np\":null".to_string();
+    };
+    let n = &a.now;
+    format!(
+        "\"np\":{{\"phase\":{},\"spine\":{},\"outside\":{},\"soft\":{},\"centre_speed\":{},\"lower\":{},\"swinging\":{},\"steps\":{},\"moved\":{},\"readback\":[{},{}],\"since_hit\":{},\"dt\":{}}}",
+        room_events::text(if n.phase.is_empty() { "taken" } else { n.phase }),
+        room_events::num(n.spine),
+        room_events::num(n.outside),
+        room_events::num(n.soft),
+        room_events::num(n.centre_speed),
+        room_events::num(n.lower),
+        n.swinging.map_or("null".to_string(), |s| s.to_string()),
+        a.steps,
+        room_events::num(length(a.moved)),
+        room_events::num(a.readback.0),
+        room_events::num(a.readback.1),
+        room_events::num(a.since_hit),
+        room_events::num(n.dt)
+    )
 }
 
 /// After the draw (`crate::active_ragdoll::unwrite`): the game's own locals put back and the

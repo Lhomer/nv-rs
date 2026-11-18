@@ -24,7 +24,12 @@ machinery runs.
   skipped, the write/update/read-back/put-back, the actor moved with its steps); fixture tests.
 - **M4:** a hit past any step falls into the game's ragdoll (`knockdown::hand_over`:
   `KnockExplosion` at strength 0, each body on New Physics' pose and velocities, the knockdowns'
-  get-up); the fixture fall test. Next: M5 (the in-game metrics and how Patrick tests), then M6.
+  get-up); the fixture fall test.
+- **Merge:** slaterain/nv-rs main up to 76c7374 (#671 to #697) merged in; the launcher's profile
+  code is now the `game-profile` crate (its tests, now run off Windows, expect the fork's rows).
+- **M5:** `[np step]`, a fuller `[np reaction]`, the clips' `"np":{...}` sample each frame;
+  docs/PLAYTESTING.md "Testing New Physics" (what Patrick runs and reports) and the tuning table
+  (docs/GUNPLAY.md "M5"). Next: M6, downed but active.
 
 ### Claude, 2026-11-17 (bdf710a: the get-up as the game runs it; stagger slide, head nod, launch)
 

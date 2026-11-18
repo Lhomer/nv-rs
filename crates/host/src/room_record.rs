@@ -322,7 +322,9 @@ pub fn frame(e: &mut Engine) {
     });
     if let Some((form, _, _)) = target {
         let actor = e.call(LOOKUP_FORM, &args![form]).u32();
-        if actor != 0 && (due || crate::active_ragdoll::reacting(actor)) {
+        if actor != 0
+            && (due || crate::active_ragdoll::reacting(actor) || crate::new_physics::owns(actor))
+        {
             c.last_sample = Some(now);
             let fields = crate::knockdown::state_fields(e, actor);
             let body = crate::active_ragdoll::sample_fields(actor);
@@ -333,7 +335,13 @@ pub fn frame(e: &mut Engine) {
         }
     } else if !room {
         // In play: every actor reacting now, each frame while it reacts.
-        for actor in crate::active_ragdoll::reacting_actors() {
+        let mut all = crate::active_ragdoll::reacting_actors();
+        for actor in crate::new_physics::actors() {
+            if !all.contains(&actor) {
+                all.push(actor);
+            }
+        }
+        for actor in all {
             let form = e.mem.u32(actor + FORM_ID);
             let fields = crate::knockdown::state_fields(e, actor);
             let body = crate::active_ragdoll::sample_fields(actor);
