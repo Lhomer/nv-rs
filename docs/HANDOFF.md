@@ -45,6 +45,31 @@ machinery runs.
   floor at 3.01 and 6.26 body weights). `move_reference` now moves that snapshot's root with the
   reference. Both tests pass unchanged.
 
+- **The running fix (14:06 clip): tried, not committed** (`docs/wip/np-running-seed.patch`, on
+  this commit: `git apply` it). New Physics takes a runner at 0 m/s (`set_anim_velocity` is never
+  called). The patch keeps the actor's velocity at `claim` (`knockdown::actor_velocity`: the
+  character controller's `GethkLinearVelocity`, `00807080`, Havok units scaled) and seeds the body
+  and its animation's velocity with it; it keeps the fixture's controller velocity in Havok units
+  as the game does; it adds `run_run` (a runner the game keeps moving at 3.7 m/s, thighs swinging
+  opposite each other, arms against them, taken at 0.2 s) and tests a
+  (`np_running_unhit_never_stumbles`) and b (`np_running_light_hit_gathers_and_resumes`).
+  - Both fail on 8243b93 (a step with no hit, `rel_v` up to 1.55 m/s). With the seed: no step
+    unhit, never downed, the run kept (3.69 m/s), but `rel_v` still reaches 0.48 to 0.52 m/s (limit
+    0.3), swinging with the stride. It scales with the swing (0.05 m/s with none, 0.12 at 15
+    degrees): the simulated body's sway against the animation within a stride. Measuring against
+    the animation over 0.04 s instead of 0.12 s, or swinging the arms against the legs, changed
+    nothing. A 0.4 m/s hit across the runner takes no step (wanted 1 to 3): the balance has catching
+    steps only, no runner's footfall adjustment.
+  - The seed broke `np_a_slab_edge_holds_the_body` (a body 2.57 u inside, the floor 6.07 body
+    weights) and `np_the_arms_push_it_up` (the hands carried 0.17). The conflict to settle first:
+    `cycle_run`'s walker has its movement held once New Physics owns it (`mover_update`), so its
+    animation stops and a seed of its walk is wrong there; Patrick's runner kept moving at 3.65
+    m/s under New Physics (the AI threads' movers, not `ActorMover::Update`), so 0 is wrong there.
+    The seed must be what the game does with the reference after the take: find which movers still
+    move a runner's controller while New Physics holds `ActorMover::Update`, then seed from that
+    (or hold them too).
+- **Not started:** the 14:09 knockdown issues, tests c to g, the three ignored ce922331 tests.
+
 ### Claude, 2026-11-18 (New Physics: barriers, the rise's pace, the arms' push, bursts)
 
 - **Done (Patrick's 10:08/10:10 clips on abcb629e):**

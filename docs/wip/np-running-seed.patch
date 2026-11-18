@@ -1,0 +1,347 @@
+diff --git a/crates/host/src/knockdown.rs b/crates/host/src/knockdown.rs
+index 64ffcf2..a4963a9 100644
+--- a/crates/host/src/knockdown.rs
++++ b/crates/host/src/knockdown.rs
+@@ -1838,6 +1838,22 @@ fn bodies(e: &mut Engine, actor: u32) -> Vec<(u32, u32)> {
+     found
+ }
+ 
++/// The actor's movement velocity (game units a second): its character controller's linear
++/// velocity (`bhkCharacterProxy::GethkLinearVelocity`, `00807080`, Havok units) scaled; zero
++/// without a controller.
++pub(crate) fn actor_velocity(e: &mut Engine, actor: u32) -> [f32; 3] {
++    let controller = e.call(CHAR_CONTROLLER, &args![actor]).u32();
++    if controller == 0 {
++        return [0.0; 3];
++    }
++    let at = e.call(CONTROLLER_VELOCITY, &args![controller]).u32();
++    if at == 0 {
++        return [0.0; 3];
++    }
++    let s = hk_scale(e);
++    read3(e, at).map(|x| if x.is_finite() { x * s } else { 0.0 })
++}
++
+ /// Game units per Havok unit (the game's float at `011b1864`; 7 when it can't be read).
+ fn hk_scale(e: &Engine) -> f32 {
+     let s = e.mem.f32(HK_TO_GAME);
+diff --git a/crates/host/src/new_physics.rs b/crates/host/src/new_physics.rs
+index b45cf3f..bb1b246 100644
+--- a/crates/host/src/new_physics.rs
++++ b/crates/host/src/new_physics.rs
+@@ -146,6 +146,9 @@ struct NpActor {
+     /// (`animation_updated`): its animation, as New Physics reads it.
+     tree: Vec<(u32, u32)>,
+     snap: Option<Snapshot>,
++    /// The actor's velocity when New Physics took it (game units a second): its character
++    /// controller's (the run or walk it was in), seeding the body and its animation's velocity.
++    take_v: V3,
+     /// The body's last frames since its last hit (the frame's time, each body's velocity and
+     /// spin at its end): the hand-over's velocities, their mean.
+     history: std::collections::VecDeque<(f32, Vec<(V3, V3)>)>,
+@@ -519,6 +522,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
+             aim: None,
+             tree: tree.clone(),
+             snap: Some(snapshot(e, root, &tree)),
++            take_v: crate::knockdown::actor_velocity(e, actor),
+             history: std::collections::VecDeque::new(),
+             jumps_said: 0,
+             walls: Vec::new(),
+@@ -746,6 +750,9 @@ pub fn apply(e: &mut Engine) {
+             // Made on the first frame's animated pose, still: its animation's velocity is
+             // measured from the frames that follow (`Np`), never from the pose at the hit.
+             let mut np = Np::new(model().clone(), &anim, 1.0);
++            // Moving as the actor was when taken (a runner taken at 0 m/s sat 3.27 m/s off its
++            // 3.65 m/s run: catching steps with no hit, "downed (steps)", Patrick's 14:06 clip).
++            np.set_anim_velocity([a.take_v[0], a.take_v[1], 0.0]);
+             np.keep_down = KEEP_DOWN.load(std::sync::atomic::Ordering::Relaxed);
+             for (b, p, j) in a.pending.drain(..) {
+                 np.hit(b, p, j);
+diff --git a/crates/host/src/new_physics_fixture_tests.rs b/crates/host/src/new_physics_fixture_tests.rs
+index be4988e..db351af 100644
+--- a/crates/host/src/new_physics_fixture_tests.rs
++++ b/crates/host/src/new_physics_fixture_tests.rs
+@@ -2166,10 +2166,10 @@ fn slope_run(cfg: &Slope) -> SlopeRun {
+         if cfg.mover {
+             let want = [0.0, cfg.walk * k, 0.0];
+             crate::knockdown::mover_update(&mut f.e, MOVER, |e| {
+-                rig_fixture::write3(e, velocity_at, want);
++                rig_fixture::write3(e, velocity_at, scale(want, 1.0 / rig_fixture::HK));
+                 rig_fixture::write3(e, MOVER + crate::knockdown::MOVER_DELTA, scale(want, dt));
+             });
+-            let v = rig_fixture::read3(&f.e, velocity_at);
++            let v = scale(rig_fixture::read3(&f.e, velocity_at), rig_fixture::HK);
+             reference = add(reference, scale(v, dt));
+             if is_down(ACTOR) {
+                 game_moved += length(v) * dt;
+@@ -2726,10 +2726,10 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+         // controller seating the reference on the ground.
+         let want = [0.0, 0.45 * k, 0.0];
+         crate::knockdown::mover_update(&mut f.e, MOVER, |e| {
+-            rig_fixture::write3(e, velocity_at, want);
++            rig_fixture::write3(e, velocity_at, scale(want, 1.0 / rig_fixture::HK));
+             rig_fixture::write3(e, MOVER + crate::knockdown::MOVER_DELTA, scale(want, dt));
+         });
+-        let v = rig_fixture::read3(&f.e, velocity_at);
++        let v = scale(rig_fixture::read3(&f.e, velocity_at), rig_fixture::HK);
+         let mut reference = add(f.reference(), scale(v, dt));
+         if is_down(ACTOR) {
+             game_moved += length(v) * dt;
+@@ -3840,3 +3840,242 @@ fn np_crippling_hits_never_start_the_cripple_reaction() {
+     }
+     assert!(failed.is_empty(), "{failed:#?}");
+ }
++
++/// A runner (Patrick's 14:06 clip): what [`run_run`] found.
++#[derive(Debug, Default)]
++struct RunnerRun {
++    /// New Physics took it, kept it to the end, ever had it downed or falling.
++    taken: bool,
++    kept: bool,
++    downed: bool,
++    /// Catching steps New Physics took (all, and after the hit).
++    steps: u32,
++    /// The body against its animation (m/s, flat): the most from 0.3 s after the take on, and
++    /// the last.
++    rel_most: f32,
++    rel_last: f32,
++    /// The body's centre's speed (m/s, flat) over the last half second, against the run's.
++    speed_end: f32,
++    /// The body's centre off the run's path across it (units), the most from 1.5 s after the hit
++    /// on, and the reference's.
++    off_path: f32,
++    ref_off_path: f32,
++    notes: Vec<String>,
++}
++
++/// A runner on flat ground at `speed` (m/s, along +y) for `seconds`: the game moves its
++/// reference at that speed every frame (its character controller, whatever New Physics does:
++/// Patrick's 14:06 clip measured the animation at 3.65 m/s while New Physics had it) and the
++/// controller's velocity reads so (Havok units); its legs swing at a run's cadence. New Physics
++/// takes it at 0.2 s (`claim`, as a hit's `HitMe` does), and `hit` (m/s across, -x) comes at
++/// `hit_at` when given.
++fn run_run(speed: f32, seconds: f32, hit: Option<(f32, f32)>) -> RunnerRun {
++    let _one = crate::active_ragdoll::tests::SERIAL
++        .lock()
++        .unwrap_or_else(|p| p.into_inner());
++    let mut f = Fixture::new(
++        rig_fixture::fnv_skeleton(),
++        Ground {
++            collision: Some(-1.0),
++            navmesh: -9.0,
++        },
++    );
++    f.game_update();
++    f.make_character();
++    crate::active_ragdoll::clear();
++    crate::knockdown::clear();
++    set_keep_down(true);
++    let was = crate::gunplay::tuning();
++    crate::gunplay::set_tuning(crate::gunplay::Tuning {
++        new_physics: true,
++        ..was
++    });
++    let k = ragdoll_core::np_body::UNITS;
++    let bind: Vec<M3> = f.nodes.iter().map(|n| n.r).collect();
++    let body_nodes: Vec<usize> = model()
++        .bodies
++        .iter()
++        .map(|b| f.nodes.iter().position(|n| n.name == b.node).unwrap())
++        .collect();
++    f.animate();
++    let anim0: Vec<(M3, V3)> = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
++    let low = ragdoll_core::np_body::lowest_point(model(), &model().states_from_nodes(&anim0)) * k;
++    let drop = [0.0, 0.0, -low - 1.0];
++    // The thighs and their parents' world rotations (still: the pelvis does not turn).
++    let thighs: Vec<(usize, M3)> = [
++        "Bip01 L Thigh",
++        "Bip01 R Thigh",
++        "Bip01 L UpperArm",
++        "Bip01 R UpperArm",
++    ]
++        .iter()
++        .map(|name| {
++            let i = f.nodes.iter().position(|n| n.name == *name).unwrap();
++            let up = f.nodes[i].parent.map_or(ragdoll_core::flinch::IDENTITY, |p| f.world_of(f.at[p]).0);
++            (i, up)
++        })
++        .collect();
++    room_events::set_on(true);
++    let _ = room_events::take();
++    let velocity_at = rig_fixture::CONTROLLER + 0x700;
++    let run_v = [0.0, speed * k, 0.0];
++    let dt = 1.0 / 60.0;
++    let mut r = RunnerRun::default();
++    let mut t = 0.0f32;
++    let mut steps_at_hit = 0;
++    let mut centres: Vec<(f32, V3)> = Vec::new();
++    while t < seconds {
++        t += dt;
++        f.e.mem.set_f32(0x011d_ea30, dt);
++        // The game's movement: the controller at the run's velocity (Havok units), the
++        // reference moved by it.
++        rig_fixture::write3(&mut f.e, velocity_at, scale(run_v, 1.0 / rig_fixture::HK));
++        let reference = add(f.reference(), scale(run_v, dt));
++        rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, reference);
++        // The run's animation: its root at the reference, the thighs swinging opposite each
++        // other in the body's own plane (about the world's x, across the run) at a run's cadence
++        // (0.7 s a stride), each arm with the other side's leg.
++        let swing = (30.0f32 * (std::f32::consts::TAU * t / 0.7).sin()).to_radians();
++        for (k_side, (i, up)) in thighs.iter().enumerate() {
++            // Thighs 30 degrees each way, the arms opposite their side's leg (as a run's
++            // swing balances the legs' turn), 35.
++            let a = match k_side {
++                0 => swing,
++                1 => -swing,
++                2 => -swing * 35.0 / 30.0,
++                _ => swing * 35.0 / 30.0,
++            };
++            let (s, c) = a.sin_cos();
++            let rx: M3 = [1.0, 0.0, 0.0, 0.0, c, -s, 0.0, s, c];
++            // local' = up^T * Rx * up * local (the turn about the world's x, in the parent's frame).
++            let turn = ragdoll_core::flinch::mul(
++                &ragdoll_core::flinch::transpose(up),
++                &ragdoll_core::flinch::mul(&rx, up),
++            );
++            f.nodes[*i].r = ragdoll_core::flinch::mul(&turn, &bind[*i]);
++        }
++        rig_fixture::write3(
++            &mut f.e,
++            f.at[0] + rig_fixture::LOCAL_TRANSLATION,
++            add(reference, drop),
++        );
++        f.animate();
++        if !r.taken && t >= 0.2 {
++            r.taken = claim(&mut f.e, ACTOR);
++        }
++        if let Some((at, across)) = hit {
++            if t >= at && t - dt < at {
++                steps_at_hit = state(ACTOR).map_or(0, |s| s.1);
++                let chest = f.world("Bip01 Spine2").unwrap().1;
++                crate::new_physics::hit(
++                    &mut f.e,
++                    ACTOR,
++                    across * model().mass,
++                    add(chest, [6.0, 0.0, 2.0]),
++                    [-1.0, 0.0, 0.0],
++                );
++            }
++        }
++        main_thread(&mut f.e);
++        crate::active_ragdoll::apply(&mut f.e);
++        crate::active_ragdoll::read_drawn(&mut f.e);
++        crate::active_ragdoll::after_draw(&mut f.e);
++        crate::active_ragdoll::unwrite(&mut f.e);
++        if r.taken {
++            if is_down(ACTOR)
++                || state(ACTOR).is_some_and(|s| s.0 == ragdoll_core::np_balance::Phase::Falling)
++            {
++                r.downed = true;
++            }
++            if let Some(rel) = rel_speed(ACTOR) {
++                if t >= 0.5 {
++                    r.rel_most = r.rel_most.max(rel);
++                }
++                r.rel_last = rel;
++            }
++            if let Some((drawn, _)) = drawn(ACTOR) {
++                let (c, _) = model().centre_of_mass(&model().states_from_nodes(&drawn));
++                let c = scale(c, k);
++                centres.push((t, c));
++                if let Some((at, _)) = hit {
++                    if t >= at + 1.5 {
++                        r.off_path = r.off_path.max(c[0].abs());
++                        r.ref_off_path = r.ref_off_path.max(f.reference()[0].abs());
++                    }
++                }
++            }
++        }
++    }
++    r.kept = owns(ACTOR);
++    r.steps = state(ACTOR).map_or(0, |s| s.1) - if hit.is_some() { steps_at_hit } else { 0 };
++    if let (Some(&(t1, c1)), Some(&(t0, c0))) = (
++        centres.last(),
++        centres.iter().find(|(tt, _)| *tt >= seconds - 0.5),
++    ) {
++        if t1 > t0 {
++            let d = sub(c1, c0);
++            r.speed_end = length([d[0], d[1], 0.0]) / (t1 - t0) / k;
++        }
++    }
++    r.notes = room_events::take()
++        .into_iter()
++        .filter(|l| l.contains("[np step]") || l.contains("[np outcome]") || l.contains("downed"))
++        .take(12)
++        .collect();
++    room_events::set_on(false);
++    crate::active_ragdoll::clear();
++    crate::knockdown::clear();
++    set_keep_down(false);
++    crate::gunplay::set_tuning(was);
++    r
++}
++
++/// Test a (Patrick's 14:06 clip: a runner taken at 0 m/s, `rel_v` 3.27 m/s while it ran at 3.65,
++/// unhit catch steps seconds after its hit, "downed (steps)"): a runner at 3.7 m/s New Physics
++/// has for 5 s, unhit, takes no step, is never downed, and its body keeps with its animation
++/// (`rel_v` under 0.3 m/s from 0.5 s on).
++#[test]
++fn np_running_unhit_never_stumbles() {
++    let r = run_run(3.7, 5.0, None);
++    eprintln!("RESULT np running unhit: {r:#?}");
++    assert!(r.taken && r.kept, "{r:#?}");
++    assert_eq!(r.steps, 0, "{} steps unhit: {:#?}", r.steps, r.notes);
++    assert!(!r.downed, "downed unhit: {:#?}", r.notes);
++    assert!(r.rel_most < 0.3, "rel_v {:.2} m/s", r.rel_most);
++    assert!(r.rel_last < 0.3, "rel_v {:.2} m/s at the end", r.rel_last);
++    assert!(
++        (r.speed_end - 3.7).abs() < 0.37,
++        "the body ran {:.2} m/s at the end",
++        r.speed_end
++    );
++}
++
++/// Test b: a 0.4 m/s hit across a runner at 3.7 m/s (taken at 0.2 s, hit at 1.0 s): not downed,
++/// one to three catching steps, at 90% of the run's speed or more over its last half second and
++/// back on its path (the body's centre within 6 units across of it, the reference within 6) from
++/// 1.5 s after the hit.
++#[test]
++fn np_running_light_hit_gathers_and_resumes() {
++    let r = run_run(3.7, 4.0, Some((1.0, 0.4)));
++    eprintln!("RESULT np running light hit: {r:#?}");
++    assert!(r.taken && r.kept, "{r:#?}");
++    assert!(!r.downed, "downed: {:#?}", r.notes);
++    assert!(
++        (1..=3).contains(&r.steps),
++        "{} steps from a 0.4 m/s hit: {:#?}",
++        r.steps,
++        r.notes
++    );
++    assert!(
++        r.speed_end >= 0.9 * 3.7,
++        "{:.2} m/s at the end",
++        r.speed_end
++    );
++    assert!(
++        r.off_path <= 6.0 && r.ref_off_path <= 6.0,
++        "{:.1} units off the path (the reference {:.1})",
++        r.off_path,
++        r.ref_off_path
++    );
++    assert!(r.rel_last < 0.3, "rel_v {:.2} m/s at the end", r.rel_last);
++}
+diff --git a/crates/host/src/rig_fixture.rs b/crates/host/src/rig_fixture.rs
+index 55f3109..407df63 100644
+--- a/crates/host/src/rig_fixture.rs
++++ b/crates/host/src/rig_fixture.rs
+@@ -365,7 +365,9 @@ impl Fixture {
+         e.register_double(CONTROLLER_SET_POSITION, |_, _| 0u32.into_ret());
+         e.register_double(CONTROLLER_SET_VELOCITY, |e, a| {
+             let v = read3(e, a[1]);
+-            write3(e, CONTROLLER + 0x700, v);
++            // The game's `SetLinearVelocity` takes game units and keeps Havok units
++            // (`00926980` through `004a3e00`); `GethkLinearVelocity` hands those back.
++            write3(e, CONTROLLER + 0x700, v.map(|x| x / HK));
+             0u32.into_ret()
+         });
+         e.register_double(CONTROLLER_VELOCITY, |_, _| (CONTROLLER + 0x700).into_ret());
