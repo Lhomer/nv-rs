@@ -4346,7 +4346,7 @@ pub fn condition_hit(e: &mut Engine, actor: u32, severity: f32, point: V3) -> co
     let mut c = condition_of(actor);
     c.hit(severity, region);
     for (av, limb) in LIMB_CONDITIONS {
-        let v = e.vcall(actor + 0xa4, 0xc, &args![av]).f64() as f32;
+        let v = engine::actor_values::current(e, actor, av).unwrap_or(f32::NAN);
         if v.is_finite() && v <= 0.0 {
             c.cripple(limb);
         }

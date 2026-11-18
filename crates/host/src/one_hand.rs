@@ -90,7 +90,7 @@ pub fn widen(e: &mut Engine, args: &mut [u32]) {
             .any(|m| m.effect == crate::weapon_mods::Effect::Spread),
     );
     let spread = e.call(SPREAD, &args![weapon, spread_mod]).f64() as f32;
-    let strength = e.vcall(shooter + 0xa4, 0xc, &args![AV_STRENGTH]).f64() as f32;
+    let strength = engine::actor_values::current(e, shooter, AV_STRENGTH).unwrap_or(f32::NAN);
     let cone = ragdoll_core::one_hand::extra(spread, stats.weight, strength, off).to_radians();
     if cone.is_nan() || cone <= 0.0 {
         return;

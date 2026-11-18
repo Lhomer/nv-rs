@@ -152,6 +152,10 @@ pub(crate) fn lay_out_gecko(e: &mut Engine) {
         e.mem.set_u8(part + 0x62, 20);
         e.mem.set_u32(part_slot(slot), part);
     }
+    // Each actor's cached-values owner (`+0xa8`, eye level and radius): answering nothing.
+    for who in [GECKO, PLAYER, SHOOTER] {
+        e.mem.set_u32(who + 0xa8, BASE_VTABLE);
+    }
     for who in [PLAYER, SHOOTER] {
         e.mem.set_u32(who, GECKO_VTABLE);
         e.mem.set_u32(who + rig_fixture::PROCESS, GECKO_PROCESS);
@@ -171,7 +175,13 @@ pub(crate) fn lay_out_gecko(e: &mut Engine) {
     // In a loaded cell (`+0x1d0` its 3D: some; the parent cell attached).
     e.mem.set_u32(GECKO + 0x40, CELL);
     e.mem.set_u8(CELL + 0x26, 6);
-    e.mem.set_u32(GECKO_VTABLE + 0x1d0, ANSWER_YES);
+    // Its 3D (`+0x1d0`): the root the fixture laid out for it (`Actor::Get3D`'s answer), the
+    // creature's tree for the player and the biter, who have none of their own.
+    e.register_double(SLOTS + 40, |e, a| {
+        let root = e.call(0x0043_fcd0, &[a[0]]).u32();
+        if root != 0 { root } else { CREATURE_TREE }.into_ret()
+    });
+    e.mem.set_u32(GECKO_VTABLE + 0x1d0, SLOTS + 40);
     // The damage (`+0x338`): lethal from the tenth pellet on (the game's answer, kept here).
     e.mem.set_u32(GECKO_VTABLE + 0x338, ANSWER_DEAD);
     e.register_double(ANSWER_DEAD, |_, _| {
@@ -220,6 +230,9 @@ fn gecko_like() -> Vec<rig_fixture::Node> {
     tree[0].t = [120.0, 0.0, 0.0];
     tree
 }
+
+/// Where the creature's tree is laid out (`Fixture::add_actor`).
+const CREATURE_TREE: u32 = 0x7700_0000;
 
 /// The pellets fired so far.
 pub(crate) static PELLETS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -478,7 +491,7 @@ fn np_creature_hits_never_corrupt_the_actor_value_table() {
     );
     f.make_character();
     lay_out_gecko(&mut f.e);
-    f.add_actor(GECKO, GECKO_ID, gecko_like(), 0x7700_0000);
+    f.add_actor(GECKO, GECKO_ID, gecko_like(), CREATURE_TREE);
     f.e.mem.set_u32(GECKO + rig_fixture::FORM_ID, GECKO_ID);
     f.game_update();
     crate::active_ragdoll::clear();
@@ -729,4 +742,199 @@ fn np_creature_hits_never_corrupt_the_actor_value_table() {
         bones_written > 0,
         "the creature's hit reaction wrote no bone"
     );
+}
+
+/// The NPC's actor values (its owner's slot `+0xC`): Strength 6, damage threshold 2, health
+/// 100, the rest 50.
+const NPC_OWNER_VTABLE: u32 = AREA + 0x2_5000;
+/// The biting creature (a Coyote's id) and its bite's damage (its slot `+0x444`).
+const BITER_ID: u32 = 0xff00_1327;
+const BITE: i32 = 12;
+
+/// The fixture's NPC (`ACTOR`) made whole for the game's `HitMe`: its vtable's and its process's
+/// unset slots answering nothing, its actor values ([`NPC_OWNER_VTABLE`]), its base form, cell
+/// and magic target the creature's.
+fn dress_npc(e: &mut Engine) {
+    let vt = e.mem.u32(ACTOR);
+    let process = e.mem.u32(ACTOR + rig_fixture::PROCESS);
+    let pvt = e.mem.u32(process);
+    for slot in 0..0x400u32 {
+        for table in [vt, pvt] {
+            if e.mem.u32(table + 4 * slot) == 0 {
+                e.mem.set_u32(table + 4 * slot, ANSWER_NONE);
+            }
+        }
+        e.mem.set_u32(NPC_OWNER_VTABLE + 4 * slot, ANSWER_NONE);
+    }
+    e.register_double(SLOTS + 28, |_, a| Ret {
+        st0: match a[1] {
+            5 => 6.0,
+            0x4c => 2.0,
+            0x10 => 100.0,
+            _ => 50.0,
+        },
+        ..Ret::default()
+    });
+    e.mem.set_u32(NPC_OWNER_VTABLE + 0xc, SLOTS + 28);
+    e.mem.set_u32(ACTOR + 0xa4, NPC_OWNER_VTABLE);
+    e.mem.set_u32(ACTOR + 0x20, BASE_FORM);
+    e.mem.set_u32(ACTOR + 0x40, CELL);
+    e.mem.set_u32(ACTOR + 0x94, BASE_VTABLE);
+    e.mem.set_u32(ACTOR + 0xa8, BASE_VTABLE);
+    e.mem.set_u32(vt + 0x1d0, SLOTS + 40);
+}
+
+/// Patrick's 16:17 crash on 08ff8723 (New Physics on, NPCs turned hostile; a Gecko, a Coyote and
+/// a Giant Rat fighting): `00406d70` < `008d4870` < `HitMe` < `Actor::CombatHit` < the attack
+/// animation's hit < the task queue read `[011d62fc]` (index 77, one past the table) and faulted.
+/// The game's own `HitData::ClearData` (`009b4dc0`: `eAttackSkill` 0x4d, none) and
+/// `InitializeHitData_ov3` (`009b5170`, the melee hit: a creature with no weapon takes its
+/// bite's damage, slot `+0x444`, and keeps that skill) make a Coyote's bite; the game's
+/// `Actor::HitMe` through the hook (`knockdown::hit_me_hooked`) then lands it on an NPC and on a
+/// creature, with New Physics on and off. `crate::hit_force` measured the swing with the hit's
+/// skill through the creature's actor-value owner (`008d4870` < `00406d70`).
+///
+/// Asserted, each run: no fault; `00406d70` never read past the table and the table unchanged;
+/// the swing measured with skill 0 (the knockdown line says "skill 0", or New Physics' hit line
+/// for its actor); its momentum the formula's (`ragdoll_core::knock::transferred` of a swing of
+/// 0 lb, reach 1, the Coyote's Strength, skill 0, against the target's damage threshold).
+#[test]
+fn np_creature_melee_hit_never_reads_past_the_actor_value_table() {
+    use engine::units::fallout_ai::actor_p3::actor_hit_me;
+    use ragdoll_core::knock::{transferred, Push};
+    use std::sync::atomic::Ordering::SeqCst;
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut failed = Vec::new();
+    for np in [true, false] {
+        for (who, target) in [("an NPC", ACTOR), ("a creature", GECKO)] {
+            let mut f = Fixture::new(
+                rig_fixture::fnv_skeleton(),
+                Ground {
+                    collision: Some(-1.0),
+                    navmesh: -9.0,
+                },
+            );
+            f.make_character();
+            lay_out_gecko(&mut f.e);
+            f.add_actor(GECKO, GECKO_ID, gecko_like(), CREATURE_TREE);
+            f.game_update();
+            dress_npc(&mut f.e);
+            // What the 16:17 crash read one past the table: pi/2.
+            f.e.mem
+                .set_u32(crate::av_table::TABLE + 4 * 0x4d, 0x3fc9_0fdb);
+            // The biter: a creature (`+0x21c`), its bite (`+0x444`), its own form id.
+            f.e.mem.set_u32(GECKO_VTABLE + 0x21c, ANSWER_YES);
+            f.e.register_double(SLOTS + 32, |_, _| (BITE as u32).into_ret());
+            f.e.mem.set_u32(GECKO_VTABLE + 0x444, SLOTS + 32);
+            f.e.mem.set_u32(SHOOTER + rig_fixture::FORM_ID, BITER_ID);
+            // Its animation (`+0x1e4`): the attack's group in the upper-body section's word.
+            f.e.register_double(SLOTS + 36, |_, _| (AREA + 0x2_6000).into_ret());
+            f.e.mem.set_u32(GECKO_VTABLE + 0x1e4, SLOTS + 36);
+            crate::active_ragdoll::clear();
+            crate::knockdown::clear();
+            crate::av_table::clear();
+            PELLETS.store(0, SeqCst);
+            let was = crate::gunplay::tuning();
+            crate::gunplay::set_tuning(crate::gunplay::Tuning {
+                new_physics: np,
+                knockdowns: true,
+                ..was
+            });
+            crate::knockdown::install(&mut f.e);
+            room_events::set_on(true);
+            let _ = room_events::take();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                f.animate();
+                // The bite as the game makes it.
+                f.e.call(0x009b_4dc0, &[HIT]);
+                f.e.call(0x009b_5170, &[HIT, SHOOTER, target, 0, 0]);
+                let skill = f.e.get(Ptr::<HitData>::new(HIT), HitData::eAttackSkill);
+                crate::knockdown::hit_me_hooked(&mut f.e, &[target, HIT, 0], |e, a| {
+                    actor_hit_me(e, Ptr::new(a[0]), Ptr::new(a[1]), a[2] as u8)
+                });
+                skill
+            }));
+            let lines = room_events::take();
+            room_events::set_on(false);
+            let (past, changes) = (crate::av_table::reads_past(), crate::av_table::changes());
+            // The formula: the Coyote's Strength (its process's actor values: 100, taken as
+            // 10), skill 0, against the target's damage threshold.
+            let dt = if target == ACTOR { 2.0 } else { 100.0 };
+            let want = transferred(
+                Push::Swing {
+                    weight: 0.0,
+                    reach: 1.0,
+                    strength: 100.0,
+                    skill: 0.0,
+                    power: false,
+                },
+                dt,
+            );
+            let id = if target == ACTOR {
+                format!("{:08X}", rig_fixture::ACTOR_ID)
+            } else {
+                format!("{GECKO_ID:08X}")
+            };
+            let swing_line = lines
+                .iter()
+                .find(|l| l.contains(&id) && l.contains("swing ("))
+                .cloned();
+            let np_line = lines
+                .iter()
+                .find(|l| l.contains(&id) && l.contains("[np hit]"))
+                .cloned();
+            let momentum = lines
+                .iter()
+                .find(|l| l.contains("\"event\":\"hit\"") && l.contains(&id))
+                .and_then(|l| {
+                    let at = l.find("\"momentum\":")? + "\"momentum\":".len();
+                    l[at..].split(',').next()?.parse::<f32>().ok()
+                });
+            eprintln!(
+                "RESULT creature melee, New Physics {np}, on {who}: skill in the hit {:?}, \
+                 00406d70 reads {} (past the table {past}), table changes {changes}, momentum \
+                 {momentum:?} (the formula {want:.3}); {swing_line:?} {np_line:?}",
+                r.as_ref().ok(),
+                crate::av_table::reads(),
+            );
+            let tag = format!("New Physics {np}, {who}");
+            match &r {
+                Err(p) => failed.push(format!("{tag}: fault: {}", text_of(p))),
+                Ok(skill) if *skill != 0x4d => failed.push(format!(
+                    "{tag}: the bite's skill {skill:#x}, not ClearData's"
+                )),
+                _ => {}
+            }
+            if past != 0 || changes != 0 {
+                failed.push(format!("{tag}: past the table {past}, changes {changes}"));
+            }
+            let np_has = np && target == ACTOR;
+            if np_has {
+                // New Physics' actor: its hit line carries the momentum.
+                match np_line.as_deref().and_then(|l| {
+                    let at = l.find("[np hit] ")? + "[np hit] ".len();
+                    l[at..].split(' ').next()?.parse::<f32>().ok()
+                }) {
+                    Some(p) if (p - want * was.hit_force as f32 / 100.0).abs() < 0.05 => {}
+                    other => failed.push(format!("{tag}: [np hit] {other:?}, want {want:.3}")),
+                }
+            } else {
+                if !swing_line
+                    .as_deref()
+                    .is_some_and(|l| l.contains("skill 0)"))
+                {
+                    failed.push(format!("{tag}: no swing line with skill 0: {swing_line:?}"));
+                }
+                if !momentum.is_some_and(|m| (m - want).abs() < 1e-3) {
+                    failed.push(format!("{tag}: momentum {momentum:?}, want {want:.4}"));
+                }
+            }
+            crate::active_ragdoll::clear();
+            crate::knockdown::clear();
+            crate::gunplay::set_tuning(was);
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
 }

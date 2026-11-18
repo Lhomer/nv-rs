@@ -122,13 +122,18 @@ pub fn has_flags(e: &mut Engine, index: i32, mask: u32) -> bool {
     if !inside || !e.mem.is_mapped(entry.wrapping_add(0x44)) {
         PAST.fetch_add(1, Ordering::Relaxed);
         note(format!(
-            "[av table] 00406d70 index {index} ({}) from {}: [{at:#010x}] = {entry:#010x}{}",
+            "[av table] 00406d70 index {index} ({}) from {}, asked by {}: [{at:#010x}] = \
+             {entry:#010x}{}",
             if inside {
                 "inside the table"
             } else {
                 "past the table"
             },
             callers(e),
+            engine::actor_values::asking().map_or_else(
+                || "the game's code".to_string(),
+                |l| format!("{}:{}", l.file(), l.line())
+            ),
             if e.mem.is_mapped(entry.wrapping_add(0x44)) {
                 ""
             } else {

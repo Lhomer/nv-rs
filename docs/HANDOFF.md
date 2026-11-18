@@ -7,6 +7,29 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-18 (the 16:17 crash: a creature's bite and hit_force's skill)
+
+- **16:17 crash (08ff8723), fixed:** `3fc9101f` in `00406d70` < `008d4870` < `HitMe` <
+  `CombatHit` < the attack animation's hit < the task queue; `[av table]` named index 77 read at
+  `011d62fc` (one past the table) and no change of the table. A creature's bite keeps
+  `HitData::ClearData`'s `eAttackSkill` 0x4d ("none": `InitializeHitData_ov3`'s creature branch
+  takes slot `+0x444`'s damage and returns before any skill), and `hit_force::shot_of` (from
+  `knockdown::after_hit` < `measure_hit`) asked the creature's actor-value owner for it. The
+  14:05 and 14:49 logs had the same trace and were likely this path too.
+- `engine_core::actor_values::current`: the one way nv-rs's own code asks for an actor value; an
+  index outside 0..0x4c is none and the owner is never asked; each call marks its Rust caller
+  (`#[track_caller]`), and `[av table]`'s past-the-table line now says "asked by <file:line>" or
+  "the game's code". Used by `hit_force`, `knockdown`, `active_ragdoll` (limb conditions),
+  `one_hand` and JIP's `gc_damage` (resist type, block skill).
+- The knockdown's swing line says the skill (`swing (0 lb, Strength 10, skill 0)`).
+- Test `np_creature_melee_hit_never_reads_past_the_actor_value_table`: the game's `ClearData` and
+  `InitializeHitData_ov3` make a Coyote's bite, the hooked `HitMe` lands it on an NPC and on a
+  creature, New Physics on and off; no fault, nothing read past the table, no change, skill 0 in
+  the line, the momentum `knock::transferred`'s. On 08ff8723's `hit_force` it faults reading
+  `3fc9101f` after `[av table] 00406d70 index 77 ... [0x011d62fc] = 0x3fc90fdb`. The fixture's
+  `NiNode`s and blend collision objects have RTTI now (the limb pick's ray asks each node's type;
+  no Havok shapes, so the game's own fallback picks the limb).
+
 ### Claude, 2026-11-18 (the 14:49 crash: HitMe's limb past the actor-value table)
 
 - **14:49 crash (c08805c1, bNewPhysics=1), fixed:** `3fc9101f` in `00406d70` < `008d4870` <

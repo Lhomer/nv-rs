@@ -233,13 +233,9 @@ const SETTING_FLOAT: u32 = 0x0040_3e20;
 const SETTING_INT: u32 = 0x0043_d4d0;
 const RANDOM: u32 = 0x0048_7f50;
 
+#[track_caller]
 fn actor_value(e: &mut Engine, actor: u32, index: u32) -> f32 {
-    let v = e.vcall(actor + 0xa4, 0xc, &args![index]).f64() as f32;
-    if v.is_finite() {
-        v
-    } else {
-        0.0
-    }
+    engine::actor_values::current(e, actor, index).unwrap_or(0.0)
 }
 
 fn position(e: &mut Engine, actor: u32) -> Option<[f32; 3]> {
@@ -767,10 +763,11 @@ fn describe_push(push: Push) -> String {
         Push::Swing {
             weight,
             strength,
+            skill,
             power,
             ..
         } => format!(
-            "swing ({weight:.0} lb, Strength {strength:.0}{}):",
+            "swing ({weight:.0} lb, Strength {strength:.0}, skill {skill:.0}{}):",
             if power { ", power attack" } else { "" }
         ),
         Push::Blast { damage } => format!("blast ({damage:.0} damage here):"),

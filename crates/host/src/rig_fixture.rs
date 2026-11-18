@@ -89,6 +89,8 @@ const PATHING: u32 = BASE + 0xc_5000;
 pub const ACTOR_ID: u32 = 0x0012_3456;
 const IS_SELF: u32 = 0x7200_0000;
 const NOTHING: u32 = 0x7200_0010;
+const RTTI_NODE: u32 = 0x7200_0030;
+const RTTI_BLEND: u32 = 0x7200_0034;
 /// The skinned geometry: its vtable, its skin instance (`+0xbc`), the skin's data (`+0x08`) and
 /// bone list (`+0x14`), the data's bone count (`+0x44`).
 const GEOMETRY: u32 = BASE + 0xc_6000;
@@ -557,6 +559,18 @@ impl Fixture {
         e.mem.set_u32(NODE_VTABLE + 0xfc, 0x00a5_db30);
         e.mem.set_u32(GEOMETRY_VTABLE + 0xa4, NOTHING);
         e.mem.set_u32(BLEND_VTABLE + 0x90, 0x00c8_17d0);
+        // Their types (`GetRTTI`, vtable `+8`: an `NiRTTI`, its name at `+0`, its parent's at
+        // `+4`): an `NiNode`, and a blend collision object that is not Havok's shape holder (the
+        // fixture has no Havok shapes: a ray the game casts at the bodies meets none).
+        const RTTI: u32 = BASE + 0xe_f800;
+        e.mem.set_cstr(RTTI + 0x80, b"NiNode");
+        e.mem.set_cstr(RTTI + 0x90, b"bhkBlendCollisionObject");
+        e.mem.set_u32(RTTI, RTTI + 0x80);
+        e.mem.set_u32(RTTI + 0x10, RTTI + 0x90);
+        e.register_double(RTTI_NODE, |_, _| RTTI.into_ret());
+        e.register_double(RTTI_BLEND, |_, _| (RTTI + 0x10).into_ret());
+        e.mem.set_u32(NODE_VTABLE + 8, RTTI_NODE);
+        e.mem.set_u32(BLEND_VTABLE + 8, RTTI_BLEND);
         let mut list = CHILD_LISTS;
         let mut blend = BLENDS;
         for (i, n) in self.nodes.iter().enumerate() {

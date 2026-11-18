@@ -60,6 +60,7 @@
 #![cfg_attr(test, allow(clippy::useless_vec))]
 
 pub mod abi;
+pub mod actor_values;
 #[cfg(test)]
 pub(crate) mod alloc_count;
 pub mod call_trace;

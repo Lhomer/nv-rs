@@ -159,17 +159,13 @@ const AV_DAMAGE_THRESHOLD: u32 = 0x4c;
 pub const MELEE_HIT: u32 = 0x009b_5170;
 pub const KNOCK_EXPLOSION: u32 = 0x0091_fee0;
 
-/// An actor's actor value (the `ActorValueOwner` at `+0xa4`, its float getter `+0xc`).
+/// An actor's actor value (the `ActorValueOwner` at `+0xa4`, its float getter `+0xc`), 0 for
+/// none: an index outside the table is none (`engine::actor_values`; a creature's bite keeps
+/// `HitData::ClearData`'s "no skill", 0x4d, and asking for it read past the table: Patrick's
+/// 16:17 crash).
+#[track_caller]
 fn actor_value(e: &mut Engine, actor: u32, index: u32) -> f32 {
-    if actor == 0 {
-        return 0.0;
-    }
-    let v = e.vcall(actor + 0xa4, 0xc, &args![index]).f64() as f32;
-    if v.is_finite() {
-        v
-    } else {
-        0.0
-    }
+    engine::actor_values::current(e, actor, index).unwrap_or(0.0)
 }
 
 /// The power attacks the game made melee hits for lately: (aggressor, target), when.

@@ -271,10 +271,9 @@ const AMMO_EFFECTS: u32 = 0xd4;
 const FORM_TYPE_CREATURE: u8 = 0x3c;
 const BIPED_SLOT_2: u32 = 0x2c + 2 * 0x10;
 const VTBL_ARMOR: u32 = 0x0102_a62c;
-/// Virtual slots: `MagicTarget::CannotBeHit`, `ActorValueOwner::GetActorValue`,
-/// `Actor::GetIsParalyzed`.
+/// Virtual slots: `MagicTarget::CannotBeHit`, `Actor::GetIsParalyzed`
+/// (`ActorValueOwner::GetActorValue`, `+0xC`, through `engine_core::actor_values`).
 const CANNOT_BE_HIT: u32 = 0x10;
-const GET_ACTOR_VALUE: u32 = 0x0c;
 const GET_IS_PARALYZED: u32 = 0x234;
 /// Actor value codes.
 const AV_CHARISMA: u32 = 0x08;
@@ -329,10 +328,15 @@ fn apply_ammo(e: &mut Engine, kind: u32, effects: u32, value: f32) -> f32 {
         .f64() as f32
 }
 
-/// `owner->avOwner.GetActorValue(code)`.
+/// `owner->avOwner.GetActorValue(code)`; a code outside the actor values (a weapon's resist type
+/// is the record's word) is none, 0, never asked (nv-rs: the owner of a creature reads its flags
+/// from past the actor-value table for one, `engine_core::actor_values`).
+#[track_caller]
 fn actor_value(e: &mut Engine, actor: u32, code: u32) -> f32 {
-    e.vcall(actor.wrapping_add(AV_OWNER), GET_ACTOR_VALUE, &[code])
-        .f64() as f32
+    if !engine_core::actor_values::valid(code) {
+        return 0.0;
+    }
+    engine_core::actor_values::current(e, actor, code).unwrap_or(f32::NAN)
 }
 
 /// `ApplyPerkModifiers(entry, owner, filter1, filter2, value)` (`0x5E58F0`, cdecl).
