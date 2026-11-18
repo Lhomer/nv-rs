@@ -52,6 +52,11 @@ const LINEAR_VELOCITY: u32 = 0x0056_0dc0;
 const ANGULAR_VELOCITY: u32 = 0x0056_0e50;
 const SET_LINEAR_VELOCITY: u32 = 0x0056_16d0;
 const SET_ANGULAR_VELOCITY: u32 = 0x0056_1800;
+const BODY_SET_POSITION_AND_ROTATION: u32 = 0x00ca_8960;
+/// A body's position and rotation quaternion (`crate::knockdown`'s `BODY_TRANSLATION`,
+/// `BODY_ROTATION`).
+pub const BODY_TRANSLATION: u32 = 0x120;
+pub const BODY_ROTATION: u32 = 0x160;
 const SET_LOCATION: u32 = 0x0057_5830;
 const CHAR_CONTROLLER: u32 = 0x0093_06d0;
 const CONTROLLER_SET_POSITION: u32 = 0x0056_20e0;
@@ -63,6 +68,7 @@ const RESOLVE_TO_NAVMESH: u32 = 0x006d_dc00;
 const IS_VALID_LOCATION: u32 = 0x006d_ed70;
 /// Game units per Havok unit.
 const HK_TO_GAME: u32 = 0x011b_1864;
+const GAME_TO_HK: u32 = 0x011c_582c;
 pub const HK: f32 = 7.0;
 
 /// The actor's record and its process (`crate::active_ragdoll`'s offsets).
@@ -123,6 +129,9 @@ pub struct Fixture {
     /// Other actors' trees laid out beside it ([`Fixture::add_actor`]): each actor, its form id,
     /// its nodes' addresses and its nodes.
     pub others: Vec<(u32, u32, Vec<u32>, Vec<Node>)>,
+    /// Each node's world as the last [`Fixture::animate`] made it (the list's order), before New
+    /// Physics' snapshot hook (which then puts its body's worlds in).
+    pub anim: Vec<(M3, V3)>,
 }
 
 thread_local! {
@@ -232,6 +241,11 @@ impl Fixture {
         let page = HK_TO_GAME & !0xfff;
         e.mem.map(page, 0x1000);
         e.mem.set_f32(HK_TO_GAME, HK);
+        // And its inverse, the game-to-Havok scale (`011c582c`, what `NI2HK` multiplies by).
+        if !e.mem.is_mapped(GAME_TO_HK & !0xfff) {
+            e.mem.map(GAME_TO_HK & !0xfff, 0x1000);
+        }
+        e.mem.set_f32(GAME_TO_HK, 1.0 / HK);
         // The process manager's lists (`jip::commands::jip_fn_effect::high_actors`): empty.
         e.mem.map(0x011e_0000, 0x2000);
         // Whether an AI thread's task runs now (`008c7aa0`): none, unless a test says so.
@@ -340,6 +354,18 @@ impl Fixture {
         e.register_double(HAVOK_BODY, |_, a| a[0].into_ret());
         e.register_double(LINEAR_VELOCITY, |_, a| (a[0] + 0x10).into_ret());
         e.register_double(ANGULAR_VELOCITY, |_, a| (a[0] + 0x20).into_ret());
+        // A body moved (`hkpRigidBody::setPositionAndRotation`'s queueing wrapper, `00ca8960`):
+        // its position (`+0x120`) and rotation quaternion (`+0x160`), Havok units, as
+        // `crate::knockdown` reads them; the fixture's bodies have no Havok entity of their own.
+        e.register_double(BODY_SET_POSITION_AND_ROTATION, |e, a| {
+            let p = read3(e, a[1]);
+            write3(e, a[0] + BODY_TRANSLATION, p);
+            for i in 0..4 {
+                let x = e.mem.f32(a[2] + 4 * i);
+                e.mem.set_f32(a[0] + BODY_ROTATION + 4 * i, x);
+            }
+            0u32.into_ret()
+        });
         e.register_double(SET_LINEAR_VELOCITY, |e, a| {
             let v = read3(e, a[1]);
             write3(e, a[0] + 0x10, v);
@@ -382,11 +408,22 @@ impl Fixture {
         e.register_double(IS_VALID_LOCATION, |_, _| 1u32.into_ret());
         let _ = PATHING;
         update_worlds(&mut e, &at);
+        // Each body where its node is (the keyframed bodies of a living actor follow the
+        // animation): its position (Havok units) and rotation.
+        for &(node, body) in &with_body {
+            let p = read3(&e, node + WORLD_TRANSLATION).map(|x| x / HK);
+            write3(&mut e, body + BODY_TRANSLATION, p);
+            let q = quaternion(&read9(&e, node + WORLD_ROTATION));
+            for (i, x) in q.into_iter().enumerate() {
+                e.mem.set_f32(body + BODY_ROTATION + 4 * i as u32, x);
+            }
+        }
         Fixture {
             e,
             nodes,
             at,
             others: Vec::new(),
+            anim: Vec::new(),
         }
     }
 
@@ -639,6 +676,7 @@ impl Fixture {
             write3(&mut self.e, self.at[i] + LOCAL_TRANSLATION, t);
         }
         self.update();
+        self.anim = self.worlds();
         // The game's animation update ends here: New Physics' snapshot of it.
         crate::new_physics::animation_updated(&mut self.e, ACTOR);
     }
@@ -719,6 +757,16 @@ impl Fixture {
         );
     }
 
+    /// The animation's world of the node at `node` (as the last [`Fixture::animate`] made it).
+    pub fn anim_world_of(&self, node: u32) -> (M3, V3) {
+        let i = self
+            .at
+            .iter()
+            .position(|&n| n == node)
+            .expect("a node of the tree");
+        self.anim[i]
+    }
+
     /// The world (rotation, translation) of the node at `node`.
     pub fn world_of(&self, node: u32) -> (M3, V3) {
         (
@@ -751,6 +799,44 @@ impl Fixture {
     /// The actor's reference position.
     pub fn reference(&self) -> V3 {
         read3(&self.e, ACTOR + REFR_POSITION)
+    }
+}
+
+/// The unit quaternion (x, y, z, w) of a rotation matrix (row-major, as `NiMatrix3`).
+pub fn quaternion(m: &M3) -> [f32; 4] {
+    let trace = m[0] + m[4] + m[8];
+    if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        [
+            (m[7] - m[5]) / s,
+            (m[2] - m[6]) / s,
+            (m[3] - m[1]) / s,
+            0.25 * s,
+        ]
+    } else if m[0] > m[4] && m[0] > m[8] {
+        let s = (1.0 + m[0] - m[4] - m[8]).sqrt() * 2.0;
+        [
+            0.25 * s,
+            (m[1] + m[3]) / s,
+            (m[2] + m[6]) / s,
+            (m[7] - m[5]) / s,
+        ]
+    } else if m[4] > m[8] {
+        let s = (1.0 + m[4] - m[0] - m[8]).sqrt() * 2.0;
+        [
+            (m[1] + m[3]) / s,
+            0.25 * s,
+            (m[5] + m[7]) / s,
+            (m[2] - m[6]) / s,
+        ]
+    } else {
+        let s = (1.0 + m[8] - m[0] - m[4]).sqrt() * 2.0;
+        [
+            (m[2] + m[6]) / s,
+            (m[5] + m[7]) / s,
+            0.25 * s,
+            (m[3] - m[1]) / s,
+        ]
     }
 }
 

@@ -1962,6 +1962,106 @@ fn start_from(
     moved
 }
 
+/// One of an actor's Havok bodies held to New Physics' body (`crate::new_physics`): its node as
+/// New Physics draws it (`lead`: the body's own node, or the drawn node under it for FNV's root
+/// body on `Bip01 NonAccum`), and the body against that node when taken (the node's world then,
+/// game units; the body's rotation and position, Havok units), so its offset from the node is
+/// kept.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BodyHold {
+    pub lead: u32,
+    pub body: u32,
+    now: ([f32; 9], [f32; 3]),
+    held: ([f32; 4], [f32; 3]),
+}
+
+/// `actor`'s Havok bodies and how each stands against its node now (`drawn`: the nodes New
+/// Physics draws), for [`hold_bodies`].
+pub(crate) fn body_holds(e: &mut Engine, actor: u32, drawn: &[u32]) -> Vec<BodyHold> {
+    let mut out = Vec::new();
+    for (node, body) in bodies(e, actor) {
+        let lead = if drawn.contains(&node) {
+            node
+        } else {
+            match drawn.iter().find(|&&d| e.mem.u32(d + PARENT) == node) {
+                Some(&d) => d,
+                None => continue,
+            }
+        };
+        out.push(BodyHold {
+            lead,
+            body,
+            now: (
+                read9(e, lead + WORLD_ROTATION),
+                read3(e, lead + WORLD_TRANSLATION),
+            ),
+            held: (
+                [0, 4, 8, 12].map(|o| e.mem.f32(body + BODY_ROTATION + o)),
+                read3(e, body + BODY_TRANSLATION),
+            ),
+        });
+    }
+    out
+}
+
+/// The bodies of `holds` put on the pose `shown` (each drawn node, its world rotation and
+/// position, game units), each kept at its offset from its node, and stilled (keyframed by New
+/// Physics, not flying): what the game's hit tests, VATS and AI query between frames is the body
+/// drawn (Patrick's 17:08 clip: the hitboxes stood upright 145 units off the body he saw). Only at
+/// the main thread's safe point (the AI threads' tasks joined) and under the world's lock with no
+/// critical operation open, as [`place_in_world`]; otherwise nothing is moved (false).
+pub(crate) fn hold_bodies(
+    e: &mut Engine,
+    actor: u32,
+    holds: &[BodyHold],
+    shown: &[(u32, [f32; 9], [f32; 3])],
+) -> bool {
+    if holds.is_empty() || e.call(AI_THREAD, &[]).bool() {
+        return false;
+    }
+    let controller = e.call(CHAR_CONTROLLER, &args![actor]).u32();
+    let world = if controller != 0 {
+        controller_world(e, controller)
+    } else {
+        0
+    };
+    if world != 0 {
+        e.call(WORLD_LOCK, &args![world]);
+        if e.mem.u32(world + 0x94) != 0 || e.mem.u32(world + 0x98) != 0 {
+            e.call(WORLD_UNLOCK, &args![world]);
+            return false;
+        }
+    }
+    let scale = hk_scale(e);
+    for h in holds {
+        let Some(&(_, r, t)) = shown.iter().find(|s| s.0 == h.lead) else {
+            continue;
+        };
+        let Some((q, p)) = body_onto_shown((r, t), h.now, h.held, scale) else {
+            continue;
+        };
+        e.with_stack(48, |e, frame| {
+            let at = (frame.addr() + 15) & !15;
+            for (i, x) in p.into_iter().enumerate() {
+                e.mem.set_f32(at + 4 * i as u32, x);
+            }
+            e.mem.set_f32(at + 12, 0.0);
+            for (i, x) in q.into_iter().enumerate() {
+                e.mem.set_f32(at + 16 + 4 * i as u32, x);
+            }
+            e.call(BODY_SET_POSITION_AND_ROTATION, &args![h.body, at, at + 16]);
+        });
+        if linear(e, h.body).is_some() {
+            set_velocity(e, SET_LINEAR_VELOCITY, h.body, [0.0; 3]);
+            set_velocity(e, SET_ANGULAR_VELOCITY, h.body, [0.0; 3]);
+        }
+    }
+    if world != 0 {
+        e.call(WORLD_UNLOCK, &args![world]);
+    }
+    true
+}
+
 /// A body (`body`: its rotation quaternion x, y, z, w and position, Havok units) moved with its
 /// node from the world `now` (rotation, position: game units) to `shown`: the node's world turn
 /// and move put on it, whatever its offset from the node. `scale`: game units per Havok unit.

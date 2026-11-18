@@ -7,6 +7,40 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-18 (the 17:08 clip: hitboxes, VATS and the reference on the body drawn)
+
+- **Cause (Patrick's 17:08 clip, 21a1b52):** New Physics' pose existed only for the draw: written
+  at the draw's set-up, drawn, then the animation's locals put back. Everything the game queries
+  between its update and the draw (the limb ray, VATS's target nodes and highlight, the AI, the
+  18 Havok biped bodies) read the animation at a reference that never moved: the hitboxes stood
+  upright 145 units off the body lying head-down.
+- **Fix (b44a964's rule kept: the animation's locals never hold the write):**
+  - Right after the game's animation update for the actor (`animation_updated`, the snapshot
+    taken first) each body node's world, and its subtree's, is New Physics' body drawn
+    (`put_drawn`, also what `read_drawn` uses at the world pass). Worlds only.
+  - At the main thread's safe point the 18 Havok bodies are put on the body drawn at their offsets
+    from their nodes at the take, and stilled (`knockdown::body_holds`, `hold_bodies`: under the
+    world's lock with no critical operation open, never on an AI thread). A hand-over (a death, a
+    give-up) starts from the pose they were last held to.
+  - Downed, the reference (and its controller) follows the pelvis drawn once it lies 6 units off
+    it: swept clear of walls, at the ground under it (`move_reference`); the animation's snapshot
+    and its samples move with it.
+- **Tests:** `np_hitboxes_follow_the_drawn_body` (downed, 107 units off its animation: every Havok
+  body and body node on the body drawn, 0.00 units; the game's capsule test,
+  `bhkCapsuleShape::GetClosestPoints` on each body node's world through `NI2HK`, meets Spine2 at the
+  drawn chest and nothing at the animated chest), `np_reference_follows_a_downed_body` (8.1 units
+  off the pelvis at most, moved 77 units, stood again, 0.0 units at the rise),
+  `np_the_animation_never_reads_the_write` (181 frames: the locals the animation's after every
+  put-back, the snapshot the animation's every frame). Without the fix: the bodies 157 units and
+  176 degrees off, the reference 144 units off the pelvis.
+- The old "the reference does not move while downed" checks (`np_downed_on_fnvs_skeleton_stands_again`,
+  the cycle and slope runs' "at most 5 u/s downed") are replaced by Patrick's new rule: within 15
+  units of the pelvis while downed, no jump over 10 units at the rise. The fixture keeps the
+  animation's worlds (`Fixture::anim`) for tests that read the animation after `animate`, gives
+  its bodies their transforms and the game's body move, and maps the game-to-Havok scale.
+- **Not covered:** VATS's hit chance (its visibility casts need data the fixture has not); the
+  body nodes' worlds VATS's targets read are covered by the first test. Not run in the game.
+
 ### Claude, 2026-11-18 (New Physics off is vanilla FNV's hits)
 
 - Patrick: bNewPhysics=0 must be vanilla FNV's hit physics. `gunplay::fork_hit_physics()` (gunplay

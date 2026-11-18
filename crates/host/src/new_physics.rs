@@ -146,6 +146,11 @@ struct NpActor {
     /// (`animation_updated`): its animation, as New Physics reads it.
     tree: Vec<(u32, u32)>,
     snap: Option<Snapshot>,
+    /// Its Havok bodies held to the body drawn (`knockdown::BodyHold`), made with the body.
+    holds: Vec<crate::knockdown::BodyHold>,
+    /// The pose its bodies were last held to (each drawn node, its world): where the game's
+    /// ragdoll takes them from at a hand-over.
+    held: Vec<(u32, M3, V3)>,
     /// The body's last frames since its last hit (the frame's time, each body's velocity and
     /// spin at its end): the hand-over's velocities, their mean.
     history: std::collections::VecDeque<(f32, Vec<(V3, V3)>)>,
@@ -244,6 +249,30 @@ pub fn animation_updated(e: &mut Engine, actor: u32) {
     let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(a) = actors.iter_mut().find(|a| a.actor == actor) {
         a.snap = Some(snapshot(e, a.root, &a.tree));
+        // The animation's own taken, its worlds are the body's for the rest of the frame: what
+        // the game's hit tests (the limb ray), VATS's targets and the AI read between this update
+        // and the draw (Patrick's 17:08 clip: the hitboxes stood upright 145 units off the body
+        // drawn). Worlds only: the animation's locals, which it reads as its own, are untouched
+        // (b44a964).
+        put_drawn(e, a);
+    }
+}
+
+/// Each body's node's world set from New Physics' body as drawn, parents first, and every node
+/// under it from it with its own local (`crate::active_ragdoll::set_subtree`). Nothing before the
+/// body is drawn.
+fn put_drawn(e: &mut Engine, a: &NpActor) {
+    if a.drawn.len() != a.nodes.len() {
+        return;
+    }
+    for &b in &a.order {
+        let node = a.nodes[b];
+        let world = Xf {
+            r: a.drawn[b].0,
+            t: a.drawn[b].1,
+            s: e.mem.f32(node + WORLD_SCALE),
+        };
+        crate::active_ragdoll::set_subtree(e, node, world, 0);
     }
 }
 
@@ -519,6 +548,8 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             aim: None,
             tree: tree.clone(),
             snap: Some(snapshot(e, root, &tree)),
+            holds: Vec::new(),
+            held: Vec::new(),
             history: std::collections::VecDeque::new(),
             jumps_said: 0,
             walls: Vec::new(),
@@ -745,6 +776,9 @@ pub fn apply(e: &mut Engine) {
         if a.np.is_none() {
             // Made on the first frame's animated pose, still: its animation's velocity is
             // measured from the frames that follow (`Np`), never from the pose at the hit.
+            // Its Havok bodies against their nodes as the game's update left them (the
+            // animation's, which the keyframed bodies follow): held to the body from now on.
+            a.holds = crate::knockdown::body_holds(e, a.actor, &a.nodes);
             let mut np = Np::new(model().clone(), &anim, 1.0);
             np.keep_down = KEEP_DOWN.load(std::sync::atomic::Ordering::Relaxed);
             for (b, p, j) in a.pending.drain(..) {
@@ -1067,6 +1101,8 @@ fn world_said(e: &mut Engine) {
     }
 }
 
+/// Downed, the reference follows the pelvis once it lies this far from it (game units, flat).
+const DOWN_FOLLOW: f32 = 6.0;
 /// New Physics moves its actor only by this much or more (game units); less is gathered.
 const MOVE_LEAST: f32 = 0.5;
 /// The actor is moved by the body only while drawn within this of it (degrees, units).
@@ -1496,6 +1532,38 @@ pub fn let_gos() -> u32 {
 /// safe point only, the AI threads' tasks joined; a move it cannot make yet is given back.
 fn move_reference(e: &mut Engine, a: &mut NpActor) {
     let Some(np) = a.np.as_mut() else { return };
+    // Downed: the reference (and its character controller, the AI's position) kept on the
+    // pelvis, flat, swept clear of walls, at the ground under it (Patrick's 17:08 clip: it stayed
+    // where the hit took it while the body lay and rose elsewhere).
+    if np.down.is_some() {
+        let Some(&(_, pelvis)) = a.drawn.get(model().root) else {
+            return;
+        };
+        let at = read3(e, a.actor + REFR_POSITION);
+        let mv = [pelvis[0] - at[0], pelvis[1] - at[1], 0.0];
+        if length(mv) < DOWN_FOLLOW {
+            return;
+        }
+        let (to_flat, _) = swept_move(e, a.actor, at, mv);
+        let mut to = [to_flat[0], to_flat[1], at[2]];
+        if length(sub(to, at)) < MOVE_LEAST {
+            return;
+        }
+        if let Some(g) = crate::active_ragdoll::floor_under(e, [to[0], to[1], at[2] + 30.0]) {
+            to[2] = g + a.floor_lift.unwrap_or(0.0) - a.floor_offset.unwrap_or(0.0);
+        }
+        if crate::knockdown::place_in_world(e, a.actor, to) {
+            let now = read3(e, a.actor + REFR_POSITION);
+            let k = ragdoll_core::np_body::UNITS;
+            np.anim_moved(scale(sub(now, at), 1.0 / k));
+            if let Some(s) = a.snap.as_mut() {
+                s.root.t = add(s.root.t, sub(now, at));
+            }
+            a.moved = add(a.moved, sub(now, at));
+            a.ref_after = Some(now);
+        }
+        return;
+    }
     // The steps' move is the actor's, only while the pose is drawn (an actor moved under a
     // pose not drawn slid along upright: Patrick's d02bbd1 clip).
     let held = a.readback.0 <= MOVE_DRAWN.0 && a.readback.1 <= MOVE_DRAWN.1;
@@ -1587,6 +1655,18 @@ fn main_thread_pass(e: &mut Engine) {
         for a in list.iter_mut() {
             if a.handing.is_none() {
                 move_reference(e, a);
+                // Its Havok bodies on the body drawn (the game's hit tests, VATS, the AI).
+                if a.drawn.len() == a.nodes.len() {
+                    let shown: Vec<(u32, M3, V3)> = a
+                        .nodes
+                        .iter()
+                        .zip(&a.drawn)
+                        .map(|(&n, d)| (n, d.0, d.1))
+                        .collect();
+                    if crate::knockdown::hold_bodies(e, a.actor, &a.holds, &shown) {
+                        a.held = shown;
+                    }
+                }
             }
         }
         let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
@@ -1686,6 +1766,12 @@ fn main_thread_pass(e: &mut Engine) {
                 p = add(p, scale(v.1, m.bodies[b].mass / k));
             }
             scale(p, 1.0 / m.mass)
+        };
+        // The bodies are where they were last held (the body drawn), else on the animation.
+        let animated = if a.held.is_empty() {
+            animated
+        } else {
+            a.held.clone()
         };
         if reason == "death" {
             let (moved, given) =
@@ -1808,15 +1894,7 @@ pub fn read_drawn(e: &mut Engine) {
         }
         let over = changed > 0;
         // Set from the body.
-        for &b in &a.order {
-            let node = a.nodes[b];
-            let world = Xf {
-                r: a.drawn[b].0,
-                t: a.drawn[b].1,
-                s: e.mem.f32(node + WORLD_SCALE),
-            };
-            crate::active_ragdoll::set_subtree(e, node, world, 0);
-        }
+        put_drawn(e, a);
         let (after, as_anim) = drawn_against(e, &a.nodes, &a.drawn, &a.anim_last);
         a.readback = after;
         a.readback_most = (
