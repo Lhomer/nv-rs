@@ -7,6 +7,41 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (the 22:58 crash on 959f6d31: a dead texture in the texture manager's pool)
+
+**Status: open; the stop now names itself (111a59b), the cause is not yet proven.** Asked first, before
+the queued New Physics work.
+
+- **Done (111a59b):** `Engine::vcall` is `#[track_caller]`; a target nobody translated (0 from an emptied
+  vtable, or an open address) stops with the object, its vtable, the slot, the vtable's word and the Rust
+  `file:line:col` of the call (`vcall_full`; the fast path is the same, benchmark within noise). Test
+  `a_virtual_call_to_an_open_slot_names_the_call` (engine-core). The next stop says which object read 0:
+  a vtable equal to `NiRefObject`'s (the destructors leave the base vtable, whose slots end before +0x94)
+  means a destroyed object.
+- **The stop's frame:** `00b6d5e0` is reached from `00872f50` (a Rust call, so not in the chain) through
+  `00b6e110` kind 4. Its open vcalls are the renderer's default group (+0x884, slot +0xc8) slot +0x8c/+0x90,
+  and, in the pool search, each `+0x78` entry's texture's +0x30 (`NiRenderedTexture`) slot +0x94/+0x98.
+- **Audited (translation against translation and their recorded exe readings; no exe in the cloud
+  container):** borrow `00b6d5e0` (the InterlockedDecrement/Increment pair), return `00b6da10`, cleanup
+  `00b6dd00`, `00b6ee70`, the destructor `00b6f0b0`, warm-up `00b6e450`, `00b6e110`, the pointer stack
+  `00b6b050`/`00b6b0b0`/`00b6b6c0`, `ImageSpaceTexture` (`00ba3840`/`39a0`/`3940`/`3a00`), the screenshot
+  `00878f60` (its target is not a pool texture), and every caller of the borrow and the return in crates/
+  (a sub-agent's table, checked at the suspect lines). Every count balances: no caller releases a pointer
+  it did not count.
+- **Hazards found (not proven to be this crash):**
+  1. `00872f50` stores the kind-4 texture raw in `011f9438` (main_p2.rs:1896); `00876850` returns it and
+     nothing clears the global. A frame that skips the borrow (`008707c0` with byte +0x131, or `011f91a4`
+     clear) but runs the water reflection copy (`00b65c60`, bsshaderaccumulator.rs:1964; typed
+     `draw/own.rs:426`) hands the returned texture to image-space effect 0x22, whose `SetTexture` and clear
+     count it up and down: on a texture the cleanup already freed (two passes without a borrow) that is a
+     second delete, whose member releases can kill a live pooled texture's +0x30. To settle in the exe:
+     does anything else write `011f9438` (in `00876850`, `008707c0`, the save path)?
+  2. `00b6d5e0`'s new entry never writes `eType` (+0x14), which its match reads for types 9 and 0x16
+     (bstexturemanager.rs:257-264): check the exe's stores after the allocation.
+- **Next:** the line after the stop from a build at or after 111a59b, or the exe (Patrick's `nv-re`),
+  then the real-path test (borrow, return, cleanup, the faulty release, kind-4 borrow failing in
+  `00b6d5e0`) and the fix.
+
 ### Claude, 2026-11-19 (the rise ends moving: clip 22:19 on 08187cb1; `docs/wip/np-rise-still.patch`)
 
 Work in progress on the get-up slide/trip addendum (applies to 959f6d3). In the patch:
