@@ -107,6 +107,10 @@ pub struct Keys {
     pub perks_per_level: Option<u32>,
     /// The lines whose value can't be used (`key=value`): the default stands for each.
     pub bad: Vec<String>,
+    /// `[nv-rs Stewie]`: lStewieAl's Tweaks' rows' off keys and `bMissingKeysAsTweaks`, read by the
+    /// keys `crates/stewie` names (its own table, not [`TABLE`]: a key a row, as many as Tweaks has
+    /// rows built).
+    pub stewie: stewie::rows::Keys,
 }
 
 impl Keys {
@@ -226,6 +230,8 @@ impl Keys {
                 keys.bad.push(format!("{}={raw}", row.key));
             }
         }
+        keys.stewie = stewie::rows::Keys::read(|key| value(text, stewie::SECTION, key));
+        keys.bad.extend(keys.stewie.bad.iter().cloned());
         keys
     }
 

@@ -30,6 +30,8 @@ jip = { path = "../jip" }
 # The living-body physics' pure parts (flinch, balance, knockdown momentum, calibres), shared
 # with tools/ragdoll-lab.
 ragdoll-core = { path = "../ragdoll-core" }
+# lStewieAl's Tweaks built in, when its row is on: after JIP and MCM, before UIO (crates/stewie).
+stewie = { path = "../stewie" }
 uio = { path = "../uio" }
 # The Mod Configuration Menu's plugin (MCM.dll) built in, when its row is on: after JIP, before UIO.
 mcm = { path = "../mcm" }
