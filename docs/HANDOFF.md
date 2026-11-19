@@ -7,6 +7,31 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (the two upstream merges: 6529531 and 90fd0c7)
+
+**Status: both pushed; 6529531 on the launcher, 90fd0c7's Play package building.**
+- **6529531**: slaterain/main 3fb7369c..420b12a3 (11 commits; stewie, the mod installer, JIP).
+  Its Linux test room stopped: `linux/Cargo.lock` lacked the stewie crate (`--locked`). Fixed in
+  the next merge (linux and android lock files get stewie only, no version moves).
+- **90fd0c7**: slaterain/main 420b12a3..3c977609 (30 commits). The one real conflict was
+  `d3d9real/win32.rs`: upstream's `input::cursor_action` (bBackground Mouse=1: never held, moves
+  to the game as WM_MOUSEMOVE; the hold made again after the game reactivates its mouse;
+  activations to the game's procedure; refused calls logged) combined with the fork's mouse
+  look (`mouse_look.rs`: NV_MOUSE_LOOK modes, the hold on the first motion in front and after a
+  move, raw echo and absolute positions, recentring, minimised let go). Every hold now goes
+  through `follow`; the fork's extra holds use `CursorEvent::Activated`, so a mouse that is not
+  exclusive is never held by them. `NV_MOUSE_LOOK=hold` takes no hold from `hold_wanted`.
+  Checked on Linux with `cargo check`/`clippy --target x86_64-pc-windows-msvc -p engine-platform`
+  (rust-std for that target installed in the container); not played on Windows yet.
+- **Known on Linux, unchanged:** nvse `the_results_match_the_real_game_bit_for_bit` (tan/tanh
+  last bits from the system's libm); `active_ragdoll::mock_tests::the_drawn_flinch_reaches_the_spine_tops_node`
+  failed once in a full parallel host run and passed alone, in its group three times and in the
+  next full run (load-dependent timing, like `rig_fixture`'s joint-limit test).
+- **Queue:** every item has been through once. Open, with patches and notes below: the rise
+  from the front and task C (`np-front-rise*.patch`, `np-settle-stage.patch`), the running fix
+  (`np-running-seed.patch`), knockdown deaths (needs the settled limits), explosions (needs
+  the exe's settings and the forms' force values).
+
 ### Claude, 2026-11-19 (explosions under New Physics: what blocks a force-sized blast)
 
 **Status: not started in code; needs Patrick's data.** The game's own explosion push
