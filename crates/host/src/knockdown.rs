@@ -1111,6 +1111,9 @@ pub(crate) fn hand_over(
         nudges: 0,
         nudge_at: Instant::now(),
         blended: false,
+        from_np: true,
+        rolls: 0,
+        roll_at: Instant::now(),
     });
     drop(ups);
     let mut down = DOWN.lock().unwrap_or_else(|p| p.into_inner());
@@ -1349,6 +1352,9 @@ pub fn knock_down(
             nudges: 0,
             nudge_at: Instant::now(),
             blended: false,
+            from_np: false,
+            rolls: 0,
+            roll_at: Instant::now(),
         });
     }
     note(format!(
@@ -2455,6 +2461,12 @@ struct GetUp {
     nudge_at: Instant,
     /// The drawn get-up's blend from the ragdoll's pose begun (`crate::active_ragdoll`).
     blended: bool,
+    /// Handed down by New Physics (`hand_over`): it gets up only lying on its back or front,
+    /// rolled onto the nearer when on its side (`knock::FLAT_ENOUGH`); the rolls it took and when
+    /// the last was.
+    from_np: bool,
+    rolls: u32,
+    roll_at: Instant,
 }
 
 static GET_UPS: Mutex<Vec<GetUp>> = Mutex::new(Vec::new());
@@ -2676,7 +2688,66 @@ fn get_ups(e: &mut Engine) {
                 ));
             }
         }
-        if !may_get_up(g.still_frames, lies, held) {
+        // Handed down by New Physics: on its back or front only (the game's face-up or face-down
+        // get-up picked from a side played flipped); on its side and still, rolled onto the nearer.
+        let front = match (
+            spine_at,
+            head_at,
+            node_at(e, &bones, b"Bip01 L UpperArm"),
+            node_at(e, &bones, b"Bip01 R UpperArm"),
+        ) {
+            (Some(sp), Some(h), Some(l), Some(r)) => Some(ragdoll_core::knock::front(sp, h, l, r)),
+            _ => None,
+        };
+        let front_up = front.map(|f| {
+            let l = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt().max(1e-6);
+            f[2] / l
+        });
+        let on_side = g.from_np
+            && front_up.is_some_and(|u| u.abs() < ragdoll_core::knock::FLAT_ENOUGH)
+            && g.rolls < ragdoll_core::knock::ROLLS;
+        if on_side
+            && g.still_frames >= STILL_FRAMES
+            && g.roll_at.elapsed().as_secs_f32() >= ragdoll_core::knock::ROLL_EVERY
+        {
+            if let Some(axis) = front.and_then(ragdoll_core::knock::roll_axis) {
+                let w = axis.map(|x| x * ragdoll_core::knock::ROLL_SPEED);
+                let hk = hk_scale(e);
+                let mut moved = 0;
+                for &(node, body) in &bones {
+                    let at = read3(e, node + WORLD_TRANSLATION);
+                    let r = ragdoll_core::flinch::sub(at, centre_now);
+                    // The whole body turned about its centre: each body's speed (Havok units).
+                    let v = [
+                        w[1] * r[2] - w[2] * r[1],
+                        w[2] * r[0] - w[0] * r[2],
+                        w[0] * r[1] - w[1] * r[0],
+                    ];
+                    if linear(e, body).is_some() {
+                        set_velocity(e, SET_LINEAR_VELOCITY, body, v.map(|x| x / hk));
+                        set_velocity(e, SET_ANGULAR_VELOCITY, body, w);
+                        moved += 1;
+                    }
+                }
+                g.rolls += 1;
+                g.roll_at = Instant::now();
+                g.still_frames = 0;
+                note(format!(
+                    "{}: [np settle] on its side (its front {:.2} up): rolled onto its {} at \
+                     {:.1} rad/s, {moved} bodies (roll {})",
+                    describe(e, g.actor),
+                    front_up.unwrap_or(0.0),
+                    if front_up.unwrap_or(0.0) >= 0.0 {
+                        "back"
+                    } else {
+                        "front"
+                    },
+                    ragdoll_core::knock::ROLL_SPEED,
+                    g.rolls
+                ));
+            }
+        }
+        if on_side || !may_get_up(g.still_frames, lies, held) {
             if !g.held_said {
                 g.held_said = true;
                 note(format!(

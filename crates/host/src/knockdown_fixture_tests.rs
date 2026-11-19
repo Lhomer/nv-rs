@@ -17,6 +17,8 @@ use crate::active_ragdoll::tests::SERIAL;
 fn knocked(stood: [f32; 3], lying: f32) {
     let since = Instant::now() - Duration::from_secs_f32(lying + FLIGHT.as_secs_f32());
     let mut ups = GET_UPS.lock().unwrap_or_else(|p| p.into_inner());
+    // Handed down by New Physics (`hand_over` made its bookkeeping): kept so.
+    let from_np = ups.iter().any(|g| g.actor == ACTOR && g.from_np);
     ups.clear();
     ups.push(GetUp {
         actor: ACTOR,
@@ -34,6 +36,9 @@ fn knocked(stood: [f32; 3], lying: f32) {
         nudges: 0,
         nudge_at: since,
         blended: false,
+        from_np,
+        rolls: 0,
+        roll_at: since,
     });
 }
 
@@ -702,4 +707,179 @@ fn the_launch_is_the_hits_speed_on_fnvs_skeleton() {
         (v / speed - 1.0).abs() <= 0.1,
         "the {what} at {v:.0} units/s for a {speed:.0} hit"
     );
+}
+
+/// A lying pose for [`get_ups`]: the get-up animation's first frame (on its back) at the
+/// reference, turned `side` degrees onto its side about its length (the pelvis to the head; the
+/// arm it turns onto laid back flat on the floor), lifted so its lowest node lies 2 units over
+/// the floor (every node's world).
+#[allow(clippy::needless_range_loop)]
+fn lying_turned(f: &mut Fixture, side: f32) -> Vec<(M3, [f32; 3])> {
+    let lying = get_up_animation(f, [0.0; 3], 0.0);
+    let index = |n: &str| f.nodes.iter().position(|x| x.name == n).unwrap();
+    let (pelvis_i, head_i) = (index("Bip01 Pelvis"), index("Bip01 Head"));
+    let about = lying[pelvis_i].1;
+    let along = ragdoll_core::flinch::unit(sub(lying[head_i].1, about)).unwrap();
+    let turn = |angle: f32| {
+        ragdoll_core::active::m_from_q(ragdoll_core::active::qexp(scale_v(
+            along,
+            angle.to_radians(),
+        )))
+    };
+    let r = turn(side);
+    let mut pose: Vec<(M3, [f32; 3])> = lying
+        .iter()
+        .enumerate()
+        .map(|(i, (m, t))| {
+            if i == 0 {
+                return (*m, *t);
+            }
+            (
+                ragdoll_core::flinch::mul(&r, m),
+                ragdoll_core::flinch::add(about, ragdoll_core::flinch::apply_m(&r, sub(*t, about))),
+            )
+        })
+        .collect();
+    if side.abs() > 1.0 {
+        let arm = if pose[index("Bip01 L Hand")].1[2] < pose[index("Bip01 R Hand")].1[2] {
+            index("Bip01 L UpperArm")
+        } else {
+            index("Bip01 R UpperArm")
+        };
+        let back = turn(-side);
+        let shoulder = pose[arm].1;
+        for i in 0..f.nodes.len() {
+            let mut p = Some(i);
+            while let Some(j) = p {
+                if j == arm {
+                    break;
+                }
+                p = f.nodes[j].parent;
+            }
+            if p == Some(arm) {
+                pose[i] = (
+                    ragdoll_core::flinch::mul(&back, &pose[i].0),
+                    ragdoll_core::flinch::add(
+                        shoulder,
+                        ragdoll_core::flinch::apply_m(&back, sub(pose[i].1, shoulder)),
+                    ),
+                );
+            }
+        }
+    }
+    let low = pose
+        .iter()
+        .skip(1)
+        .map(|x| x.1[2])
+        .fold(f32::INFINITY, f32::min);
+    for x in pose.iter_mut().skip(1) {
+        x.1[2] += 2.0 - low;
+    }
+    pose
+}
+
+/// What [`get_ups`] did with a still body lying as `pose`, held `held` seconds already, handed
+/// down by New Physics or not, over 60 frames: whether its get-up was allowed, its rolls, its
+/// front as it began (`knock::front_up`) and the spin given its bodies.
+fn settle_run(pose_side: f32, held: f32, from_np: bool) -> (bool, usize, f32, [f32; 3]) {
+    let _one = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let mut f = Fixture::new(
+        rig_fixture::fnv_skeleton(),
+        Ground {
+            collision: Some(0.0),
+            navmesh: -8.0,
+        },
+    );
+    crate::active_ragdoll::clear();
+    clear();
+    rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, [0.0; 3]);
+    let pose = lying_turned(&mut f, pose_side);
+    f.set_worlds(&pose);
+    f.set_knock_state(1);
+    let since = Instant::now() - Duration::from_secs_f32(held + FLIGHT.as_secs_f32());
+    GET_UPS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(GetUp {
+            actor: ACTOR,
+            id: ACTOR_ID,
+            start: [0.0; 3],
+            since,
+            lying_since: Some(Instant::now() - Duration::from_secs_f32(held)),
+            still_frames: 0,
+            held_said: false,
+            allowed: false,
+            placed: None,
+            next_log: 0.0,
+            fall_dir: [0.0, 0.0, -1.0],
+            braced: false,
+            nudges: ragdoll_core::knock::NUDGES,
+            nudge_at: since,
+            blended: false,
+            from_np,
+            rolls: 0,
+            roll_at: since,
+        });
+    let w = |n: &str| pose[f.nodes.iter().position(|x| x.name == n).unwrap()].1;
+    let front = ragdoll_core::knock::front_up(
+        w("Bip01 Spine1"),
+        w("Bip01 Head"),
+        w("Bip01 L UpperArm"),
+        w("Bip01 R UpperArm"),
+    );
+    crate::room_events::set_on(true);
+    let _ = crate::room_events::take();
+    let mut spin = [0.0f32; 3];
+    for _ in 0..60 {
+        f.set_worlds(&pose);
+        get_ups(&mut f.e);
+        let s = f.body_spin(0);
+        if length(s) > length(spin) {
+            spin = s;
+        }
+        // The game's physics: the bodies still (a roll given them shows in their spin).
+        for k in 0..f.body_nodes().len() {
+            f.set_body_velocity(k, [0.0; 3]);
+        }
+    }
+    let notes = crate::room_events::take();
+    crate::room_events::set_on(false);
+    let allowed = get_up_of().is_some_and(|g| g.allowed);
+    let rolls = notes.iter().filter(|n| n.contains("[np settle]")).count();
+    crate::active_ragdoll::clear();
+    clear();
+    (allowed, rolls, front, spin)
+}
+
+/// Patrick's 18:39 and 19:14 clips: bodies New Physics handed to the game's ragdoll lying on their
+/// side were let up after 8 s ("held too long, not lying"), and the game's get-up, picked face up
+/// or down from a side, played flipped (the pelvis 99 to 230 units up, upside down). Here,
+/// through the get-up's bookkeeping (`get_ups`), with the body held 9 s already:
+/// - handed down by New Physics on its side (its front 0.17 up), it is not let up but rolled
+///   onto its back (its bodies given a spin about its length, toward its front facing up);
+/// - the same on its back: let up (still and lying);
+/// - the old knock-downs (not New Physics'): let up as before (held too long), never rolled.
+#[test]
+fn np_handed_bodies_get_up_only_on_their_back_or_front() {
+    let (allowed, rolls, front, spin) = settle_run(80.0, 9.0, true);
+    eprintln!(
+        "RESULT np handed on its side: front {front:.2} up, allowed {allowed}, {rolls} rolls, \
+         spin {spin:?}"
+    );
+    assert!(front.abs() < ragdoll_core::knock::FLAT_ENOUGH, "{front:.2}");
+    assert!(!allowed, "let up on its side");
+    assert!(rolls >= 1, "never rolled");
+    assert!(
+        (length(spin) - ragdoll_core::knock::ROLL_SPEED).abs() < 0.1,
+        "spin {spin:?}"
+    );
+    let (allowed, rolls, front, _) = settle_run(0.0, 9.0, true);
+    eprintln!(
+        "RESULT np handed on its back: front {front:.2} up, allowed {allowed}, {rolls} rolls"
+    );
+    assert!(front >= ragdoll_core::knock::FLAT_ENOUGH, "{front:.2}");
+    assert!(allowed && rolls == 0);
+    let (allowed, rolls, _, _) = settle_run(80.0, 9.0, false);
+    eprintln!("RESULT old knock-down on its side: allowed {allowed}, {rolls} rolls");
+    assert!(allowed && rolls == 0);
 }

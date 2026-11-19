@@ -44,6 +44,12 @@ animation update; VATS's readers run in the menu pass, outside that window, and 
   bones as drawn), the C runtime's maths and formatting, the combat formulas' damage, the
   player's own update; settings the test's (listed in the file).
 - Next: the 18:39/18:41 knockdown items, then the running/knockdown task with its addenda.
+- Done: bodies New Physics hands to the game's ragdoll get up only on their back or front
+  (`GetUp::from_np`; `knock::front_up` at least `FLAT_ENOUGH` 0.7): on their side and still they
+  are rolled onto the nearer (a spin of `ROLL_SPEED` 2.5 rad/s about their length, every 0.6 s, at
+  most `ROLLS` 5), never let up by the 8 s hold while on their side (the 18:39 and 19:14 flips:
+  the game's get-up picked face up or down from a side). `[np settle]` lines. The old
+  knock-downs unchanged. Test: `np_handed_bodies_get_up_only_on_their_back_or_front`.
 - In progress (`docs/wip/np-settled-limits.patch`, applies to this commit): a downed body settled
   (landed, past `SETTLE_AFTER` 0.6 s, not rising) on the skeleton's own limits, soft for 0.3 s
   after each change of limits (`Down::settled_limits`, `limits_for`); rising, the widened ones;

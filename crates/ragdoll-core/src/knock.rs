@@ -125,6 +125,62 @@ pub fn faces_up(spine: [f32; 3], head: [f32; 3], left: [f32; 3], right: [f32; 3]
     front_z > 0.0
 }
 
+/// How far a lying body's front faces up (1) or down (-1); 0 on its side: the height of its front
+/// (as [`faces_up`] takes it) over its length.
+pub fn front_up(spine: [f32; 3], head: [f32; 3], left: [f32; 3], right: [f32; 3]) -> f32 {
+    let up = [head[0] - spine[0], head[1] - spine[1], head[2] - spine[2]];
+    let across = [right[0] - left[0], right[1] - left[1], right[2] - left[2]];
+    let front = [
+        up[1] * across[2] - up[2] * across[1],
+        up[2] * across[0] - up[0] * across[2],
+        up[0] * across[1] - up[1] * across[0],
+    ];
+    let l = (front[0] * front[0] + front[1] * front[1] + front[2] * front[2]).sqrt();
+    if l > 1e-6 {
+        front[2] / l
+    } else {
+        0.0
+    }
+}
+
+/// A body handed down by New Physics gets up only lying on its back or front: its front at least
+/// this far up or down ([`front_up`]); on its side it is rolled onto the nearer at [`ROLL_SPEED`]
+/// (rad/s) every [`ROLL_EVERY`] seconds while still, at most [`ROLLS`] times (the game picks its
+/// face-up or face-down get-up from the ragdoll and played it flipped from a side: Patrick's 18:39
+/// and 19:14 clips, the pelvis 99 to 230 units up, upside down).
+pub const FLAT_ENOUGH: f32 = 0.7;
+pub const ROLL_SPEED: f32 = 2.5;
+pub const ROLL_EVERY: f32 = 0.6;
+pub const ROLLS: u32 = 5;
+
+/// The roll that turns a body's front (`front`, any length) toward straight up or down, whichever
+/// is nearer: a rotation vector's direction (unit), or none when it already faces one.
+pub fn roll_axis(front: [f32; 3]) -> Option<[f32; 3]> {
+    let want = if front[2] >= 0.0 {
+        [0.0, 0.0, 1.0]
+    } else {
+        [0.0, 0.0, -1.0]
+    };
+    let axis = [
+        front[1] * want[2] - front[2] * want[1],
+        front[2] * want[0] - front[0] * want[2],
+        front[0] * want[1] - front[1] * want[0],
+    ];
+    let l = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    (l > 1e-4).then(|| axis.map(|x| x / l))
+}
+
+/// The front of a lying body (up the body crossed with left to right, not unit).
+pub fn front(spine: [f32; 3], head: [f32; 3], left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    let up = [head[0] - spine[0], head[1] - spine[1], head[2] - spine[2]];
+    let across = [right[0] - left[0], right[1] - left[1], right[2] - left[2]];
+    [
+        up[1] * across[2] - up[2] * across[1],
+        up[2] * across[0] - up[0] * across[2],
+        up[0] * across[1] - up[1] * across[0],
+    ]
+}
+
 /// The way a body that does not lie leans (flat, unit: from its spine toward its head), along
 /// which it is nudged to finish toppling; straight up, the way it faces `facing`.
 pub fn lean(spine: [f32; 3], head: [f32; 3], facing: [f32; 3]) -> [f32; 3] {

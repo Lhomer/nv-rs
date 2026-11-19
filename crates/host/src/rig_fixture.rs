@@ -749,6 +749,13 @@ impl Fixture {
     pub fn body_velocity(&self, k: usize) -> V3 {
         scale(read3(&self.e, BODIES + k as u32 * BODY_SIZE + 0x10), HK)
     }
+    /// The `k`th body's spin (rad/s), as the doubles keep it.
+    pub fn body_spin(&self, k: usize) -> V3 {
+        read3(&self.e, BODIES + k as u32 * BODY_SIZE + 0x20)
+    }
+    pub fn set_body_spin(&mut self, k: usize, w: V3) {
+        write3(&mut self.e, BODIES + k as u32 * BODY_SIZE + 0x20, w);
+    }
     pub fn set_body_velocity(&mut self, k: usize, v: V3) {
         write3(
             &mut self.e,
