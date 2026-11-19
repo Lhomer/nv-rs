@@ -70,6 +70,14 @@ animation update; VATS's readers run in the menu pass, outside that window, and 
   spin of 1.3 rad/s), from the rise's goals (each spine joint its own 0.3 rad reach) and from
   goal switches (rise to settle: back to the standing animation's targets). A settle stage with
   neutral lying targets and eased goal changes (task C) is the way, not more tuning.
+  Latest patch: settled only after a failed rise or 3 s down (`SETTLE_AFTER`), not rising; its
+  goals eased (`SETTLE_REACH` 0.15 rad a frame) toward the animation's idle; the rise's reach
+  as on HEAD. 34 of 35 NP tests pass; the one left: `np_the_arms_push_it_up` "on its face,
+  flat" never stands (three rises fail, then a clean give-up: 0.4 degrees out as handed). Rises
+  that follow a settle fail more often (face down; on HEAD that case already needs several tries,
+  7 s). With it, give-ups hand over inside the limits. A death 0.3 s after its fall still waits
+  up to 45 frames (the joints out by 15 to 46 degrees then; `into_data_limits`' 12 passes do not
+  bring them in, 120 make it worse); making the dead body limp (no muscles) did not shorten it.
 
 ### Claude, 2026-11-19 (the running fix: where it stands, docs/wip/np-running-seed.patch)
 

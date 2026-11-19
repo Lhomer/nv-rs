@@ -1,21 +1,24 @@
 diff --git a/crates/ragdoll-core/src/np.rs b/crates/ragdoll-core/src/np.rs
-index 6dfe53c..693735c 100644
+index cc675cb..fa6a5ef 100644
 --- a/crates/ragdoll-core/src/np.rs
 +++ b/crates/ragdoll-core/src/np.rs
-@@ -113,6 +113,12 @@ pub const HAND_PLANT: (f32, f32, f32) = (3000.0, 150.0, 400.0);
+@@ -113,6 +113,15 @@ pub const HAND_PLANT: (f32, f32, f32) = (3000.0, 150.0, 400.0);
  pub const HAND_REACH: f32 = 60.0;
  /// How long the limits stay soft after a fall (s).
  pub const LIMITS_SETTLE: f32 = 0.3;
 +/// A downed body takes the skeleton's own limits this long after it went down (s), once it is
 +/// not in the air: the fall keeps the limits it fell with.
-+pub const SETTLE_AFTER: f32 = 0.6;
++pub const SETTLE_AFTER: f32 = 3.0;
 +/// Settled, the skeleton's limits stay soft while a joint lies further out than this (rad): only
 +/// its allowance eases in ([`crate::np_body::SETTLE_STEP`]), anything further is held.
 +pub const LIMITS_IN: f32 = 0.005;
++/// Settled, a joint's goal lies at most this far from where it is (rad, at 60 frames a second;
++/// less in a shorter frame): the limbs drift to the neutral lying pose, never yanked.
++pub const SETTLE_REACH: f32 = 0.15;
  /// A rise with nothing to push from (or too weak) this long gives up (s).
  pub const RISE_NO_PUSH: f32 = 0.5;
  /// A rise lasts at most this long (s, from the AI's wish to stand, whatever the frames read):
-@@ -273,6 +279,11 @@ pub struct Down {
+@@ -273,6 +282,11 @@ pub struct Down {
      pub arms_off: bool,
      /// How long the legs' push has lapsed (s).
      pub lift_lapse: f32,
@@ -27,7 +30,7 @@ index 6dfe53c..693735c 100644
  }
  
  /// Each joint's relative rotation (`parent⁻¹ child`) in a pose of body-node worlds.
-@@ -514,6 +525,8 @@ impl Np {
+@@ -514,6 +528,8 @@ impl Np {
                  hand_landed: [false, false],
                  arms_off: false,
                  lift_lapse: 0.0,
@@ -36,7 +39,7 @@ index 6dfe53c..693735c 100644
              });
              return self.down_frame(anim, floor, dt);
          }
-@@ -636,6 +649,7 @@ impl Np {
+@@ -636,6 +652,7 @@ impl Np {
              allow: Vec::new(),
              floors: self.floors.clone(),
              data_limits: self.to_limits,
@@ -44,7 +47,7 @@ index 6dfe53c..693735c 100644
              body_walls: self.body_walls.clone(),
          };
          let tracking = self.with_allowance(tracking);
-@@ -679,6 +693,7 @@ impl Np {
+@@ -679,6 +696,7 @@ impl Np {
      /// body: the joints aim at the animation (or, rising, at goals: a foot under its hip, the
      /// torso over the feet) with springs that hold rather than stand.
      fn down_frame(&mut self, anim: &[(M3, V3)], floor: f32, dt: f32) -> Vec<(M3, V3)> {
@@ -52,7 +55,7 @@ index 6dfe53c..693735c 100644
          use crate::np_down::{classify, read, reads, turn_between, DOWN_ARMS, DOWN_GAINS};
          let f = floor / UNITS;
          let push = self.push();
-@@ -710,6 +725,8 @@ impl Np {
+@@ -710,6 +728,8 @@ impl Np {
              hand_landed: [false, false],
              arms_off: false,
              lift_lapse: 0.0,
@@ -61,56 +64,37 @@ index 6dfe53c..693735c 100644
          });
          down.since += dt;
          down.reading = reading;
-@@ -765,6 +782,10 @@ impl Np {
-         if rising_wish {
-             down.rising += dt;
+@@ -1016,6 +1036,29 @@ impl Np {
+             down.arms_off = false;
+             down.rise_stall = 0.0;
          }
-+        // A rise's goal a frame at most [`RISE_REACH`] from where a joint is, less in a long
-+        // frame (the same turn a second as at 60 frames a second: a 37 ms frame's whole reach
-+        // turned the pelvis 32 degrees in it).
-+        let reach = RISE_REACH * (1.0 / (60.0 * dt.max(1e-4))).min(1.0);
-         if rising && !airborne {
-             if reading.pelvis_height > down.rise_best + RISE_GAINED {
-                 down.rise_best = reading.pelvis_height;
-@@ -833,7 +854,10 @@ impl Np {
-                 let qp = self.states[def.parent].q;
-                 let goal = qmul(crate::active::qexp(scale(c, share)), qc);
-                 let now = qnorm(qmul(qconj(qp), qc));
--                targets[j] = turn_toward(now, qnorm(qmul(qconj(qp), goal)), RISE_REACH);
-+                // The torso's whole turn a frame bounded by the reach, its share at each spine
-+                // joint (each its own reach turned the torso and the pelvis under it 31 degrees
-+                // in a frame).
-+                targets[j] = turn_toward(now, qnorm(qmul(qconj(qp), goal)), reach * share);
-                 gains[j].0 = self.muscles.base[j].0 * RISE_GAIN * k;
-                 holds[j] = 0.5 * k;
-             }
-@@ -912,7 +936,7 @@ impl Np {
-             let now_rel = self.model.relative(&self.states);
-             for side in 0..2 {
-                 for &j in &self.balance.legs[side] {
--                    targets[j] = turn_toward(now_rel[j], legs[j], RISE_REACH);
-+                    targets[j] = turn_toward(now_rel[j], legs[j], reach);
-                     gains[j].0 = self.muscles.base[j].0 * RISE_GAIN * k;
-                     holds[j] = 0.0;
-                 }
-@@ -1027,6 +1051,16 @@ impl Np {
-                 hold,
-             })
-             .collect();
 +        // Settled (landed, past the fall: [`SETTLE_AFTER`]) and not rising, or about to be handed
 +        // over: the skeleton's own limits. The fall itself keeps the limits it fell with.
-+        let settled =
-+            (!rising_wish && !airborne && down.since > SETTLE_AFTER) || self.to_limits;
++        let settled = (!self.rise
++            && !airborne
++            && (down.rise_failed || down.since > SETTLE_AFTER))
++            || self.to_limits;
 +        if settled != down.settled_limits {
 +            down.settled_limits = settled;
 +            down.limits_for = 0.0;
 +        }
 +        down.limits_for += dt;
 +        self.on_data_limits = settled;
-         let tracking = Tracking {
-             w: vec![[0.0; 3]; self.states.len()],
-             rate: vec![0.0; self.states.len()],
-@@ -1048,13 +1082,19 @@ impl Np {
++        // Settled: the limbs eased toward their lying goals (the animation's idle: arms at the
++        // sides, legs straight; a firing arm's aim and the free arm's brace), at most
++        // [`SETTLE_REACH`] a frame from where each joint is (Patrick's SETTLE-THEN-RISE: goals
++        // given whole as a rise gave up yanked the legs, 30 degrees a frame).
++        if settled && !self.to_limits {
++            let now_rel = self.model.relative(&self.states);
++            let most = SETTLE_REACH * (60.0 * dt).min(1.0);
++            for (j, t) in targets.iter_mut().enumerate() {
++                *t = turn_toward(now_rel[j], *t, most);
++            }
++        }
+         let drives: Vec<Drive> = targets
+             .iter()
+             .zip(gains)
+@@ -1048,13 +1091,19 @@ impl Np {
              before: std::mem::replace(&mut self.last_targets, anim_rel.clone()),
              widen_by: anim_rel,
              reach: b.reach.clone(),
@@ -136,7 +120,7 @@ index 6dfe53c..693735c 100644
          };
          let tracking = self.with_allowance(tracking);
 diff --git a/crates/ragdoll-core/src/np_body.rs b/crates/ragdoll-core/src/np_body.rs
-index d1a2566..9cea28f 100644
+index cc18bc8..c1626e5 100644
 --- a/crates/ragdoll-core/src/np_body.rs
 +++ b/crates/ragdoll-core/src/np_body.rs
 @@ -42,6 +42,9 @@ pub const LIMIT_MARGIN: f32 = 0.052;
@@ -159,7 +143,7 @@ index d1a2566..9cea28f 100644
      /// Each body's own walls (world, metres; empty: none): the sides of walls, crates and ledges
      /// found near it (a plane holds only the body it was found for, so a crate's face never
      /// reaches a body beyond the crate).
-@@ -595,10 +601,10 @@ impl Model {
+@@ -611,10 +617,10 @@ impl Model {
              for (j, def) in self.joints.iter().enumerate() {
                  self.pin(states, def);
                  let soft = tracking.is_some_and(|t| t.soft_limits);
