@@ -156,6 +156,13 @@ pub struct Tracking {
     /// Limits brought back at most [`LIMIT_STEP`] a substep (a downed body, whose limits move
     /// under it as its goals change); otherwise at once.
     pub soft_limits: bool,
+    /// With `soft_limits`, each joint's allowance (rad; empty or missing: none yet): how far out
+    /// of its limit the joint may still lie, what it was found out by when the limits went soft,
+    /// less what the soft pull has since brought in ([`StepReport::allow`] gives it back each
+    /// frame). Only that is eased in: a joint pushed further out (a fall's impact folding the
+    /// neck 50 degrees past its cone under a 0.01 rad soft pull) is held at once, and the
+    /// soft pull's end never finds a joint out to snap in (the head 21 degrees in a frame).
+    pub allow: Vec<f32>,
     /// Each body's own floor (world, metres; empty: the frame's flat floor for every body): the
     /// ground under it, a slope's included (a flat floor at one height pushed a downed body's
     /// shins and knees into a 20 degree slope: Patrick's 23:41 clip).
@@ -219,6 +226,8 @@ pub struct StepReport {
     /// Substeps in which a body was moving faster than [`MAX_SPEED`] or turning faster than
     /// [`MAX_SPIN`] and was slowed to it (a solver upset: none expected).
     pub clamped: u32,
+    /// Each joint's allowance at the frame's end ([`Tracking::allow`]; with soft limits).
+    pub allow: Vec<f32>,
 }
 
 impl Model {
@@ -338,7 +347,8 @@ impl Model {
                 let bind = self.bind_rel.get(j).copied().unwrap_or(Q_ID);
                 let lim = widen(def.limit, self.measure(j, bind), axle_apart(def, bind));
                 self.pin(states, def);
-                most = most.max(self.limit(states, def, &lim, false, LIMIT_STEP));
+                let mut none = f32::INFINITY;
+                most = most.max(self.limit(states, def, &lim, false, LIMIT_STEP, &mut none));
                 self.pin(states, def);
             }
         }
@@ -544,6 +554,8 @@ impl Model {
             .collect();
         let floors: &[Plane] = tracking.map_or(&[], |t| &t.floors);
         let body_walls: &[Vec<Plane>] = tracking.map_or(&[], |t| &t.body_walls);
+        let mut allow: Vec<f32> = tracking.map_or(Vec::new(), |t| t.allow.clone());
+        allow.resize(self.joints.len(), f32::INFINITY);
         for sub_i in 0..substeps {
             let prev: Vec<State> = states.to_vec();
             // The muscles' hold of the weight below each joint (a torque pair on the joint).
@@ -588,7 +600,7 @@ impl Model {
                 } else {
                     LIMIT_STEP
                 };
-                let out = self.limit(states, def, &widened[j], soft, step);
+                let out = self.limit(states, def, &widened[j], soft, step, &mut allow[j]);
                 if sub_i == substeps - 1 {
                     report.limit_most = report.limit_most.max(out);
                 }
@@ -706,6 +718,7 @@ impl Model {
                 }
             }
         }
+        report.allow = allow;
         report.gap_most = self
             .joints
             .iter()
@@ -753,6 +766,7 @@ impl Model {
         lim: &Limit,
         soft: bool,
         step: f32,
+        allow: &mut f32,
     ) -> f32 {
         let (ra, rb) = (
             m_from_q(states[def.child].q),
@@ -830,17 +844,27 @@ impl Model {
                 }
             }
         }
+        let mut left = 0.0f32;
         for c in corrections {
-            // At most [`LIMIT_STEP`] a substep: a pose found far outside (its widening moved
-            // under it) is brought back within a few frames, not snapped in one substep.
+            // Soft, at most `step` a substep of what the joint's allowance holds (a pose found
+            // far outside as its widening moved under it is brought back within a few frames,
+            // not snapped in one substep), and whatever lies beyond the allowance at up to four
+            // times that (an impact's fold held within a few substeps, not snapped).
             let a = length(c);
-            let c = if soft && a > step {
-                scale(c, step / a)
+            let take = if soft {
+                (a - *allow).min(4.0 * step).max(a.min(step)).min(a)
+            } else {
+                a
+            };
+            left = left.max(a - take);
+            let c = if take < a {
+                scale(c, take / a.max(1e-9))
             } else {
                 c
             };
             self.turn(states, def.child, Some(def.parent), c, 0.0, 1.0);
         }
+        *allow = if soft { allow.min(left) } else { f32::INFINITY };
         most
     }
 

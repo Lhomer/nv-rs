@@ -206,6 +206,11 @@ pub struct Np {
     /// About to be handed to the game's ragdoll: the body is brought inside the skeleton's own
     /// limits (`np_body::Tracking::data_limits`); `report.limit_most` says how far out it still is.
     pub to_limits: bool,
+    /// Each joint's allowance out of its limits while they are soft
+    /// (`np_body::Tracking::allow`), and the last frame's limits (soft, the data's, without a
+    /// reach): the allowance is measured afresh when any changes.
+    limit_allow: Vec<f32>,
+    soft_was: (bool, bool, bool),
     /// The last frame ran inside the skeleton's own limits ([`Np::to_limits`]): its
     /// `report.limit_most` is how far out of them the body still was.
     pub on_data_limits: bool,
@@ -310,6 +315,8 @@ impl Np {
             weapon_side: None,
             firing: false,
             to_limits: false,
+            limit_allow: Vec::new(),
+            soft_was: (false, false, true),
             on_data_limits: false,
             jumps: 0,
             jump_last: 0.0,
@@ -622,11 +629,16 @@ impl Np {
             } else {
                 Vec::new()
             },
-            soft_limits: self.stood_up < LIMITS_SETTLE || self.to_limits,
+            // Soft on past the reach's end (its widening dropped under the pose is eased in as
+            // well: dropped and hard at once, the pose was snapped in, 5 body weights on the
+            // floor).
+            soft_limits: self.stood_up < 2.0 * LIMITS_SETTLE || self.to_limits,
+            allow: Vec::new(),
             floors: self.floors.clone(),
             data_limits: self.to_limits,
             body_walls: self.body_walls.clone(),
         };
+        let tracking = self.with_allowance(tracking);
         self.stood_up += dt;
         self.report = self.model.step_world(
             &mut self.states,
@@ -637,7 +649,23 @@ impl Np {
             &self.walls,
             dt,
         );
+        self.limit_allow = std::mem::take(&mut self.report.allow);
         self.model.node_worlds(&self.states)
+    }
+
+    /// `tracking` given each joint's allowance out of its limits ([`Tracking::allow`]): the
+    /// last frame's while the limits stay soft, none (measured afresh) as they go soft.
+    fn with_allowance(&mut self, mut tracking: Tracking) -> Tracking {
+        let now = (
+            tracking.soft_limits,
+            tracking.data_limits,
+            tracking.reach.is_empty(),
+        );
+        if tracking.soft_limits && self.soft_was == now {
+            tracking.allow = std::mem::take(&mut self.limit_allow);
+        }
+        self.soft_was = now;
+        tracking
     }
 
     /// The legs' push now (N): [`crate::np_down::RISE_FORCE`] times strength and effort.
@@ -1024,10 +1052,12 @@ impl Np {
             // the legs' footing) to the downed ones (the animation's and the reach, which stay);
             // hard otherwise.
             soft_limits: down.since < LIMITS_SETTLE || self.to_limits,
+            allow: Vec::new(),
             floors: self.floors.clone(),
             data_limits: self.to_limits,
             body_walls: self.body_walls.clone(),
         };
+        let tracking = self.with_allowance(tracking);
         self.report = self.model.step_world(
             &mut self.states,
             &drives,
@@ -1037,6 +1067,7 @@ impl Np {
             &self.walls,
             dt,
         );
+        self.limit_allow = std::mem::take(&mut self.report.allow);
         // Standing again, balanced over its feet: the balance has it.
         let mut now = read(&self.model, &b, &self.states, &self.report, f);
         if down.lifting {

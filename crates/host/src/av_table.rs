@@ -192,4 +192,4 @@ pub fn check(e: &Engine, at: &str) -> bool {
 
 #[cfg(test)]
 #[path = "av_table_tests.rs"]
-mod tests;
+pub(crate) mod tests;

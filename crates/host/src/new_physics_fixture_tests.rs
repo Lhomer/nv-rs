@@ -15,6 +15,8 @@ struct Run {
     /// put-back.
     readback: (f32, f32),
     put_back: f32,
+    /// The most a body node's world lay off the body drawn after the put-back (units).
+    held_off: f32,
     /// The spine's top's peak off its animation (degrees), the lowest node (units over the
     /// floor), the largest frame-to-frame move of a node after the hit (units, degrees).
     spine_peak: f32,
@@ -72,6 +74,7 @@ fn np_run(speed: f32, seconds: f32, on: bool) -> Run {
     let mut run = Run {
         readback: (0.0, 0.0),
         put_back: 0.0,
+        held_off: 0.0,
         spine_peak: 0.0,
         lowest: f32::INFINITY,
         step_most: (0.0, 0.0),
@@ -171,10 +174,27 @@ fn np_run(speed: f32, seconds: f32, on: bool) -> Run {
         }
         crate::active_ragdoll::after_draw(&mut f.e);
         crate::active_ragdoll::unwrite(&mut f.e);
-        // Put back: the nodes as the animation had them.
+        // Put back: the game's own locals as the animation had them; the worlds held on the body
+        // drawn until the game's next animation update (what reads them between draws: VATS,
+        // the hit tests).
+        let held = drawn(ACTOR).map(|d| d.0);
         for (k, &i) in body_nodes.iter().enumerate() {
-            let w = f.world_of(f.at[i]);
-            run.put_back = run.put_back.max(length(sub(w.1, anim[k].1)));
+            let at = f.at[i];
+            let l = (
+                rig_fixture::read9(&f.e, at + rig_fixture::LOCAL_ROTATION),
+                rig_fixture::read3(&f.e, at + rig_fixture::LOCAL_TRANSLATION),
+            );
+            let off = length(sub(l.1, f.nodes[i].t))
+                + l.0
+                    .iter()
+                    .zip(&f.nodes[i].r)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f32::max);
+            run.put_back = run.put_back.max(off);
+            if let Some(d) = held.as_ref() {
+                let w = f.world_of(at);
+                run.held_off = run.held_off.max(length(sub(w.1, d[k].1)));
+            }
         }
     }
     crate::active_ragdoll::clear();
@@ -203,8 +223,13 @@ fn np_draws_what_it_simulates_on_fnvs_skeleton() {
     );
     assert!(
         r.put_back < 0.01,
-        "the animation not put back: {:.3} units",
+        "the animation's locals not put back: {:.3}",
         r.put_back
+    );
+    assert!(
+        r.held_off <= 0.5,
+        "the worlds {:.3} units off the body drawn after the put-back",
+        r.held_off
     );
     assert!(
         (11.0..=17.0).contains(&r.spine_peak),
@@ -3063,6 +3088,9 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
             if !down && phase_now != ragdoll_core::np_balance::Phase::Falling {
                 if let Some(n) = floor_force(ACTOR) {
                     run.floor_most = run.floor_most.max(n / weight);
+                    if std::env::var_os("NP_TRACE").is_some() && n / weight > 2.5 {
+                        eprintln!("FLOOR t {t:.3} dt {dt:.3} {:.2} BW since hit {:.2} stood_at {stood_at:?} {}", n / weight, t - last_hit, sample_field(ACTOR));
+                    }
                 }
             }
             if steps_now > last_steps && t - last_hit >= 1.5 && !down {

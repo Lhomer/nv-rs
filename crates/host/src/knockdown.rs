@@ -362,6 +362,7 @@ pub fn install(e: &mut Engine) {
         }
         u32::from(did).into_ret()
     });
+    install_vats_readers(e);
     e.register(crate::new_physics::ACTOR_MOVER_UPDATE, |e, a| {
         mover_update(e, a[0], |e| {
             engine::units::fallout_ai::actormover::actor_mover_update(
@@ -2003,6 +2004,52 @@ pub(crate) fn body_holds(e: &mut Engine, actor: u32, drawn: &[u32]) -> Vec<BodyH
     }
     out
 }
+
+/// `VATSMenu::Create` (`007e9200`), `VATSMenu::DoIdle` (`007ec810`), `VATSMenu::ShowTargetLimb`
+/// (`007ec3a0`), the targets' build (`007f52c0`) and the meters' layout (`007f1840`): the readers
+/// of a target's part nodes (their worlds: the parts' `WorldCoord`, the screen projection, the
+/// chances, the limb highlight's effect target) run on New Physics' body drawn
+/// (`crate::new_physics::vats_frame`, `hold_drawn`), also through VATS's pause; nothing changes
+/// without New Physics' actors (none with it off).
+pub(crate) fn install_vats_readers(e: &mut Engine) {
+    use engine::units::fallout_interface::vatsmenu::{
+        fn_007f1840, fn_007f52c0, vats_menu_create, vats_menu_do_idle, vats_menu_show_target_limb,
+        VatsMenu,
+    };
+    e.register(VATS_CREATE, |e, _| {
+        crate::new_physics::hold_drawn(e);
+        let opened = vats_menu_create(e);
+        crate::new_physics::vats_parts(e, "VATSMenu::Create");
+        u32::from(opened).into_ret()
+    });
+    e.register(VATS_DO_IDLE, |e, a| {
+        crate::new_physics::vats_frame(e, "VATSMenu::DoIdle");
+        vats_menu_do_idle(e, Ptr::<VatsMenu>::new(a[0]));
+        crate::new_physics::vats_parts(e, "VATSMenu::DoIdle");
+        Ret::default()
+    });
+    e.register(VATS_SHOW_TARGET_LIMB, |e, a| {
+        crate::new_physics::hold_drawn(e);
+        vats_menu_show_target_limb(e, a[0] as u8);
+        Ret::default()
+    });
+    e.register(VATS_BUILD_TARGETS, |e, _| {
+        crate::new_physics::hold_drawn(e);
+        u32::from(fn_007f52c0(e)).into_ret()
+    });
+    e.register(VATS_LAY_OUT_METERS, |e, a| {
+        crate::new_physics::hold_drawn(e);
+        fn_007f1840(e, Ptr::<VatsMenu>::new(a[0]));
+        Ret::default()
+    });
+}
+
+/// The V.A.T.S. readers [`install_vats_readers`] wraps.
+pub const VATS_CREATE: u32 = 0x007e_9200;
+pub const VATS_DO_IDLE: u32 = 0x007e_c810;
+pub const VATS_SHOW_TARGET_LIMB: u32 = 0x007e_c3a0;
+pub const VATS_BUILD_TARGETS: u32 = 0x007f_52c0;
+pub const VATS_LAY_OUT_METERS: u32 = 0x007f_1840;
 
 /// The bodies of `holds` put on the pose `shown` (each drawn node, its world rotation and
 /// position, game units), each kept at its offset from its node, and stilled (keyframed by New

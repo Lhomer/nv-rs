@@ -256,7 +256,7 @@ pub(crate) fn pellet(e: &mut Engine, part: u32) {
 /// `TlsSetValue` `00fdf04c`, `EnterCriticalSection` `00fdf05c`, `LeaveCriticalSection`
 /// `00fdf100`): thread-local slots per OS thread, and one recursive critical section that
 /// really excludes the other thread. Plain functions, so the AI thread's engine has them too.
-mod platform {
+pub(crate) mod platform {
     use engine::prelude::*;
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::SeqCst};

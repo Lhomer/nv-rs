@@ -964,6 +964,9 @@ pub fn unwrite(e: &mut Engine) {
     for root in roots {
         update(e, root);
     }
+    // New Physics' bodies stay on the body drawn until the game's next animation update for
+    // them: what reads their nodes between draws (V.A.T.S., the hit tests) reads the body seen.
+    crate::new_physics::hold_drawn(e);
 }
 
 /// The frame drawn by `draw` (the game's `DRAW_FRAME`, `crate::fixes::install`), then what it

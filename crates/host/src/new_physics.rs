@@ -151,6 +151,11 @@ struct NpActor {
     /// The pose its bodies were last held to (each drawn node, its world): where the game's
     /// ragdoll takes them from at a hand-over.
     held: Vec<(u32, M3, V3)>,
+    /// The game's animation updates for it (`animation_updated`) and the times its Havok bodies
+    /// could not be held (`knockdown::hold_bodies` false) since the last VATS frame's log
+    /// (`vats_frame`).
+    anim_updates: u32,
+    holds_refused: u32,
     /// What the reference may still move this frame (game units; [`ROOT_STEP`] each frame at the
     /// draw's set-up, spent by the downed follow at the main thread's safe point).
     root_budget: f32,
@@ -254,6 +259,7 @@ pub fn animation_updated(e: &mut Engine, actor: u32) {
     let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(a) = actors.iter_mut().find(|a| a.actor == actor) {
         a.snap = Some(snapshot(e, a.root, &a.tree));
+        a.anim_updates += 1;
         // The animation's own taken, its worlds are the body's for the rest of the frame: what
         // the game's hit tests (the limb ray), VATS's targets and the AI read between this update
         // and the draw (Patrick's 17:08 clip: the hitboxes stood upright 145 units off the body
@@ -279,6 +285,178 @@ fn put_drawn(e: &mut Engine, a: &NpActor) {
         };
         crate::active_ragdoll::set_subtree(e, node, world, 0);
     }
+}
+
+/// Where a hit's point lies against the body drawn (the nearest drawn body, the point's distance
+/// off its capsule) and against the body nodes as the hit read them (Patrick's 18:39/18:41 clips:
+/// whether bullets hit what is seen).
+fn hit_against(m: &Model, a: &NpActor, worlds: &[(M3, V3)], point: V3) -> String {
+    let (nb, nd) = nearest_body_at(m, worlds, point);
+    if a.drawn.len() != a.nodes.len() {
+        return format!(
+            "the point {nd:.1} u off the nodes' {} (nothing drawn yet)",
+            m.bodies[nb].node
+        );
+    }
+    let (db, dd) = nearest_body_at(m, &a.drawn, point);
+    format!(
+        "the point {dd:.1} u off the drawn {}{} ({nd:.1} u off the nodes' {})",
+        m.bodies[db].node,
+        if db == nb {
+            ""
+        } else {
+            ", another body than the nodes'"
+        },
+        m.bodies[nb].node
+    )
+}
+
+/// Every actor New Physics draws: its body nodes' worlds put back on the body drawn
+/// ([`put_drawn`]). After the draw's put-back (`crate::active_ragdoll::unwrite`: the game's own
+/// locals back, the trees updated with them) and before each V.A.T.S. reader
+/// (`crate::knockdown`'s wrappers of `VATSMenu::Create`, `DoIdle`, `ShowTargetLimb` and the
+/// targets' build): whatever reads the nodes between two draws (VATS's parts and highlight, the
+/// game's hit tests, the AI) reads the body seen, also through VATS's pause (frame time 0, no
+/// animation update: Patrick's 18:39 and 18:41 clips, VATS's outline, highlights and chances on
+/// the animation's pose). The animation reads its locals, never these worlds (b44a964), and its
+/// next update works them out again from its own locals (then [`animation_updated`] puts the body
+/// back).
+pub fn hold_drawn(e: &mut Engine) {
+    let actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+    for a in actors.iter() {
+        if a.np.is_some() {
+            put_drawn(e, a);
+        }
+    }
+}
+
+/// `VATSMenu`'s target reference (`011f21cc`) and the open menu (`pVatsMenu`, `011db0d4`).
+const VATS_TARGET_REFERENCE: u32 = 0x011f_21cc;
+const VATS_MENU_OPEN: u32 = 0x011d_b0d4;
+/// The menu's target list (`011db150`, a `BSSimpleList` of `VatsTarget *`: `pTarget` at `+0`,
+/// the parts' list at `+8`); a part (`ChanceToHit`): `WorldCoord` `+0x14`, `eLimb` `+0x20`,
+/// `fChance` `+0x28`, `bOnScreen` `+0x2c`.
+const VATS_TARGETS: u32 = 0x011d_b150;
+
+/// One V.A.T.S. frame (before `VATSMenu::DoIdle`, `at` saying which reader): for New Physics'
+/// actor VATS targets, its body nodes as VATS would read them against the body drawn, whether
+/// the game's animation update ran for it since the last such frame and whether its Havok bodies
+/// could not be held (`[np vats]`); then its worlds put on the body drawn ([`hold_drawn`]).
+pub fn vats_frame(e: &mut Engine, at: &str) {
+    let target = if e.mem.is_mapped(VATS_TARGET_REFERENCE) {
+        e.mem.u32(VATS_TARGET_REFERENCE)
+    } else {
+        0
+    };
+    {
+        let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+        if actors.is_empty() {
+            return;
+        }
+        if let Some(a) = actors.iter_mut().find(|a| a.actor == target && target != 0) {
+            if a.drawn.len() == a.nodes.len() {
+                let m = model();
+                let mut worst = (0.0f32, 0.0f32, 0usize);
+                for (b, (&n, d)) in a.nodes.iter().zip(&a.drawn).enumerate() {
+                    let off = length(sub(read3(e, n + WORLD_TRANSLATION), d.1));
+                    let turn = ragdoll_core::np_skeleton::angle_between(
+                        &read9(e, n + WORLD_ROTATION),
+                        &d.0,
+                    )
+                    .to_degrees();
+                    if off > worst.0 {
+                        worst = (off, worst.1, b);
+                    }
+                    worst.1 = worst.1.max(turn);
+                }
+                let dt = e.mem.f32(FRAME_SECONDS);
+                note(format!(
+                    "{:08X}: [np vats] {at}: its body nodes as VATS reads them {:.1} u ({}) and                      {:.1} degrees off the body drawn, set on it now; the game's animation                      updates since the last VATS frame {}, its Havok bodies not held {} times;                      frame time {dt:.4} s",
+                    a.id,
+                    worst.0,
+                    m.bodies[worst.2].node,
+                    worst.1,
+                    a.anim_updates,
+                    a.holds_refused
+                ));
+                a.anim_updates = 0;
+                a.holds_refused = 0;
+            }
+        }
+    }
+    hold_drawn(e);
+}
+
+/// After a V.A.T.S. reader (`at`): each part of New Physics' actor VATS targets, where VATS put it
+/// (`WorldCoord`) against the nearest body node drawn, and its chance (`[np vats parts]`).
+pub fn vats_parts(e: &mut Engine, at: &str) {
+    if !e.mem.is_mapped(VATS_TARGETS) || e.mem.u32(VATS_MENU_OPEN) == 0 {
+        return;
+    }
+    let target = e.mem.u32(VATS_TARGET_REFERENCE);
+    let (id, drawn) = {
+        let actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+        match actors.iter().find(|a| a.actor == target && target != 0) {
+            Some(a) if a.drawn.len() == a.nodes.len() => (a.id, a.drawn.clone()),
+            _ => return,
+        }
+    };
+    let m = model();
+    let mut said = Vec::new();
+    for (limb, at_part, chance, _) in vats_target_parts(e, target) {
+        let (b, off) = drawn
+            .iter()
+            .enumerate()
+            .map(|(b, d)| (b, length(sub(at_part, d.1))))
+            .fold((0, f32::INFINITY), |w, x| if x.1 < w.1 { x } else { w });
+        said.push(format!(
+            "limb {limb}: {:.1} u off the drawn {}, chance {:.0}",
+            off,
+            m.bodies[b].node,
+            chance * 100.0
+        ));
+    }
+    if !said.is_empty() {
+        note(format!(
+            "{id:08X}: [np vats parts] {at}: {}",
+            said.join("; ")
+        ));
+    }
+}
+
+/// The parts V.A.T.S. holds for `reference` (its menu's target list): each part's limb, its
+/// `WorldCoord`, its chance and whether it is on screen.
+pub fn vats_target_parts(e: &Engine, reference: u32) -> Vec<(u32, V3, f32, bool)> {
+    let mut out = Vec::new();
+    let mut node = VATS_TARGETS;
+    let mut guard = 0;
+    while node != 0 && (e.mem.u32(node) != 0 || e.mem.u32(node + 4) != 0) && guard < 256 {
+        guard += 1;
+        let item = e.mem.u32(node);
+        if item != 0 && e.mem.u32(item) == reference {
+            let mut part_node = item + 8;
+            let mut g = 0;
+            while part_node != 0
+                && (e.mem.u32(part_node) != 0 || e.mem.u32(part_node + 4) != 0)
+                && g < 64
+            {
+                g += 1;
+                let part = e.mem.u32(part_node);
+                if part != 0 {
+                    out.push((
+                        e.mem.u32(part + 0x20),
+                        read3(e, part + 0x14),
+                        e.mem.f32(part + 0x28),
+                        e.mem.u8(part + 0x2c) != 0,
+                    ));
+                }
+                part_node = e.mem.u32(part_node + 4);
+            }
+            break;
+        }
+        node = e.mem.u32(node + 4);
+    }
+    out
 }
 
 /// `Animation::UpdateMovement` (`00493900`) and `Animation::UpdateQueuedScenegraph`
@@ -555,6 +733,8 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             snap: Some(snapshot(e, root, &tree)),
             holds: Vec::new(),
             held: Vec::new(),
+            anim_updates: 0,
+            holds_refused: 0,
             root_budget: ROOT_STEP,
             pelvis_last: None,
             history: std::collections::VecDeque::new(),
@@ -590,6 +770,7 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
         })
         .collect();
     let body = nearest_body(m, &worlds, point);
+    let against = hit_against(m, a, &worlds, point);
     let impulse = scale(direction, p);
     a.since_hit = 0.0;
     // Pellets of one burst (hits before a frame has run since the last): one outcome, their
@@ -600,7 +781,7 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
             o.speed = o.impulse / m.mass;
             o.pellets += 1;
             note(format!(
-                "{:08X}: [np hit] {p:.1} N s on {} (pellet {} of a burst, {:.2} m/s in all)",
+                "{:08X}: [np hit] {p:.1} N s on {} (pellet {} of a burst, {:.2} m/s in all); {against}",
                 a.id, m.bodies[body].node, o.pellets, o.speed
             ));
             match a.np.as_mut() {
@@ -635,7 +816,7 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
     a.wall_logs = 0;
     a.history.clear();
     note(format!(
-        "{:08X}: [np hit] {} N s on {} ({:.2} m/s on its {:.0} kg)",
+        "{:08X}: [np hit] {} N s on {} ({:.2} m/s on its {:.0} kg); {against}",
         a.id,
         format_args!("{p:.1}"),
         m.bodies[body].node,
@@ -650,6 +831,12 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
 
 /// The body nearest `point` (its capsule's segment, each body at its node's world, game units).
 fn nearest_body(m: &Model, worlds: &[(M3, V3)], point: V3) -> usize {
+    nearest_body_at(m, worlds, point).0
+}
+
+/// The body nearest `point` and how far the point lies off its capsule (game units; under 0
+/// inside it), each body at its node's world (`worlds`, game units).
+fn nearest_body_at(m: &Model, worlds: &[(M3, V3)], point: V3) -> (usize, f32) {
     let k = ragdoll_core::np_body::UNITS;
     let mut best = (f32::INFINITY, 0);
     for (i, (b, (r, t))) in m.bodies.iter().zip(worlds).enumerate() {
@@ -662,7 +849,7 @@ fn nearest_body(m: &Model, worlds: &[(M3, V3)], point: V3) -> usize {
             best = (dist, i);
         }
     }
-    best.1
+    (best.1, best.0)
 }
 
 /// Once a frame at the draw's start (`crate::active_ragdoll::apply`): each actor's body stepped on
@@ -1162,8 +1349,9 @@ const GROUND_SAMPLES: [&str; 7] = [
     "Bip01 L Hand",
     "Bip01 R Hand",
 ];
-/// A sample moved this far (flat, game units) since its cast is cast again.
-const GROUND_RECAST: f32 = 6.0;
+/// A sample moved this far (flat, game units) since its cast is cast again (at 6 a foot slid 5
+/// units onto a slab's edge kept the ground's cast under it and lay 2 units into the slab).
+const GROUND_RECAST: f32 = 2.0;
 /// The steepest ground taken (its slope's tangent), and how much a few samples in a line lean
 /// to flat (game units squared, each).
 const GROUND_STEEPEST: f32 = 1.2;
@@ -1705,6 +1893,8 @@ fn main_thread_pass(e: &mut Engine) {
                         .collect();
                     if crate::knockdown::hold_bodies(e, a.actor, &a.holds, &shown) {
                         a.held = shown;
+                    } else {
+                        a.holds_refused += 1;
                     }
                 }
             }

@@ -7,6 +7,36 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (VATS on the body drawn: the 18:39 and 18:41 clips on 231db2da)
+
+Why 231db2da did not fix VATS: `active_ragdoll::unwrite` (after every draw) put the animation's
+locals back and updated the trees, so the body nodes' worlds were the animation's until the next
+animation update; VATS's readers run in the menu pass, outside that window, and through VATS's pause
+(frame time 0) the animation update may not run at all. Now:
+- `new_physics::hold_drawn` puts New Physics' bodies' worlds back on the body drawn at the end of
+  `unwrite` (locals stay the animation's: b44a964's rule holds) and before each VATS reader:
+  `knockdown::install_vats_readers` wraps `VATSMenu::Create` (`007e9200`), `DoIdle` (`007ec810`),
+  `ShowTargetLimb` (`007ec3a0`), the targets' build (`007f52c0`) and the meters' layout
+  (`007f1840`). Nothing changes with New Physics off (no actors).
+- Logs: `[np vats]` each VATS frame for an NP target (its body nodes as VATS reads them against
+  the body drawn, the animation updates since the last VATS frame, the Havok holds refused, the
+  frame time); `[np vats parts]` each part's `WorldCoord` against the nearest drawn body and its
+  chance; `[np hit]` now says the point's distance off the nearest drawn body and off the nodes'.
+- `np_draws_what_it_simulates_on_fnvs_skeleton` asserts the locals are put back and the worlds held
+  on the body drawn after the put-back (fails on 231db2da).
+- Holding the drawn worlds moved hits' points onto the drawn body, which changed the cycle runs'
+  trajectories and exposed two real faults, fixed: the limits' soft pull let an impact fold a neck
+  50 degrees past its cone, and its end snapped what was left in at once (the head 21 degrees in a
+  frame): `np_body::Tracking::allow` keeps each joint's allowance (what it was out by as the limits
+  went soft, less the pull since); only that is eased in, anything beyond is held at up to 4x the
+  pull. Standing again, the limits stay soft past the reach's end (0.6 s). The ground under a body
+  is cast again after 2 units of travel, not 6 (a foot slid onto a slab's edge kept the ground's
+  cast and lay 2 units in it).
+- Still to do: the real-VATS-path test (`new_physics_vats_tests.rs`, in progress in the working
+  tree, not committed): the game's `VATSMenu::Create`/`DoIdle` at their addresses after the
+  animation update, the draw and the put-back, with paused frames; then the 18:39/18:41 knockdown
+  items.
+
 ### Claude, 2026-11-19 (the running fix: where it stands, docs/wip/np-running-seed.patch)
 
 The patch (on a88a3af: `git apply docs/wip/np-running-seed.patch`) now holds, beyond the seed:
