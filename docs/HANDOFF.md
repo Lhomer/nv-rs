@@ -7,6 +7,20 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (the rise from the front, second attempt: `docs/wip/np-front-rise-knees.patch`)
+
+**Status: not pushed; moved on to the running/knockdown items as Patrick asked.** A simpler idea
+than the kneel and lunge stages: the rise's own legs from the front have the wrong knee way (its
+`leg_ik` is given the rise's way, toward the feet: right on the back, backwards on the front) and,
+once the feet are under the hips, pull them forward along the torso's facing. The patch: a rise that
+begins lying with its front's up under -0.5 (`Down::from_front`, judged at the rise's start) keeps
+its feet's way toward the feet and bends its knees toward the head until the pelvis is 0.75 of
+standing height (`FRONT_UNTIL`), so it rocks back over its feet and stands. Results: the face-down
+world stands in 2.83 s (f42be63: 3.06 s), no seated phase, but its front's up goes -0.77 to +0.99
+on the way (the torso through facing the sky with the pelvis already 0.8 to 0.96 up: to check by eye
+in the lab viewer, a flip by the task C measure); the side world sinks to a kneel-sit (pelvis 0.15),
+fails and rises from its back. Both front-rise patches apply to f42be63 (not together).
+
 ### Claude, 2026-11-19 (the rise from the front, kneel first: `docs/wip/np-front-rise.patch`)
 
 **Status: not pushed; first attempt in `docs/wip/np-front-rise.patch` (on f42be63).** f42be63 (the

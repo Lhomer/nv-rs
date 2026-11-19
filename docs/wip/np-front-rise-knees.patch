@@ -1,0 +1,93 @@
+diff --git a/crates/ragdoll-core/src/np.rs b/crates/ragdoll-core/src/np.rs
+index d4328db..0b9a7e3 100644
+--- a/crates/ragdoll-core/src/np.rs
++++ b/crates/ragdoll-core/src/np.rs
+@@ -153,6 +153,13 @@ pub const RISE_FOOT_OUT: f32 = 0.3;
+ /// The legs push once the centre of mass is within this of the feet (m): their pull brings the
+ /// hips forward over the feet as they lift.
+ pub const RISE_OVER_FEET: f32 = 0.35;
++/// A rise that begins lying with its front's up under minus this rises from the front: until the
++/// pelvis is [`FRONT_UNTIL`] of standing height its knees bend toward its head and its feet stay
++/// behind its hips, so it rocks back over its feet into a squat and stands from there. With the
++/// rise's own goals (the knees bent toward the feet, the feet drawn in front of the hips along the
++/// torso's facing once under them) it sat back and rolled onto its seat: a flip.
++pub const FRONT_START: f32 = 0.5;
++pub const FRONT_UNTIL: f32 = 0.75;
+ /// The legs' push brings the pelvis over its place at this rate (1/s) of the way left, at most
+ /// this fast (m/s), the support's spring at this share and its damper at this many times.
+ pub const RISE_FLAT: (f32, f32, f32, f32) = (3.0, 0.3, 0.5, 2.0);
+@@ -332,6 +339,10 @@ pub struct Down {
+     pub still_wait: bool,
+     /// Up for the still stage ([`up_for_still`]) at the last frame.
+     pub still_up: bool,
++    /// The rise began lying on its front ([`FRONT_START`]): until the pelvis is
++    /// [`FRONT_UNTIL`] of standing height the knees bend toward the head and the feet stay
++    /// behind the hips.
++    pub from_front: bool,
+     /// Upright, the foot going to its place in the animation's stance ([`STANCE_KEPT`]).
+     pub stance_fixing: Option<usize>,
+ }
+@@ -580,6 +591,7 @@ impl Np {
+                 lift_lapse: 0.0,
+                 still_wait: false,
+                 still_up: false,
++                from_front: false,
+                 stance_fixing: None,
+             });
+             return self.down_frame(anim, floor, dt);
+@@ -803,6 +815,7 @@ impl Np {
+             lift_lapse: 0.0,
+             still_wait: false,
+             still_up: false,
++            from_front: false,
+             stance_fixing: None,
+         });
+         down.since += dt;
+@@ -858,6 +871,8 @@ impl Np {
+         // clip rose for 7 and 17 s).
+         if rising_wish {
+             down.rising += dt;
++        } else {
++            down.from_front = false;
+         }
+         if rising && !airborne {
+             // Up already: no more height to gain, coming still is the rise's end (not a stall).
+@@ -875,7 +890,23 @@ impl Np {
+             // the torso's facing points at the sky), the torso's facing once they are under it.
+             let to_feet = sub(feet_mid, self.states[r].x);
+             let to_feet = [to_feet[0], to_feet[1], 0.0];
+-            let rise_dir = if crate::flinch::length(to_feet) > RISE_FEET_OUT {
++            // From the front ([`FRONT_START`], judged as the rise begins lying; a rise from the
++            // back pitches its front down as it comes over its feet).
++            if down.rising <= dt && down.labeler.label == Label::Lying {
++                let fw = b.forward_of(&self.states, b.torso);
++                down.from_front = fw[2] / crate::flinch::length(fw).max(1e-6) < -FRONT_START;
++            }
++            let front_low =
++                down.from_front && reading.pelvis_height < FRONT_UNTIL * reading.stand_height;
++            // The body's way from its chest to its pelvis (flat): toward its feet.
++            let back_dir = crate::flinch::unit({
++                let d = sub(self.states[r].x, self.states[b.torso].x);
++                [d[0], d[1], 0.0]
++            })
++            .unwrap_or(reading.facing);
++            let rise_dir = if front_low {
++                back_dir
++            } else if crate::flinch::length(to_feet) > RISE_FEET_OUT {
+                 crate::flinch::unit(to_feet).unwrap_or(reading.facing)
+             } else {
+                 reading.facing
+@@ -1006,7 +1037,12 @@ impl Np {
+                     worlds[foot].1,
+                     hip,
+                     goal,
+-                    rise_dir,
++                    // From the front the knees bend toward the head.
++                    if front_low {
++                        scale(back_dir, -1.0)
++                    } else {
++                        rise_dir
++                    },
+                 ) else {
+                     continue;
+                 };
