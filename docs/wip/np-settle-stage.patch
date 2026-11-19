@@ -1,0 +1,121 @@
+diff --git a/crates/host/src/new_physics.rs b/crates/host/src/new_physics.rs
+index 2017113..1753191 100644
+--- a/crates/host/src/new_physics.rs
++++ b/crates/host/src/new_physics.rs
+@@ -2472,6 +2472,10 @@ fn downed(e: &mut Engine, a: &mut NpActor, dt: f32) -> bool {
+     } else if failed {
+         // A rise gave up this frame: a moment's rest before the next.
+         "wait"
++    } else if !np.rise && np.settled() == Some(false) {
++        // Lying on its side: it settles onto its back or front before a rise begins (task C;
++        // a rise under way comes off flat as it lifts, and goes on).
++        "settle"
+     } else if np.rise || rd.can_push_up {
+         "stand"
+     } else {
+diff --git a/crates/ragdoll-core/src/np.rs b/crates/ragdoll-core/src/np.rs
+index aa7f9e2..636155b 100644
+--- a/crates/ragdoll-core/src/np.rs
++++ b/crates/ragdoll-core/src/np.rs
+@@ -141,6 +141,14 @@ pub const STAND_INSIDE: f32 = -0.02;
+ /// `np_balance::STANCE_OFF`).
+ pub const STANCE_KEPT: f32 = 0.06;
+ pub const STANCE_THERE: f32 = 0.01;
++/// Downed, lying on its side (its front's up under `knock::FLAT_ENOUGH`) and not rising: the
++/// settle (task C). The pelvis and the torso turned toward the nearer of its back or front:
++/// each led this far ahead along the roll (rad) with this spring (N m/rad), damper (N m s/rad)
++/// and cap (N m, times the effort). The skeleton's own limits (eased in), the limbs toward the
++/// animation's at this share of standing's spring.
++pub const SETTLE_LEAD: f32 = 0.4;
++pub const SETTLE_ROLL: (f32, f32, f32) = (600.0, 60.0, 120.0);
++pub const SETTLE_LIMBS: f32 = 0.5;
+ /// Standing again, the torso against the pelvis at most this far from the animation's (degrees).
+ pub const STAND_POSE: f32 = 10.0;
+ /// Rising and upright, the torso's flat sway's damper (N·s/m) and its cap (N).
+@@ -847,6 +855,46 @@ impl Np {
+             }
+         }
+         let mut pulls = Vec::new();
++        // The settle (task C): lying and not rising, the body untangles itself on the skeleton's
++        // own limits (eased in), its limbs toward the animation's, and on its side it rolls onto
++        // the nearer of its back or front (handed or risen from its side, the game's get-up and
++        // the rise played it flipped).
++        let settling = down.labeler.label == Label::Lying
++            && !rising_wish
++            && !airborne
++            && self.front_up().abs() < crate::knock::FLAT_ENOUGH;
++        if settling {
++            for (j, def) in self.model.joints.iter().enumerate() {
++                if b.spines.contains(&def.child) || def.child == b.head {
++                    continue;
++                }
++                gains[j].0 = gains[j].0.max(self.muscles.base[j].0 * SETTLE_LIMBS * k);
++            }
++            let front = b.forward_of(&self.states, b.torso);
++            let up = front[2] / crate::flinch::length(front).max(1e-6);
++            if up.abs() < crate::knock::FLAT_ENOUGH {
++                if let Some(axis) = crate::knock::roll_axis(front) {
++                    for body in [r, b.torso] {
++                        let q = self.states[body].q;
++                        pulls.push(Support {
++                            body,
++                            x: self.states[body].x,
++                            v: [0.0; 3],
++                            q: qnorm(qmul(crate::active::qexp(scale(axis, SETTLE_LEAD)), q)),
++                            kp: 0.0,
++                            kd: 0.0,
++                            max_force: 0.0,
++                            kp_h: 0.0,
++                            kd_h: 0.0,
++                            max_force_h: 0.0,
++                            kp_turn: SETTLE_ROLL.0,
++                            kd_turn: SETTLE_ROLL.1,
++                            max_torque: SETTLE_ROLL.2 * k,
++                        });
++                    }
++                }
++            }
++        }
+         down.lifting_was = down.lifting;
+         down.lifting = false;
+         down.arms = false;
+@@ -1254,10 +1302,11 @@ impl Np {
+             // Soft only just downed, while the limits change from the standing ones (widened by
+             // the legs' footing) to the downed ones (the animation's and the reach, which stay);
+             // hard otherwise.
+-            soft_limits: down.since < LIMITS_SETTLE || self.to_limits,
++            // Settling: the skeleton's own, eased in (soft, the allowance ratcheting down).
++            soft_limits: down.since < LIMITS_SETTLE || self.to_limits || settling,
+             allow: Vec::new(),
+             floors: self.floors.clone(),
+-            data_limits: self.to_limits,
++            data_limits: self.to_limits || settling,
+             body_walls: self.body_walls.clone(),
+         };
+         let tracking = self.with_allowance(tracking);
+@@ -1533,6 +1582,25 @@ impl Np {
+         Some(p.p[2] - (p.n[0] * (x - p.p[0]) + p.n[1] * (y - p.p[1])) / p.n[2])
+     }
+ 
++    /// The body's front's up (its torso's forward, the up component of the unit vector): 1 lying
++    /// on its back, -1 on its front.
++    pub fn front_up(&self) -> f32 {
++        let f = self.bodies.forward_of(&self.states, self.bodies.torso);
++        let l = crate::flinch::length(f);
++        if l > 1e-6 {
++            f[2] / l
++        } else {
++            0.0
++        }
++    }
++
++    /// Downed: whether it may begin a rise (task C): it does not lie, or it lies on its back or
++    /// front (`knock::FLAT_ENOUGH`). None standing.
++    pub fn settled(&self) -> Option<bool> {
++        let d = self.down.as_ref()?;
++        Some(d.labeler.label != Label::Lying || self.front_up().abs() >= crate::knock::FLAT_ENOUGH)
++    }
++
+     /// Whether the rise holds the body up for its still stage ([`up_for_still`]'s latch).
+     pub fn still_up(&self) -> bool {
+         self.down.as_ref().is_some_and(|d| d.still_up)

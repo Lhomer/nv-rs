@@ -7,6 +7,31 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (task C, the settle before the rise: a first attempt, `docs/wip/np-settle-stage.patch`)
+
+**Status: not pushed; the attempt is in `docs/wip/np-settle-stage.patch` (on e0331a0).** It adds a
+settle stage to `down_frame` (lying, not rising, not airborne, optionally only on its side: the
+pelvis and torso turned toward the nearer of back or front with a led support, `SETTLE_LEAD` 0.4
+rad, `SETTLE_ROLL` 600/60/120 N m; the limbs at `SETTLE_LIMBS` 0.5 of standing's spring toward the
+animation's; the skeleton's own limits, soft), `Np::front_up` and `Np::settled`, and the downed
+AI's "settle" choice until settled (only before a rise begins: a rise lifting off flat read
+unsettled and the choice flickered). Findings:
+- The roll itself works: knocked sideways the body lands nearly face down (front up -0.96) and is
+  brought to -0.99 within a second.
+- What fails is the rise that follows. On e0331a0 the side world stands at 6.5 s and the face-down
+  world at 3.0 s; with the settle on lying bodies the side world gives up (three failed rises),
+  with the real limits off it stands at 8.8 s, with the settle only on its side the face-down world
+  never stands (its landing passes through side-like orientations).
+- A face-down rise passes through "seated" (seat 435 to 500 N, torso 39 to 45 degrees): the rise
+  draws the feet toward the hips along the rise's way and leans the torso over them, which from the
+  front sits the body back. A rise from the front that kneels (knees under the hips, hands pushing
+  the chest up) is needed before the settle can hand its result to the rise without flips; the
+  earlier settled-limits work (above) hit the same wall ("rises that follow a settle fail more
+  often (face down)").
+- Next: the rise from the front (kneel first), then the settle on top of it, then the task C tests
+  (settle within a bound with the joints inside the limits, the rise's orientation never flipping,
+  no discontinuity at the hand-over, the hands carrying load, New Physics off unchanged).
+
 ### Claude, 2026-11-19 (the rise ends still: clip 22:19, addendum tests 1 and 2)
 
 **Status: pushed as code (Patrick's 67d693e decisions applied).** The addendum's tests 1 to 3
