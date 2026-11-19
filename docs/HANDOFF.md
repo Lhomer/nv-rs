@@ -7,6 +7,62 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (the rise ends still: clip 22:19, addendum tests 1 and 2)
+
+**Status: not pushed as code; all of it in `docs/wip/np-rise-ends-still.patch` (applies to
+03ed4ff; replaces `np-rise-still.patch`).** With it, tests 1 and 2 of the get-up slide/trip
+addendum (`np_rise_ends_still`, `np_rise_no_momentum_trip`, in the patch) pass in five worlds
+(face up, face down and on its side on flat ground, face up on a 10 degree slope, face up knocked
+back against a wall) and fail on 03ed4ff; 442 of the host's 443 tests pass. The one that fails:
+`np_slope_downed_holds_the_games_movement` (the 23:41 Goodsprings glide: "stands within 4 s of
+going down or gives up", its note "a rise lasts at most 2 s"): it stands at 4.47 s. Standing only
+still (0.05 m/s), posed and in the animation's stance takes 1.5 s from upright there: the body
+comes up moving 0.35 m/s downhill and the torso pitches 37 degrees over the pelvis as it is
+stopped. Tried and worse: the spine's half hold (5.3 s), the pelvis's flat hold not doubled
+upright (5.4 s), the stance fix waiting for stillness (5.0 s), the flat hold growing through the
+late rise (5.0 s); the torso's sway cap doubled: no change. Waiting on Patrick: the bound (4 s
+stays and the rise must be quicker, or the rise's own limits) and test 3 below.
+- **The rise's still stage** (`up_for_still`, latched in at 0.85 of standing height and 25
+  degrees, out at 0.78 and 40, the classifier's feet not asked while latched: its contact came and
+  went frame to frame): the torso straight up, the feet held where they stand on their own ground,
+  the pelvis where the animation's stance puts it against the feet, the torso's flat sway damped,
+  the spine driven to the animation's own rotations (twist and curve, at standing's spring; turned
+  only to bring the torso's up straight it stood 18 to 41 degrees off and swung the centre at 0.45
+  m/s after the hand-over), the arms, neck and head at standing's spring toward the animation's.
+- **The stance before standing:** the feet off the animation's stance past `STANCE_KEPT` (6 cm),
+  the foot carrying less (further from the centre, chosen once) slides to its place (lifted, it
+  tipped a body still moving on the slope); done under `STANCE_THERE` (1 cm). A stance step after
+  standing moved it 3.8 units. The rise's timeout and the stand's hold read upright as the still
+  stage's latch too (the classifier's feet flickered: a standing body timed out and fell).
+- **Standing again only:** still (0.05 m/s against the ground), the centre inside the soles as a
+  fresh balance finds them (`Balance::would_find`; `planted` now reads the ground under each end of
+  the sole), the torso within `STAND_POSE` (10 degrees) of the animation's against the pelvis, the
+  feet in the stance; never by the rise's timeout while upright (`STILL_MOST` 2 s more).
+- **The hand-over:** the animation on the feet as they stand (its feet's middle on theirs), both
+  feet planted where they stand, the balance recovering first, the joint targets and the pelvis's
+  turn eased from the pose it stood in over `STAND_BLEND` (0.5 s), the bodies' flat velocity and
+  `anim_v` the ground's, the actor taken to the body at most at `STAND_TAKE` (3.5 units a second)
+  for a second (taken whole, the capsule hopped a unit in a frame).
+- **The balance's steps:** a stance step moves the foot carrying less (the loaded one lifted
+  dropped the body onto the other leg: 4.6 body weights) and lands over its own ground (a slope's);
+  a catching step lands at its standing height over its own ground, not the flat floor's.
+- **Measured** (`np_rise_ends_still`, `np_rise_no_momentum_trip`; on 03ed4ff face up 0.40 m/s,
+  drift 7.6 units, torso 25 degrees off): the centre 0.024 to 0.048 m/s over the half second from
+  standing, the capsule 0, drift 0 to 1.04 units in 2 s, no steps or falls, the torso within 4.4
+  degrees of the animation's. Every other New Physics test still passes.
+- **Waiting on Patrick (test 3, `np_rise_root_bounded`, kept out of the commit):** "the capsule
+  at most 15 units in all" through the rise. Face down 11.1 units, the slope 4.6, the wall 9.2 (net;
+  the path the same within 1.5); face up 20.5 net (41 along its path: the reference follows the
+  pelvis's bob through the rise) and on its side 21.9 net: getting up off the back or side carries
+  the pelvis 0.3 m onto the feet. Is the bound for the whole rise (then the face-up and side rises
+  need another way up, e.g. rolling to the front first) or from the body reading upright? Its other
+  checks: the reference 1.90 units at most in a frame (its cap) and 3.02 behind the pelvis at one
+  frame face up (`LAG_MOST` 3), 5.0 against the wall (the wall holds the capsule off the pelvis).
+  The test's code: `docs/wip/np-rise-root-bound.patch` (on top of `np-rise-ends-still.patch`).
+- **Next in the queue:** the settle-then-rise stage (task C: settle with real limits, roll to back
+  or front), the flipped game get-ups (pelvis 225 units), then the running fix and the knockdown
+  items, explosions/pellets/full-auto, the upstream merge.
+
 ### Claude, 2026-11-19 (the 22:58 crash on 959f6d31: a dead texture in the texture manager's pool)
 
 **Status: open; the stop now names itself (111a59b), the cause is not yet proven.** Asked first, before
@@ -44,7 +100,8 @@ the queued New Physics work.
 
 ### Claude, 2026-11-19 (the rise ends moving: clip 22:19 on 08187cb1; `docs/wip/np-rise-still.patch`)
 
-Work in progress on the get-up slide/trip addendum (applies to 959f6d3). In the patch:
+(Superseded: applied and finished in the entry above.) Work in progress on the get-up slide/trip
+addendum (applies to 959f6d3). In the patch:
 - the feet's rise goal no longer 5% of a leg ahead once up (`out = leg * RISE_FOOT_OUT * (1 - up)`);
 - the root support's flat target velocity the ground's (`ground_v`), and upright (the downed
   classifier's Standing) the pelvis placed so the centre of mass lies over the feet, the torso's
