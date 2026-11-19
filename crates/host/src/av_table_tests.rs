@@ -478,7 +478,6 @@ unsafe impl Send for Sent {}
 /// section ([`platform`]); the broad phase finds no pairs ([`world`]).
 #[test]
 fn np_creature_hits_never_corrupt_the_actor_value_table() {
-    use engine::units::fallout_ai::actor_p3::actor_hit_me;
     use std::sync::atomic::{AtomicI32, AtomicU32, Ordering::SeqCst};
     use std::sync::{mpsc, Arc};
     let _one = crate::active_ragdoll::tests::SERIAL
@@ -591,9 +590,8 @@ fn np_creature_hits_never_corrupt_the_actor_value_table() {
             if frame >= 8 && frame % 15 == 8 && PELLETS.load(SeqCst) < 15 {
                 let part = PARTS[PELLETS.load(SeqCst) as usize % PARTS.len()].0;
                 pellet(&mut f.e, part);
-                crate::knockdown::hit_me_hooked(&mut f.e, &[GECKO, HIT, 0], |e, a| {
-                    actor_hit_me(e, Ptr::new(a[0]), Ptr::new(a[1]), a[2] as u8)
-                });
+                // `Actor::HitMe` as the game calls it: knockdown's hook, installed above.
+                f.e.call(crate::knockdown::HIT_ME, &[GECKO, HIT, 0]);
                 PELLETS.fetch_add(1, SeqCst);
             }
         }));
@@ -802,7 +800,6 @@ fn dress_npc(e: &mut Engine) {
 /// 0 lb, reach 1, the Coyote's Strength, skill 0, against the target's damage threshold).
 #[test]
 fn np_creature_melee_hit_never_reads_past_the_actor_value_table() {
-    use engine::units::fallout_ai::actor_p3::actor_hit_me;
     use ragdoll_core::knock::{transferred, Push};
     use std::sync::atomic::Ordering::SeqCst;
     let _one = crate::active_ragdoll::tests::SERIAL
@@ -853,9 +850,8 @@ fn np_creature_melee_hit_never_reads_past_the_actor_value_table() {
                 f.e.call(0x009b_4dc0, &[HIT]);
                 f.e.call(0x009b_5170, &[HIT, SHOOTER, target, 0, 0]);
                 let skill = f.e.get(Ptr::<HitData>::new(HIT), HitData::eAttackSkill);
-                crate::knockdown::hit_me_hooked(&mut f.e, &[target, HIT, 0], |e, a| {
-                    actor_hit_me(e, Ptr::new(a[0]), Ptr::new(a[1]), a[2] as u8)
-                });
+                // `Actor::HitMe` as the game calls it: knockdown's hook, installed above.
+                f.e.call(crate::knockdown::HIT_ME, &[target, HIT, 0]);
                 skill
             }));
             let lines = room_events::take();
@@ -966,7 +962,6 @@ struct BiteState {
 /// knockdowns and the ballistics as given, each frame the reactions' pass as the game's frame
 /// runs it.
 fn bite_run(fork: Option<(bool, bool)>) -> BiteState {
-    use engine::units::fallout_ai::actor_p3::actor_hit_me;
     use std::sync::atomic::Ordering::SeqCst;
     let mut f = Fixture::new(
         rig_fixture::fnv_skeleton(),
@@ -1014,11 +1009,8 @@ fn bite_run(fork: Option<(bool, bool)>) -> BiteState {
             f.animate();
             f.e.call(0x009b_4dc0, &[HIT]);
             f.e.call(0x009b_5170, &[HIT, SHOOTER, target, 0, 0]);
-            if fork.is_some() {
-                f.e.call(0x0089_a760, &[target, HIT, 0]);
-            } else {
-                actor_hit_me(&mut f.e, Ptr::new(target), Ptr::new(HIT), 0);
-            }
+            // `Actor::HitMe` as the game calls it: nv-rs's hook with `fork`, the game's own without.
+            f.e.call(crate::knockdown::HIT_ME, &[target, HIT, 0]);
         }
         for _ in 0..10 {
             f.e.mem.set_f32(0x011d_ea30, 1.0 / 60.0);
