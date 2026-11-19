@@ -53,6 +53,14 @@ animation update; VATS's readers run in the menu pass, outside that window, and 
   slope walking snap 29.8 degrees, arms carrying 0.16-0.20); every variant tried (data limits
   for the whole downed state; at the HAND rate; at LIMIT_STEP) moved the borderline tests
   around. To do: find what the settle's soft ease does at each failing frame (NP_TRACE).
+  Updated patch (also: the allowance stays soft while a settled joint is out, `SETTLE_STEP`
+  0.002 rad a substep; the rise's spine goals share one reach; the reach scaled down in long
+  frames): 3 fail (slab edge foot 2.3 u in at the slab's corner; slope downed stood after 6.7 s;
+  slope walking never stood). Findings: the "snaps" in the cycle runs are the pelvis dragged by
+  its joints while its turn damping keeps its spin near 0 (31 degrees in a 37 ms frame with a
+  spin of 1.3 rad/s), from the rise's goals (each spine joint its own 0.3 rad reach) and from
+  goal switches (rise to settle: back to the standing animation's targets). A settle stage with
+  neutral lying targets and eased goal changes (task C) is the way, not more tuning.
 
 ### Claude, 2026-11-19 (the running fix: where it stands, docs/wip/np-running-seed.patch)
 

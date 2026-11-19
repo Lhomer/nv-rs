@@ -1,18 +1,21 @@
 diff --git a/crates/ragdoll-core/src/np.rs b/crates/ragdoll-core/src/np.rs
-index 6dfe53c..9835a3b 100644
+index 6dfe53c..693735c 100644
 --- a/crates/ragdoll-core/src/np.rs
 +++ b/crates/ragdoll-core/src/np.rs
-@@ -113,6 +113,9 @@ pub const HAND_PLANT: (f32, f32, f32) = (3000.0, 150.0, 400.0);
+@@ -113,6 +113,12 @@ pub const HAND_PLANT: (f32, f32, f32) = (3000.0, 150.0, 400.0);
  pub const HAND_REACH: f32 = 60.0;
  /// How long the limits stay soft after a fall (s).
  pub const LIMITS_SETTLE: f32 = 0.3;
 +/// A downed body takes the skeleton's own limits this long after it went down (s), once it is
 +/// not in the air: the fall keeps the limits it fell with.
 +pub const SETTLE_AFTER: f32 = 0.6;
++/// Settled, the skeleton's limits stay soft while a joint lies further out than this (rad): only
++/// its allowance eases in ([`crate::np_body::SETTLE_STEP`]), anything further is held.
++pub const LIMITS_IN: f32 = 0.005;
  /// A rise with nothing to push from (or too weak) this long gives up (s).
  pub const RISE_NO_PUSH: f32 = 0.5;
  /// A rise lasts at most this long (s, from the AI's wish to stand, whatever the frames read):
-@@ -273,6 +276,11 @@ pub struct Down {
+@@ -273,6 +279,11 @@ pub struct Down {
      pub arms_off: bool,
      /// How long the legs' push has lapsed (s).
      pub lift_lapse: f32,
@@ -24,7 +27,7 @@ index 6dfe53c..9835a3b 100644
  }
  
  /// Each joint's relative rotation (`parent⁻¹ child`) in a pose of body-node worlds.
-@@ -514,6 +522,8 @@ impl Np {
+@@ -514,6 +525,8 @@ impl Np {
                  hand_landed: [false, false],
                  arms_off: false,
                  lift_lapse: 0.0,
@@ -33,7 +36,7 @@ index 6dfe53c..9835a3b 100644
              });
              return self.down_frame(anim, floor, dt);
          }
-@@ -636,6 +646,7 @@ impl Np {
+@@ -636,6 +649,7 @@ impl Np {
              allow: Vec::new(),
              floors: self.floors.clone(),
              data_limits: self.to_limits,
@@ -41,7 +44,7 @@ index 6dfe53c..9835a3b 100644
              body_walls: self.body_walls.clone(),
          };
          let tracking = self.with_allowance(tracking);
-@@ -679,6 +690,7 @@ impl Np {
+@@ -679,6 +693,7 @@ impl Np {
      /// body: the joints aim at the animation (or, rising, at goals: a foot under its hip, the
      /// torso over the feet) with springs that hold rather than stand.
      fn down_frame(&mut self, anim: &[(M3, V3)], floor: f32, dt: f32) -> Vec<(M3, V3)> {
@@ -49,7 +52,7 @@ index 6dfe53c..9835a3b 100644
          use crate::np_down::{classify, read, reads, turn_between, DOWN_ARMS, DOWN_GAINS};
          let f = floor / UNITS;
          let push = self.push();
-@@ -710,6 +722,8 @@ impl Np {
+@@ -710,6 +725,8 @@ impl Np {
              hand_landed: [false, false],
              arms_off: false,
              lift_lapse: 0.0,
@@ -58,7 +61,39 @@ index 6dfe53c..9835a3b 100644
          });
          down.since += dt;
          down.reading = reading;
-@@ -1027,6 +1041,16 @@ impl Np {
+@@ -765,6 +782,10 @@ impl Np {
+         if rising_wish {
+             down.rising += dt;
+         }
++        // A rise's goal a frame at most [`RISE_REACH`] from where a joint is, less in a long
++        // frame (the same turn a second as at 60 frames a second: a 37 ms frame's whole reach
++        // turned the pelvis 32 degrees in it).
++        let reach = RISE_REACH * (1.0 / (60.0 * dt.max(1e-4))).min(1.0);
+         if rising && !airborne {
+             if reading.pelvis_height > down.rise_best + RISE_GAINED {
+                 down.rise_best = reading.pelvis_height;
+@@ -833,7 +854,10 @@ impl Np {
+                 let qp = self.states[def.parent].q;
+                 let goal = qmul(crate::active::qexp(scale(c, share)), qc);
+                 let now = qnorm(qmul(qconj(qp), qc));
+-                targets[j] = turn_toward(now, qnorm(qmul(qconj(qp), goal)), RISE_REACH);
++                // The torso's whole turn a frame bounded by the reach, its share at each spine
++                // joint (each its own reach turned the torso and the pelvis under it 31 degrees
++                // in a frame).
++                targets[j] = turn_toward(now, qnorm(qmul(qconj(qp), goal)), reach * share);
+                 gains[j].0 = self.muscles.base[j].0 * RISE_GAIN * k;
+                 holds[j] = 0.5 * k;
+             }
+@@ -912,7 +936,7 @@ impl Np {
+             let now_rel = self.model.relative(&self.states);
+             for side in 0..2 {
+                 for &j in &self.balance.legs[side] {
+-                    targets[j] = turn_toward(now_rel[j], legs[j], RISE_REACH);
++                    targets[j] = turn_toward(now_rel[j], legs[j], reach);
+                     gains[j].0 = self.muscles.base[j].0 * RISE_GAIN * k;
+                     holds[j] = 0.0;
+                 }
+@@ -1027,6 +1051,16 @@ impl Np {
                  hold,
              })
              .collect();
@@ -75,7 +110,7 @@ index 6dfe53c..9835a3b 100644
          let tracking = Tracking {
              w: vec![[0.0; 3]; self.states.len()],
              rate: vec![0.0; self.states.len()],
-@@ -1048,13 +1072,18 @@ impl Np {
+@@ -1048,13 +1082,19 @@ impl Np {
              before: std::mem::replace(&mut self.last_targets, anim_rel.clone()),
              widen_by: anim_rel,
              reach: b.reach.clone(),
@@ -90,6 +125,7 @@ index 6dfe53c..9835a3b 100644
 +            // standing limits give way to them; hard otherwise.
 +            soft_limits: down.since < LIMITS_SETTLE
 +                || down.limits_for < LIMITS_SETTLE
++                || (settled && self.report.limit_most > LIMITS_IN)
 +                || self.to_limits,
              allow: Vec::new(),
              floors: self.floors.clone(),
@@ -100,10 +136,20 @@ index 6dfe53c..9835a3b 100644
          };
          let tracking = self.with_allowance(tracking);
 diff --git a/crates/ragdoll-core/src/np_body.rs b/crates/ragdoll-core/src/np_body.rs
-index d1a2566..0c8bc14 100644
+index d1a2566..9cea28f 100644
 --- a/crates/ragdoll-core/src/np_body.rs
 +++ b/crates/ragdoll-core/src/np_body.rs
-@@ -172,6 +172,9 @@ pub struct Tracking {
+@@ -42,6 +42,9 @@ pub const LIMIT_MARGIN: f32 = 0.052;
+ /// Downed, the most a joint limit turns its joint back in a substep (rad; 9.6 rad/s at 16
+ /// substeps a 60th): hard for anything the solver's own steps put past it, never a snap.
+ pub const LIMIT_STEP: f32 = 0.01;
++/// A settled downed body's limits (the skeleton's own) ease in at most this a substep (rad, about
++/// 2 rad/s): brought in at [`LIMIT_STEP`] a settling body's limbs whipped at 8 m/s.
++pub const SETTLE_STEP: f32 = 0.002;
+ /// Brought inside the skeleton's own limits for the hand-over (`Tracking::data_limits`): at most
+ /// this a frame (rad, whatever its substeps): a few frames for a pose far out, never a turn over
+ /// 20 degrees a frame drawn.
+@@ -172,6 +175,9 @@ pub struct Tracking {
      /// the game's ragdoll (whose constraints snapped a pose far outside them: the tester's 08:13
      /// clip, 79 to 183 degrees out).
      pub data_limits: bool,
@@ -113,12 +159,18 @@ index d1a2566..0c8bc14 100644
      /// Each body's own walls (world, metres; empty: none): the sides of walls, crates and ledges
      /// found near it (a plane holds only the body it was found for, so a crate's face never
      /// reaches a body beyond the crate).
-@@ -595,7 +598,7 @@ impl Model {
+@@ -595,10 +601,10 @@ impl Model {
              for (j, def) in self.joints.iter().enumerate() {
                  self.pin(states, def);
                  let soft = tracking.is_some_and(|t| t.soft_limits);
 -                let step = if tracking.is_some_and(|t| t.data_limits) {
-+                let step = if tracking.is_some_and(|t| t.data_limits && t.handing) {
-                     HAND_LIMIT_FRAME / substeps as f32
-                 } else {
-                     LIMIT_STEP
+-                    HAND_LIMIT_FRAME / substeps as f32
+-                } else {
+-                    LIMIT_STEP
++                let step = match tracking {
++                    Some(t) if t.data_limits && t.handing => HAND_LIMIT_FRAME / substeps as f32,
++                    Some(t) if t.data_limits => SETTLE_STEP,
++                    _ => LIMIT_STEP,
+                 };
+                 let out = self.limit(states, def, &widened[j], soft, step, &mut allow[j]);
+                 if sub_i == substeps - 1 {
