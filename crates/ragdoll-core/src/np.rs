@@ -153,6 +153,9 @@ pub const RISE_FOOT_OUT: f32 = 0.3;
 /// The legs push once the centre of mass is within this of the feet (m): their pull brings the
 /// hips forward over the feet as they lift.
 pub const RISE_OVER_FEET: f32 = 0.35;
+/// The legs' push brings the pelvis over its place at this rate (1/s) of the way left, at most
+/// this fast (m/s), the support's spring at this share and its damper at this many times.
+pub const RISE_FLAT: (f32, f32, f32, f32) = (3.0, 0.3, 0.5, 2.0);
 /// The legs' push lifts the pelvis at most this fast (m/s), slowing as it nears standing height
 /// (its pace per metre still to go, 1/s).
 pub const RISE_PACE: (f32, f32) = (0.8, 3.0);
@@ -1120,10 +1123,30 @@ impl Np {
                 } else {
                     [feet_mid[0], feet_mid[1]]
                 };
+                // Brought over the feet at a pace that falls as it nears its place (led there by
+                // the spring alone, it overshot and came upright still moving 0.4 to 0.5 m/s,
+                // 0.7 s to come still; and the lift outran it: the centre 0.07 to 0.09 m outside
+                // the feet at 80% of standing height, the lab's M6 stand): the support damps
+                // toward that pace, its spring a share.
+                let to = [
+                    over_at[0] - self.states[r].x[0],
+                    over_at[1] - self.states[r].x[1],
+                ];
+                let d = (to[0] * to[0] + to[1] * to[1]).sqrt();
+                let along = (d * RISE_FLAT.0).min(RISE_FLAT.1);
+                let approach = if d > 1e-4 {
+                    [to[0] / d * along, to[1] / d * along]
+                } else {
+                    [0.0; 2]
+                };
                 pulls.push(Support {
                     body: r,
                     x: [over_at[0], over_at[1], stand_z],
-                    v: [self.ground_v[0], self.ground_v[1], pace],
+                    v: [
+                        self.ground_v[0] + approach[0],
+                        self.ground_v[1] + approach[1],
+                        pace,
+                    ],
                     q: self.anim_states[r].q,
                     kp: ROOT_SUPPORT.kp,
                     kd: ROOT_SUPPORT.kd,
@@ -1131,8 +1154,8 @@ impl Np {
                     // Held over the feet harder as it comes up: near upright the sway is the
                     // stand's to stop (it swayed 0.36 to 0.56 m/s upright and never stood:
                     // Patrick's 10:10 clip).
-                    kp_h: ROOT_SUPPORT.kp_h * (0.2 + 0.8 * up_now),
-                    kd_h: ROOT_SUPPORT.kd_h * (0.2 + 0.8 * up_now),
+                    kp_h: ROOT_SUPPORT.kp_h * (0.2 + 0.8 * up_now) * RISE_FLAT.2,
+                    kd_h: ROOT_SUPPORT.kd_h * (0.2 + 0.8 * up_now) * RISE_FLAT.3,
                     max_force_h: (250.0 + 650.0 * up_now) * k * if upright { 2.0 } else { 1.0 },
                     kp_turn: ROOT_SUPPORT.kp_turn * 0.5,
                     kd_turn: self.root_kd_turn * 0.5,
