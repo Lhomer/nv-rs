@@ -7,6 +7,24 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (the rise from the front, kneel first: `docs/wip/np-front-rise.patch`)
+
+**Status: not pushed; first attempt in `docs/wip/np-front-rise.patch` (on f42be63).** f42be63 (the
+rise's paced approach over the feet) fixed the Ragdoll lab's M6 stand. Why a rise from the front
+flips: the rise turns the torso's up toward vertical leaning toward the feet and draws the feet in
+front of the hips; from the front that sits the body back on its heels ("seated") and the feet can
+only come in front by rolling it onto its seat. The patch: a rise that begins lying with its front's
+up under -0.5 (`FRONT_START`; judged only at the rise's start, a rise from the back pitches forward
+near standing) goes 1) onto the knees (each foot `KNEEL_FOOT` 0.35 m behind its hip, the knees
+bending toward the head, the pelvis held at `KNEEL_HEIGHT` 0.5 of standing height and turned upright,
+the torso straight up), 2) a foot forward (`LUNGE_FOOT` 0.3 m in front of its hip, lifted 0.08 m
+until within 0.05 m), then the rise's own push; each stage at most 2 s; reset whenever no rise is
+wished. State: the stages run in order, but the kneel is shallow (pelvis 0.42 of standing height,
+the torso leaning back: front up +0.3) and the lunge's foot never reaches its place; the face-down
+world, which on f42be63 catches itself and stands at 3.1 s, no longer stands in 12 s; the side world
+gives up. Next: a tall kneel that holds (the hips over the knees, thigh vertical: the pelvis's turn
+and the knee's place, not the foot's), then the lunge from it; check in the lab viewer.
+
 ### Claude, 2026-11-19 (the Ragdoll lab workflow: `np_m6_stands_by_balance` since de0e5d92)
 
 **Status: open, not fixed.** The lab's `np_m6_stands_by_balance` ("on its back": the centre at most
