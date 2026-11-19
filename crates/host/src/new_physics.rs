@@ -811,7 +811,86 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
     let body = nearest_body(m, &worlds, point);
     let against = hit_against(m, a, &worlds, point);
     let impulse = scale(direction, p);
+    strike(a, p, body, &against, vec![(body, point, impulse)]);
+}
+
+/// An explosion's push on New Physics' actor `actor` (Patrick's design, the 22:36 clip): each body
+/// pushed away from `centre` (game units) by the explosion form's `force` (N s for the whole body
+/// at the centre) times the game's own falloff at that body's distance (`00647920(radius,
+/// distance)`, as `Explosion`'s own checks use it) and its share of the mass; the feet's and the
+/// calves' push turned up by [`BLAST_LIFT`] (the blast off the ground under them). One outcome.
+pub fn blast(e: &mut Engine, actor: u32, centre: V3, force: f32, radius: f32) {
+    let worlds: Vec<(M3, V3)> = {
+        let actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(a) = actors.iter().find(|a| a.actor == actor) else {
+            return;
+        };
+        a.nodes
+            .iter()
+            .map(|&n| {
+                (
+                    read9(e, n + WORLD_ROTATION),
+                    read3(e, n + WORLD_TRANSLATION),
+                )
+            })
+            .collect()
+    };
+    let m = model();
+    let k = ragdoll_core::np_body::UNITS;
+    let mut pushes = Vec::new();
+    let mut total = 0.0f32;
+    for (b, def) in m.bodies.iter().enumerate() {
+        let Some((r, t)) = worlds.get(b) else {
+            continue;
+        };
+        let at = add(*t, apply_m(r, scale(def.com, k)));
+        let off = sub(at, centre);
+        let distance = length(off);
+        let share = e.call(0x0064_7920, &args![radius, distance]).f32();
+        if !share.is_finite() || share <= 0.0 || !force.is_finite() {
+            continue;
+        }
+        let mut way = ragdoll_core::flinch::unit(off).unwrap_or([0.0, 0.0, 1.0]);
+        if def.node.ends_with("Foot") || def.node.ends_with("Calf") {
+            way = ragdoll_core::flinch::unit(add(way, [0.0, 0.0, BLAST_LIFT]))
+                .unwrap_or([0.0, 0.0, 1.0]);
+        }
+        let p = force * share.min(1.0) * def.mass / m.mass;
+        total += p;
+        pushes.push((b, at, scale(way, p)));
+    }
+    if pushes.is_empty() {
+        return;
+    }
+    let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(a) = actors.iter_mut().find(|a| a.actor == actor) else {
+        return;
+    };
+    let body = m.body("Bip01 Spine2").unwrap_or(0);
+    let against = format!(
+        "a blast {:.0} units off, its force {force:.0} over a radius of {radius:.0}",
+        length(sub(worlds.get(body).map_or(centre, |w| w.1), centre))
+    );
+    strike(a, total, body, &against, pushes);
+}
+
+/// The last hit's or blast's pushes (each body, its point, its impulse), for the tests.
+#[cfg(test)]
+pub(crate) static LAST_PUSHES: std::sync::Mutex<Vec<(usize, V3, V3)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// How much a blast's push on the feet and calves is turned up (the ground's share under them).
+const BLAST_LIFT: f32 = 1.0;
+
+/// A hit's or a blast's pushes (`pushes`: each body, its point, its impulse) on `a`, `p` in all,
+/// said on `body`: one outcome, or added to the last if no frame has run since (a burst's pellets).
+fn strike(a: &mut NpActor, p: f32, body: usize, against: &str, pushes: Vec<(usize, V3, V3)>) {
+    let m = model();
     a.since_hit = 0.0;
+    #[cfg(test)]
+    {
+        *LAST_PUSHES.lock().unwrap_or_else(|p| p.into_inner()) = pushes.clone();
+    }
     // Pellets of one burst (hits before a frame has run since the last): one outcome, their
     // momenta summed (each pellet closed the last as "stood, 0 frames": Patrick's 10:08 clip).
     if a.hit_frames == 0 {
@@ -823,9 +902,11 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
                 "{:08X}: [np hit] {p:.1} N s on {} (pellet {} of a burst, {:.2} m/s in all); {against}",
                 a.id, m.bodies[body].node, o.pellets, o.speed
             ));
-            match a.np.as_mut() {
-                Some(np) => np.hit(body, point, impulse),
-                None => a.pending.push((body, point, impulse)),
+            for (b, point, impulse) in pushes {
+                match a.np.as_mut() {
+                    Some(np) => np.hit(b, point, impulse),
+                    None => a.pending.push((b, point, impulse)),
+                }
             }
             return;
         }
@@ -862,9 +943,11 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
         p / m.mass,
         m.mass
     ));
-    match a.np.as_mut() {
-        Some(np) => np.hit(body, point, impulse),
-        None => a.pending.push((body, point, impulse)),
+    for (b, point, impulse) in pushes {
+        match a.np.as_mut() {
+            Some(np) => np.hit(b, point, impulse),
+            None => a.pending.push((b, point, impulse)),
+        }
     }
 }
 

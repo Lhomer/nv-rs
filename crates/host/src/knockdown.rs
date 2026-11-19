@@ -491,8 +491,22 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
             p,
             point,
             direction,
+            push,
             ..
         } = measure_hit(e, target, hit);
+        // An explosion pushes every body by its own distance (the form's force, the game's
+        // falloff); else the hit's momentum on the body it struck.
+        if let (Push::Blast { .. }, Some((centre, force, radius))) = (push, blast_of(e, hit)) {
+            crate::new_physics::blast(
+                e,
+                target,
+                centre,
+                force * t.hit_force.max(0) as f32 / 100.0,
+                radius,
+            );
+            clear_stored_push(e, target);
+            return;
+        }
         crate::new_physics::hit(
             e,
             target,
@@ -950,6 +964,27 @@ fn note(line: String) {
 
 /// A blast's push: from its centre (the explosion reference's position) through the target's
 /// chest.
+/// The explosion of a blast's hit `hit` as the game has it: its centre (game units), its form's
+/// force (the form's float at `+0x74`, as the game's own push of rigid bodies reads it, `009b0920`
+/// through `009b0bd0`) and its radius (`00644930`, the explosion's `+0x94`); none without one.
+pub(crate) fn blast_of(e: &mut Engine, hit: u32) -> Option<([f32; 3], f32, f32)> {
+    let source = e.mem.u32(hit + HIT_SOURCE);
+    if source == 0 {
+        return None;
+    }
+    let centre = [0, 4, 8].map(|o| e.mem.f32(source + REFR_POSITION + o));
+    let form = e.call(0x0041_81e0, &args![source]).u32();
+    if form == 0 || !centre.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let force = e.mem.f32(form + EXPLOSION_FORCE);
+    let radius = e.call(0x0064_4930, &args![source]).f32();
+    (force.is_finite() && radius.is_finite() && radius > 0.0).then_some((centre, force, radius))
+}
+
+/// `BGSExplosion`'s force (its DATA's float, `009b0bd0`).
+pub(crate) const EXPLOSION_FORCE: u32 = 0x74;
+
 fn blast(e: &mut Engine, hit: u32, target: u32) -> ([f32; 3], [f32; 3]) {
     let at = position(e, target).unwrap_or([0.0; 3]);
     let chest = [at[0], at[1], at[2] + 60.0];

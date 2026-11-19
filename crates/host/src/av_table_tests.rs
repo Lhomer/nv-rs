@@ -1165,3 +1165,136 @@ fn np_off_hits_are_vanilla_fnvs() {
     assert!(vanilla.reacting.is_empty());
     assert!(failed.is_empty(), "{failed:#?}");
 }
+
+/// Where the blast's explosion, its form and its vtable are laid out.
+const EXPLOSION: u32 = AREA + 0x3_e400;
+const EXPLOSION_FORM: u32 = AREA + 0x3_e600;
+const EXPLOSION_VTABLE: u32 = AREA + 0x3_e800;
+
+/// Patrick's 22:36 clip and design: an explosion under New Physics pushes each body away from its
+/// centre by the explosion form's own force (`BGSExplosion`'s `+0x74`, as the game's push of rigid
+/// bodies reads it) times the game's falloff at that body's distance (`00647920`: `1 - (d/r)^2`
+/// within the explosion's radius `+0x94`, nothing past it) and its share of the mass, the feet's
+/// and calves' push turned up (the lift under them). Through the game's `Actor::HitMe` with
+/// knockdown's hook: a blast 100 units in front of the chest pushes every body within its 300
+/// unit radius, each body's push per kilogram the force over the body's mass times its falloff,
+/// each away from the centre (feet and calves upward), the nearer bodies more; the same blast 700
+/// units off pushes nothing.
+#[test]
+fn np_a_blast_pushes_each_body_by_its_distance() {
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    const FORCE: f32 = 300.0;
+    const RADIUS: f32 = 300.0;
+    let mut failed = Vec::new();
+    for (name, off) in [("near", 100.0f32), ("past its radius", 700.0)] {
+        let mut f = Fixture::new(
+            rig_fixture::fnv_skeleton(),
+            Ground {
+                collision: Some(-1.0),
+                navmesh: -9.0,
+            },
+        );
+        f.make_character();
+        f.game_update();
+        lay_out_gecko(&mut f.e);
+        dress_npc(&mut f.e);
+        crate::active_ragdoll::clear();
+        crate::knockdown::clear();
+        let was = crate::gunplay::tuning();
+        crate::gunplay::set_tuning(crate::gunplay::Tuning {
+            new_physics: true,
+            knockdowns: true,
+            hit_force: 100,
+            ..was
+        });
+        crate::knockdown::install(&mut f.e);
+        f.animate();
+        assert!(claim(&mut f.e, ACTOR), "{name}: New Physics took the actor");
+        let chest = f.world("Bip01 Spine2").unwrap().1;
+        let centre = [chest[0], chest[1] - off, chest[2]];
+        // The explosion: a reference (its vtable says it is one), its form with its force, its
+        // radius and its place.
+        f.e.register_double(SLOTS + 40, |_, _| 1u32.into_ret());
+        f.e.mem.set_u32(EXPLOSION_VTABLE + 0x220, SLOTS + 40);
+        // Not an actor (`+0x100`), as an explosion answers the game's `HitMe`.
+        f.e.register_double(SLOTS + 44, |_, _| 0u32.into_ret());
+        f.e.mem.set_u32(EXPLOSION_VTABLE + 0x100, SLOTS + 44);
+        f.e.mem.set_u32(EXPLOSION, EXPLOSION_VTABLE);
+        f.e.mem.set_u32(EXPLOSION + 0x20, EXPLOSION_FORM);
+        f.e.mem
+            .set_f32(EXPLOSION_FORM + crate::knockdown::EXPLOSION_FORCE, FORCE);
+        f.e.mem.set_f32(EXPLOSION + 0x94, RADIUS);
+        for (i, v) in centre.iter().enumerate() {
+            f.e.mem.set_f32(EXPLOSION + 0x30 + 4 * i as u32, *v);
+        }
+        let hit = Ptr::<HitData>::new(HIT);
+        for o in (0..0x64).step_by(4) {
+            f.e.mem.set_u32(HIT + o, 0);
+        }
+        f.e.set(hit, HitData::pTarget, ACTOR);
+        f.e.set(hit, HitData::pAggressor, PLAYER);
+        f.e.mem.set_u32(HIT + 0x08, EXPLOSION);
+        f.e.set(hit, HitData::fHealthDamage, 20.0f32.to_bits());
+        f.e.set(hit, HitData::fTotalDamage, 20.0f32.to_bits());
+        crate::new_physics::LAST_PUSHES
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        f.e.call(crate::knockdown::HIT_ME, &[ACTOR, HIT, 0]);
+        let pushes = crate::new_physics::LAST_PUSHES
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        crate::gunplay::set_tuning(was);
+        let m = crate::new_physics::model();
+        eprintln!("RESULT np blast {name}: {} bodies pushed", pushes.len());
+        if off > RADIUS {
+            if !pushes.is_empty() {
+                failed.push(format!("{name}: {} bodies pushed", pushes.len()));
+            }
+            continue;
+        }
+        if pushes.len() != m.bodies.len() {
+            failed.push(format!(
+                "{name}: {} of {} bodies pushed",
+                pushes.len(),
+                m.bodies.len()
+            ));
+        }
+        let mut per_kg = Vec::new();
+        for (b, at, impulse) in &pushes {
+            let def = &m.bodies[*b];
+            let d = ragdoll_core::flinch::length(ragdoll_core::flinch::sub(*at, centre));
+            let want = FORCE * (1.0 - (d / RADIUS) * (d / RADIUS)) * def.mass / m.mass;
+            let got = ragdoll_core::flinch::length(*impulse);
+            if (got - want).abs() > 1e-3 * want.max(1.0) {
+                failed.push(format!(
+                    "{name}: {} pushed {got:.3} N s, want {want:.3}",
+                    def.node
+                ));
+            }
+            let away = ragdoll_core::flinch::unit(ragdoll_core::flinch::sub(*at, centre)).unwrap();
+            let way = ragdoll_core::flinch::unit(*impulse).unwrap_or([0.0; 3]);
+            let lifted = def.node.ends_with("Foot") || def.node.ends_with("Calf");
+            if lifted {
+                if way[2] <= away[2] + 0.2 {
+                    failed.push(format!(
+                        "{name}: {} not lifted ({:.2} up, away {:.2})",
+                        def.node, way[2], away[2]
+                    ));
+                }
+            } else if ragdoll_core::flinch::dot(way, away) < 0.999 {
+                failed.push(format!("{name}: {} not pushed away", def.node));
+            }
+            per_kg.push((d, got / def.mass));
+        }
+        // The nearer, the harder per kilogram.
+        per_kg.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if per_kg.windows(2).any(|w| w[1].1 > w[0].1 + 1e-4) {
+            failed.push(format!("{name}: a farther body pushed harder: {per_kg:?}"));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
