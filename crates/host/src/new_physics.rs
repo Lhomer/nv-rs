@@ -67,6 +67,9 @@ pub(crate) fn model() -> &'static Model {
 
 /// One actor New Physics has.
 struct NpActor {
+    /// The last hit was a pellet of a shot of several (a shotgun's): the next in the same frame
+    /// joins its outcome.
+    last_pellet: bool,
     actor: u32,
     id: u32,
     root: u32,
@@ -773,6 +776,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             held: Vec::new(),
             anim_updates: 0,
             holds_refused: 0,
+            last_pellet: false,
             root_budget: ROOT_STEP,
             pelvis_last: None,
             history: std::collections::VecDeque::new(),
@@ -793,6 +797,13 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
 /// measure, Hit Force applied), at `point` (world, game units) along `direction` (unit). The
 /// struck body is the nearest's to the point.
 pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
+    hit_shot(e, actor, p, point, direction, true)
+}
+
+/// [`hit`], `pellet` saying whether it is one of several projectiles of one shot (a shotgun's):
+/// only those join the outcome of the frame's last hit; each round of a full-auto burst is judged
+/// on its own (Patrick's design for the 22:36 clip).
+pub fn hit_shot(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3, pellet: bool) {
     let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
     let Some(a) = actors.iter_mut().find(|a| a.actor == actor) else {
         return;
@@ -811,7 +822,7 @@ pub fn hit(e: &mut Engine, actor: u32, p: f32, point: V3, direction: V3) {
     let body = nearest_body(m, &worlds, point);
     let against = hit_against(m, a, &worlds, point);
     let impulse = scale(direction, p);
-    strike(a, p, body, &against, vec![(body, point, impulse)]);
+    strike(a, p, body, &against, vec![(body, point, impulse)], pellet);
 }
 
 /// An explosion's push on New Physics' actor `actor` (Patrick's design, the 22:36 clip): each body
@@ -871,7 +882,7 @@ pub fn blast(e: &mut Engine, actor: u32, centre: V3, force: f32, radius: f32) {
         "a blast {:.0} units off, its force {force:.0} over a radius of {radius:.0}",
         length(sub(worlds.get(body).map_or(centre, |w| w.1), centre))
     );
-    strike(a, total, body, &against, pushes);
+    strike(a, total, body, &against, pushes, false);
 }
 
 /// The last hit's or blast's pushes (each body, its point, its impulse), for the tests.
@@ -884,16 +895,26 @@ const BLAST_LIFT: f32 = 1.0;
 
 /// A hit's or a blast's pushes (`pushes`: each body, its point, its impulse) on `a`, `p` in all,
 /// said on `body`: one outcome, or added to the last if no frame has run since (a burst's pellets).
-fn strike(a: &mut NpActor, p: f32, body: usize, against: &str, pushes: Vec<(usize, V3, V3)>) {
+fn strike(
+    a: &mut NpActor,
+    p: f32,
+    body: usize,
+    against: &str,
+    pushes: Vec<(usize, V3, V3)>,
+    pellet: bool,
+) {
     let m = model();
     a.since_hit = 0.0;
     #[cfg(test)]
     {
         *LAST_PUSHES.lock().unwrap_or_else(|p| p.into_inner()) = pushes.clone();
     }
-    // Pellets of one burst (hits before a frame has run since the last): one outcome, their
-    // momenta summed (each pellet closed the last as "stood, 0 frames": Patrick's 10:08 clip).
-    if a.hit_frames == 0 {
+    // Pellets of one shot (hits before a frame has run since the last, each a pellet): one
+    // outcome, their momenta summed (each pellet closed the last as "stood, 0 frames": Patrick's
+    // 10:08 clip). A full-auto round is its own, even in the same frame.
+    let joins = a.hit_frames == 0 && pellet && a.last_pellet;
+    a.last_pellet = pellet;
+    if joins {
         if let Some(o) = a.outcome.as_mut() {
             o.impulse += p;
             o.speed = o.impulse / m.mass;

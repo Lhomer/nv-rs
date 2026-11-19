@@ -507,12 +507,17 @@ fn after_hit(e: &mut Engine, target: u32, hit: u32) {
             clear_stored_push(e, target);
             return;
         }
-        crate::new_physics::hit(
+        // A pellet of a shot of several (the weapon's projectiles per shot) joins the frame's
+        // last pellet's outcome; a round of a full-auto burst is judged on its own.
+        let pellet = crate::gunplay::weapon_stats(e, e.mem.u32(hit + HIT_WEAPON))
+            .is_some_and(|s| s.projectiles > 1);
+        crate::new_physics::hit_shot(
             e,
             target,
             p * t.hit_force.max(0) as f32 / 100.0,
             point,
             direction,
+            pellet,
         );
         clear_stored_push(e, target);
         return;

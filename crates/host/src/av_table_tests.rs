@@ -1298,3 +1298,85 @@ fn np_a_blast_pushes_each_body_by_its_distance() {
     }
     assert!(failed.is_empty(), "{failed:#?}");
 }
+
+/// Patrick's design for the 22:36 clip: each round of a full-auto burst is judged on its own,
+/// only the pellets of one shot are one outcome, and nothing caps them. Through the game's
+/// `Actor::HitMe` with knockdown's hook on New Physics' actor, in one frame: a weapon of one
+/// projectile a shot lands 2 rounds, each said as its own hit (`[np hit] ... N s on`, no
+/// "of a burst"); a weapon of 9 projectiles lands its 9 pellets, the first its own hit and the
+/// other 8 joining it ("pellet 9 of a burst").
+#[test]
+fn np_full_auto_rounds_are_each_their_own_and_pellets_one() {
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut failed = Vec::new();
+    for (name, projectiles, hits, own, joined) in [
+        ("full-auto", 1u8, 2u32, 2usize, 0usize),
+        ("shotgun", 9, 9, 1, 8),
+    ] {
+        let mut f = Fixture::new(
+            rig_fixture::fnv_skeleton(),
+            Ground {
+                collision: Some(-1.0),
+                navmesh: -9.0,
+            },
+        );
+        f.make_character();
+        f.game_update();
+        lay_out_gecko(&mut f.e);
+        dress_npc(&mut f.e);
+        crate::active_ragdoll::clear();
+        crate::knockdown::clear();
+        let was = crate::gunplay::tuning();
+        crate::gunplay::set_tuning(crate::gunplay::Tuning {
+            new_physics: true,
+            knockdowns: true,
+            hit_force: 100,
+            ..was
+        });
+        crate::knockdown::install(&mut f.e);
+        f.animate();
+        assert!(claim(&mut f.e, ACTOR), "{name}: New Physics took the actor");
+        f.e.mem.set_u8(WEAPON + 0xF4 + 0x2A, projectiles);
+        room_events::set_on(true);
+        let _ = room_events::take();
+        for _ in 0..hits {
+            let hit = Ptr::<HitData>::new(HIT);
+            for o in (0..0x64).step_by(4) {
+                f.e.mem.set_u32(HIT + o, 0);
+            }
+            f.e.set(hit, HitData::pTarget, ACTOR);
+            f.e.set(hit, HitData::pAggressor, PLAYER);
+            f.e.set(hit, HitData::pWeapon, WEAPON);
+            f.e.set(hit, HitData::fHealthDamage, 9.0f32.to_bits());
+            f.e.set(hit, HitData::fTotalDamage, 9.0f32.to_bits());
+            f.e.call(crate::knockdown::HIT_ME, &[ACTOR, HIT, 0]);
+        }
+        let lines = room_events::take();
+        room_events::set_on(false);
+        crate::gunplay::set_tuning(was);
+        let said: Vec<&String> = lines.iter().filter(|l| l.contains("[np hit]")).collect();
+        let own_now = said.iter().filter(|l| !l.contains("of a burst")).count();
+        let joined_now = said.iter().filter(|l| l.contains("of a burst")).count();
+        eprintln!(
+            "RESULT np {name}: {} hits said, {own_now} their own, {joined_now} joined",
+            said.len()
+        );
+        if said.len() != hits as usize || own_now != own || joined_now != joined {
+            failed.push(format!(
+                "{name}: {} hits said, {own_now} their own (want {own}), {joined_now} joined \
+                 (want {joined})",
+                said.len()
+            ));
+        }
+        if joined > 0
+            && !said
+                .last()
+                .is_some_and(|l| l.contains(&format!("pellet {hits} of a burst")))
+        {
+            failed.push(format!("{name}: the last pellet not counted {hits}"));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
