@@ -7,6 +7,24 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (the running fix and the knockdown items on f42be63: state)
+
+**Status: not pushed; moved on to explosions as Patrick asked.**
+- `docs/wip/np-running-seed.patch` applies to f42be63 with `git apply --3way` (one trivial conflict
+  in the cycle's floor trace). With it both running tests pass (`np_running_unhit_never_stumbles`,
+  `np_running_light_hit_gathers_and_resumes`) and 5 New Physics tests fail: `np_draws_what_it_
+  simulates_on_fnvs_skeleton` (drawn 8.05 degrees, 13.3 units off simulated: the fixture's walkers
+  now keep moving the controller under New Physics, the reference moving under a body drawn from
+  its own states), `np_rises_on_its_first_try` (flat stood at 10.1 s, rises given up),
+  `np_slope_walking_with_a_racing_animation` (the floor 3.11 body weights), `np_a_slab_edge_holds_
+  the_body` (a body 4.81 units inside) and `np_the_arms_push_it_up` (the hands 0.00 face down).
+  Next: the walk's own move taken into the shift (`anim_moved`) while New Physics has the actor.
+- The knockdown items: a death waits up to `HAND_WAIT_FRAMES` 45 for the joints to come inside the
+  skeleton's limits (meanwhile hits are taken as downed hits); a prompt death needs the joints held
+  inside them while downed (`docs/wip/np-settled-limits.patch`, which no longer applies to
+  np.rs: re-implement on the current down frame; its settle came 3 s after the fall, so a death
+  0.3 s after landing still found joints 15 to 46 degrees out).
+
 ### Claude, 2026-11-19 (the rise from the front, second attempt: `docs/wip/np-front-rise-knees.patch`)
 
 **Status: not pushed; moved on to the running/knockdown items as Patrick asked.** A simpler idea
