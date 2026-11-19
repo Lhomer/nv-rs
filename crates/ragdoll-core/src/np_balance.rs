@@ -265,19 +265,22 @@ impl Balance {
     /// one height the uphill foot read lifted and the steps came with no hit, the tester's 08:13
     /// clip).
     fn planted(&self, model: &Model, s: &State, b: usize, floor: f32) -> bool {
-        let floor = (0..2)
+        let plane = (0..2)
             .find(|&side| self.feet[side] == b)
             .and_then(|side| self.foot_floor[side])
-            .map_or(floor, |p| {
-                if p.n[2] > 0.1 {
-                    p.p[2] - (p.n[0] * (s.x[0] - p.p[0]) + p.n[1] * (s.x[1] - p.p[1])) / p.n[2]
-                } else {
-                    floor
-                }
-            });
+            .filter(|p| p.n[2] > 0.1);
+        // The ground under each end of the sole (on a slope, under the foot's centre it lay
+        // several centimetres off its ends' own: a foot standing on a 20 degree slope read
+        // lifted).
+        let ground = |at: V3| {
+            plane.map_or(floor, |p| {
+                p.p[2] - (p.n[0] * (at[0] - p.p[0]) + p.n[1] * (at[1] - p.p[1])) / p.n[2]
+            })
+        };
         let def = &model.bodies[b];
         def.ends.iter().any(|e| {
-            add(s.x, crate::active::qrot(s.q, sub(*e, def.com)))[2] - def.radius < floor + 0.03
+            let at = add(s.x, crate::active::qrot(s.q, sub(*e, def.com)));
+            at[2] - def.radius < ground(at) + 0.03
         })
     }
 
@@ -308,6 +311,26 @@ impl Balance {
         } else {
             outside(&self.support, [self.capture[0], self.capture[1]])
         };
+    }
+
+    /// The ground under `at` (flat) on `side`'s foot's own ground plane (a slope's), or `floor`
+    /// without one (m).
+    fn ground(&self, side: usize, at: V3, floor: f32) -> f32 {
+        self.foot_floor[side]
+            .filter(|p| p.n[2] > 0.1)
+            .map_or(floor, |p| {
+                p.p[2] - (p.n[0] * (at[0] - p.p[0]) + p.n[1] * (at[1] - p.p[1])) / p.n[2]
+            })
+    }
+
+    /// How far outside this balance's support (the planted feet's soles: [`Balance::measure`])
+    /// a still body's capture point (its centre of mass, flat) would lie on `states` now (m;
+    /// negative inside): what a balance taking it over would find.
+    pub fn would_find(&mut self, model: &Model, states: &[State], floor: f32) -> f32 {
+        let (com, _) = model.centre_of_mass(states);
+        self.capture = [com[0], com[1], 0.0];
+        self.measure(model, states, floor);
+        self.outside
     }
 
     /// The capture point's hold: true while it is inside the support.
@@ -469,7 +492,19 @@ impl Balance {
                 let along = ease(s);
                 let mut at = add(st.from, scale(sub(st.to, st.from), along));
                 at[2] += st.lift * (std::f32::consts::PI * s).sin();
-                let dv = scale(sub(st.to, st.from), 1.0 / st.time);
+                // A stance step's foot goes at its arc's own pace (from rest, lifted before it
+                // moves on: led at the step's mean pace from its first frame, still on the floor,
+                // the foot dragged and dug in, the other leg kicking the body up at 4.6 to 5.6
+                // body weights); a catching step's at once.
+                let dv = if st.stance {
+                    let pace = 30.0 * s * s * (1.0 - s) * (1.0 - s) / st.time;
+                    let mut d = scale(sub(st.to, st.from), pace);
+                    d[2] +=
+                        st.lift * std::f32::consts::PI * (std::f32::consts::PI * s).cos() / st.time;
+                    d
+                } else {
+                    scale(sub(st.to, st.from), 1.0 / st.time)
+                };
                 ask.leg[st.side] = 0.25;
                 ask.foot = Some((self.feet[st.side], at, st.q, dv));
                 ask.hold_across = 0.6;
@@ -568,14 +603,23 @@ impl Balance {
                 };
                 let apart = length(sub(off(0), off(1)));
                 if apart > STANCE_OFF {
-                    let side = if length(off(0)) > length(off(1)) {
-                        0
-                    } else {
-                        1
-                    };
+                    // The foot carrying less of the body (the one further from its centre, flat)
+                    // steps: lifted, the foot under the centre dropped the body onto the other
+                    // leg (4.6 body weights on the floor, after a rise that stood with its spine
+                    // straight over that foot). Either foot's step restores the stance.
+                    let from_com = |side: usize| length(flat(sub(states[self.feet[side]].x, com)));
+                    let side = if from_com(0) > from_com(1) { 0 } else { 1 };
                     let b = self.feet[side];
                     let at = add(flat(anim[b].x), off(1 - side));
-                    let to = [at[0], at[1], states[b].x[2]];
+                    // As high over its own ground there as it stands over it here (on a 20
+                    // degree slope the foot's own height 10 cm uphill lies 3.6 cm into the
+                    // ground).
+                    let to = [
+                        at[0],
+                        at[1],
+                        states[b].x[2] - self.ground(side, states[b].x, floor)
+                            + self.ground(side, at, floor),
+                    ];
                     let st = Step {
                         side,
                         from: states[b].x,
@@ -657,7 +701,10 @@ impl Balance {
                 );
                 covers = outside(&hull(&pts), [self.capture[0], self.capture[1]]).max(0.0);
             }
-            let height = states[b].x[2] - lowest_of(model, states, b) + floor;
+            // Its standing height over its own ground where it lands (a slope's, not the flat
+            // floor's).
+            let height =
+                states[b].x[2] - lowest_of(model, states, b) + self.ground(side, to, floor);
             let st = Step {
                 side,
                 from: states[b].x,

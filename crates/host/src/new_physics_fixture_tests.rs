@@ -2429,8 +2429,9 @@ fn np_slope_downed_lies_on_the_slope() {
 /// The same, the game's mover and controller moving the reference at 30 units a second (the
 /// clip's glide) while it is downed: the game moves the reference under 2 units a second while it
 /// is down (New Physics holds the game's movement before it applies; the reference follows the
-/// pelvis, which the fall, the rises and a collapse move), and it stands within 4 s of going
-/// down or gives up into the game's ragdoll (a rise lasts at most 2 s).
+/// pelvis, which the fall, the rises and a collapse move), and it stands within 5 s of going
+/// down or gives up into the game's ragdoll (Patrick, the 67d693e decisions: 5 s on the slope,
+/// 4 s before; standing again waits for the body to come still, posed and in its stance).
 #[test]
 fn np_slope_downed_holds_the_games_movement() {
     let r = slope_run(&Slope {
@@ -2459,7 +2460,7 @@ fn np_slope_downed_holds_the_games_movement() {
         r.ref_rise_jump
     );
     assert!(
-        r.stood_after.is_some_and(|s| s <= 4.0) || r.gave_up_after.is_some(),
+        r.stood_after.is_some_and(|s| s <= 5.0) || r.gave_up_after.is_some(),
         "stood {:?}, gave up {:?}",
         r.stood_after,
         r.gave_up_after
@@ -2575,6 +2576,9 @@ struct Cycle {
     pellets: u32,
     /// It holds a weapon drawn (the right hand's).
     armed: bool,
+    /// Standing idle (the game's mover gives it no walk) and, once it stands again, left alone
+    /// (no light hits): the rise's end measured on its own ([`AfterStand`]).
+    still: bool,
 }
 
 impl Default for Cycle {
@@ -2591,8 +2595,30 @@ impl Default for Cycle {
             light: 0.0,
             pellets: 0,
             armed: false,
+            still: false,
         }
     }
+}
+
+/// The rise's end, the first time it stands again: the most the body's centre moved (m/s, flat,
+/// drawn) and the capsule (the reference, units a second, flat) over the half second from
+/// standing again; over the two seconds after it, the reference's drift (units, flat), the
+/// catching steps, whether it went down again, and the torso's most tilt off the animation's
+/// (degrees, pelvis to Spine2, drawn against animated); from the body first upright (read
+/// standing while downed, or held up by the rise's still stage) to the hand-over's end (half a second after standing): the reference's
+/// path (units, flat), its most in a frame of New Physics' own (beyond the game's movement) and
+/// the most it lay behind the pelvis drawn (flat).
+#[derive(Debug, Default, Clone)]
+struct AfterStand {
+    centre_speed: f32,
+    capsule_speed: f32,
+    drift: f32,
+    steps: u32,
+    downed: bool,
+    tilt: f32,
+    rise_path: f32,
+    step_most: f32,
+    lag: f32,
 }
 
 /// What a [`cycle_run`] found.
@@ -2672,6 +2698,8 @@ struct CycleRun {
     ref_end: V3,
     ref_inside: f32,
     moves: u32,
+    /// The first stand's end ([`AfterStand`]), once two seconds after it have run.
+    after: Option<AfterStand>,
 }
 
 /// The whole cycle on FNV's skeleton through the game's own path: the game's update
@@ -2817,6 +2845,14 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
     let mut last_spin: Vec<V3> = Vec::new();
     let mut ragdoll_pose: Vec<(M3, V3)> = Vec::new();
     let mut gave_up = false;
+    // The rise's end: when it first stood (time, reference, steps, downs), the measures so far,
+    // the last frame's drawn centre (m) and reference.
+    let mut stand: Option<(f32, V3, u32, u32)> = None;
+    let mut after = AfterStand::default();
+    let mut rising_from = false;
+    let mut last_centre: Option<V3> = None;
+    let mut last_after_ref: Option<V3> = None;
+    let mut upright_from = false;
     while t < cfg.seconds {
         let dt = 0.008 + 0.030 * rnd();
         t += dt;
@@ -2826,7 +2862,11 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
         let torn = rnd() < 0.35;
         // The game's movement: its mover (held by New Physics while it has the actor), its
         // controller seating the reference on the ground.
-        let want = [0.0, 0.45 * k, 0.0];
+        let want = if cfg.still {
+            [0.0; 3]
+        } else {
+            [0.0, 0.45 * k, 0.0]
+        };
         crate::knockdown::mover_update(&mut f.e, MOVER, |e| {
             rig_fixture::write3(e, velocity_at, want);
             rig_fixture::write3(e, MOVER + crate::knockdown::MOVER_DELTA, scale(want, dt));
@@ -3162,11 +3202,75 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
             if let Some(u) = upright_at {
                 run.upright_still = run.upright_still.max(t - u);
             }
-            if stage == 0 {
+            if stand.is_none() {
+                stand = Some((t, f.reference(), steps_now, run.downed));
+            }
+            if stage == 0 && !cfg.still {
                 stage = 1;
                 next_hit = Some((t + 1.0, light));
             }
         }
+        // The rise's end ([`AfterStand`]).
+        if down && label_of(ACTOR) == Some("rising") {
+            rising_from = true;
+        }
+        let centre =
+            drawn(ACTOR).map(|(p, _)| model().centre_of_mass(&model().states_from_nodes(&p)).0);
+        if rising_from && run.after.is_none() {
+            let within = stand.map_or(true, |s| t <= s.0 + 0.5);
+            // Upright: read so while downed (the label `standing`) or held so by the rise's
+            // still stage (its latch), whichever comes first.
+            upright_from |= (down && label_of(ACTOR) == Some("standing"))
+                || crate::new_physics::still_up(ACTOR)
+                || stand.is_some();
+            if let Some(was) = last_after_ref.filter(|_| within && upright_from) {
+                let d = sub(f.reference(), was);
+                after.rise_path += length([d[0], d[1], 0.0]);
+            }
+            if within && upright_from {
+                let step = length(sub(f.reference(), game_ref));
+                after.step_most = after.step_most.max(step);
+                if let Some((p, _)) = drawn(ACTOR) {
+                    let pelvis = p[model().root].1;
+                    let d = sub(f.reference(), pelvis);
+                    after.lag = after.lag.max(length([d[0], d[1], 0.0]));
+                }
+            }
+            if let Some((t0, ref0, steps0, downs0)) = stand {
+                let since = t - t0;
+                if since <= 0.5 {
+                    if let (Some(c), Some(was)) = (centre, last_centre) {
+                        let d = sub(c, was);
+                        after.centre_speed = after.centre_speed.max(length([d[0], d[1], 0.0]) / dt);
+                    }
+                    if let Some(was) = last_after_ref {
+                        let d = sub(f.reference(), was);
+                        after.capsule_speed =
+                            after.capsule_speed.max(length([d[0], d[1], 0.0]) / dt);
+                    }
+                }
+                if since <= 2.0 {
+                    after.steps = steps_now.saturating_sub(steps0);
+                    after.downed |= down || run.downed > downs0;
+                    if let Some((p, _)) = drawn(ACTOR) {
+                        // Against the animation's own stance (its idle leans a few degrees).
+                        let spine = model().body("Bip01 Spine2").unwrap();
+                        let r = model().root;
+                        let up = sub(p[spine].1, p[r].1);
+                        let anim_up = sub(f.anim[body_nodes[spine]].1, f.anim[body_nodes[r]].1);
+                        let cos =
+                            ragdoll_core::flinch::dot(up, anim_up) / (length(up) * length(anim_up));
+                        after.tilt = after.tilt.max(cos.clamp(-1.0, 1.0).acos().to_degrees());
+                    }
+                    let d = sub(f.reference(), ref0);
+                    after.drift = length([d[0], d[1], 0.0]);
+                } else {
+                    run.after = Some(after.clone());
+                }
+            }
+        }
+        last_centre = centre;
+        last_after_ref = Some(f.reference());
         if stage == 1 && next_hit.is_none() && t - last_hit >= 1.5 && !down {
             if lights_left > 0 {
                 lights_left -= 1;
@@ -3587,6 +3691,143 @@ fn np_the_reference_moves_clear_of_a_wall() {
         "the reference never went to the body: furthest {:?}",
         r.ref_end
     );
+}
+
+/// The rise's end in five worlds (Patrick's 22:19 clip: the rise ended at 0.3 to 0.4 m/s, the
+/// balance took the moving body, it slid forward and tripped): downed face up, face down and on
+/// its side on flat ground, face up on a 10 degree slope and against a wall beside it, each left
+/// standing idle (no walk, no more hits) once it stands. One run each, shared by the tests.
+fn rise_ends() -> &'static [(&'static str, Option<f32>, Option<AfterStand>)] {
+    static RUNS: std::sync::OnceLock<Vec<(&'static str, Option<f32>, Option<AfterStand>)>> =
+        std::sync::OnceLock::new();
+    RUNS.get_or_init(|| {
+        let below = 1.0;
+        let worlds: Vec<(&'static str, Cycle)> = vec![
+            ("face up", Cycle::default()),
+            (
+                "face down",
+                Cycle {
+                    knock: [0.0, 1.0, 0.0],
+                    ..Default::default()
+                },
+            ),
+            (
+                "on its side",
+                Cycle {
+                    knock: [1.0, 0.0, 0.0],
+                    ..Default::default()
+                },
+            ),
+            (
+                "face up on a 10 degree slope",
+                Cycle {
+                    slope: 10.0,
+                    below: 3.5,
+                    ..Default::default()
+                },
+            ),
+            (
+                "face up against a wall",
+                Cycle {
+                    boxes: vec![block((-120.0, 120.0), (-62.0, -50.0), below, 150.0)],
+                    ..Default::default()
+                },
+            ),
+        ];
+        worlds
+            .into_iter()
+            .map(|(name, cfg)| {
+                let r = cycle_run(&Cycle {
+                    below: if cfg.slope > 0.0 { cfg.below } else { below },
+                    seconds: 12.0,
+                    heavy: 4.6,
+                    still: true,
+                    ..cfg
+                });
+                eprintln!(
+                    "RESULT np rise end {name}: downed {}, stood after {:?} s, {:?}",
+                    r.downed, r.first_stood, r.after
+                );
+                (name, r.first_stood, r.after.clone())
+            })
+            .collect()
+    })
+}
+
+/// Addendum test 1 (clip 22:19): the rise ends still. Each world's body stands again within 8 s
+/// and, over the half second from standing again, its centre never moves faster than 0.05 m/s
+/// and the capsule than 3.5 units a second; two seconds on the capsule has drifted at most 2
+/// units.
+#[test]
+fn np_rise_ends_still() {
+    let mut failed = Vec::new();
+    for (name, stood, after) in rise_ends() {
+        let Some(a) = after.as_ref().filter(|_| stood.is_some_and(|s| s <= 8.0)) else {
+            failed.push(format!("{name}: stood after {stood:?} s"));
+            continue;
+        };
+        if a.centre_speed > 0.05 {
+            failed.push(format!("{name}: its centre at {:.3} m/s", a.centre_speed));
+        }
+        if a.capsule_speed > 3.5 {
+            failed.push(format!("{name}: the capsule at {:.2} u/s", a.capsule_speed));
+        }
+        if a.drift > 2.0 {
+            failed.push(format!("{name}: drifted {:.2} u in 2 s", a.drift));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// Addendum test 2 (clip 22:19): no trip from the rise's momentum. In the two seconds after it
+/// stands again no catching step, no fall and no going down, and the torso within 10 degrees of
+/// upright as the animation stands (pelvis to Spine2, drawn against animated).
+#[test]
+fn np_rise_no_momentum_trip() {
+    let mut failed = Vec::new();
+    for (name, _, after) in rise_ends() {
+        let Some(a) = after else {
+            failed.push(format!("{name}: never stood"));
+            continue;
+        };
+        if a.steps > 0 {
+            failed.push(format!("{name}: {} catching steps", a.steps));
+        }
+        if a.downed {
+            failed.push(format!("{name}: down again"));
+        }
+        if a.tilt > 10.0 {
+            failed.push(format!("{name}: tilted {:.1} degrees", a.tilt));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// Addendum test 3 (clip 22:19): the capsule's move at the rise's end is bounded. From the body
+/// first upright (read standing while downed, or held up by the rise's still stage) to the hand-over's end (half a second after it
+/// stands) the reference travels at most 15 units, at most 1.9 units in a frame of New Physics'
+/// own and never lies more than `LAG_MOST` (3 units) behind the pelvis (Patrick, the 67d693e
+/// decisions: the carry of the pelvis onto the feet off the back or side before it is upright is
+/// the rise's own).
+#[test]
+fn np_rise_root_bounded() {
+    let mut failed = Vec::new();
+    for (name, _, after) in rise_ends() {
+        let Some(a) = after else {
+            failed.push(format!("{name}: never stood"));
+            continue;
+        };
+        if a.rise_path > 15.0 {
+            failed.push(format!("{name}: travelled {:.1} u", a.rise_path));
+        }
+        if a.step_most > 1.9 {
+            failed.push(format!("{name}: {:.2} u in a frame", a.step_most));
+        }
+        if a.lag > 3.0 {
+            failed.push(format!("{name}: {:.2} u behind the pelvis", a.lag));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
 }
 
 /// Patrick's 10:10 clip: the whole cycle at 4.6 m/s on flat ground and beside a 12 unit slab:

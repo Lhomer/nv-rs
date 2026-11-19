@@ -9,19 +9,14 @@ machinery runs.
 
 ### Claude, 2026-11-19 (the rise ends still: clip 22:19, addendum tests 1 and 2)
 
-**Status: not pushed as code; all of it in `docs/wip/np-rise-ends-still.patch` (applies to
-03ed4ff; replaces `np-rise-still.patch`).** With it, tests 1 and 2 of the get-up slide/trip
-addendum (`np_rise_ends_still`, `np_rise_no_momentum_trip`, in the patch) pass in five worlds
+**Status: pushed as code (Patrick's 67d693e decisions applied).** The addendum's tests 1 to 3
+(`np_rise_ends_still`, `np_rise_no_momentum_trip`, `np_rise_root_bounded`) pass in five worlds
 (face up, face down and on its side on flat ground, face up on a 10 degree slope, face up knocked
-back against a wall) and fail on 03ed4ff; 442 of the host's 443 tests pass. The one that fails:
-`np_slope_downed_holds_the_games_movement` (the 23:41 Goodsprings glide: "stands within 4 s of
-going down or gives up", its note "a rise lasts at most 2 s"): it stands at 4.47 s. Standing only
-still (0.05 m/s), posed and in the animation's stance takes 1.5 s from upright there: the body
-comes up moving 0.35 m/s downhill and the torso pitches 37 degrees over the pelvis as it is
-stopped. Tried and worse: the spine's half hold (5.3 s), the pelvis's flat hold not doubled
-upright (5.4 s), the stance fix waiting for stillness (5.0 s), the flat hold growing through the
-late rise (5.0 s); the torso's sway cap doubled: no change. Waiting on Patrick: the bound (4 s
-stays and the rise must be quicker, or the rise's own limits) and test 3 below.
+back against a wall) and fail on 03ed4ff; the host's 444 tests pass. Test 3 bounds the capsule from
+the body first upright (read standing while downed, or held up by the still stage) to the
+hand-over's end: at most 9.5 units, 1.9 a frame, 1.97 behind the pelvis (03ed4ff: 17.3 face down,
+17.8 on its side, 1.900004 a frame). `np_slope_downed_holds_the_games_movement` allows 5 s on the
+slope (4 before; it stands at 4.47 s), its other checks as they were.
 - **The rise's still stage** (`up_for_still`, latched in at 0.85 of standing height and 25
   degrees, out at 0.78 and 40, the classifier's feet not asked while latched: its contact came and
   went frame to frame): the torso straight up, the feet held where they stand on their own ground,
@@ -50,15 +45,6 @@ stays and the rise must be quicker, or the rise's own limits) and test 3 below.
   drift 7.6 units, torso 25 degrees off): the centre 0.024 to 0.048 m/s over the half second from
   standing, the capsule 0, drift 0 to 1.04 units in 2 s, no steps or falls, the torso within 4.4
   degrees of the animation's. Every other New Physics test still passes.
-- **Waiting on Patrick (test 3, `np_rise_root_bounded`, kept out of the commit):** "the capsule
-  at most 15 units in all" through the rise. Face down 11.1 units, the slope 4.6, the wall 9.2 (net;
-  the path the same within 1.5); face up 20.5 net (41 along its path: the reference follows the
-  pelvis's bob through the rise) and on its side 21.9 net: getting up off the back or side carries
-  the pelvis 0.3 m onto the feet. Is the bound for the whole rise (then the face-up and side rises
-  need another way up, e.g. rolling to the front first) or from the body reading upright? Its other
-  checks: the reference 1.90 units at most in a frame (its cap) and 3.02 behind the pelvis at one
-  frame face up (`LAG_MOST` 3), 5.0 against the wall (the wall holds the capsule off the pelvis).
-  The test's code: `docs/wip/np-rise-root-bound.patch` (on top of `np-rise-ends-still.patch`).
 - **Next in the queue:** the settle-then-rise stage (task C: settle with real limits, roll to back
   or front), the flipped game get-ups (pelvis 225 units), then the running fix and the knockdown
   items, explosions/pellets/full-auto, the upstream merge.

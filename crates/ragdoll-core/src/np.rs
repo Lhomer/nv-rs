@@ -113,6 +113,12 @@ pub const HAND_PLANT: (f32, f32, f32) = (3000.0, 150.0, 400.0);
 pub const HAND_REACH: f32 = 60.0;
 /// How long the limits stay soft after a fall (s).
 pub const LIMITS_SETTLE: f32 = 0.3;
+/// Standing again, the balance's joint targets and the pelvis's turn ease from the pose the body
+/// stood up in to the animation's over this long (s): switched at once, the legs and spine driven
+/// to the animation's stance pushed a still body to 0.3 to 0.4 m/s in its first frames.
+pub const STAND_BLEND: f32 = 0.5;
+/// Standing again, the actor taken to the body at most this fast (m/s) for this long (s).
+pub const STAND_TAKE: (f32, f32) = (0.05, 1.0);
 /// A rise with nothing to push from (or too weak) this long gives up (s).
 pub const RISE_NO_PUSH: f32 = 0.5;
 /// A rise lasts at most this long (s, from the AI's wish to stand, whatever the frames read):
@@ -123,7 +129,22 @@ pub const RISE_NO_PUSH: f32 = 0.5;
 pub const RISE_MOST: f32 = 4.0;
 /// Standing again: the body's centre slower than this (m/s) against the ground it is carried on
 /// ([`Np::ground_v`]).
-pub const STAND_STILL: f32 = 0.4;
+pub const STAND_STILL: f32 = 0.05;
+/// A rise past [`RISE_MOST`] with the body upright is held this long more (s) to come still
+/// before the balance takes it whatever its speed.
+pub const STILL_MOST: f32 = 2.0;
+/// Standing again, the centre of mass at least this far inside the soles (m, negative inside).
+pub const STAND_INSIDE: f32 = -0.02;
+/// Rising and upright, the feet off the animation's stance (m: [`Np::stance_apart`]) past
+/// [`STANCE_KEPT`]: the foot carrying less goes to its place, done once the feet are within
+/// [`STANCE_THERE`] (m) of the stance. Standing again only within [`STANCE_KEPT`] (the balance's own stance step comes at
+/// `np_balance::STANCE_OFF`).
+pub const STANCE_KEPT: f32 = 0.06;
+pub const STANCE_THERE: f32 = 0.01;
+/// Standing again, the torso against the pelvis at most this far from the animation's (degrees).
+pub const STAND_POSE: f32 = 10.0;
+/// Rising and upright, the torso's flat sway's damper (N·s/m) and its cap (N).
+pub const TORSO_STILL: (f32, f32) = (1500.0, 600.0);
 /// While the feet lie further than this from the hips (m, flat) the rise goes toward them.
 pub const RISE_FEET_OUT: f32 = 0.15;
 /// Rising from the floor, each foot's goal lies this share of its leg in front of its hip (a hip
@@ -137,6 +158,32 @@ pub const RISE_OVER_FEET: f32 = 0.35;
 pub const RISE_PACE: (f32, f32) = (0.8, 3.0);
 /// The legs' push held through a lapse this long (s).
 pub const LIFT_LAPSE: f32 = 0.2;
+
+/// Up enough for the rise to bring the body still over its feet (its feet held, its lean
+/// dropped): standing (`classify`), the pelvis at [`STILL_UP`] of standing height and the torso
+/// within [`STILL_TILT`] of upright. Earlier, holding the feet stalled the rise. Once there
+/// (`was`), it stays there until the pelvis drops under [`STILL_UP_OUT`] or the torso tilts past
+/// [`STILL_TILT_OUT`]: on the line itself it flickered frame to frame, the feet and the lean
+/// switching with it, and the sway it set off kept the body from coming still (1.04 s upright
+/// before still on flat ground).
+fn up_for_still(r: &crate::np_down::Reading, was: bool) -> bool {
+    let (up, tilt) = if was {
+        (STILL_UP_OUT, STILL_TILT_OUT)
+    } else {
+        (STILL_UP, STILL_TILT)
+    };
+    // Latched, the classifier's Standing is not asked again: its feet's contact came and went
+    // frame to frame on a body standing still (the still stage switched off every other frame and
+    // a body 0.98 of standing height, 5 to 9 degrees from upright, never stood again).
+    (was || crate::np_down::classify(r, false) == Label::Standing)
+        && r.pelvis_height >= up * r.stand_height
+        && r.tilt <= tilt.to_radians()
+}
+/// [`up_for_still`]'s lines: in at these, out at the `_OUT` ones.
+pub const STILL_UP: f32 = 0.85;
+pub const STILL_TILT: f32 = 25.0;
+pub const STILL_UP_OUT: f32 = 0.78;
+pub const STILL_TILT_OUT: f32 = 40.0;
 
 /// `now` turned toward `goal` by at most `most` (rad); relative rotations.
 fn turn_toward(now: Q, goal: Q, most: f32) -> Q {
@@ -170,6 +217,8 @@ pub struct Np {
     pub muscles: Muscles,
     /// Seconds since it began, and since the last hit.
     pub t: f32,
+    /// The last frame's seconds.
+    last_dt: f32,
     pub since_hit: Option<f32>,
     /// The last frame's step.
     pub report: StepReport,
@@ -236,6 +285,9 @@ pub struct Np {
     last_targets: Vec<Q>,
     /// Seconds since it last stood up from the floor (long ago: never).
     stood_up: f32,
+    /// At the last stand: each joint's relative rotation and the pelvis's rotation, the pose the
+    /// balance's targets ease out of over [`STAND_BLEND`].
+    stand_from: Option<(Vec<Q>, Q)>,
 }
 
 /// A downed body's figures: how long down, the label, the last reading, the rise's progress.
@@ -273,6 +325,12 @@ pub struct Down {
     pub arms_off: bool,
     /// How long the legs' push has lapsed (s).
     pub lift_lapse: f32,
+    /// Upright past [`RISE_MOST`]: held to come still, not given up.
+    pub still_wait: bool,
+    /// Up for the still stage ([`up_for_still`]) at the last frame.
+    pub still_up: bool,
+    /// Upright, the foot going to its place in the animation's stance ([`STANCE_KEPT`]).
+    pub stance_fixing: Option<usize>,
 }
 
 /// Each joint's relative rotation (`parent⁻¹ child`) in a pose of body-node worlds.
@@ -329,6 +387,8 @@ impl Np {
             bodies,
             last_targets: Vec::new(),
             stood_up: f32::INFINITY,
+            stand_from: None,
+            last_dt: 0.0,
             root_kd_turn,
             anim_states: states.clone(),
             states,
@@ -467,6 +527,7 @@ impl Np {
             self.balance = Balance::new(&self.model);
         }
         self.t += dt;
+        self.last_dt = dt;
         if let Some(s) = self.since_hit.as_mut() {
             *s += dt;
         }
@@ -514,11 +575,38 @@ impl Np {
                 hand_landed: [false, false],
                 arms_off: false,
                 lift_lapse: 0.0,
+                still_wait: false,
+                still_up: false,
+                stance_fixing: None,
             });
             return self.down_frame(anim, floor, dt);
         }
         let posed = self.legs_on_footing(&shifted, &ask);
         let targets = relative_of(&self.model, posed.as_deref().unwrap_or(anim));
+        // Just stood up: the targets eased out of the pose it stood up in ([`STAND_BLEND`]).
+        let blend = self
+            .stand_from
+            .as_ref()
+            .filter(|_| self.stood_up < STAND_BLEND)
+            .map(|(from, q)| {
+                (
+                    from.clone(),
+                    *q,
+                    crate::active::ease(self.stood_up / STAND_BLEND),
+                )
+            });
+        let targets: Vec<Q> = match &blend {
+            Some((from, _, k)) if from.len() == targets.len() => targets
+                .iter()
+                .zip(from)
+                .map(|(t, f)| crate::active::qslerp(*f, *t, *k))
+                .collect(),
+            _ => targets,
+        };
+        let root_q = match &blend {
+            Some((_, q, k)) => crate::active::qslerp(*q, self.anim_states[r].q, *k),
+            None => self.anim_states[r].q,
+        };
         let mut gains = self.muscles.gains();
         for side in 0..2 {
             for &j in &self.balance.legs[side] {
@@ -557,7 +645,7 @@ impl Np {
                 body: r,
                 x: sub(self.anim_states[r].x, [0.0, 0.0, ask.lower]),
                 v: anim_v,
-                q: self.anim_states[r].q,
+                q: root_q,
                 kp: ROOT_SUPPORT.kp * soft,
                 kd: ROOT_SUPPORT.kd * soft,
                 kp_h: ROOT_SUPPORT.kp_h * soft,
@@ -710,6 +798,9 @@ impl Np {
             hand_landed: [false, false],
             arms_off: false,
             lift_lapse: 0.0,
+            still_wait: false,
+            still_up: false,
+            stance_fixing: None,
         });
         down.since += dt;
         down.reading = reading;
@@ -766,8 +857,11 @@ impl Np {
             down.rising += dt;
         }
         if rising && !airborne {
-            if reading.pelvis_height > down.rise_best + RISE_GAINED {
-                down.rise_best = reading.pelvis_height;
+            // Up already: no more height to gain, coming still is the rise's end (not a stall).
+            if reading.pelvis_height > down.rise_best + RISE_GAINED
+                || classify(&reading, false) == Label::Standing
+            {
+                down.rise_best = down.rise_best.max(reading.pelvis_height);
                 down.rise_stall = 0.0;
             } else {
                 down.rise_stall += dt;
@@ -785,8 +879,16 @@ impl Np {
             };
             let toward = sub(feet_mid, reading.com);
             let flat = [toward[0], toward[1], 0.0];
-            // The torso over the feet: up, leaning toward them by how far behind it is.
-            let lean = (crate::flinch::length(flat) * RISE_LEAN.0).min(RISE_LEAN.1);
+            // The torso over the feet: up, leaning toward them by how far behind it is; upright,
+            // straight up (leaning on, the hips chased the feet and the feet the hips: a creep of
+            // 0.2 to 0.3 m/s that never came still, Patrick's 22:19 clip).
+            let upright = up_for_still(&reading, down.still_up);
+            down.still_up = upright;
+            let lean = if upright {
+                0.0
+            } else {
+                (crate::flinch::length(flat) * RISE_LEAN.0).min(RISE_LEAN.1)
+            };
             let dir = crate::flinch::unit(flat).unwrap_or(rise_dir);
             let want_up = add(scale([0.0, 0.0, 1.0], lean.cos()), scale(dir, lean.sin()));
             let c = turn_between(b.up_of(&self.states, b.torso), want_up);
@@ -833,10 +935,38 @@ impl Np {
                 let qp = self.states[def.parent].q;
                 let goal = qmul(crate::active::qexp(scale(c, share)), qc);
                 let now = qnorm(qmul(qconj(qp), qc));
-                targets[j] = turn_toward(now, qnorm(qmul(qconj(qp), goal)), RISE_REACH);
-                gains[j].0 = self.muscles.base[j].0 * RISE_GAIN * k;
-                holds[j] = 0.5 * k;
+                // Upright, the spine goes to the animation's own (its twist and its curve too:
+                // turned only to bring the torso's up straight, Spine2 stood 18 to 41 degrees off
+                // the animation's, and straightened after the hand-over it swung the centre at
+                // 0.45 m/s).
+                let goal = if upright {
+                    targets[j]
+                } else {
+                    qnorm(qmul(qconj(qp), goal))
+                };
+                targets[j] = turn_toward(now, goal, RISE_REACH);
+                // Upright, standing's own spring (at the rise's share it took 2.5 s to bring the
+                // spine round to the animation's, the torso rocking meanwhile).
+                gains[j].0 = self.muscles.base[j].0 * if upright { 1.0 } else { RISE_GAIN } * k;
+                holds[j] = if upright { 1.0 } else { 0.5 } * k;
             }
+            // Upright with its feet off the animation's stance ([`STANCE_KEPT`]): the foot
+            // carrying less (further from the centre) goes to its place in the stance beside the
+            // other before it stands (a stance step taken after standing moved it 3.8 units on,
+            // Patrick's drift bound 2).
+            let stance = self.stance_apart(anim);
+            if !upright {
+                down.stance_fixing = None;
+            } else if down.stance_fixing.is_none() && stance.0 > STANCE_KEPT {
+                // The foot that goes is chosen once (chosen each frame, it changed as the
+                // centre moved and the step never ended).
+                down.stance_fixing = Some(stance.1);
+            } else if stance.0 <= STANCE_THERE {
+                down.stance_fixing = None;
+            }
+            let stance_fix = down
+                .stance_fixing
+                .map(|side| (side, self.stance_place(anim, side)));
             // Each foot drawn onto the floor in front of its hip, as near as the leg folds (half
             // its length out from a hip near the floor, under it once the hip is a leg high).
             let mut posed = worlds.clone();
@@ -848,11 +978,25 @@ impl Np {
                 // This foot's own ground under its hip (a slope's), game units.
                 let ground = self.ground_at(foot, hip).map_or(floor, |z| z * UNITS);
                 let up = ((hip[2] - ground - foot_h) / leg).clamp(0.0, 1.0);
-                let out = leg * (RISE_FOOT_OUT * (1.0 - up) + 0.05 * up);
+                // Under the hip once up (5% of a leg in front kept the hips chasing the feet: a
+                // creep of 0.3 m/s, the rise ending moving and tripping, Patrick's 22:19 clip).
+                let out = leg * RISE_FOOT_OUT * (1.0 - up);
                 let ahead = scale(rise_dir, out);
-                let at = [hip[0] + ahead[0], hip[1] + ahead[1], 0.0];
+                // Upright, each foot stays where it is, set down on its own ground (followed
+                // under the hips, the feet and the hips chased each other).
+                let at = if let Some((_, to)) = stance_fix.filter(|f| f.0 == side) {
+                    to
+                } else if upright {
+                    let ft = worlds[foot].1;
+                    [ft[0], ft[1], 0.0]
+                } else {
+                    [hip[0] + ahead[0], hip[1] + ahead[1], 0.0]
+                };
                 let ground = self.ground_at(foot, at).map_or(floor, |z| z * UNITS);
-                let goal = [at[0], at[1], ground + foot_h];
+                // The foot going to its place in the stance slides there, kept in the support
+                // (lifted, it tipped a body still moving on a 20 degree slope to 39 degrees).
+                let lift = 0.0;
+                let goal = [at[0], at[1], ground + foot_h + lift];
                 let Some((r1, m, _)) = crate::flinch::leg_ik(
                     worlds[thigh].1,
                     worlds[calf].1,
@@ -868,9 +1012,9 @@ impl Np {
                 posed[calf].0 = crate::flinch::mul(&mr1, &worlds[calf].0);
                 posed[foot].0 = anim[foot].0;
                 // The foot drawn in along the floor (the leg's muscles against the floor's
-                // grip: a heel dragged, not a leg swung up); once the legs push, the feet stand
-                // where they are.
-                if down.lifting_was {
+                // grip: a heel dragged, not a leg swung up); once the legs push the feet stand
+                // where they are; upright, each pressed onto its own ground where it is.
+                if down.lifting_was && !upright {
                     continue;
                 }
                 let q = self.states[foot].q;
@@ -917,6 +1061,19 @@ impl Np {
                     holds[j] = 0.0;
                 }
             }
+            // Upright, the arms, neck and head at standing's own strength toward the animation's
+            // (held at the downed share until the hand-over, they swung into its pose after it
+            // and moved the centre at 0.07 m/s).
+            if upright && down.arms_off {
+                for (j, def) in self.model.joints.iter().enumerate() {
+                    let leg = self.balance.legs.iter().any(|l| l.contains(&j));
+                    if leg || b.spines.contains(&def.child) {
+                        continue;
+                    }
+                    gains[j].0 = self.muscles.base[j].0 * k;
+                    holds[j] = k;
+                }
+            }
             // Over a foot that is down (one knee still on the floor is a kneel to rise from):
             // the legs' push lifts the pelvis toward standing.
             let feet_down = b
@@ -931,7 +1088,7 @@ impl Np {
             } else if down.lifting_was {
                 down.lift_lapse += dt;
             }
-            if over || (down.lifting_was && down.lift_lapse < LIFT_LAPSE) {
+            if over || upright || (down.lifting_was && down.lift_lapse < LIFT_LAPSE) {
                 down.lifting = true;
                 // Over the feet's own ground (a slope's).
                 let feet_ground = b
@@ -946,10 +1103,27 @@ impl Np {
                 // capped spring's push and an uncapped damper held the pelvis to 0.3 to 0.4 m/s:
                 // a rise of 2 s and more).
                 let pace = ((stand_z - self.states[r].x[2]) * RISE_PACE.1).clamp(0.0, RISE_PACE.0);
+                // Its flat motion damped toward the ground's (the ground the body stands on may
+                // carry it), harder as it comes up: the rise ends still over its feet.
+                // Upright, the pelvis set so the centre of mass lies over the feet (the pelvis
+                // over them, a torso still leaning left the centre beside them on a slope).
+                let over_at = if upright {
+                    // Where the animation's stance puts the pelvis against its feet (the balance
+                    // then takes it with its animation on the feet as they stand, the pelvis
+                    // already where its root support holds it: placed by the centre of mass
+                    // instead, it moved 2 to 3 units after standing, the reference with it).
+                    let fb = self.balance.feet;
+                    let a = &self.anim_states;
+                    let anim_mid = scale(add(a[fb[0]].x, a[fb[1]].x), 0.5);
+                    let off = sub(a[r].x, anim_mid);
+                    [feet_mid[0] + off[0], feet_mid[1] + off[1]]
+                } else {
+                    [feet_mid[0], feet_mid[1]]
+                };
                 pulls.push(Support {
                     body: r,
-                    x: [feet_mid[0], feet_mid[1], stand_z],
-                    v: [0.0, 0.0, pace],
+                    x: [over_at[0], over_at[1], stand_z],
+                    v: [self.ground_v[0], self.ground_v[1], pace],
                     q: self.anim_states[r].q,
                     kp: ROOT_SUPPORT.kp,
                     kd: ROOT_SUPPORT.kd,
@@ -959,11 +1133,32 @@ impl Np {
                     // Patrick's 10:10 clip).
                     kp_h: ROOT_SUPPORT.kp_h * (0.2 + 0.8 * up_now),
                     kd_h: ROOT_SUPPORT.kd_h * (0.2 + 0.8 * up_now),
-                    max_force_h: (250.0 + 650.0 * up_now) * k,
+                    max_force_h: (250.0 + 650.0 * up_now) * k * if upright { 2.0 } else { 1.0 },
                     kp_turn: ROOT_SUPPORT.kp_turn * 0.5,
                     kd_turn: self.root_kd_turn * 0.5,
                     max_torque: 300.0 * k,
                 });
+                // Upright, the torso's own flat sway damped toward the ground's too (the pelvis
+                // held, the chest swung on: the centre never still). Not before: it held the
+                // torso back from coming over the feet.
+                let torso = b.torso;
+                if upright {
+                    pulls.push(Support {
+                        body: torso,
+                        x: self.states[torso].x,
+                        v: [self.ground_v[0], self.ground_v[1], 0.0],
+                        q: self.states[torso].q,
+                        kp: 0.0,
+                        kd: 0.0,
+                        max_force: 0.0,
+                        kp_h: 0.0,
+                        kd_h: TORSO_STILL.0,
+                        max_force_h: TORSO_STILL.1 * k,
+                        kp_turn: 0.0,
+                        kd_turn: 0.0,
+                        max_torque: 0.0,
+                    });
+                }
             }
             // Not getting up (the pelvis no higher for a while): give up and settle back (the
             // AI may try again).
@@ -1007,8 +1202,16 @@ impl Np {
             }
         }
         // At most [`RISE_MOST`]: then it gives up (the AI waits, or gives up into the game's
-        // ragdoll after its tries).
-        if self.rise && down.rising > RISE_MOST {
+        // ragdoll after its tries); never while it is up and moving (the push let go of an
+        // upright body moving at 0.4 m/s and it tripped onto its front, Patrick's 22:19 clip):
+        // then it is brought still (at most [`STILL_MOST`] more) and the balance takes it.
+        // (Upright as the still stage holds it too: read alone, its feet's contact flickered,
+        // a body standing still timed out and was let go, and it fell.)
+        let upright = classify(&reading, false) == Label::Standing || down.still_up;
+        if self.rise && down.rising > RISE_MOST && upright && down.rising <= RISE_MOST + STILL_MOST
+        {
+            down.still_wait = true;
+        } else if self.rise && down.rising > RISE_MOST {
             self.rise = false;
             down.rise_failed = true;
             down.rising = 0.0;
@@ -1073,8 +1276,35 @@ impl Np {
         if down.lifting {
             now.pushed = (now.weight - now.total).max(0.0);
         }
-        if classify(&now, false) == Label::Standing
-            && crate::flinch::length(sub(now.com_v, self.ground_v)) < STAND_STILL
+        // Standing again only still: its centre's flat speed against the ground under
+        // [`STAND_STILL`] (0.4 m/s handed the balance a body that leant, drifted and tripped:
+        // Patrick's 22:19 clip), or upright past the rise's time and brought as still as it
+        // gets ([`STILL_MOST`]).
+        let rel = sub(now.com_v, self.ground_v);
+        let flat_speed = crate::flinch::length([rel[0], rel[1], 0.0]);
+        // Standing: as read, or held up for the still stage ([`up_for_still`]; the reading's feet
+        // came and went frame to frame on a body standing still, and each frame they went the
+        // stand's hold started over).
+        let standing = classify(&now, false) == Label::Standing || down.still_up;
+        // And its centre over its soles (accepted beside them, on a slope, the balance took a
+        // catching step at once).
+        // And its spine as the animation stands it (the torso against the pelvis within
+        // [`STAND_POSE`] of the animation's).
+        let posed_as_anim = self.posed_as_anim();
+        // And its feet in the animation's stance (else its balance would step at once).
+        // (Done once the gap is under [`STANCE_THERE`]; then off again only past [`STANCE_KEPT`]:
+        // fixed again at its line, the foot came up and down and the stand never held.)
+        let in_stance = down.stance_fixing.is_none() && self.stance_apart(anim).0 <= STANCE_KEPT;
+        let over = posed_as_anim && in_stance && now.over_feet < STAND_INSIDE && {
+            // ... as the balance taking it will find it (its own soles, each foot planted on its
+            // own ground).
+            let mut fresh = Balance::new(&self.model);
+            for side in 0..2 {
+                fresh.foot_floor[side] = self.floors.get(fresh.feet[side]).copied();
+            }
+            fresh.would_find(&self.model, &self.states, f) < STAND_INSIDE
+        };
+        if standing && ((flat_speed < STAND_STILL && over) || down.rising > RISE_MOST + STILL_MOST)
         {
             down.stood += dt;
         } else {
@@ -1085,9 +1315,41 @@ impl Np {
         let anim_root = scale(anim[r].1, 1.0 / UNITS);
         self.balance.shift = [pelvis[0] - anim_root[0], pelvis[1] - anim_root[1], 0.0];
         if down.stood >= STAND_HOLD {
-            let shift = self.balance.shift;
+            // The animation on the feet as they stand (its feet's middle on theirs; the root on
+            // the pelvis, the balance's own shift slid it there after the hand-over, the body
+            // and the reference with it).
+            let fb = self.balance.feet;
+            let unshifted = self.model.states_from_nodes(anim);
+            let body_mid = scale(add(self.states[fb[0]].x, self.states[fb[1]].x), 0.5);
+            let anim_mid = scale(add(unshifted[fb[0]].x, unshifted[fb[1]].x), 0.5);
+            let shift = [body_mid[0] - anim_mid[0], body_mid[1] - anim_mid[1], 0.0];
             self.balance = Balance::new(&self.model);
             self.balance.shift = shift;
+            // Both feet planted where they stand (the balance's legs reach them, as after a
+            // step's landing, until a stance step brings them to the animation's stance): driven
+            // to the animation's own legs once standing, the pelvis was pushed off where it
+            // stood.
+            let feet = self.balance.feet;
+            for side in 0..2 {
+                let st = self.states[feet[side]];
+                self.balance.plants[side] = Some((st.x, st.q));
+            }
+            // Recovering first, as after a step: no step of its own while the pose eases into
+            // the animation's ([`STAND_BLEND`]).
+            self.balance.phase = crate::np_balance::Phase::Recovering;
+            // Handed over at rest, as the game's own get-up leaves a body (its bones and
+            // controller stilled): no flat motion against the ground left in the bodies, and the
+            // animation's measured velocity the ground's.
+            let g = self.ground_v;
+            for st in self.states.iter_mut() {
+                st.v = [g[0], g[1], st.v[2]];
+            }
+            self.anim_v = [g[0], g[1], 0.0];
+            self.anim_samples.clear();
+            self.stand_from = Some((
+                relative_of(&self.model, &self.model.node_worlds(&self.states)),
+                self.states[r].q,
+            ));
             self.rise = false;
             self.down = None;
             self.stood_up = 0.0;
@@ -1095,6 +1357,44 @@ impl Np {
             self.down = Some(down);
         }
         self.model.node_worlds(&self.states)
+    }
+
+    /// How far the feet stand off the animation's stance (m, flat: each foot's offset from its
+    /// animated place, the one against the other), the foot carrying less of the body (further
+    /// from its centre, flat) and that foot's node's place in the stance beside the other (game
+    /// units, flat).
+    fn stance_apart(&self, anim: &[(M3, V3)]) -> (f32, usize, V3) {
+        let fb = self.bodies.feet;
+        let shift = self.balance.shift;
+        let flat = |a: V3| [a[0], a[1], 0.0];
+        let worlds = self.model.node_worlds(&self.states);
+        let anim_at = |side: usize| add(anim[fb[side]].1, scale(shift, UNITS));
+        let off = |side: usize| flat(sub(worlds[fb[side]].1, anim_at(side)));
+        let apart = crate::flinch::length(sub(off(0), off(1))) / UNITS;
+        let (com, _) = self.model.centre_of_mass(&self.states);
+        let from_com = |side: usize| crate::flinch::length(flat(sub(self.states[fb[side]].x, com)));
+        let side = if from_com(0) > from_com(1) { 0 } else { 1 };
+        (apart, side, flat(add(anim_at(side), off(1 - side))))
+    }
+
+    /// Whether the torso stands against the pelvis within [`STAND_POSE`] of the animation's.
+    fn posed_as_anim(&self) -> bool {
+        let (r, tb) = (self.model.root, self.bodies.torso);
+        let rel = |s: &[State]| qnorm(qmul(qconj(s[r].q), s[tb].q));
+        let d = crate::active::qlog(qmul(rel(&self.anim_states), qconj(rel(&self.states))));
+        crate::flinch::length(d) <= STAND_POSE.to_radians()
+    }
+
+    /// `side`'s foot's node's place in the animation's stance beside the other foot (game units,
+    /// flat).
+    fn stance_place(&self, anim: &[(M3, V3)], side: usize) -> V3 {
+        let fb = self.bodies.feet;
+        let shift = scale(self.balance.shift, UNITS);
+        let worlds = self.model.node_worlds(&self.states);
+        let o = 1 - side;
+        let off = sub(worlds[fb[o]].1, add(anim[fb[o]].1, shift));
+        let at = add(add(anim[fb[side]].1, shift), off);
+        [at[0], at[1], 0.0]
     }
 
     /// Each arm of `arms` put down on the ground (the rise's push, or the free arm's brace while
@@ -1231,6 +1531,11 @@ impl Np {
         }
         let (x, y) = (at[0] / UNITS, at[1] / UNITS);
         Some(p.p[2] - (p.n[0] * (x - p.p[0]) + p.n[1] * (y - p.p[1])) / p.n[2])
+    }
+
+    /// Whether the rise holds the body up for its still stage ([`up_for_still`]'s latch).
+    pub fn still_up(&self) -> bool {
+        self.down.as_ref().is_some_and(|d| d.still_up)
     }
 
     /// The pose's label now (none while standing on its feet under the balance).
@@ -1394,9 +1699,20 @@ impl Np {
         {
             return [0.0; 3];
         }
-        let by = self.balance.shift;
+        let mut by = self.balance.shift;
         if crate::flinch::length(by) < 1e-4 {
             return [0.0; 3];
+        }
+        // Just stood up, the actor goes to the body at most at [`STAND_TAKE`] (taken whole, the
+        // actor's capsule hopped 0.5 to 1 unit in a frame as the balance took the body: its
+        // reference had followed the pelvis while down, the animation now stands on the feet);
+        // the rest stays in the shift, taken the next frames.
+        if self.stood_up < STAND_TAKE.1 {
+            let most = STAND_TAKE.0 * self.last_dt;
+            let l = crate::flinch::length(by);
+            if l > most {
+                by = scale(by, most / l);
+            }
         }
         self.balance.take(by);
         self.anim_moved(by);

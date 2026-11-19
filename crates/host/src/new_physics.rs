@@ -2341,6 +2341,17 @@ pub fn label_of(actor: u32) -> Option<&'static str> {
         .and_then(|a| a.label)
 }
 
+/// Whether `actor`'s rise holds it up for its still stage (`Np::still_up`).
+pub fn still_up(actor: u32) -> bool {
+    ACTORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|a| a.actor == actor)
+        .and_then(|a| a.np.as_ref())
+        .is_some_and(|np| np.still_up())
+}
+
 /// Whether New Physics has `actor` downed (the game's path movement is held for it).
 pub fn is_down(actor: u32) -> bool {
     ACTORS
