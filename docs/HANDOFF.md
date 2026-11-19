@@ -7,6 +7,17 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (the third upstream merge: 109aa5a, to 1abed1e8)
+
+**Status: pushed with ce1be1c.** slaterain/main 3c977609..1abed1e8 (9 commits: JIP regex,
+Linux and Steam Deck pads, xNVSE's run-time parser, crash group D, the package's notices).
+Conflicts: `scripts/package-playtest.ps1` (the fork's optional -Game and upstream's
+`--notices`), `DEPENDENCY-LOCK.sha256` (recomputed). The Linux and Android lock files get
+libc. ce1be1c: `repo_hygiene`'s overridable check had failed since de0e5d9 (the actor-value
+tests called `actor_hit_me` directly, the table allows 0089a760 one call); they call
+`knockdown::HIT_ME` with `e.call` now. The container's disk and memory are tight: build with
+`-j 4` and clear `target/debug/incremental` between big runs.
+
 ### Claude, 2026-11-19 (the two upstream merges: 6529531 and 90fd0c7)
 
 **Status: both pushed; 6529531 on the launcher, 90fd0c7's Play package building.**
