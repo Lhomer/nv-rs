@@ -958,6 +958,17 @@ impl Engine {
     /// every register a function uses anywhere is saved on entry).
     #[inline(always)]
     fn dispatch(&mut self, addr: u32, args: &[u32]) -> Ret {
+        self.dispatch_or(addr, args, Self::call_full)
+    }
+
+    /// [`Engine::dispatch`] with the out-of-line rest named: [`Engine::call_full`] for a
+    /// call by address, [`Engine::vcall_full`] for a virtual call (which names the virtual
+    /// call when its target is open). `full` is only called off the fast path.
+    #[inline(always)]
+    fn dispatch_or<F>(&mut self, addr: u32, args: &[u32], full: F) -> Ret
+    where
+        F: FnOnce(&mut Self, u32, &[u32]) -> Ret,
+    {
         debug_assert_eq!(
             self.diagnosing(),
             self.diagnosing_each(),
@@ -984,7 +995,7 @@ impl Engine {
                 }
             }
         }
-        self.call_full(addr, args)
+        full(self, addr, args)
     }
 
     /// [`Engine::dispatch`]'s fast path when the slice is used up: the hook (which starts the
@@ -1128,6 +1139,41 @@ impl Engine {
     #[cold]
     #[inline(never)]
     fn call_full(&mut self, addr: u32, args: &[u32]) -> Ret {
+        self.call_full_or(addr, args, |_, addr, _| {
+            panic!("open function {addr:08x}: not translated yet (FalloutNV.exe 1.4.0.525, docs/LEDGER.md)")
+        })
+    }
+
+    /// [`Engine::call_full`] for a virtual call ([`Engine::vcall`]): the same, but a target
+    /// nobody translated (0 read from an emptied vtable, or an address with no function)
+    /// stops naming the object, its vtable, the slot and the Rust line that made the call.
+    #[cold]
+    #[inline(never)]
+    fn vcall_full(
+        &mut self,
+        addr: u32,
+        args: &[u32],
+        slot: u32,
+        at: &'static std::panic::Location<'static>,
+    ) -> Ret {
+        self.call_full_or(addr, args, move |e, addr, args| {
+            let this = args.first().copied().unwrap_or(0);
+            let vtable = e.mem.u32(this);
+            panic!(
+                "open function {addr:08x}: not translated yet (FalloutNV.exe 1.4.0.525, \
+                 docs/LEDGER.md): virtual call on object {this:08x}, vtable {vtable:08x}, slot \
+                 {slot:#x} (the vtable's word at {:08x} is {addr:08x}), called from {at}",
+                vtable.wrapping_add(slot)
+            )
+        })
+    }
+
+    /// [`Engine::call_full`]'s body; `open` is what a target nobody translated does.
+    #[inline(always)]
+    fn call_full_or<F>(&mut self, addr: u32, args: &[u32], open: F) -> Ret
+    where
+        F: Fn(&mut Self, u32, &[u32]) -> Ret + Copy,
+    {
         // Every call takes this path while a diagnostic is on: typed calls go by address from
         // here on, so the diagnostic sees them ([`crate::typed`]).
         if self.typed.any_allowed() {
@@ -1148,7 +1194,7 @@ impl Engine {
             && self.funcs.contains_key(&addr)
         {
             // Registered on another thread's engine since this one last looked.
-            return self.call_full(addr, args);
+            return self.call_full_or(addr, args, open);
         }
         let Some(f) = self.funcs.get(&addr).cloned() else {
             if let Some(row) = crate::static_exit::row(addr) {
@@ -1162,7 +1208,7 @@ impl Engine {
                     return ret;
                 }
             }
-            panic!("open function {addr:08x}: not translated yet (FalloutNV.exe 1.4.0.525, docs/LEDGER.md)")
+            return open(self, addr, args);
         };
         if let Callable::Abi(plain) = f {
             self.cache(addr, plain);
@@ -1273,58 +1319,88 @@ impl Engine {
     /// Virtual call: reads the vtable pointer at `this + 0` and the
     /// function at byte offset `slot` in that table (as the game's
     /// `call dword ptr [eax + slot]`), then calls it with `this` first.
+    ///
+    /// The Rust line that made the call is passed along (`#[track_caller]`: one constant
+    /// pointer, no work on the fast path) and named when the target is open, with the object,
+    /// its vtable and the slot ([`Engine::vcall_full`]).
+    #[track_caller]
     pub fn vcall(&mut self, this: u32, slot: u32, args: &[u32]) -> Ret {
         // The vtable and its slot as `Mem::u32` reads them. A read that needs its slow path
         // (across a page, or unmapped: a stop) is made out of line, both reads again (the fast
         // reads have no effect), so this body keeps few registers across its calls.
+        let at = std::panic::Location::caller();
         let target = match self.mem.u32_in_page(this) {
             Some(vtable) => self.mem.u32_in_page(vtable.wrapping_add(slot)),
             None => None,
         };
         let Some(target) = target else {
-            return self.vcall_slow(this, slot, args);
+            return self.vcall_slow(this, slot, args, at);
         };
-        self.vcall_to(target, this, args)
+        self.vcall_to(target, this, slot, args, at)
     }
 
     /// [`Engine::vcall`] when a read of the vtable or its slot needs [`Mem::u32`]'s slow path.
     #[cold]
     #[inline(never)]
-    fn vcall_slow(&mut self, this: u32, slot: u32, args: &[u32]) -> Ret {
+    fn vcall_slow(
+        &mut self,
+        this: u32,
+        slot: u32,
+        args: &[u32],
+        at: &'static std::panic::Location<'static>,
+    ) -> Ret {
         let vtable = self.mem.u32(this);
         let target = self.mem.u32(vtable.wrapping_add(slot));
-        self.vcall_to(target, this, args)
+        self.vcall_to(target, this, slot, args, at)
     }
 
     /// [`Engine::vcall`] once the target is read.
     #[inline(always)]
-    fn vcall_to(&mut self, target: u32, this: u32, args: &[u32]) -> Ret {
+    fn vcall_to(
+        &mut self,
+        target: u32,
+        this: u32,
+        slot: u32,
+        args: &[u32],
+        at: &'static std::panic::Location<'static>,
+    ) -> Ret {
         // `this` and the arguments on the stack (no allocation per call). The short lists, most
         // virtual calls, are a fixed-size array (a variable-length copy is a call to `memcpy`,
         // which cost more than the rest of the call: a15's benchmark) passed to the one inlined
-        // [`Engine::dispatch`]; longer ones are out of line.
+        // [`Engine::dispatch_or`]; longer ones are out of line.
         let (words, n) = match *args {
             [] => ([this, 0, 0, 0, 0], 1),
             [a] => ([this, a, 0, 0, 0], 2),
             [a, b] => ([this, a, b, 0, 0], 3),
             [a, b, c] => ([this, a, b, c, 0], 4),
             [a, b, c, d] => ([this, a, b, c, d], 5),
-            _ => return self.vcall_long(target, this, args),
+            _ => return self.vcall_long(target, this, slot, args, at),
         };
-        self.dispatch(target, &words[..n])
+        self.dispatch_or(target, &words[..n], move |e, addr, words| {
+            e.vcall_full(addr, words, slot, at)
+        })
     }
 
     /// [`Engine::vcall`] with more than four arguments, once the target is read.
     #[inline(never)]
-    fn vcall_long(&mut self, target: u32, this: u32, args: &[u32]) -> Ret {
+    fn vcall_long(
+        &mut self,
+        target: u32,
+        this: u32,
+        slot: u32,
+        args: &[u32],
+        at: &'static std::panic::Location<'static>,
+    ) -> Ret {
         const INLINE: usize = 15;
         if args.len() <= INLINE {
             let mut words = [0u32; INLINE + 1];
             words[0] = this;
             words[1..=args.len()].copy_from_slice(args);
-            self.call(target, &words[..=args.len()])
+            self.dispatch_or(target, &words[..=args.len()], move |e, addr, words| {
+                e.vcall_full(addr, words, slot, at)
+            })
         } else {
-            self.vcall_longer(target, this, args)
+            self.vcall_longer(target, this, slot, args, at)
         }
     }
 
@@ -1333,18 +1409,26 @@ impl Engine {
     /// call), else on the heap.
     #[cold]
     #[inline(never)]
-    fn vcall_longer(&mut self, target: u32, this: u32, args: &[u32]) -> Ret {
+    fn vcall_longer(
+        &mut self,
+        target: u32,
+        this: u32,
+        slot: u32,
+        args: &[u32],
+        at: &'static std::panic::Location<'static>,
+    ) -> Ret {
         const LONG: usize = 63;
+        let full = move |e: &mut Self, addr: u32, words: &[u32]| e.vcall_full(addr, words, slot, at);
         if args.len() <= LONG {
             let mut words = [0u32; LONG + 1];
             words[0] = this;
             words[1..=args.len()].copy_from_slice(args);
-            self.call(target, &words[..=args.len()])
+            self.dispatch_or(target, &words[..=args.len()], full)
         } else {
             let mut words = Vec::with_capacity(args.len() + 1);
             words.push(this);
             words.extend_from_slice(args);
-            self.call(target, &words)
+            self.dispatch_or(target, &words, full)
         }
     }
 
@@ -2719,6 +2803,67 @@ mod tests {
         .and_then(|p| p.downcast_ref::<String>().cloned())
         .unwrap_or_default();
         assert_eq!(message, "read of unmapped memory at 03000000");
+    }
+
+    /// A virtual call whose slot holds 0 (or an address nobody translated) stops naming the
+    /// virtual call: the target, the object, its vtable, the slot and the Rust line that made
+    /// the call, for the short argument lists and the long ones.
+    #[test]
+    fn a_virtual_call_to_an_open_slot_names_the_call() {
+        let mut e = Engine::new();
+        let vtable = 0x0100_0000;
+        e.put_vtable(vtable, &[0x0040_4000, 0, 0x0077_0001]);
+        e.register_double(0x0040_4000, |_, _| Ret::default());
+        let this = e.mem.alloc(4);
+        e.mem.set_u32(this, vtable);
+        let stop = |e: &mut Engine, slot: u32, args: &[u32]| -> (String, u32) {
+            let mut line = 0;
+            let message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                line = line!() + 1;
+                e.vcall(this, slot, args);
+            }))
+            .err()
+            .and_then(|p| p.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+            (message, line)
+        };
+        for args in [vec![], vec![1, 2], (1..=7).collect::<Vec<u32>>(), (1..=20).collect()] {
+            let (message, line) = stop(&mut e, 4, &args);
+            assert_eq!(
+                message,
+                format!(
+                    "open function 00000000: not translated yet (FalloutNV.exe 1.4.0.525, \
+                     docs/LEDGER.md): virtual call on object {this:08x}, vtable 01000000, slot \
+                     0x4 (the vtable's word at 01000004 is 00000000), called from {}:{line}:19",
+                    file!()
+                ),
+                "{} arguments",
+                args.len()
+            );
+            let (message, line) = stop(&mut e, 8, &args);
+            assert!(
+                message.starts_with("open function 00770001: not translated yet")
+                    && message.contains(&format!(
+                        "virtual call on object {this:08x}, vtable 01000000, slot 0x8 (the \
+                         vtable's word at 01000008 is 00770001), called from {}:{line}:",
+                        file!()
+                    )),
+                "{message}"
+            );
+        }
+        // A call by address to an open function keeps its message.
+        let message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            e.call(0, &[]);
+        }))
+        .err()
+        .and_then(|p| p.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+        assert_eq!(
+            message,
+            "open function 00000000: not translated yet (FalloutNV.exe 1.4.0.525, docs/LEDGER.md)"
+        );
+        // The translated slot still runs.
+        e.vcall(this, 0, &[1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
