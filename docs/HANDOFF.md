@@ -7,6 +7,43 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (item 1, the running fix: state on 568ce43, `docs/wip/np-running-seed.patch`)
+
+**Status: not pushed yet; 41 of 43 New Physics fixture tests pass with the patch, plus both
+running tests (a, b).** The patch (`git apply docs/wip/np-running-seed.patch` on 568ce43; it
+carries `NP_DBG` eprintln lines to strip before a commit) holds the old seed work and, new:
+- **Real bugs fixed:** a rise wished while the body still falls measured its gains from the height
+  it fell through and gave up 1.5 s after landing (`RISE_LANDING`, `RISE_COMING_DOWN`: gains from
+  its lowest, no stall while coming down in the first second); a rise going up at its time's end
+  (1.3 m/s through 0.72 m) or nearly up (pelvis over 0.8 of standing) was given up
+  (`RISE_GOING_UP`, `RISE_NEARLY_UP`, within `STILL_MOST` more); the floor under the feet and
+  pelvis read from cached casts rose in 1.4 u steps walking up a slope (now read off the fitted
+  plane where they are); a second gather step for a light hit's leftover sway (`gathers`: the
+  second only at twice `GATHER`); from the front the arms let go as soon as the legs pushed (now
+  once the torso is under 60 degrees, `ARMS_UNTIL_TILT`; the weapon's arm never once the legs
+  push or in the rise's first second).
+- **Collision:** each end of a body has its own floor (`Tracking::end_floors`, casts under each end
+  of the feet); steps' edges as contacts (`np_body::Edge`, found by halving between casts on two
+  levels, `step_edges`), a landing over an edge's high side lands on its top and a step up swings
+  up first (`STEP_UP`); a wall a body rises past is cast again or dropped (`WALL_RISE`); the feet
+  and hands also cast along their own length (`WALL_AXIS_MORE`).
+- **Still failing:** `np_a_slab_edge_holds_the_body` (the walker's own animated toe over the slab's
+  corner at the take, 2.48 u by the box metric, about 1 u true; after a second light hit a
+  catching step's shin against the slab's face at 5062 N and the floor at 6 body weights) and
+  `np_the_arms_push_it_up` ("on its back, flat": the hands 0.13 of 0.2, because the rise is wished
+  while the body still falls backwards and the legs push it into a backbend, pelvis 0.9 m, torso 157
+  degrees; "armed": the weapon hand 10 frames). Holding the push until it lands fixes the back
+  case but breaks the rises that catch themselves mid-fall (`np_rises_on_its_first_try`,
+  `np_reference_follows_a_downed_body`). That is task C's settle-then-rise: the AI's "stand"
+  should come only once the body has come to rest, with a catch while upright kept apart.
+- **Later in the same patch:** the AI settles on while the body still comes down with its torso
+  past level (`DOWN_COMING_DOWN`, at most `DOWN_SETTLE_MOST` 2 s); the "on its back, flat" case
+  passes with it. Left: "on its back, armed" never stands (it sits, the seat carrying 550 N, the
+  feet none and 0.3 to 0.5 m ahead of the centre: the feet are never drawn in under the hips from
+  a sit, one arm pushing), and `np_rises_on_its_first_try`'s still stage takes 1.14 s and 1.07 s
+  (limit 1). Next: the seated rise drawing the feet in (knees up, heels to the seat) before the
+  push, then the still stage's time.
+
 ### Claude, 2026-11-19 (the third upstream merge: 109aa5a, to 1abed1e8)
 
 **Status: pushed with ce1be1c.** slaterain/main 3c977609..1abed1e8 (9 commits: JIP regex,
