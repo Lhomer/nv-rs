@@ -371,13 +371,11 @@ pub fn vats_frame(e: &mut Engine, at: &str) {
                 }
                 let dt = e.mem.f32(FRAME_SECONDS);
                 note(format!(
-                    "{:08X}: [np vats] {at}: its body nodes as VATS reads them {:.1} u ({}) and                      {:.1} degrees off the body drawn, set on it now; the game's animation                      updates since the last VATS frame {}, its Havok bodies not held {} times;                      frame time {dt:.4} s",
-                    a.id,
-                    worst.0,
-                    m.bodies[worst.2].node,
-                    worst.1,
-                    a.anim_updates,
-                    a.holds_refused
+                    "{:08X}: [np vats] {at}: its body nodes as VATS reads them {:.1} u ({}) and \
+                     {:.1} degrees off the body drawn, set on it now; the game's animation updates \
+                     since the last VATS frame {}, its Havok bodies not held {} times; frame time \
+                     {dt:.4} s",
+                    a.id, worst.0, m.bodies[worst.2].node, worst.1, a.anim_updates, a.holds_refused
                 ));
                 a.anim_updates = 0;
                 a.holds_refused = 0;
@@ -404,6 +402,10 @@ pub fn vats_parts(e: &mut Engine, at: &str) {
     let m = model();
     let mut said = Vec::new();
     for (limb, at_part, chance, _) in vats_target_parts(e, target) {
+        if at_part == [0.0; 3] {
+            said.push(format!("limb {limb}: not placed yet"));
+            continue;
+        }
         let (b, off) = drawn
             .iter()
             .enumerate()
@@ -2780,3 +2782,7 @@ pub fn clear() {
 #[cfg(test)]
 #[path = "new_physics_fixture_tests.rs"]
 mod fixture_tests;
+
+#[cfg(test)]
+#[path = "new_physics_vats_tests.rs"]
+mod vats_tests;

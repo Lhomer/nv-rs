@@ -32,10 +32,18 @@ animation update; VATS's readers run in the menu pass, outside that window, and 
   pull. Standing again, the limits stay soft past the reach's end (0.6 s). The ground under a body
   is cast again after 2 units of travel, not 6 (a foot slid onto a slab's edge kept the ground's
   cast and lay 2 units in it).
-- Still to do: the real-VATS-path test (`new_physics_vats_tests.rs`, in progress in the working
-  tree, not committed): the game's `VATSMenu::Create`/`DoIdle` at their addresses after the
-  animation update, the draw and the put-back, with paused frames; then the 18:39/18:41 knockdown
-  items.
+- `np_vats_reads_the_body_drawn` (`new_physics_vats_tests.rs`): the game's VATS at its addresses
+  (`Create` once, then the interface manager's highlight update `00800370` and `DoIdle` each of
+  150 paused frames, the animation's update `00493900` on a third of them) after the animation
+  update, the draw and the put-back; standing (0.6 m/s), stepping (0.9) and lying (4.35). Parts
+  placed (`WorldCoord`), the highlight's skinned bones and the shot points within 2 / 2 / 0.5
+  units of the body drawn, the lying outline not upright, chances above 0, each shot meeting its
+  part's body in the game's capsule test. Without `hold_drawn` (231db2da's path): 16.9, 27.9 and
+  110.7 units off, the lying outline 105.7 units up. Doubles: the interface's tiles, sounds, HUD,
+  controls, the camera (a pinhole), the renderer's highlight occlusion queries (counted from the
+  bones as drawn), the C runtime's maths and formatting, the combat formulas' damage, the
+  player's own update; settings the test's (listed in the file).
+- Next: the 18:39/18:41 knockdown items, then the running/knockdown task with its addenda.
 
 ### Claude, 2026-11-19 (the running fix: where it stands, docs/wip/np-running-seed.patch)
 
