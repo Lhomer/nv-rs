@@ -27,7 +27,19 @@ other never came still). Still failing with it: `np_rises_on_its_first_try` by t
 given up, 3.2 s upright before still) and `np_slope_walking_with_a_racing_animation` (a catching
 step right after standing on the 20 degree slope: the fresh balance found the centre 0.15 m
 outside its planted soles while the downed reading had it inside). The new tests 1-5 of the
-addendum are not written yet. The anim_v feedback (point 3) does not reproduce here: the downed
+addendum are not written yet.
+Second pass (the patch updated): "upright" for the still stage is now `up_for_still` (standing,
+the pelvis at 0.85 of standing height, the torso within 25 degrees): with the classifier's
+Standing alone (35 degrees) the feet were held mid-rise and rises by the slab failed; with it the
+flat and slab first tries stand still in 0.8 s. On the 20 degree slope the stand was never
+accepted: the downed reading had the centre 0.11 m inside the soles, a fresh balance 0.07 m
+outside, because `Balance::planted` took the ground under the foot's centre, not under each end of
+its sole (a foot on the slope read lifted: one sole of support). The patch fixes `planted` (the
+ground under each end) and runs the root support whenever upright; then the slope's stand is
+accepted but the balance still takes a catching step at once (0.07 m: the body moves toward the
+animation's stance as the balance takes it). Setting the feet to the animation's stance while
+upright brought the creep back. With all of it 4 NP tests fail (M6 stands again, the reference
+follows a downed body, first try, slope walking): not ready. The anim_v feedback (point 3) does not reproduce here: the downed
 glide calls `Np::anim_moved`, which moves the animation's samples with the reference.
 
 ### Claude, 2026-11-19 (VATS on the body drawn: the 18:39 and 18:41 clips on 231db2da)
