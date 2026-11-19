@@ -7,6 +7,29 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (the rise ends moving: clip 22:19 on 08187cb1; `docs/wip/np-rise-still.patch`)
+
+Work in progress on the get-up slide/trip addendum (applies to 959f6d3). In the patch:
+- the feet's rise goal no longer 5% of a leg ahead once up (`out = leg * RISE_FOOT_OUT * (1 - up)`);
+- the root support's flat target velocity the ground's (`ground_v`), and upright (the downed
+  classifier's Standing) the pelvis placed so the centre of mass lies over the feet, the torso's
+  lean dropped, the feet held where they are on their own ground, the torso's flat sway damped
+  (`TORSO_STILL`);
+- standing again only still: flat speed under `STAND_STILL` 0.05 m/s (was 0.4), the centre inside
+  the soles (`STAND_INSIDE`), as a fresh balance would find its support (`Balance::would_find`);
+  else after `RISE_MOST + STILL_MOST` (2 s) upright, whatever its speed;
+- at the hand-over to the balance the bodies' flat velocity set to the ground's, `anim_v` the
+  ground's, its samples cleared;
+- no rise timeout or stall while upright (`still_wait`).
+Findings: on flat ground it now stands still (upright to still 0.45 to 0.5 s; the M6 run stands at
+6.5 s with its centre at 0.003 m/s; before, a steady 0.2 m/s creep of hips and feet chasing each
+other never came still). Still failing with it: `np_rises_on_its_first_try` by the slab (a rise
+given up, 3.2 s upright before still) and `np_slope_walking_with_a_racing_animation` (a catching
+step right after standing on the 20 degree slope: the fresh balance found the centre 0.15 m
+outside its planted soles while the downed reading had it inside). The new tests 1-5 of the
+addendum are not written yet. The anim_v feedback (point 3) does not reproduce here: the downed
+glide calls `Np::anim_moved`, which moves the animation's samples with the reference.
+
 ### Claude, 2026-11-19 (VATS on the body drawn: the 18:39 and 18:41 clips on 231db2da)
 
 Why 231db2da did not fix VATS: `active_ragdoll::unwrite` (after every draw) put the animation's
