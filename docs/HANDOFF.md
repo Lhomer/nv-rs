@@ -7,6 +7,30 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (the Ragdoll lab workflow: `np_m6_stands_by_balance` since de0e5d92)
+
+**Status: open, not fixed.** The lab's `np_m6_stands_by_balance` ("on its back": the centre at most
+0.05 m outside the feet once the pelvis is over 80% of its height) has failed on every push since
+de0e5d92 (CI 0.07 m; here on e0331a0 0.09 m). It is a real change of behaviour from de0e5d92's
+limit easing (each joint's allowance ratcheted in the first 0.3 s down changes the pose the lab body
+rises from): the lift reaches 54 units (80%) about 50 ms before the hips come over the feet (0.094,
+0.061, 0.033 m outside, then inside for good). Tried, each with the lab and the host's rise tests:
+- the lift held under 78% of standing height while the centre is outside: the lab passes, 6 host
+  rise tests fail (the host's rises come up with the centre behind and only come over the feet as
+  the legs extend: held, they never stand);
+- the legs' push from 0.30 or 0.25 m (was 0.35): the lab never stands;
+- the lift's pace 0.6 m/s throughout (was 0.8): the lab passes, `np_a_slab_edge_holds_the_body`
+  and `np_rises_on_its_first_try` (by the slab, 1.38 s upright to still) fail;
+- 0.6 m/s only while the centre is behind and the body does not read standing (by label), or
+  only between 65% and 80% of standing height: the lab passes at some values; the first try by the
+  slab then reads 0.0 to 3.9 s upright to still (once a rise given up) across 0.4 to 0.62 m/s: that
+  test's outcome swings with any change of the rise's path;
+- the hips pulled over the feet 1.5 times harder while behind: the lab 0.10 m.
+Also seen: `rig_fixture::the_joint_limits_on_the_fnv_skeleton_fixture` failed twice in full parallel
+host runs (L Thigh's cone 0.285 against the data's 0.051) and passes alone: a test reading shared
+state. Next: make the still stage's outcome robust (the arrival at upright carries 0.4 to 0.5 m/s;
+it decays over 0.7 s) before tuning the lift for the lab.
+
 ### Claude, 2026-11-19 (task C, the settle before the rise: a first attempt, `docs/wip/np-settle-stage.patch`)
 
 **Status: not pushed; the attempt is in `docs/wip/np-settle-stage.patch` (on e0331a0).** It adds a
