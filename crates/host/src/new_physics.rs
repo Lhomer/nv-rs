@@ -166,6 +166,9 @@ struct NpActor {
     history: std::collections::VecDeque<(f32, Vec<(V3, V3)>)>,
     /// The animation's jumps said.
     jumps_said: u32,
+    /// Seconds since its joints' figure out of the skeleton's limits was last logged (downed,
+    /// every [`JOINTS_EVERY`]).
+    joints_said: f32,
     /// Each body's walls found beside it (world, metres; where the cast met it, game units):
     /// kept while the body stays within [`WALL_KEEP`] of it.
     walls: Vec<Vec<(ragdoll_core::np_body::Plane, V3)>>,
@@ -285,6 +288,39 @@ fn put_drawn(e: &mut Engine, a: &NpActor) {
         };
         crate::active_ragdoll::set_subtree(e, node, world, 0);
     }
+}
+
+/// A downed actor's joints' figure out of the skeleton's own limits is logged this often (s).
+pub const JOINTS_EVERY: f32 = 0.25;
+
+/// Each joint out of the skeleton's own limits by more than a degree, the farthest first, by its
+/// child body's name (degrees; "every joint inside" when none), and the most (degrees).
+fn joints_line(np: &Np) -> (String, f32) {
+    let m = &np.model;
+    let mut out: Vec<(f32, &str)> = np
+        .joints_out()
+        .into_iter()
+        .zip(&m.joints)
+        .map(|(o, j)| {
+            (
+                o.to_degrees(),
+                m.bodies[j.child].node.trim_start_matches("Bip01 "),
+            )
+        })
+        .collect();
+    out.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let most = out.first().map_or(0.0, |o| o.0);
+    let listed: Vec<String> = out
+        .iter()
+        .filter(|o| o.0 > 1.0)
+        .map(|o| format!("{} {:.1}", o.1, o.0))
+        .collect();
+    let line = if listed.is_empty() {
+        "every joint inside".to_string()
+    } else {
+        listed.join(", ")
+    };
+    (line, most)
 }
 
 /// Where a hit's point lies against the body drawn (the nearest drawn body, the point's distance
@@ -741,6 +777,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             pelvis_last: None,
             history: std::collections::VecDeque::new(),
             jumps_said: 0,
+            joints_said: JOINTS_EVERY,
             walls: Vec::new(),
             wall_logs: 0,
             grounds: Vec::new(),
@@ -1067,6 +1104,22 @@ pub fn apply(e: &mut Engine) {
             ));
         }
         a.since_hit += dt;
+        // Downed: how far each joint lies out of the skeleton's own limits, every
+        // [`JOINTS_EVERY`] (Patrick's 19:14 clip: the logs had no joint angles).
+        if np.down.is_some() {
+            a.joints_said += dt;
+            if a.joints_said >= JOINTS_EVERY {
+                a.joints_said = 0.0;
+                let (line, _) = joints_line(np);
+                note(format!(
+                    "{:08X}: [np joints] {}: out of the skeleton's limits: {line}",
+                    a.id,
+                    a.label.unwrap_or("downed")
+                ));
+            }
+        } else {
+            a.joints_said = JOINTS_EVERY;
+        }
         a.frames += 1;
         // Nothing written to the nodes here: the bodies' worlds are set at the world pass
         // (`read_drawn`), right before it skins them.
@@ -1941,7 +1994,14 @@ fn main_thread_pass(e: &mut Engine) {
             continue;
         }
         // What is left out projected in at once: the pose handed lies inside them.
+        let (before, _) = joints_line(np);
         let (inside, out) = np.into_limits();
+        let (after, after_most) = joints_line(np);
+        note(format!(
+            "{:08X}: [np joints] at the hand-over ({reason}): out of the skeleton's limits as \
+             drawn: {before}; as handed: {after} (at most {after_most:.1} degrees)",
+            a.id
+        ));
         let left = model()
             .bodies
             .iter()

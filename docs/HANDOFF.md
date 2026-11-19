@@ -50,6 +50,9 @@ animation update; VATS's readers run in the menu pass, outside that window, and 
   most `ROLLS` 5), never let up by the 8 s hold while on their side (the 18:39 and 19:14 flips:
   the game's get-up picked face up or down from a side). `[np settle]` lines. The old
   knock-downs unchanged. Test: `np_handed_bodies_get_up_only_on_their_back_or_front`.
+- Done: `[np joints]` every 0.25 s while downed (each joint out of the skeleton's own limits by
+  more than a degree, by its child body, farthest first: `Model::data_limits_out`) and at each
+  hand-over (as drawn, and as handed with the most). The full cycle asserts both.
 - In progress (`docs/wip/np-settled-limits.patch`, applies to this commit): a downed body settled
   (landed, past `SETTLE_AFTER` 0.6 s, not rising) on the skeleton's own limits, soft for 0.3 s
   after each change of limits (`Down::settled_limits`, `limits_for`); rising, the widened ones;

@@ -1329,6 +1329,11 @@ impl Np {
     /// The body brought inside the skeleton's own limits at once (`Model::into_data_limits`) and
     /// its bodies' nodes' worlds (game units, the world's): the pose handed to the game's ragdoll.
     /// Answers them and how far out the body still lay (rad).
+    /// Each joint's angle out of the skeleton's own limits now (rad, the joints' order).
+    pub fn joints_out(&self) -> Vec<f32> {
+        self.model.data_limits_out(&self.states)
+    }
+
     pub fn into_limits(&mut self) -> (Vec<(M3, V3)>, f32) {
         let out = self.model.into_data_limits(&mut self.states, 12);
         (

@@ -355,6 +355,22 @@ impl Model {
         most
     }
 
+    /// How far each joint lies out of the skeleton's own limits (rad; the game's ragdoll's:
+    /// cone, plane, twist or hinge, widened only by the bind pose), measured on a copy.
+    pub fn data_limits_out(&self, states: &[State]) -> Vec<f32> {
+        self.joints
+            .iter()
+            .enumerate()
+            .map(|(j, def)| {
+                let bind = self.bind_rel.get(j).copied().unwrap_or(Q_ID);
+                let lim = widen(def.limit, self.measure(j, bind), axle_apart(def, bind));
+                let mut copy = states.to_vec();
+                let mut none = f32::INFINITY;
+                self.limit(&mut copy, def, &lim, false, LIMIT_STEP, &mut none)
+            })
+            .collect()
+    }
+
     /// The bind pose (each body's node's world, game units) the model was made from.
     pub fn bind(&self) -> (Skeleton, Vec<(M3, V3)>) {
         let sk = Skeleton::fnv();

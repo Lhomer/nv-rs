@@ -2635,6 +2635,10 @@ struct CycleRun {
     get_up: Option<(u32, f32)>,
     get_up_any_node: f32,
     jumps: u32,
+    /// `[np joints]` lines while downed, and each hand-over's most a joint lay out of the
+    /// skeleton's limits as handed (degrees).
+    joints_logged: u32,
+    joints_handed: Vec<f32>,
     notes: Vec<String>,
     /// Every frame New Physics had it: the deepest any body's capsule lay inside a box (units),
     /// which body and when (s after the last hit, downed).
@@ -3197,6 +3201,7 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
                 "[np move]",
                 "[np choice]",
                 "[np floor load]",
+                "[np joints]",
             ] {
                 if let Some(i) = l.find(key) {
                     run.notes
@@ -3234,6 +3239,22 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
         }
     }
     run.jumps = run.notes.iter().filter(|n| n.contains("[np jump]")).count() as u32;
+    // The joints' figure: logged while downed, and at each hand-over the most a joint lay out of
+    // the skeleton's limits as handed.
+    run.joints_logged = run
+        .notes
+        .iter()
+        .filter(|n| n.contains("[np joints]") && !n.contains("at the hand-over"))
+        .count() as u32;
+    run.joints_handed = run
+        .notes
+        .iter()
+        .filter(|n| n.contains("[np joints] at the hand-over"))
+        .filter_map(|n| {
+            let at = n.rfind("(at most ")? + "(at most ".len();
+            n[at..].split(' ').next()?.parse::<f32>().ok()
+        })
+        .collect();
     run.wall_logged = run.notes.iter().filter(|n| n.contains("[np wall]")).count() as u32;
     run.moves = run.notes.iter().filter(|n| n.contains("[np move]")).count() as u32;
     run.wall_most = run
@@ -3313,6 +3334,18 @@ fn np_full_cycle_with_a_racing_animation() {
     eprintln!("RESULT np full cycle: {r:#?}");
     assert_eq!(r.downed, 2, "{r:#?}");
     assert!(r.stood >= 1, "never stood: {r:#?}");
+    // Downed, its joints' figure every 0.25 s (two falls, a second or more each); at the
+    // hand-over every joint within 5 degrees of the skeleton's limits.
+    assert!(
+        r.joints_logged >= 8,
+        "{} [np joints] lines",
+        r.joints_logged
+    );
+    assert!(
+        !r.joints_handed.is_empty() && r.joints_handed.iter().all(|&d| d <= 5.0),
+        "handed {:?} degrees out",
+        r.joints_handed
+    );
     assert_eq!(
         r.snaps, 0,
         "{} frames turned over 20 degrees ({:.1})",
