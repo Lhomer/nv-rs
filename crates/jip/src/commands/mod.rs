@@ -21,7 +21,9 @@ pub mod jip_fn_ammo_effect;
 pub mod jip_fn_armor;
 pub mod jip_fn_aux_variable;
 pub mod jip_fn_body_part_data;
+pub mod jip_fn_camera;
 pub mod jip_fn_ccc;
+pub mod jip_fn_ccc_hud;
 pub mod jip_fn_cell;
 pub mod jip_fn_class;
 pub mod jip_fn_climate;
@@ -45,6 +47,7 @@ pub mod jip_fn_misc_ref;
 pub mod jip_fn_misc_ref_havok;
 pub mod jip_fn_misc_ref_havok_w;
 pub mod jip_fn_misc_ref_insert;
+pub mod jip_fn_misc_ref_lights;
 pub mod jip_fn_misc_ref_lines;
 pub mod jip_fn_misc_ref_nodes;
 pub mod jip_fn_misc_ref_nodes_w;
@@ -57,6 +60,7 @@ pub mod jip_fn_perk;
 pub mod jip_fn_projectile;
 pub mod jip_fn_quest;
 pub mod jip_fn_ref_map;
+pub mod jip_fn_rock_it;
 pub mod jip_fn_script;
 pub mod jip_fn_script_vars;
 pub mod jip_fn_sound;
@@ -64,6 +68,9 @@ pub mod jip_fn_sound_playing;
 pub mod jip_fn_string;
 pub mod jip_fn_texture_set;
 pub mod jip_fn_ui;
+pub mod jip_fn_ui_code;
+pub mod jip_fn_ui_cursor;
+pub mod jip_fn_ui_menus;
 pub mod jip_fn_ui_nodes;
 pub mod jip_fn_utility;
 pub mod jip_fn_utility_patches;
@@ -229,14 +236,29 @@ pub const ALL: &[Handlers] = &[
     crate::game_patches::gc::formulas::COMMANDS,
     crate::game_patches::gx::COMMANDS,
     jip_fn_misc_ref_insert::COMMANDS,
+    jip_fn_ccc_hud::COMMANDS,
     // `InsertNode` and `AttachModel`, with their patches H08 and H10.
     jip_fn_misc_ref_insert::AWAITING_H08_H10,
     // `SynchronizePosition`, with its patch H13 (`game_patches::gh2`).
     jip_fn_misc_ref::AWAITING_H13,
     // `ToggleHUDCursor`, with its patch H02 (`game_patches::gp`).
     jip_fn_ui::AWAITING_H02,
+    // `SetFontFile`, with its patch G129 (`game_patches::ga`).
+    jip_fn_ui::AWAITING_G129,
     // `FireWeaponEx`, with its patch H01 (`game_patches::gw`).
     jip_fn_actor_p2::AWAITING_H01,
+    // `ShowQuantityMenu`, `CloseActiveMenu` (with their DoClick seam).
+    jip_fn_ui_menus::COMMANDS,
+    // Code bytes JIP rewrites as seams and wraps (step 3.5f).
+    jip_fn_camera::INPUT_COMMANDS,
+    jip_fn_camera::MISC_COMMANDS,
+    jip_fn_rock_it::COMMANDS,
+    // `AttachLight`, `RemoveLight`.
+    jip_fn_misc_ref_lights::COMMANDS,
+    // `SetCursorPos`.
+    jip_fn_ui_cursor::COMMANDS,
+    // The recipe menu, quest messages and item filter (code bytes as seams and wraps).
+    jip_fn_ui_code::COMMANDS,
 ];
 
 /// How many of JIP's commands have a handler.
@@ -270,9 +292,13 @@ pub fn install(e: &mut Engine) {
     e.ext_free::<jip_fn_ui::HudCursor>();
     e.ext_free::<jip_fn_ui::ItemListRefresh>();
     jip_fn_ui::install(e);
+    jip_fn_ui_menus::install(e);
     jip_fn_misc_ref_insert::install(e);
     jip_fn_misc_ref_lines::install(e);
     jip_fn_actor_p2::install(e);
+    jip_fn_camera::install(e);
+    jip_fn_rock_it::install(e);
+    jip_fn_ui_code::install(e);
     for list in ALL {
         for &(opcode, execute) in list.iter() {
             crate::table::set_handlers(e, opcode, Some(execute), None);
@@ -895,14 +921,30 @@ mod tests {
             "jip_fn_input",
             // jip_fn_misc_ref_insert (InsertNode, AttachModel, ModelHasBlock).
             "jip_fn_misc_ref",
+            // jip_fn_ccc_hud (CCCOnLoad and the commands that use what it finds).
+            "jip_fn_ccc",
             // jip_fn_misc_ref_insert::AWAITING_H08_H10 (with H08 and H10).
             "jip_fn_misc_ref",
             // jip_fn_misc_ref::AWAITING_H13 (`SynchronizePosition`, with H13).
             "jip_fn_misc_ref",
             // jip_fn_ui::AWAITING_H02 (`ToggleHUDCursor`, with H02).
             "jip_fn_ui",
+            // jip_fn_ui::AWAITING_G129 (`SetFontFile`, with G129).
+            "jip_fn_ui",
             // jip_fn_actor_p2::AWAITING_H01 (`FireWeaponEx`, with H01).
             "jip_fn_actor",
+            // jip_fn_ui_menus (ShowQuantityMenu, CloseActiveMenu).
+            "jip_fn_ui",
+            // jip_fn_camera (ToggleVanityWheel; ToggleCameraCollision), jip_fn_rock_it.
+            "jip_fn_input",
+            "jip_fn_miscellaneous",
+            "jip_fn_miscellaneous",
+            // jip_fn_misc_ref_lights (AttachLight, RemoveLight).
+            "jip_fn_misc_ref",
+            // jip_fn_ui_cursor (SetCursorPos).
+            "jip_fn_ui",
+            // jip_fn_ui_code (the recipe menu, quest messages, item filter).
+            "jip_fn_ui",
         ];
         assert_eq!(files.len(), ALL.len(), "one file per command list");
         let mut seen = std::collections::HashSet::new();
@@ -968,8 +1010,8 @@ mod tests {
             nvse::table::guest_text(&e, e.mem.u32(record)),
             b"GetClimateSunTexture"
         );
-        // SetLightTraitNumeric is not built: no handler.
-        assert_eq!(execute(&e, 0x2643), 0);
+        // InitMiniMap is not built (it waits for the drawing track): no handler.
+        assert_eq!(execute(&e, 0x2873), 0);
     }
 
     /// Answering "not installed" (players' state until step 3.10), every opcode built here is as
