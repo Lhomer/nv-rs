@@ -7,6 +7,31 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (item 2, explosions/pellets/full-auto: the plan, from the game's own code)
+
+**Status: started.** Patrick's design (blast force from the explosion's own force with distance
+falloff, lift under the feet, no cap on pellets or bursts, each full-auto hit judged on its own)
+needs no invented data: the game's own functions give it at run time, so a fixture test only has
+to build an explosion form with a force (as the fixture builds every other form).
+- The hit's `HIT_SOURCE` is the `Explosion` reference (`knockdown::blast` already reads its
+  position). Its data: `004181e0(explosion)`; the force is the data's float at `+0x74`
+  (`explosion.rs` `fn_009b0bd0`, read by `009b0920`, the game's own push of rigid bodies, which
+  also checks it against the double at `01012060`). Its radius: `00644930(explosion)`; the game's
+  falloff for a distance: `00647920(radius, distance)` (as `Explosion`'s in-face check uses them).
+- Plan: `knockdown::blast_of(e, hit) -> Option<(centre, force, radius)>`; in `after_hit`'s New
+  Physics branch a `Push::Blast` goes to a new `new_physics::blast(e, actor, centre, force,
+  radius)`: each body pushed away from the centre by `force * 00647920(radius, its distance) *
+  its mass / the body's mass` (N s; the force taken as the whole body's N s at the centre: to
+  calibrate against the 22:36 clip's 200 N s once Patrick reads the 40mm grenade's force), the
+  feet's and calves' push turned up (the lift under the feet), one outcome for the blast.
+- Pellets and full-auto: `new_physics::hit` merges every hit before a frame has run into one
+  outcome ("pellets of a burst"); only a shot's own pellets (`Round::pellet`) should be merged,
+  each full-auto round its own outcome. No cap found on pellets or bursts in `new_physics.rs`.
+- Tests to write (each failing first): a blast at 2 m pushes the near side's bodies more than the
+  far side's and the feet upward, its whole push the form's force times the falloff; the same
+  blast at twice the radius pushes nothing; 9 pellets of one shot are one outcome; two full-auto
+  rounds in one frame are two.
+
 ### Claude, 2026-11-19 (item 1, the running fix: state on 568ce43, `docs/wip/np-running-seed.patch`)
 
 **Status: not pushed yet; 41 of 43 New Physics fixture tests pass with the patch, plus both
