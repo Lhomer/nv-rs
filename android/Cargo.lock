@@ -662,6 +662,7 @@ dependencies = [
  "d3d9-wgpu",
  "d3dx-tex",
  "engine-core",
+ "libc",
  "mp3",
  "qos",
  "raw-window-handle",
