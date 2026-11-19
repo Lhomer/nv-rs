@@ -1,8 +1,8 @@
 diff --git a/crates/host/src/knockdown.rs b/crates/host/src/knockdown.rs
-index 64ffcf2..a4963a9 100644
+index df76714..836f907 100644
 --- a/crates/host/src/knockdown.rs
 +++ b/crates/host/src/knockdown.rs
-@@ -1838,6 +1838,22 @@ fn bodies(e: &mut Engine, actor: u32) -> Vec<(u32, u32)> {
+@@ -1835,6 +1835,22 @@ fn bodies(e: &mut Engine, actor: u32) -> Vec<(u32, u32)> {
      found
  }
  
@@ -26,30 +26,30 @@ index 64ffcf2..a4963a9 100644
  fn hk_scale(e: &Engine) -> f32 {
      let s = e.mem.f32(HK_TO_GAME);
 diff --git a/crates/host/src/new_physics.rs b/crates/host/src/new_physics.rs
-index b45cf3f..bb1b246 100644
+index ab2aeeb..9f0e2bc 100644
 --- a/crates/host/src/new_physics.rs
 +++ b/crates/host/src/new_physics.rs
-@@ -146,6 +146,9 @@ struct NpActor {
-     /// (`animation_updated`): its animation, as New Physics reads it.
-     tree: Vec<(u32, u32)>,
-     snap: Option<Snapshot>,
+@@ -156,6 +156,9 @@ struct NpActor {
+     root_budget: f32,
+     /// The pelvis drawn at the last frame's set-up (game units): how far the body moved.
+     pelvis_last: Option<V3>,
 +    /// The actor's velocity when New Physics took it (game units a second): its character
 +    /// controller's (the run or walk it was in), seeding the body and its animation's velocity.
 +    take_v: V3,
      /// The body's last frames since its last hit (the frame's time, each body's velocity and
      /// spin at its end): the hand-over's velocities, their mean.
      history: std::collections::VecDeque<(f32, Vec<(V3, V3)>)>,
-@@ -519,6 +522,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
-             aim: None,
-             tree: tree.clone(),
-             snap: Some(snapshot(e, root, &tree)),
+@@ -557,6 +560,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
+             held: Vec::new(),
+             root_budget: ROOT_STEP,
+             pelvis_last: None,
 +            take_v: crate::knockdown::actor_velocity(e, actor),
              history: std::collections::VecDeque::new(),
              jumps_said: 0,
              walls: Vec::new(),
-@@ -746,6 +750,9 @@ pub fn apply(e: &mut Engine) {
-             // Made on the first frame's animated pose, still: its animation's velocity is
-             // measured from the frames that follow (`Np`), never from the pose at the hit.
+@@ -787,6 +791,9 @@ pub fn apply(e: &mut Engine) {
+             // animation's, which the keyframed bodies follow): held to the body from now on.
+             a.holds = crate::knockdown::body_holds(e, a.actor, &a.nodes);
              let mut np = Np::new(model().clone(), &anim, 1.0);
 +            // Moving as the actor was when taken (a runner taken at 0 m/s sat 3.27 m/s off its
 +            // 3.65 m/s run: catching steps with no hit, "downed (steps)", Patrick's 14:06 clip).
@@ -58,10 +58,10 @@ index b45cf3f..bb1b246 100644
              for (b, p, j) in a.pending.drain(..) {
                  np.hit(b, p, j);
 diff --git a/crates/host/src/new_physics_fixture_tests.rs b/crates/host/src/new_physics_fixture_tests.rs
-index be4988e..db351af 100644
+index 7097243..53d8aef 100644
 --- a/crates/host/src/new_physics_fixture_tests.rs
 +++ b/crates/host/src/new_physics_fixture_tests.rs
-@@ -2166,10 +2166,10 @@ fn slope_run(cfg: &Slope) -> SlopeRun {
+@@ -2209,10 +2209,16 @@ fn slope_run(cfg: &Slope) -> SlopeRun {
          if cfg.mover {
              let want = [0.0, cfg.walk * k, 0.0];
              crate::knockdown::mover_update(&mut f.e, MOVER, |e| {
@@ -70,11 +70,30 @@ index be4988e..db351af 100644
                  rig_fixture::write3(e, MOVER + crate::knockdown::MOVER_DELTA, scale(want, dt));
              });
 -            let v = rig_fixture::read3(&f.e, velocity_at);
++            // The AI's own movement of its controller (its AI thread's movers, not
++            // `ActorMover::Update`, which New Physics holds): it keeps walking while the actor stands,
++            // as the game's runner kept running under New Physics (Patrick's 14:06 clip: 3.65 m/s).
++            if !is_down(ACTOR) {
++                rig_fixture::write3(&mut f.e, velocity_at, scale(want, 1.0 / rig_fixture::HK));
++            }
 +            let v = scale(rig_fixture::read3(&f.e, velocity_at), rig_fixture::HK);
              reference = add(reference, scale(v, dt));
              if is_down(ACTOR) {
                  game_moved += length(v) * dt;
-@@ -2726,10 +2726,10 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+@@ -2757,6 +2763,12 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+     let anim0: Vec<(M3, V3)> = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
+     let low = ragdoll_core::np_body::lowest_point(model(), &model().states_from_nodes(&anim0)) * k;
+     let drop = [0.0, 0.0, -low - 1.0];
++    // The leg's length (the thigh's node over the foot's, as animated).
++    let leg = {
++        let thigh = f.world("Bip01 L Thigh").unwrap().1;
++        let foot = f.world("Bip01 L Foot").unwrap().1;
++        thigh[2] - foot[2]
++    };
+     rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, at);
+     room_events::set_on(true);
+     let _ = room_events::take();
+@@ -2799,10 +2811,16 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
          // controller seating the reference on the ground.
          let want = [0.0, 0.45 * k, 0.0];
          crate::knockdown::mover_update(&mut f.e, MOVER, |e| {
@@ -83,11 +102,39 @@ index be4988e..db351af 100644
              rig_fixture::write3(e, MOVER + crate::knockdown::MOVER_DELTA, scale(want, dt));
          });
 -        let v = rig_fixture::read3(&f.e, velocity_at);
++        // The AI's own movement of its controller (its AI thread's movers, not
++        // `ActorMover::Update`, which New Physics holds): it keeps walking while the actor stands,
++        // as the game's runner kept running under New Physics (Patrick's 14:06 clip: 3.65 m/s).
++        if !is_down(ACTOR) {
++            rig_fixture::write3(&mut f.e, velocity_at, scale(want, 1.0 / rig_fixture::HK));
++        }
 +        let v = scale(rig_fixture::read3(&f.e, velocity_at), rig_fixture::HK);
          let mut reference = add(f.reference(), scale(v, dt));
          if is_down(ACTOR) {
              game_moved += length(v) * dt;
-@@ -3840,3 +3840,242 @@ fn np_crippling_hits_never_start_the_cripple_reaction() {
+@@ -2822,6 +2840,11 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+                 let i = f.nodes.iter().position(|n| n.name == name).unwrap();
+                 f.nodes[i].r = turn_z(&bind[i].0, a);
+             }
++            // The walk's hips lowered by what the swung legs lift the feet (a leg turned by the
++            // swing from the hip): the stance foot stays on the floor, as a walk's does (with the
++            // pelvis held up the whole body left the ground at each stride and landed on it).
++            let bob = leg * (1.0 - swing.to_radians().cos());
++            let root_at = [root_at[0], root_at[1], root_at[2] - bob];
+             rig_fixture::write3(&mut f.e, f.at[0] + rig_fixture::LOCAL_TRANSLATION, root_at);
+             f.animate();
+         };
+@@ -3063,6 +3086,9 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+             if !down && phase_now != ragdoll_core::np_balance::Phase::Falling {
+                 if let Some(n) = floor_force(ACTOR) {
+                     run.floor_most = run.floor_most.max(n / weight);
++                    if std::env::var("NP_TRACE").is_ok() && n / weight > 2.5 {
++                        eprintln!("TRACE floor {:.2} at t {t:.2} (last hit {last_hit:.2}) phase {phase_now:?} steps {steps_now} stage {stage} rel {:?} sample {}", n / weight, rel_speed(ACTOR), sample_field(ACTOR));
++                    }
+                 }
+             }
+             if steps_now > last_steps && t - last_hit >= 1.5 && !down {
+@@ -4344,3 +4370,250 @@ fn np_rise_holds_the_root_and_capsule_on_flat_slope_and_by_a_wall() {
      }
      assert!(failed.is_empty(), "{failed:#?}");
  }
@@ -152,6 +199,11 @@ index be4988e..db351af 100644
 +    let anim0: Vec<(M3, V3)> = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
 +    let low = ragdoll_core::np_body::lowest_point(model(), &model().states_from_nodes(&anim0)) * k;
 +    let drop = [0.0, 0.0, -low - 1.0];
++    let leg = {
++        let thigh = f.world("Bip01 L Thigh").unwrap().1;
++        let foot = f.world("Bip01 L Foot").unwrap().1;
++        thigh[2] - foot[2]
++    };
 +    // The thighs and their parents' world rotations (still: the pelvis does not turn).
 +    let thighs: Vec<(usize, M3)> = [
 +        "Bip01 L Thigh",
@@ -205,10 +257,13 @@ index be4988e..db351af 100644
 +            );
 +            f.nodes[*i].r = ragdoll_core::flinch::mul(&turn, &bind[*i]);
 +        }
++        // The hips lowered by what the swung legs lift the feet: the stance foot stays on the
++        // floor (with the pelvis held up the body left the ground each stride).
++        let bob = leg * (1.0 - swing.cos());
 +        rig_fixture::write3(
 +            &mut f.e,
 +            f.at[0] + rig_fixture::LOCAL_TRANSLATION,
-+            add(reference, drop),
++            add(add(reference, drop), [0.0, 0.0, -bob]),
 +        );
 +        f.animate();
 +        if !r.taken && t >= 0.2 {
@@ -331,10 +386,10 @@ index be4988e..db351af 100644
 +    assert!(r.rel_last < 0.3, "rel_v {:.2} m/s at the end", r.rel_last);
 +}
 diff --git a/crates/host/src/rig_fixture.rs b/crates/host/src/rig_fixture.rs
-index 55f3109..407df63 100644
+index d8c0424..11ede4c 100644
 --- a/crates/host/src/rig_fixture.rs
 +++ b/crates/host/src/rig_fixture.rs
-@@ -365,7 +365,9 @@ impl Fixture {
+@@ -393,7 +393,9 @@ impl Fixture {
          e.register_double(CONTROLLER_SET_POSITION, |_, _| 0u32.into_ret());
          e.register_double(CONTROLLER_SET_VELOCITY, |e, a| {
              let v = read3(e, a[1]);
@@ -345,3 +400,73 @@ index 55f3109..407df63 100644
              0u32.into_ret()
          });
          e.register_double(CONTROLLER_VELOCITY, |_, _| (CONTROLLER + 0x700).into_ret());
+diff --git a/crates/ragdoll-core/src/np_balance.rs b/crates/ragdoll-core/src/np_balance.rs
+index a698659..c3520dd 100644
+--- a/crates/ragdoll-core/src/np_balance.rs
++++ b/crates/ragdoll-core/src/np_balance.rs
+@@ -161,6 +161,8 @@ pub struct Balance {
+     pub foot_floor: [Option<crate::np_body::Plane>; 2],
+     /// The last frame's centre of mass velocity against the animation's (m/s).
+     pub rel_v: V3,
++    /// The animation's velocity the last update was given (m/s).
++    pub anim_v: V3,
+ }
+ 
+ /// What the balance asks of the body this frame.
+@@ -235,6 +237,7 @@ impl Balance {
+             floor_was: None,
+             foot_floor: [None, None],
+             rel_v: [0.0; 3],
++            anim_v: [0.0; 3],
+         }
+     }
+ 
+@@ -333,6 +336,7 @@ impl Balance {
+         let omega = (GRAVITY / height).sqrt();
+         let rel_v = sub(v, anim_v);
+         self.rel_v = rel_v;
++        self.anim_v = anim_v;
+         let flat = |a: V3| [a[0], a[1], 0.0];
+         self.capture = add(flat(com), scale(flat(rel_v), 1.0 / omega));
+         self.moving = length(flat(anim_v)) > MOVING;
+@@ -356,8 +360,9 @@ impl Balance {
+             let at = sub(anim[self.feet[side]].x, self.shift);
+             let moved = self.anim_feet[side].map_or(0.0, |was| length(sub(at, was)));
+             self.anim_feet[side] = Some(at);
+-            if self.phase == Phase::Standing
+-                && self.since >= SETTLE
++            // Moving on its path (a walk, a run the game keeps moving), at once: the gait's own
++            // feet carry it on.
++            if (self.moving || (self.phase == Phase::Standing && self.since >= SETTLE))
+                 && self.step.is_none()
+                 && dt > 0.0
+                 && moved / dt > ANIM_FOOT_MOVING
+@@ -510,6 +515,17 @@ impl Balance {
+                 ask.hold_across = 0.0;
+                 return ask;
+             }
++            // Knocked off its path past what the gait's own sway is: a gather step toward where
++            // its capture point went, then back on its run (Patrick's 14:06 clip: a light hit on a
++            // runner took none, or fell it "path"). Not right after landing one.
++            let landed_just = self.phase == Phase::Recovering && self.since < LAND_WAIT;
++            if length(off_path) > GATHER && !landed_just && self.steps < MAX_STEPS {
++                if let Some(st) = self.plan(model, states, anim, floor) {
++                    self.begin(st, states, anim);
++                    ask.hold_across = 0.6;
++                    return ask;
++                }
++            }
+             // Settled on its path as standing does: the steps start again (they were counted
+             // across hits while the animation moved).
+             self.settle();
+@@ -611,7 +627,9 @@ impl Balance {
+             // knock (the animated feet's middle plus the capture point's offset).
+             let (anim_com, _) = model.centre_of_mass(anim);
+             let off = sub(self.capture, flat(anim_com));
+-            (add(self.capture, [0.0; 3]), unit(off)?)
++            // Where the run carries it while the step swings: the foot lands there, not behind.
++            let ahead = scale(flat(self.anim_v), STEP_TIME);
++            (add(self.capture, ahead), unit(off)?)
+         } else {
+             (self.capture, unit(sub(self.capture, mid))?)
+         };

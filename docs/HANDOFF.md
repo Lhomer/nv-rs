@@ -7,6 +7,30 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (the running fix: where it stands, docs/wip/np-running-seed.patch)
+
+The patch (on a88a3af: `git apply docs/wip/np-running-seed.patch`) now holds, beyond the seed:
+- The fixture's walkers keep walking under New Physics (the AI's own movement of the controller;
+  only `ActorMover::Update` held), as the game's runner did.
+- The harness walks lower their hips by what the swung legs lift the feet (`leg * (1 - cos
+  swing)`): with the pelvis held up, the animated body left the ground at every stride and landed
+  on it (the floor's 2.5 to 5 body weights while walking, and the runner's `rel_v` swinging to 0.5
+  m/s, were that, not New Physics).
+- `np_balance`: moving on its path, a gather step when the capture point leaves the gait's path by
+  more than `GATHER` (the moving branch returned before any step could be planned), its landing led
+  by the animation's velocity over the step's time; a foot the gait moves is let go at once.
+
+With it: `np_running_unhit_never_stumbles` passes (no step, `rel_v` at most 0.25 m/s, 3.69 m/s),
+`np_running_light_hit_gathers_and_resumes` passes (2 steps, back on its path 0.6 units, 3.70 m/s,
+`rel_v` 0.08 at the end). Still failing: `np_a_slab_edge_holds_the_body` (a body 4.39 units inside,
+the floor 18.8 body weights), `np_full_cycle_with_a_racing_animation` and
+`np_slope_walking_with_a_racing_animation` (one step with no hit: the walk's sway trips a gather
+step), `np_rise_holds_the_root_and_capsule_on_flat_slope_and_by_a_wall` (the root 5.3 units in a
+frame just after standing: the path following moves the reference), `np_the_arms_push_it_up` (the
+hands carried 0.17), and `np_creature_hits_never_corrupt_the_actor_value_table` (New Physics let its
+actor go). Next: a gather step only past the gait's own sway (measure it per stride), the path's
+shift taken into the reference within `ROOT_STEP` a frame, then the slab and the arms.
+
 ### Claude, 2026-11-18 (the rise: the capsule glides, PLANCK as the reference)
 
 - PLANCK's source (docs/PLANCK_GETUP.md) fades its root and world-from-model rather than snapping
