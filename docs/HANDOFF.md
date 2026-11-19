@@ -20,16 +20,23 @@ The patch (on a88a3af: `git apply docs/wip/np-running-seed.patch`) now holds, be
   more than `GATHER` (the moving branch returned before any step could be planned), its landing led
   by the animation's velocity over the step's time; a foot the gait moves is let go at once.
 
-With it: `np_running_unhit_never_stumbles` passes (no step, `rel_v` at most 0.25 m/s, 3.69 m/s),
-`np_running_light_hit_gathers_and_resumes` passes (2 steps, back on its path 0.6 units, 3.70 m/s,
-`rel_v` 0.08 at the end). Still failing: `np_a_slab_edge_holds_the_body` (a body 4.39 units inside,
-the floor 18.8 body weights), `np_full_cycle_with_a_racing_animation` and
-`np_slope_walking_with_a_racing_animation` (one step with no hit: the walk's sway trips a gather
-step), `np_rise_holds_the_root_and_capsule_on_flat_slope_and_by_a_wall` (the root 5.3 units in a
-frame just after standing: the path following moves the reference), `np_the_arms_push_it_up` (the
-hands carried 0.17), and `np_creature_hits_never_corrupt_the_actor_value_table` (New Physics let its
-actor go). Next: a gather step only past the gait's own sway (measure it per stride), the path's
-shift taken into the reference within `ROOT_STEP` a frame, then the slab and the arms.
+Since then (the patch updated again):
+- Gather steps on the move only within `GATHER_AFTER_HIT` (1 s) of a hit, measured on the knock's
+  own part (`rel_v / omega`: a walk's sway leaves its centre off its path for a while, no knock);
+  standing catching steps only within `STEP_AFTER_HIT` (3 s) of a hit or with the capture point
+  `WELL_OUTSIDE` (0.15 m) out (the steps with no hit after a rise into a walk). `Np` hands the
+  balance its `since_hit`.
+- `np_creature_hits_never_corrupt_the_actor_value_table` hits its New Physics actor each second (it
+  recovered and was let go before the pellets ended).
+
+Passing with it: both running tests (unhit: no step, `rel_v` at most 0.25 m/s, 3.69 m/s; a 0.4 m/s
+hit: 2 gather steps, back on its path, 3.70 m/s), `np_full_cycle_with_a_racing_animation`, the rise
+test, the creature hits, 36 of the 39 New Physics tests. Still failing:
+`np_slope_walking_with_a_racing_animation` (the floor 3.05 body weights, limit 3: walking up the
+20 degree slope 0.86 s after a light hit; lifting an animated foot under its ground at any depth
+made it 3.17), `np_a_slab_edge_holds_the_body` (a body 3.55 units inside, 3.98 body weights, a body
+at 7.66 m/s) and `np_the_arms_push_it_up` (the hands carried 0.17): the last two fail with the seed
+alone and belong with the knockdown items.
 
 ### Claude, 2026-11-18 (the rise: the capsule glides, PLANCK as the reference)
 

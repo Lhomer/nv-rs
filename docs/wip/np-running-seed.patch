@@ -1,3 +1,21 @@
+diff --git a/crates/host/src/av_table_tests.rs b/crates/host/src/av_table_tests.rs
+index 06143a7..ebbffcf 100644
+--- a/crates/host/src/av_table_tests.rs
++++ b/crates/host/src/av_table_tests.rs
+@@ -576,9 +576,11 @@ fn np_creature_hits_never_corrupt_the_actor_value_table() {
+         // The main thread's frame before the AI tasks: New Physics' hit, a pellet on the
+         // creature (`HitMe` with no AI task running: the game's own, not queued).
+         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+-            if frame == 4 {
++            // New Physics' actor hit at frame 4 and again each second (it steps through the
++            // pellets, never let go of meanwhile).
++            if frame % 60 == 4 {
+                 f.animate();
+-                np_hit = claim(&mut f.e, ACTOR);
++                np_hit = claim(&mut f.e, ACTOR) || np_hit;
+                 let chest = f.world("Bip01 Spine2").unwrap().1;
+                 crate::new_physics::hit(
+                     &mut f.e,
 diff --git a/crates/host/src/knockdown.rs b/crates/host/src/knockdown.rs
 index df76714..836f907 100644
 --- a/crates/host/src/knockdown.rs
@@ -400,28 +418,57 @@ index d8c0424..11ede4c 100644
              0u32.into_ret()
          });
          e.register_double(CONTROLLER_VELOCITY, |_, _| (CONTROLLER + 0x700).into_ret());
+diff --git a/crates/ragdoll-core/src/np.rs b/crates/ragdoll-core/src/np.rs
+index 888ba39..f1d0961 100644
+--- a/crates/ragdoll-core/src/np.rs
++++ b/crates/ragdoll-core/src/np.rs
+@@ -471,6 +471,7 @@ impl Np {
+         for side in 0..2 {
+             self.balance.foot_floor[side] = self.floors.get(self.balance.feet[side]).copied();
+         }
++        self.balance.since_hit = self.since_hit.unwrap_or(f32::INFINITY);
+         let ask = self.balance.update(
+             &self.model,
+             &self.states,
 diff --git a/crates/ragdoll-core/src/np_balance.rs b/crates/ragdoll-core/src/np_balance.rs
-index a698659..c3520dd 100644
+index a698659..3213c18 100644
 --- a/crates/ragdoll-core/src/np_balance.rs
 +++ b/crates/ragdoll-core/src/np_balance.rs
-@@ -161,6 +161,8 @@ pub struct Balance {
+@@ -56,6 +56,13 @@ pub const ANIM_FOOT_MOVING: f32 = 0.05;
+ /// Moving: how far its capture point may leave the animation's before a gather step (m), and the
+ /// animation's speed that counts as moving (m/s).
+ pub const GATHER: f32 = 0.12;
++/// Moving: gather steps come only this long after a hit (s); a walk starting under a body that
++/// stood still is no knock (the steps after a rise into a walk).
++pub const GATHER_AFTER_HIT: f32 = 1.0;
++/// Standing: catching steps come within this long of a hit (s), or with the capture point at least
++/// [`WELL_OUTSIDE`] outside the feet (m).
++pub const STEP_AFTER_HIT: f32 = 3.0;
++pub const WELL_OUTSIDE: f32 = 0.15;
+ pub const MOVING: f32 = 0.3;
+ /// Moving: how fast its path follows its knocked body (per second), and how far its capture point
+ /// may be off its path (the walk's speed at the knock) before it falls (m).
+@@ -161,6 +168,10 @@ pub struct Balance {
      pub foot_floor: [Option<crate::np_body::Plane>; 2],
      /// The last frame's centre of mass velocity against the animation's (m/s).
      pub rel_v: V3,
 +    /// The animation's velocity the last update was given (m/s).
 +    pub anim_v: V3,
++    /// Seconds since the last hit (its owner's; infinite with none).
++    pub since_hit: f32,
  }
  
  /// What the balance asks of the body this frame.
-@@ -235,6 +237,7 @@ impl Balance {
+@@ -235,6 +246,8 @@ impl Balance {
              floor_was: None,
              foot_floor: [None, None],
              rel_v: [0.0; 3],
 +            anim_v: [0.0; 3],
++            since_hit: f32::INFINITY,
          }
      }
  
-@@ -333,6 +336,7 @@ impl Balance {
+@@ -333,6 +346,7 @@ impl Balance {
          let omega = (GRAVITY / height).sqrt();
          let rel_v = sub(v, anim_v);
          self.rel_v = rel_v;
@@ -429,7 +476,7 @@ index a698659..c3520dd 100644
          let flat = |a: V3| [a[0], a[1], 0.0];
          self.capture = add(flat(com), scale(flat(rel_v), 1.0 / omega));
          self.moving = length(flat(anim_v)) > MOVING;
-@@ -356,8 +360,9 @@ impl Balance {
+@@ -356,8 +370,9 @@ impl Balance {
              let at = sub(anim[self.feet[side]].x, self.shift);
              let moved = self.anim_feet[side].map_or(0.0, |was| length(sub(at, was)));
              self.anim_feet[side] = Some(at);
@@ -441,7 +488,7 @@ index a698659..c3520dd 100644
                  && self.step.is_none()
                  && dt > 0.0
                  && moved / dt > ANIM_FOOT_MOVING
-@@ -510,6 +515,17 @@ impl Balance {
+@@ -510,6 +525,24 @@ impl Balance {
                  ask.hold_across = 0.0;
                  return ask;
              }
@@ -449,7 +496,14 @@ index a698659..c3520dd 100644
 +            // its capture point went, then back on its run (Patrick's 14:06 clip: a light hit on a
 +            // runner took none, or fell it "path"). Not right after landing one.
 +            let landed_just = self.phase == Phase::Recovering && self.since < LAND_WAIT;
-+            if length(off_path) > GATHER && !landed_just && self.steps < MAX_STEPS {
++            // The knock's own part: the body's velocity off the gait's over the pendulum's rate
++            // (a walk's sway leaves its centre off its path for a while; that is no knock).
++            let knock = length(flat(rel_v)) / omega;
++            if knock > GATHER
++                && !landed_just
++                && self.steps < MAX_STEPS
++                && self.since_hit < GATHER_AFTER_HIT
++            {
 +                if let Some(st) = self.plan(model, states, anim, floor) {
 +                    self.begin(st, states, anim);
 +                    ask.hold_across = 0.6;
@@ -459,7 +513,23 @@ index a698659..c3520dd 100644
              // Settled on its path as standing does: the steps start again (they were counted
              // across hits while the animation moved).
              self.settle();
-@@ -611,7 +627,9 @@ impl Balance {
+@@ -521,11 +554,15 @@ impl Balance {
+             let b = self.feet[side];
+             !self.planted(model, &states[b], b, floor)
+         };
++        // Standing: a catching step for a hit's knock (within `STEP_AFTER_HIT`), or for the
++        // capture point well outside; never for a gait starting under a body that stood (the steps
++        // with no hit after a rise into a walk).
+         let out = !landing
+             && if self.moving {
+                 length(off_path) > GATHER
+             } else {
+                 self.outside > MARGIN
++                    && (self.since_hit < STEP_AFTER_HIT || self.outside > WELL_OUTSIDE)
+             };
+         if out {
+             if (self.steps >= MAX_STEPS && self.outside > STEPS_FALL_OUTSIDE)
+@@ -611,7 +648,9 @@ impl Balance {
              // knock (the animated feet's middle plus the capture point's offset).
              let (anim_com, _) = model.centre_of_mass(anim);
              let off = sub(self.capture, flat(anim_com));
