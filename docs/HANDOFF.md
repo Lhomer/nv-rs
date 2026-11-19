@@ -7,6 +7,24 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-19 (explosions under New Physics: what blocks a force-sized blast)
+
+**Status: not started in code; needs Patrick's data.** The game's own explosion push
+(`fn_009b0920`, explosion.rs:2073) gives each rigid body the form's force (`BGSExplosion` DATA at
++0x74; damage +0x78, radius +0x7c, `GetRadiusBSUnits` 00477900) times `fn_0062b520`'s per-layer
+factor (settings 011d0d2c/011d0574/...; mass-limited by 011d1284; times 011d070c) and the linear
+scale setting 011cff64, capped by 011d0c9c unless it is the explosion's own actor, in Havok units;
+no distance term (only bodies the blast's phantom meets). `Explosion::ProcessTargets` (009b00a0)
+scales the hit's damage by `00647920(radius, distance)`: the game's own falloff, the one to use
+for each body's share. Blocked: those settings' default values and the explosion forms' force
+values live in the exe's data and Data/FalloutNV.esm (the grenade rifle's 40mm explosion's force
+to calibrate against the clip's 200 N s); neither is in the cloud container, and the test fixture
+maps no exe data (a read of 011cff6c stops), so a test would have to invent them. Ready to build
+once the values are known (Patrick's machine, `nv-re`): `new_physics::blast` (each body pushed from
+the centre by its own distance's falloff, an upward share under the feet), `knockdown::after_hit`
+routing `Push::Blast` there for a New Physics actor, and the harness through
+`Explosion::ProcessTargets` with the form's real values.
+
 ### Claude, 2026-11-19 (the running fix and the knockdown items on f42be63: state)
 
 **Status: not pushed; moved on to explosions as Patrick asked.**
