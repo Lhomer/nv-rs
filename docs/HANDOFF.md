@@ -9,7 +9,15 @@ machinery runs.
 
 ### Claude, 2026-11-19 (item 2, explosions/pellets/full-auto: the plan, from the game's own code)
 
-**Status: started.** Patrick's design (blast force from the explosion's own force with distance
+**Status: done in e58f332 (blasts) and c897226 (full-auto, pellets), both pushed.** Tests
+`np_a_blast_pushes_each_body_by_its_distance` and
+`np_full_auto_rounds_are_each_their_own_and_pellets_one` (av_table_tests.rs, through the game's
+`HitMe`). No cap on pellets or rounds exists in the code. **Question for Patrick:** the form's
+force is taken as the whole body's N s at the blast's centre (a 300 force gives 300 N s at 0
+units); read the 40mm grenade's `BGSExplosion` force (DATA `+0x74`) in `nv-re` and say whether
+the clip's 200 N s at its distance matches, or what scale it needs (Hit Force already scales it).
+
+Patrick's design (blast force from the explosion's own force with distance
 falloff, lift under the feet, no cap on pellets or bursts, each full-auto hit judged on its own)
 needs no invented data: the game's own functions give it at run time, so a fixture test only has
 to build an explosion form with a force (as the fixture builds every other form).
