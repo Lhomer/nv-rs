@@ -44,6 +44,15 @@ animation update; VATS's readers run in the menu pass, outside that window, and 
   bones as drawn), the C runtime's maths and formatting, the combat formulas' damage, the
   player's own update; settings the test's (listed in the file).
 - Next: the 18:39/18:41 knockdown items, then the running/knockdown task with its addenda.
+- In progress (`docs/wip/np-settled-limits.patch`, applies to this commit): a downed body settled
+  (landed, past `SETTLE_AFTER` 0.6 s, not rising) on the skeleton's own limits, soft for 0.3 s
+  after each change of limits (`Down::settled_limits`, `limits_for`); rising, the widened ones;
+  `Tracking::handing` keeps the fast `HAND_LIMIT_FRAME` pull for a hand-over only. Goal: joints
+  inside the data limits while downed, so give-ups and deaths hand over at once (no 45-frame wait,
+  no snap, no teleport). State: 5 NP tests fail with it (slab edge, hitboxes, slope downed,
+  slope walking snap 29.8 degrees, arms carrying 0.16-0.20); every variant tried (data limits
+  for the whole downed state; at the HAND rate; at LIMIT_STEP) moved the borderline tests
+  around. To do: find what the settle's soft ease does at each failing frame (NP_TRACE).
 
 ### Claude, 2026-11-19 (the running fix: where it stands, docs/wip/np-running-seed.patch)
 

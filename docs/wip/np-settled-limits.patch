@@ -1,0 +1,124 @@
+diff --git a/crates/ragdoll-core/src/np.rs b/crates/ragdoll-core/src/np.rs
+index 6dfe53c..9835a3b 100644
+--- a/crates/ragdoll-core/src/np.rs
++++ b/crates/ragdoll-core/src/np.rs
+@@ -113,6 +113,9 @@ pub const HAND_PLANT: (f32, f32, f32) = (3000.0, 150.0, 400.0);
+ pub const HAND_REACH: f32 = 60.0;
+ /// How long the limits stay soft after a fall (s).
+ pub const LIMITS_SETTLE: f32 = 0.3;
++/// A downed body takes the skeleton's own limits this long after it went down (s), once it is
++/// not in the air: the fall keeps the limits it fell with.
++pub const SETTLE_AFTER: f32 = 0.6;
+ /// A rise with nothing to push from (or too weak) this long gives up (s).
+ pub const RISE_NO_PUSH: f32 = 0.5;
+ /// A rise lasts at most this long (s, from the AI's wish to stand, whatever the frames read):
+@@ -273,6 +276,11 @@ pub struct Down {
+     pub arms_off: bool,
+     /// How long the legs' push has lapsed (s).
+     pub lift_lapse: f32,
++    /// Settled (no rise wished): the skeleton's own limits; rising, the limits widened by the
++    /// animation, the goals and the reach. Whether the last frame's were the skeleton's, and how
++    /// long they have been (s): soft for [`LIMITS_SETTLE`] after each change.
++    pub settled_limits: bool,
++    pub limits_for: f32,
+ }
+ 
+ /// Each joint's relative rotation (`parent⁻¹ child`) in a pose of body-node worlds.
+@@ -514,6 +522,8 @@ impl Np {
+                 hand_landed: [false, false],
+                 arms_off: false,
+                 lift_lapse: 0.0,
++                settled_limits: false,
++                limits_for: 0.0,
+             });
+             return self.down_frame(anim, floor, dt);
+         }
+@@ -636,6 +646,7 @@ impl Np {
+             allow: Vec::new(),
+             floors: self.floors.clone(),
+             data_limits: self.to_limits,
++            handing: self.to_limits,
+             body_walls: self.body_walls.clone(),
+         };
+         let tracking = self.with_allowance(tracking);
+@@ -679,6 +690,7 @@ impl Np {
+     /// body: the joints aim at the animation (or, rising, at goals: a foot under its hip, the
+     /// torso over the feet) with springs that hold rather than stand.
+     fn down_frame(&mut self, anim: &[(M3, V3)], floor: f32, dt: f32) -> Vec<(M3, V3)> {
++
+         use crate::np_down::{classify, read, reads, turn_between, DOWN_ARMS, DOWN_GAINS};
+         let f = floor / UNITS;
+         let push = self.push();
+@@ -710,6 +722,8 @@ impl Np {
+             hand_landed: [false, false],
+             arms_off: false,
+             lift_lapse: 0.0,
++            settled_limits: false,
++            limits_for: 0.0,
+         });
+         down.since += dt;
+         down.reading = reading;
+@@ -1027,6 +1041,16 @@ impl Np {
+                 hold,
+             })
+             .collect();
++        // Settled (landed, past the fall: [`SETTLE_AFTER`]) and not rising, or about to be handed
++        // over: the skeleton's own limits. The fall itself keeps the limits it fell with.
++        let settled =
++            (!rising_wish && !airborne && down.since > SETTLE_AFTER) || self.to_limits;
++        if settled != down.settled_limits {
++            down.settled_limits = settled;
++            down.limits_for = 0.0;
++        }
++        down.limits_for += dt;
++        self.on_data_limits = settled;
+         let tracking = Tracking {
+             w: vec![[0.0; 3]; self.states.len()],
+             rate: vec![0.0; self.states.len()],
+@@ -1048,13 +1072,18 @@ impl Np {
+             before: std::mem::replace(&mut self.last_targets, anim_rel.clone()),
+             widen_by: anim_rel,
+             reach: b.reach.clone(),
+-            // Soft only just downed, while the limits change from the standing ones (widened by
+-            // the legs' footing) to the downed ones (the animation's and the reach, which stay);
+-            // hard otherwise.
+-            soft_limits: down.since < LIMITS_SETTLE || self.to_limits,
++            // Downed, the skeleton's own limits (the game's ragdoll's): a downed body bent
++            // wherever its targets pointed (the limits widened by the animation, the last targets
++            // and the reach), and was handed over up to 140 degrees out of them, 45 frames late,
++            // snapped in (Patrick's 18:39 and 19:14 clips). Soft only just downed, while the
++            // standing limits give way to them; hard otherwise.
++            soft_limits: down.since < LIMITS_SETTLE
++                || down.limits_for < LIMITS_SETTLE
++                || self.to_limits,
+             allow: Vec::new(),
+             floors: self.floors.clone(),
+-            data_limits: self.to_limits,
++            data_limits: settled,
++            handing: self.to_limits,
+             body_walls: self.body_walls.clone(),
+         };
+         let tracking = self.with_allowance(tracking);
+diff --git a/crates/ragdoll-core/src/np_body.rs b/crates/ragdoll-core/src/np_body.rs
+index d1a2566..0c8bc14 100644
+--- a/crates/ragdoll-core/src/np_body.rs
++++ b/crates/ragdoll-core/src/np_body.rs
+@@ -172,6 +172,9 @@ pub struct Tracking {
+     /// the game's ragdoll (whose constraints snapped a pose far outside them: the tester's 08:13
+     /// clip, 79 to 183 degrees out).
+     pub data_limits: bool,
++    /// About to be handed to the game's ragdoll: the skeleton's limits brought in at
++    /// [`HAND_LIMIT_FRAME`] a frame (else [`LIMIT_STEP`] a substep, as a settled downed body's).
++    pub handing: bool,
+     /// Each body's own walls (world, metres; empty: none): the sides of walls, crates and ledges
+     /// found near it (a plane holds only the body it was found for, so a crate's face never
+     /// reaches a body beyond the crate).
+@@ -595,7 +598,7 @@ impl Model {
+             for (j, def) in self.joints.iter().enumerate() {
+                 self.pin(states, def);
+                 let soft = tracking.is_some_and(|t| t.soft_limits);
+-                let step = if tracking.is_some_and(|t| t.data_limits) {
++                let step = if tracking.is_some_and(|t| t.data_limits && t.handing) {
+                     HAND_LIMIT_FRAME / substeps as f32
+                 } else {
+                     LIMIT_STEP
