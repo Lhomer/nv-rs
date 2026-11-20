@@ -7,6 +7,24 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-20 (the fourth upstream merge: 74d2156, to 5d48a0ff)
+
+**Status: pushed.** slaterain/main 1abed1e8..5d48a0ff (35 commits), with upstream's new launcher.
+- **The launcher:** upstream moved `scripts/launcher` to `crates/nv-launcher/src/play` (Play.exe
+  is now its window in the game's terminal look, with a Settings screen in place of
+  Settings.cmd/Settings.ps1). Git carried the fork's launcher changes there (the room's `--room`
+  and `NV_RS_ROOM`, the field of view lines). Launcher.exe stays the fork's updater
+  (`scripts/updater`); `package-playtest.ps1` builds and packages both.
+- **The fork's FOV slider** is the Settings screen's "Field of view" row (`settings.rs`
+  `Row::FieldOfView`, 70 to 120 in steps of 5, both keys; settings.ini's `FOV` line among
+  `profiles.rs`' names). The fork's Play.exe FOV tests drive the screen now; they are Windows
+  only (`play/mod.rs`), so CI's Windows jobs are their first run.
+- **Not checked by hand:** the new Play.exe window on Windows with the fork's Launcher.exe in
+  front of it (the updater starts Play.exe with its choice's arguments; the window runs them).
+  An install updated from an older package keeps its old Settings.cmd and Settings.ps1 (the
+  updater replaces the package's files and leaves others); they still edit the same lines.
+- Items 1 and 3 (the running fix, the front rise and task C) wait on questions 1 to 4 above.
+
 ### Claude, 2026-11-20 (item 3, the rise from the front and task C: what blocks the tests)
 
 **Status: not pushed; blocked on a test-design decision (question 4 below).** With
