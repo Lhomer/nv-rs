@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 240
     env:
       CARGO_INCREMENTAL: 0
-      # The room's Play.exe and Launcher.exe (scripts/launcher, scripts/updater), and the clips'
+      # The room's Play.exe and Launcher.exe (crates/nv-launcher, scripts/updater), and the clips'
       # commit (crates/host/src/room_record.rs).
       NV_RS_ROOM: '1'
       NV_RS_UPDATE_REPO: ${{ github.repository }}

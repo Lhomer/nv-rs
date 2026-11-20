@@ -263,7 +263,7 @@ pub const JIP_INSTALLED: Fix = Fix {
     name: "JIP LN NVSE built in (for testing)",
     env: "NV_JIP_INSTALLED",
     addresses: &[],
-    summary: "for testing, off in every preset: JIP LN NVSE answers \"installed\" to mods (MCM, oHUD and others that need it), with the commands built so far (a script line calling one not built yet fails and stops that script for the run), its hooks and the game patches built so far (the README and docs/FIXES.md give the counts)",
+    summary: "for testing, off in every preset: JIP LN NVSE answers \"installed\" to mods (MCM, oHUD and others that need it), with all its commands, its hooks and the game patches built so far (the README and docs/FIXES.md give the counts)",
     install: install_jip_installed,
 };
 
@@ -1487,7 +1487,7 @@ fn settings_rows(e: &mut Engine, _: &[u32]) -> Ret {
 
 /// The settings file: `NV_SETTINGS` when set; else `settings.ini` beside the program or in the
 /// folder above it (a package has `app\nv-viewer.exe` under the folder with `Play.cmd`). The same
-/// file `Settings.cmd` writes.
+/// file the launcher's Settings screen writes (and older previews' Settings.cmd wrote).
 pub fn settings_file() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("NV_SETTINGS") {
         return Some(PathBuf::from(path));
@@ -1579,7 +1579,7 @@ mod tests {
 
     #[test]
     fn the_settings_file_picks_vanilla_and_the_environment_wins() {
-        let text = "# written by Settings.cmd\nBorderless=1\nPreset=Vanilla\nFrameLimit=120\n";
+        let text = "# written by the launcher\nBorderless=1\nPreset=Vanilla\nFrameLimit=120\n";
         let choice = Choice::from_parts(Some(text), no_env).unwrap();
         assert_eq!(choice.preset, Preset::Vanilla);
         assert_eq!(choice.frame_limit, 120);
