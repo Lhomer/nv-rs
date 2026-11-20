@@ -7,6 +7,36 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-20 (item 1, the running fix: second pass, `docs/wip/np-running-seed.patch`)
+
+**Status: not pushed; 42 of 45 New Physics tests pass with the patch (on f78008c), both running
+tests (a, b) among them.** Added since the first pass: a wall found at a low step knows the step's
+top and holds only what lies below it (`Tracking::body_wall_tops`, `WALL_STEP_MOST`); the ground
+fit splits its casts at their largest height gap when a fit leaning to nothing misses any by more
+than `GROUND_STEP` (one plane through a slab's top and the floor beside it lay 22 degrees on the
+flat top and pushed a foot resting there up at 8 body weights); from the front or side the arms
+keep pushing while the legs do until the torso is within 60 degrees of upright (`CHEST_UP`,
+`ARMS_UNTIL_TILT`), from the back as before. Tried and dropped (each broke 4 to 11 tests): the AI
+settling on while the body still falls (both 0.2 and 0.5 m/s), the weapon arm withheld while the
+legs push, the seated feet drawn to the seat.
+- **Still failing:** `np_a_slab_edge_holds_the_body` (a body 2.37 u inside by the box measure, the
+  floor 3.08 body weights at a catching step's landing over a 13 ms frame); `np_the_arms_push_it_up`
+  ("on its face": a 4.8 m/s shove folds it forward with its feet planted, pelvis 0.7 to 0.95 m,
+  torso 137 to 170 degrees, and the legs straighten it with no hand down; "on its back": 0.13 of
+  0.2; "armed": it sits, the seat carrying 550 N, and never gets its feet under it);
+  `np_draws_what_it_simulates_on_fnvs_skeleton` fails only in parallel runs (passes alone).
+- **Questions for Patrick** (each changes what the tests should hold):
+  1. Under New Physics the fixture's walker now keeps walking (the AI's movers move the
+     controller; only `ActorMover::Update` is held), as your 14:06 clip's runner kept running at
+     3.65 m/s. The running tests need it; it changes the slab and arms scenarios (the walker's
+     stance at the take). Keep it for every fixture walker?
+  2. A 4.8 m/s shove in the back that folds the body forward with its feet planted and lets the
+     legs straighten it (no hands, standing in 3.6 s): an acceptable emergent catch, or must such a
+     shove always put the chest on the ground and the hands push it up?
+  3. The floor bound (3 body weights standing) is a frame's mean at frame times of 8 to 38 ms: a
+     landing that stops the centre's 0.3 m/s fall in one 13 ms frame reads 3.3. Keep it per frame,
+     or a mean over 50 ms?
+
 ### Claude, 2026-11-19 (item 2, explosions/pellets/full-auto: the plan, from the game's own code)
 
 **Status: done in e58f332 (blasts) and c897226 (full-auto, pellets), both pushed.** Tests
