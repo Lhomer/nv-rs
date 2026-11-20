@@ -7,6 +7,28 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-20 (item 3, the rise from the front and task C: what blocks the tests)
+
+**Status: not pushed; blocked on a test-design decision (question 4 below).** With
+`docs/wip/np-front-rise-knees.patch` on top of the running-fix patch (`patch -p1 --fuzz=3`; it
+applies), 43 of 45 New Physics tests pass (the slab and the arms test fail as with the running
+patch alone) and the "face down" rise world stands in 3.88 s. But none of the worlds that
+should start the front rise ever lies prone: traced (`down_frame`), the forward shove of the
+"face down" worlds (4.6 to 8 m/s on Spine2 from behind) sends the body through a forward
+somersault: airborne from 0.1 to 0.6 s (no load on anything), its torso through 115, 175 (upside
+down) and 121 degrees, landing on its feet (2751 N) and then its seat, upright. A body hit high
+on the back this hard with its legs as stiff as a downed body's turns about its centre of mass
+like that (the feet swing back and up, so the floor's friction never catches them); a person
+would fold at the hips with the feet left on the ground. So the arms test's "on its face" case
+and the task C front-rise tests have no prone start to rise from.
+- **Question 4 for Patrick:** how should the tests get a body lying on its front? (a) a lower
+  hit (the pelvis or the thighs from behind, the way a sweep downs someone), (b) a lighter
+  shove that topples rather than throws (under 3 m/s), (c) the body started prone by the test
+  (a fixture pose, as task C's "contorted and side-lying starts"), or (d) the legs held stiffer in
+  the first moments of a fall (the hips folding instead of the whole body turning). Once that is
+  chosen: the front rise (the knees patch, or the kneel-and-lunge patch), then the settle stage
+  (`docs/wip/np-settle-stage.patch`) and the task C tests.
+
 ### Claude, 2026-11-20 (item 1, the running fix: second pass, `docs/wip/np-running-seed.patch`)
 
 **Status: not pushed; 42 of 45 New Physics tests pass with the patch (on f78008c), both running
