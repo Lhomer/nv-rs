@@ -40,6 +40,7 @@ pub mod gun_velocity;
 pub mod gunplay;
 pub mod half_loaded_move;
 pub mod hit_force;
+pub mod hitch_log;
 pub mod item_details;
 pub mod knockdown;
 pub mod menu_tiles;
@@ -62,6 +63,7 @@ pub mod range_cells;
 mod range_floor;
 mod range_save;
 mod range_watch;
+pub mod report_place;
 #[cfg(test)]
 pub(crate) mod rig_fixture;
 pub mod room_events;

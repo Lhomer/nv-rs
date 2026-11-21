@@ -89,6 +89,10 @@ pub(crate) struct Buf {
     /// The game released it (or made another in its place): the sun shadows let go of what they
     /// keep of it, however many places hold it.
     pub(crate) released: AtomicBool,
+    /// The game's buffers made by this device before it, plus one (0: a list of the device's
+    /// own): the same in every replay of one command file, so the per-draw digests
+    /// ([`Device::record_draw_digests`]) tell which buffer a draw read, not only its handle.
+    pub(crate) seq: u64,
 }
 
 impl Buf {
@@ -149,6 +153,72 @@ enum Obj {
     Shader(Arc<Shader>),
     Decl(Arc<Decl>),
     Query(Query),
+}
+
+/// The game's objects by handle, with the textures and buffers also in small maps of their own
+/// for `SetTexture`, `SetStreamSource` and `SetIndices` ([`Device::texture_of`],
+/// [`Device::buffer_of`]): an entry of the whole map is 80 bytes and the look-up of each set
+/// missed the cache on it; theirs are 16 (the same handle, the same object, a fifth of the
+/// memory walked). Every insert and remove goes through here, so the small maps hold exactly the
+/// whole map's textures and buffers.
+#[derive(Default)]
+struct Objects {
+    all: Map<Handle, Obj>,
+    textures: Map<Handle, Arc<Tex>>,
+    buffers: Map<Handle, Arc<Buf>>,
+}
+
+impl Objects {
+    fn get(&self, h: &Handle) -> Option<&Obj> {
+        self.all.get(h)
+    }
+
+    fn texture(&self, h: Handle) -> Option<&Arc<Tex>> {
+        self.textures.get(&h)
+    }
+
+    fn buffer(&self, h: Handle) -> Option<&Arc<Buf>> {
+        self.buffers.get(&h)
+    }
+
+    /// A buffer's object and its bytes kept here, to write them.
+    fn buffer_bytes_mut(&mut self, h: Handle) -> Option<(&Arc<Buf>, &mut Vec<u8>)> {
+        match self.all.get_mut(&h) {
+            Some(Obj::Buffer(b, shadow)) => Some((b, shadow)),
+            _ => None,
+        }
+    }
+
+    fn query_mut(&mut self, h: Handle) -> Option<&mut Query> {
+        match self.all.get_mut(&h) {
+            Some(Obj::Query(q)) => Some(q),
+            _ => None,
+        }
+    }
+
+    fn insert(&mut self, h: Handle, o: Obj) -> Option<Obj> {
+        match &o {
+            Obj::Texture(t, _) => {
+                self.textures.insert(h, t.clone());
+                self.buffers.remove(&h);
+            }
+            Obj::Buffer(b, _) => {
+                self.buffers.insert(h, b.clone());
+                self.textures.remove(&h);
+            }
+            _ => {
+                self.textures.remove(&h);
+                self.buffers.remove(&h);
+            }
+        }
+        self.all.insert(h, o)
+    }
+
+    fn remove(&mut self, h: &Handle) -> Option<Obj> {
+        self.textures.remove(h);
+        self.buffers.remove(h);
+        self.all.remove(h)
+    }
 }
 
 /// A query (`CreateQuery`): an event's answer comes from the model; an occlusion query counts
@@ -352,6 +422,41 @@ type GroupKey = Vec<(u32, u8, u64, Option<SamplerKey>)>;
 struct VertexLink {
     inputs: Vec<wgsl::Input>,
     attributes: [Vec<wgpu::VertexAttribute>; 8],
+}
+
+/// What a draw resolves from the device's state before it records anything
+/// ([`Device::draw_resolved`]): its two shaders (and whether each is a fixed-function one), the
+/// declaration and the vertex link, the samplers, the depth surface's facts,
+/// the alpha to coverage switch and the pipeline key's fields that come from the state alone.
+///
+/// `NV_WGPU_DRAW_RECORDS` (on unless `0`): the last draw's is kept and used again while nothing it
+/// was resolved from changed. Two counters say so: [`Device::state_gen`] (shaders, declaration,
+/// render and texture-stage states, targets, and every command not known to leave them alone) and
+/// [`Device::tex_gen`] (textures and sampler states: the samplers' filtering and the bind groups).
+/// What a draw reads besides (its streams, indices, viewport, scissor, the occlusion count, the sun
+/// shadows' switch) is read at each draw as before.
+#[derive(Clone)]
+struct DrawRecord {
+    state_gen: u64,
+    tex_gen: u64,
+    vs: Arc<Shader>,
+    ps: Arc<Shader>,
+    ffp_vs: bool,
+    ffp_ps: bool,
+    decl: Arc<Decl>,
+    link: Arc<VertexLink>,
+    samplers: Bindings,
+    /// A texture it samples is one of its colour targets: each draw samples a copy made just
+    /// before it ([`Device::copy_for_sampling`]), so its groups are made at each draw.
+    copies: bool,
+    /// The depth surface's wgpu and Direct3D 9 format, samples, width and height.
+    depth: Option<(wgpu::TextureFormat, u32, u32, u32, u32)>,
+    /// The key; its strides, index size, filtering, occlusion count and sun fields are set at each
+    /// draw.
+    key: PipeKey,
+    /// The stage groups were set for these samplers and textures ([`Device::stage_group`]) by a
+    /// draw of this record: a later one leaves them as they are.
+    groups: bool,
 }
 
 /// What making pipelines cost since the last report (printed with the present counters every
@@ -777,7 +882,7 @@ pub struct Device {
     adapter_name: String,
     /// The game's window and its swap chain ([`crate::window::Window`]), with [`Output::Window`].
     surface: Option<crate::window::Window>,
-    objects: Map<Handle, Obj>,
+    objects: Objects,
     back_buffers: Vec<Handle>,
     auto_depth: Handle,
     st: State,
@@ -836,6 +941,14 @@ pub struct Device {
     empty_groups: [Option<wgpu::BindGroup>; 2],
     last_link: Option<((u64, u64), Arc<VertexLink>)>,
     vertex_links: Map<(u64, u64), Arc<VertexLink>>,
+    /// [`DrawRecord`]: the switch, the two counters and the last draw's record.
+    draw_records: bool,
+    state_gen: u64,
+    tex_gen: u64,
+    record: Option<DrawRecord>,
+    /// Each draw's digest of what it gave wgpu ([`Device::record_draw_digests`], tests and the
+    /// replay example; none in play).
+    draw_digests: Option<Vec<u64>>,
     binds: PassBinds,
     /// The driver's compiled pipelines kept between runs ([`cache`]), where the backend has them.
     pipeline_cache: Option<cache::PipelineCacheFile>,
@@ -924,6 +1037,8 @@ pub struct Device {
     /// depth stand-ins that hold them are dropped then ([`Device::purge_destroyed`]).
     destroyed: HashSet<u64>,
     next_id: u64,
+    /// The game's buffers this device has made ([`Buf::seq`]).
+    buffers_made: u64,
     presents: u64,
     /// The window's frames presented ([`Device::frames_shown`]).
     frames_shown: u64,
@@ -1036,6 +1151,9 @@ struct SunState {
     /// A far caster came or went since its map was last started, and the present it was.
     far_dirty: bool,
     far_last: u64,
+    /// A far place may be moving (paired as a move since the far cache last had none): only then
+    /// is the far cache passed over for places that stood still (review of #843).
+    far_moving: bool,
     /// The vertex blocks' headers the casters use (a few: the integer and boolean registers).
     headers: Vec<Vec<u8>>,
     /// The integer and boolean registers of the last caster and their header's place.
@@ -1212,6 +1330,7 @@ impl SunState {
             far_maps: 0,
             far_dirty: false,
             far_last: 0,
+            far_moving: false,
             headers: Vec::new(),
             last_regs: None,
             moving: 0,
@@ -1546,7 +1665,7 @@ impl Device {
             adapter: adapter.clone(),
             adapter_name,
             surface: None,
-            objects: Map::default(),
+            objects: Objects::default(),
             back_buffers: Vec::new(),
             auto_depth: 0,
             st: State {
@@ -1608,6 +1727,11 @@ impl Device {
             empty_groups: [None, None],
             last_link: None,
             vertex_links: Map::default(),
+            draw_records: std::env::var("NV_WGPU_DRAW_RECORDS").map_or(true, |v| v.trim() != "0"),
+            state_gen: 0,
+            tex_gen: 0,
+            record: None,
+            draw_digests: None,
             binds: PassBinds::default(),
             made_on_draws: 0,
             list_offers: 0,
@@ -1666,6 +1790,7 @@ impl Device {
             target_copies: Map::default(),
             destroyed: HashSet::new(),
             next_id: 1,
+            buffers_made: 0,
             presents: 0,
             frames_shown: 0,
             fps_meter: Arc::default(),
@@ -2062,17 +2187,11 @@ impl Device {
     }
 
     fn texture_of(&self, h: Handle) -> Option<Arc<Tex>> {
-        match self.objects.get(&h) {
-            Some(Obj::Texture(t, _)) => Some(t.clone()),
-            _ => None,
-        }
+        self.objects.texture(h).cloned()
     }
 
     fn buffer_of(&self, h: Handle) -> Option<Arc<Buf>> {
-        match self.objects.get(&h) {
-            Some(Obj::Buffer(b, _)) => Some(b.clone()),
-            _ => None,
-        }
+        self.objects.buffer(h).cloned()
     }
 
     // Resources.
@@ -2191,6 +2310,10 @@ impl Device {
             uploads: AtomicU64::new(0),
             id: Buf::next_id(),
             released: AtomicBool::new(false),
+            seq: {
+                self.buffers_made += 1;
+                self.buffers_made
+            },
         });
         if let Some(Obj::Buffer(old, _)) = self
             .objects
@@ -2631,7 +2754,7 @@ impl Device {
         offset: u32,
         data: &d3d9_stream::Data<'_>,
     ) {
-        let Some(Obj::Buffer(b, shadow)) = self.objects.get_mut(&buffer) else {
+        let Some((b, shadow)) = self.objects.buffer_bytes_mut(buffer) else {
             return;
         };
         let b = b.clone();
@@ -2845,6 +2968,7 @@ impl Device {
             if self.st.a2m1 != on {
                 self.st.a2m1 = on;
                 self.st.touch(1);
+                self.state_gen += 1;
             }
             return;
         }
@@ -2856,6 +2980,7 @@ impl Device {
             return;
         }
         *s = value;
+        self.state_gen += 1;
         match state as usize {
             // The pixel block's alpha test and alpha to coverage; the vertex block's clip planes.
             rs::ALPHATESTENABLE | rs::ALPHAREF | rs::ALPHAFUNC | RS_ADAPTIVETESS_Y => {
@@ -2890,6 +3015,7 @@ impl Device {
                 return;
             }
             *s = value;
+            self.tex_gen += 1;
             // Of the sampler states only the LOD bias is in the stage's block; the rest go into
             // the draw's sampler, made from them at the draw.
             if kind as usize == state::ss::MIPMAPLODBIAS {
@@ -2908,6 +3034,7 @@ impl Device {
             if self.st.bound.textures[slot] == texture {
                 return;
             }
+            self.tex_gen += 1;
             let t = if texture == 0 {
                 None
             } else {
@@ -2917,6 +3044,13 @@ impl Device {
             let fix = |t: &Option<Arc<Tex>>| t.as_ref().map_or(0, |t| t.format.fix);
             if fix(&t) != fix(&self.st.textures[slot]) {
                 self.st.touch(usize::from(slot < 16));
+            }
+            // A draw without a pixel shader takes a fixed-function one made for its stages'
+            // texture kinds ([`ffp::PixelKey`]: cube or not): a change of kind is a change of the
+            // draw's shader, not only of its groups ([`DrawRecord`]).
+            let cube = |t: &Option<Arc<Tex>>| t.as_ref().is_some_and(|t| t.cube);
+            if cube(&t) != cube(&self.st.textures[slot]) {
+                self.state_gen += 1;
             }
             self.st.textures[slot] = t;
             self.st.bound.textures[slot] = texture;
@@ -2928,6 +3062,7 @@ impl Device {
         if self.st.bound.shaders[usize::from(pixel)] == shader {
             return;
         }
+        self.state_gen += 1;
         self.st.bound.shaders[usize::from(pixel)] = shader;
         let s = match self.objects.get(&shader) {
             Some(Obj::Shader(s)) => Some(s.clone()),
@@ -2944,6 +3079,7 @@ impl Device {
         if self.st.bound.declaration == declaration {
             return;
         }
+        self.state_gen += 1;
         self.st.bound.declaration = declaration;
         self.st.fvf = None;
         self.st.decl = match self.objects.get(&declaration) {
@@ -2957,6 +3093,7 @@ impl Device {
     /// binding is forgotten, so setting the same declaration again sets it). A code without a
     /// position (0 included) leaves no layout, and a draw without one is skipped.
     pub(crate) fn set_fvf(&mut self, fvf: u32) {
+        self.state_gen += 1;
         self.st.bound.declaration = UNKNOWN;
         self.st.fvf = Some(fvf);
         self.st.decl = ffp::fvf_elements(fvf).map(|elements| {
@@ -2984,8 +3121,41 @@ impl Device {
             .get_mut(stage as usize)
             .and_then(|s| s.get_mut(state as usize))
         {
-            *s = value;
+            if *s != value {
+                *s = value;
+                self.state_gen += 1;
+            }
         }
+    }
+
+    /// A command that may change what a draw is resolved from ([`DrawRecord`]): every one but the
+    /// draws and the sets that count their own changes ([`crate::WgpuBackend`]'s dispatch).
+    pub(crate) fn state_changed(&mut self) {
+        self.state_gen += 1;
+    }
+
+    /// Turns [`DrawRecord`] on or off (`NV_WGPU_DRAW_RECORDS`; tests and the replay example
+    /// compare the two). The next draw is resolved afresh either way.
+    pub fn set_draw_records(&mut self, on: bool) {
+        self.draw_records = on;
+        self.record = None;
+    }
+
+    /// From now on each draw notes a digest of what it gave wgpu: its pipeline key, both stages'
+    /// group keys, the register blocks' places, its vertex and index buffers (by the game's
+    /// handles, offsets and strides), viewport, scissor, stencil reference, blend factor, the
+    /// sun shadows' switch and its own arguments ([`Device::take_draw_digests`]). For tests and
+    /// the replay example: nothing is noted in play.
+    pub fn record_draw_digests(&mut self, on: bool) {
+        self.draw_digests = on.then(Vec::new);
+    }
+
+    /// The digests noted since the last call ([`Device::record_draw_digests`]).
+    pub fn take_draw_digests(&mut self) -> Vec<u64> {
+        self.draw_digests
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// `Set*ShaderConstant*` (`kind`: vertex float, int, bool, then the same for the pixel stage)
@@ -4513,6 +4683,109 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         s
     }
 
+    /// The draw's [`DrawRecord`]: the last draw's while [`Device::state_gen`] is the same (its
+    /// samplers resolved again when only [`Device::tex_gen`] moved), else made from the state as
+    /// each draw made it before records. None for a draw that is skipped (no declaration, no
+    /// shader the fixed-function stand-ins cover, no target), each said once as before.
+    fn draw_resolved(&mut self) -> Option<DrawRecord> {
+        if self.draw_records {
+            if let Some(r) = self
+                .record
+                .as_ref()
+                .filter(|r| r.state_gen == self.state_gen)
+            {
+                if r.tex_gen == self.tex_gen {
+                    return Some(r.clone());
+                }
+                let mut r = r.clone();
+                r.samplers = self.sampler_bindings(&r.vs, &r.ps);
+                r.copies = self.samples_a_target(&r.samplers);
+                r.tex_gen = self.tex_gen;
+                r.groups = false;
+                self.record = Some(r.clone());
+                return Some(r);
+            }
+        }
+        let Some(decl) = self.st.decl.clone() else {
+            self.warn("a draw without a vertex declaration or FVF: skipped");
+            return None;
+        };
+        // The game's shaders, or for a stage without one the fixed-function shader of the state
+        // ([`ffp`]); a fixed-function draw it does not cover is skipped (printed once a layout).
+        let (vs, ps, ffp_vs, ffp_ps) = self.draw_shaders(&decl)?;
+        if self.st.rt.iter().all(|r| r.is_none()) && self.st.ds.is_none() {
+            return None;
+        }
+        // The vertex inputs: each shader input from the declaration's element of its usage
+        // (linked once for each vertex shader and declaration).
+        let link = self.vertex_link(&vs, &decl);
+        let samplers = self.sampler_bindings(&vs, &ps);
+        // The depth surface's format (wgpu's, Direct3D 9's), samples and size.
+        let depth =
+            self.usable_depth_with(|d| (d.format.wgpu, d.format.d3d, d.samples, d.width, d.height));
+        let atoc = self.atoc();
+        let samples = self
+            .st
+            .rt
+            .iter()
+            .flatten()
+            .next()
+            .map(|s| s.samples)
+            .or(depth.map(|d| d.2))
+            .unwrap_or(1);
+        // The fields of the draw's own (strides, topology, index size, filtering, count, sun) are
+        // set at each draw.
+        let key = PipeKey {
+            vs: vs.id,
+            ps: ps.id,
+            decl: decl.id,
+            strides: [0; 8],
+            topology: 0,
+            index32: false,
+            colours: std::array::from_fn(|i| {
+                self.st.rt[i]
+                    .as_ref()
+                    .map(|s| (s.format.wgpu, s.format.opaque))
+            }),
+            depth: depth.map(|d| d.0),
+            states: PIPELINE_STATES.map(|s| self.st.rs[s]),
+            samples,
+            filterable: 0,
+            atoc,
+            count: false,
+            clip: self.clip_link(samples),
+            sun: false,
+        };
+        let r = DrawRecord {
+            state_gen: self.state_gen,
+            tex_gen: self.tex_gen,
+            copies: self.samples_a_target(&samplers),
+            vs,
+            ps,
+            ffp_vs,
+            ffp_ps,
+            decl,
+            link,
+            samplers,
+            depth,
+            key,
+            groups: false,
+        };
+        if self.draw_records {
+            self.record = Some(r.clone());
+        }
+        Some(r)
+    }
+
+    /// Whether a texture `samplers` read is one of the colour targets ([`DrawRecord::copies`]).
+    fn samples_a_target(&self, samplers: &Bindings) -> bool {
+        samplers.as_slice().iter().any(|&(_, slot)| {
+            self.st.textures[slot]
+                .as_ref()
+                .is_some_and(|t| self.is_colour_target(t))
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw(
         &mut self,
@@ -4533,24 +4806,26 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             self.skipped += 1;
             return;
         };
-        let Some(decl) = self.st.decl.clone() else {
-            self.warn("a draw without a vertex declaration or FVF: skipped");
+        // The shaders, declaration, link, samplers and the key's state fields: the last draw's
+        // again while nothing they come from changed ([`DrawRecord`]), else resolved afresh.
+        let Some(rec) = self.draw_resolved() else {
             self.skipped += 1;
             return;
         };
-        // The game's shaders, or for a stage without one the fixed-function shader of the state
-        // ([`ffp`]); a fixed-function draw it does not cover is skipped (printed once a layout).
-        let Some((vs, ps, ffp_vs, ffp_ps)) = self.draw_shaders(&decl) else {
-            self.skipped += 1;
-            return;
-        };
-        if self.st.rt.iter().all(|r| r.is_none()) && self.st.ds.is_none() {
-            self.skipped += 1;
-            return;
-        }
-        // The vertex inputs: each shader input from the declaration's element of its usage
-        // (linked once for each vertex shader and declaration).
-        let link = self.vertex_link(&vs, &decl);
+        let DrawRecord {
+            vs,
+            ps,
+            ffp_vs,
+            ffp_ps,
+            decl,
+            link,
+            samplers,
+            copies: any_copies,
+            depth,
+            mut key,
+            groups: groups_set,
+            ..
+        } = rec;
         let attributes = &link.attributes;
         let mut strides = [0u32; 8];
         for (k, a) in attributes.iter().enumerate() {
@@ -4562,16 +4837,12 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                 };
             }
         }
-        let samplers = self.sampler_bindings(&vs, &ps);
         let samplers = samplers.as_slice();
         let filterable = samplers
             .iter()
             .enumerate()
             .fold(0u32, |m, (i, &((_, _, f), _))| m | (u32::from(f) << i));
         let index32 = indexed && self.st.indices.as_ref().is_some_and(|b| b.index32);
-        // The depth surface's format (wgpu's, Direct3D 9's), samples and size.
-        let depth =
-            self.usable_depth_with(|d| (d.format.wgpu, d.format.d3d, d.samples, d.width, d.height));
         // The sun shadows' variant of a lit pixel shader, on the scene while this frame has the
         // sun's lookup ([`Device::sun_lookup`]), before its depth-only clear: the first-person
         // arms and weapon after it are drawn with their own camera, which the lookup does not
@@ -4584,37 +4855,14 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                     && s.scene_depth.is_some()
                     && s.scene_depth == self.st.ds.as_ref().map(|d| d.id)
             });
-        let atoc = self.atoc();
-        let samples = self
-            .st
-            .rt
-            .iter()
-            .flatten()
-            .next()
-            .map(|s| s.samples)
-            .or(depth.map(|d| d.2))
-            .unwrap_or(1);
-        let mut key = PipeKey {
-            vs: vs.id,
-            ps: ps.id,
-            decl: decl.id,
-            strides,
-            topology: kind as u8,
-            index32,
-            colours: std::array::from_fn(|i| {
-                self.st.rt[i]
-                    .as_ref()
-                    .map(|s| (s.format.wgpu, s.format.opaque))
-            }),
-            depth: depth.map(|d| d.0),
-            states: PIPELINE_STATES.map(|s| self.st.rs[s]),
-            samples,
-            filterable,
-            atoc,
-            count: self.counting.is_some(),
-            clip: self.clip_link(samples),
-            sun: use_sun,
-        };
+        let atoc = key.atoc;
+        let samples = key.samples;
+        key.strides = strides;
+        key.topology = kind as u8;
+        key.index32 = index32;
+        key.filterable = filterable;
+        key.count = self.counting.is_some();
+        key.sun = use_sun;
         // A variant is made on a thread of its own the first time (its shaders take the driver a
         // while): until it is there, the draw takes the plain pipeline (no hitch, no shadow).
         if key.sun && !self.pipelines.contains_key(&key) {
@@ -4783,32 +5031,48 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         // samples a copy of that texture instead, made just before it
         // ([`Device::copy_for_sampling`]): what the target held before this draw.
         let mut copies: [Option<Arc<Tex>>; 20] = Default::default();
-        for &(_, slot) in samplers {
-            let t = match &self.st.textures[slot] {
-                Some(t) if self.is_colour_target(t) => t.clone(),
-                _ => continue,
-            };
-            copies[slot] = self.copy_for_sampling(&t);
+        // The record's groups are set already (its textures and samplers unchanged since a draw of
+        // it set them, and none of them a target: [`DrawRecord::groups`]): nothing to look up.
+        let groups_kept = self.draw_records
+            && groups_set
+            && !any_copies
+            && self.last_groups.iter().all(|(_, g)| g.is_some());
+        if !groups_kept {
+            for &(_, slot) in samplers {
+                let t = match &self.st.textures[slot] {
+                    Some(t) if self.is_colour_target(t) => t.clone(),
+                    _ => continue,
+                };
+                copies[slot] = self.copy_for_sampling(&t);
+            }
+            // The textures and samplers: the last draw's bind group again, else the cache's.
+            let mut group_key = [(0u32, 0u8, 0u64, None::<SamplerKey>); 20];
+            for (g, &((binding, dim, filterable), slot)) in group_key.iter_mut().zip(samplers) {
+                let tex_id = copies[slot]
+                    .as_ref()
+                    .or(self.st.textures[slot].as_ref())
+                    .map_or(0, |t| t.id);
+                let sk = SamplerKey::new(&self.st.samplers[slot], filterable);
+                *g = (binding, dim, tex_id, Some(sk));
+            }
+            let group_key = &group_key[..samplers.len()];
+            // Each stage's own group ([`wgsl::sampler_group`]): the vertex shader's samplers come
+            // first in the pair's list ([`Device::sampler_bindings`]).
+            let vertex = samplers
+                .iter()
+                .take_while(|((b, _, _), _)| *b >= 32)
+                .count();
+            self.stage_group(0, &group_key[vertex..], &samplers[vertex..], &copies);
+            self.stage_group(1, &group_key[..vertex], &samplers[..vertex], &copies);
+            let (state_gen, tex_gen) = (self.state_gen, self.tex_gen);
+            if let Some(r) = self
+                .record
+                .as_mut()
+                .filter(|r| r.state_gen == state_gen && r.tex_gen == tex_gen)
+            {
+                r.groups = true;
+            }
         }
-        // The textures and samplers: the last draw's bind group again, else the cache's.
-        let mut group_key = [(0u32, 0u8, 0u64, None::<SamplerKey>); 20];
-        for (g, &((binding, dim, filterable), slot)) in group_key.iter_mut().zip(samplers) {
-            let tex_id = copies[slot]
-                .as_ref()
-                .or(self.st.textures[slot].as_ref())
-                .map_or(0, |t| t.id);
-            let sk = SamplerKey::new(&self.st.samplers[slot], filterable);
-            *g = (binding, dim, tex_id, Some(sk));
-        }
-        let group_key = &group_key[..samplers.len()];
-        // Each stage's own group ([`wgsl::sampler_group`]): the vertex shader's samplers come
-        // first in the pair's list ([`Device::sampler_bindings`]).
-        let vertex = samplers
-            .iter()
-            .take_while(|((b, _, _), _)| *b >= 32)
-            .count();
-        self.stage_group(0, &group_key[vertex..], &samplers[vertex..], &copies);
-        self.stage_group(1, &group_key[..vertex], &samplers[..vertex], &copies);
         // Vertices from DrawPrimitiveUP go into the batch's ring. The register ring's room is made
         // first: a send for it after the bytes are placed (in [`Device::write_blocks`]) would hand
         // them to the batch before the draw's own, and the draw would read another draw's vertices
@@ -5046,6 +5310,37 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                 pass.draw_indexed(start..start + n, base_vertex, 0..1);
             }
             None => pass.draw(start..start + n, 0..1),
+        }
+        // What this draw gave wgpu, for the tests' and the replay example's compares
+        // ([`Device::record_draw_digests`]); one test of an option in play.
+        if let Some(digests) = self.draw_digests.as_mut() {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            if let Some((k, _, planes)) = &self.last_pipeline {
+                k.hash(&mut h);
+                planes.hash(&mut h);
+            }
+            for (g, _) in &self.last_groups {
+                g.hash(&mut h);
+            }
+            self.blocks.hash(&mut h);
+            for (k, a) in attributes.iter().enumerate() {
+                if !a.is_empty() {
+                    let seq = self.st.streams[k].buffer.as_ref().map(|b| b.seq);
+                    (k, self.st.bound.streams[k], seq).hash(&mut h);
+                }
+            }
+            indexed
+                .then(|| {
+                    (
+                        self.st.bound.indices,
+                        self.st.indices.as_ref().map(|b| b.seq),
+                    )
+                })
+                .hash(&mut h);
+            (kind, base_vertex, start, n, up_offset, use_sun).hash(&mut h);
+            (stencil_ref, bf, scissor, viewport).hash(&mut h);
+            digests.push(h.finish());
         }
         // The sun shadows' light list ([`sun_shadow`]): off (or no sun last frame), only this test.
         let caster = self
@@ -7384,6 +7679,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                     uploads: AtomicU64::new(0),
                     id: Buf::next_id(),
                     released: AtomicBool::new(false),
+                    seq: 0,
                 }),
                 count,
             }
@@ -7851,6 +8147,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         }
         // The casters on the scene into the cache.
         let mut came = crate::fxhash::Set::<sun_shadow::GeoKey>::default();
+        // The geometries with a new far place this frame (for its moves).
+        let mut far_came = crate::fxhash::Set::<sun_shadow::GeoKey>::default();
         // The far map where it stands now (with the sun it was last drawn for), for which far
         // casters it takes.
         let far_here = sun_shadow::far_place(
@@ -7867,11 +8165,15 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         let mut step = 0.0f64;
         let mut skin_places = std::mem::take(&mut sun.skin_now);
         skin_places.clear();
+        // The ranges the game drew from each pair of buffers this frame (report 012: an LOD
+        // block's segments).
+        let mut ranges_drawn = sun_shadow::RangesDrawn::default();
         for c in std::mem::take(&mut sun.lists.casters) {
             if c.depth != scene {
                 continue;
             }
             on_scene += 1;
+            ranges_drawn.insert(&c.key);
             let world = sun_shadow::world_of(&c.draw.mvp(), frustum, axes, position);
             // A character, as posed in that frame: cast this frame, never kept (its next pose comes
             // with its next draw), never in the far map.
@@ -7918,10 +8220,15 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                     ];
                     let slack =
                         sun_shadow::far_slack((o[0] * o[0] + o[1] * o[1] + o[2] * o[2]).sqrt());
-                    sun.far
+                    if sun
+                        .far
                         .see_within(c.key.clone(), world, c.bounds, now, false, slack, || {
                             draw.clone()
-                        });
+                        })
+                        .is_some()
+                    {
+                        far_came.insert(c.key.clone());
+                    }
                 }
             }
             // Not a caster: the sky's dome and clouds, and the far land's blocks (whole spheres round
@@ -7947,8 +8254,10 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             }
         }
         // Let go: what was written or released since; a moving place's old places; what the game
-        // would have drawn (wholly in view) and has not for a few frames; what is too far to cast
-        // into any map. A place that came near a place of the same geometry drawn the frame before
+        // would have drawn (wholly in view) and has not for a few frames, or a range of buffers
+        // the game still draws other ranges of, whose sphere reaches into the view or round the
+        // camera (report 012: an LOD block's piece turned off for a loaded cell,
+        // [`sun_shadow::segment_gone`]); what is too far to cast into any map. A place that came near a place of the same geometry drawn the frame before
         // and not in this one moves (decided place by place, [`sun_shadow::Cache::mark_moves`]):
         // kept out of the still maps (drawn each frame over a copy of them), so it does not redraw
         // them.
@@ -7969,6 +8278,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             std::array::from_fn(|k| axes[k][0] * d[0] + axes[k][1] * d[1] + axes[k][2] * d[2])
         };
         let (near, far) = (f64::from(view.near), f64::from(s[sun_shadow::CASCADES]));
+        let view_far = f64::from(view.far);
         sun.cache.mark_moves(
             now,
             &came,
@@ -7999,7 +8309,15 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                 distance - i.radius > reach,
                 i.moved_on(now)
                     || (now - i.seen > sun_shadow::GRACE
-                        && sun_shadow::wholly_in_view(frustum, v, i.radius, near, far)),
+                        && (sun_shadow::wholly_in_view(frustum, v, i.radius, near, far)
+                            || sun_shadow::segment_gone(
+                                frustum,
+                                v,
+                                i.radius,
+                                near,
+                                view_far,
+                                ranges_drawn.others(k),
+                            ))),
             ];
             match gone.iter().position(|&g| g) {
                 Some(n) => {
@@ -8038,22 +8356,48 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         }
         // The far map's casters let go: written or released, two steps past its square, or not
         // drawn for a while where the game would have drawn them (wholly in view; or partly, when
-        // the camera stands inside their sphere: a land block under cells loaded since). No moves
-        // are paired here (a far place that changed is a new still place, its old one goes).
-        let view_far = f64::from(view.far);
+        // the camera stands inside their sphere: a land block under cells loaded since), or moved on.
+        // A far place that came near a place of the same geometry drawn the frame before and not in
+        // this one is that place moved (paired as the cascades', [`sun_shadow::Cache::mark_moves`]):
+        // the old place goes at once, so a large caster moving (radius [`sun_shadow::FAR_MIN_RADIUS`]
+        // up) leaves no trail of shadows in the far map, which casts it from its latest place; one
+        // that stood still a while is still again (review of #817).
+        let far_moved = sun.far.mark_moves(
+            now,
+            &far_came,
+            MAX_SUN_MOVING,
+            sun_shadow::mover(frustum, position, axes, near, view_far),
+        );
+        sun.far_moving |= far_moved > 0;
+        if sun.far_moving {
+            sun.far.settle(now, sun_shadow::SETTLE);
+            sun.far_moving = sun.far.iter().any(|i| i.moving);
+        }
         let mut far_changed = sun.far.iter().any(|i| i.born == now);
-        for _ in sun.far.sweep(|_, i| {
+        for _ in sun.far.sweep(|k, i| {
             if i.seen == now {
                 return false;
             }
             let v = in_view(i.centre);
             let inside = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() < i.radius;
             i.payload.stale()
+                // (A moving far place merely out of view is kept as a still one: review of #843.)
+                || i.left
                 || !far_here.touches(i.centre, i.radius + 2.0 * far_step)
                 || (now - i.seen > sun_shadow::GRACE
                     && (sun_shadow::wholly_in_view(frustum, v, i.radius, near, view_far)
                         || (inside
-                            && sun_shadow::partly_in_view(frustum, v, i.radius, near, view_far))))
+                            && sun_shadow::partly_in_view(frustum, v, i.radius, near, view_far))
+                        // An LOD block's piece turned off for a loaded cell, as in the cascades
+                        // (review of #844: the far map went on casting it).
+                        || sun_shadow::segment_gone(
+                            frustum,
+                            v,
+                            i.radius,
+                            near,
+                            view_far,
+                            ranges_drawn.others(k),
+                        )))
         }) {
             far_changed = true;
         }
@@ -8135,6 +8479,11 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             redraw,
             (&sun.far, far_redraw.then_some(&far_map)),
             &sun.skinned,
+            sun_shadow::ShadowDepth {
+                position,
+                ahead: axes[2],
+                sine,
+            },
         );
         self.span_end(span);
         for (buffer, bytes) in writes {
@@ -8268,6 +8617,17 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
     #[doc(hidden)]
     pub fn sun_far_drawn(&self) -> Option<sun_shadow::Cascade> {
         self.sun.as_ref().and_then(|s| s.gpu.far_drawn)
+    }
+
+    /// Tests: the far map's kept places (world centre, radius, moving).
+    #[doc(hidden)]
+    pub fn sun_far_places(&self) -> Vec<([f64; 3], f64, bool)> {
+        self.sun.as_ref().map_or_else(Vec::new, |s| {
+            s.far
+                .iter()
+                .map(|i| (i.centre, i.radius, i.moving))
+                .collect()
+        })
     }
 
     /// Tests: how many times the sun shadows' far map was drawn (0 with them off).
@@ -8642,7 +9002,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             self.encoder()
                 .clear_buffer(&counts, u64::from(slot) * 4, Some(4));
             self.counting = Some((query, slot));
-            if let Some(Obj::Query(q)) = self.objects.get_mut(&query) {
+            if let Some(q) = self.objects.query_mut(query) {
                 q.slot = Some(slot);
                 q.result = None;
                 q.read = None;
@@ -8654,7 +9014,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                 self.counting = None;
             }
             let batch = self.batch;
-            if let Some(Obj::Query(q)) = self.objects.get_mut(&query) {
+            if let Some(q) = self.objects.query_mut(query) {
                 q.batch = batch;
                 q.result = None;
                 q.read = None;
@@ -8759,7 +9119,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                     });
                 });
                 let read = CountRead { buffer, state };
-                if let Some(Obj::Query(q)) = self.objects.get_mut(&query) {
+                if let Some(q) = self.objects.query_mut(query) {
                     q.read = Some(read.clone());
                 }
                 read
@@ -8786,13 +9146,13 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                 self.warn(format!(
                     "an occlusion count not read back ({e}): read again"
                 ));
-                if let Some(Obj::Query(q)) = self.objects.get_mut(&query) {
+                if let Some(q) = self.objects.query_mut(query) {
                     q.read = None;
                 }
                 return Some((S_FALSE, 0));
             }
         };
-        if let Some(Obj::Query(q)) = self.objects.get_mut(&query) {
+        if let Some(q) = self.objects.query_mut(query) {
             q.result = Some(n);
             q.read = None;
         }
@@ -11047,6 +11407,16 @@ fn capture(
 /// Makes a module from WGSL: read and checked once, by wgpu (naga's reader and validator, with
 /// the device's own capabilities); what it refuses, as text.
 fn create_module(device: &wgpu::Device, source: String) -> Result<wgpu::ShaderModule, String> {
+    // The hitch log's counts (`d3d9_stream::hitch`): a module made and its time, on whichever thread.
+    let started = std::time::Instant::now();
+    let made = create_module_here(device, source);
+    d3d9_stream::hitch::add(d3d9_stream::hitch::Count::Modules, 1);
+    d3d9_stream::hitch::add_time(d3d9_stream::hitch::Count::ModuleNs, started.elapsed());
+    made
+}
+
+/// [`create_module`]'s work.
+fn create_module_here(device: &wgpu::Device, source: String) -> Result<wgpu::ShaderModule, String> {
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
@@ -11060,6 +11430,20 @@ fn create_module(device: &wgpu::Device, source: String) -> Result<wgpu::ShaderMo
 
 /// Makes the pipeline `job` describes (with the driver's cache, where there is one).
 fn build_pipeline(
+    device: &wgpu::Device,
+    cache: Option<&wgpu::PipelineCache>,
+    job: &PipelineJob,
+) -> Result<wgpu::RenderPipeline, String> {
+    // The hitch log's counts (`d3d9_stream::hitch`): a pipeline made and its time, on whichever thread.
+    let started = std::time::Instant::now();
+    let made = build_pipeline_here(device, cache, job);
+    d3d9_stream::hitch::add(d3d9_stream::hitch::Count::Pipelines, 1);
+    d3d9_stream::hitch::add_time(d3d9_stream::hitch::Count::PipelineNs, started.elapsed());
+    made
+}
+
+/// [`build_pipeline`]'s work.
+fn build_pipeline_here(
     device: &wgpu::Device,
     cache: Option<&wgpu::PipelineCache>,
     job: &PipelineJob,

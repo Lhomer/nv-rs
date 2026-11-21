@@ -477,7 +477,14 @@ fn stream_of(r: &mut Real, this: u32) -> Option<Sink<'_>> {
 /// Records `cmd`, a call on the modelled device `this`, when the backend has its device.
 #[inline]
 fn record(e: &mut Engine, this: u32, cmd: Cmd<Data<'_>>) {
-    if let Some(mut s) = stream_of(real(e), this) {
+    record_in(real(e), this, cmd);
+}
+
+/// [`record`] for a model function that holds the backend's state already (`super::d3d9device`'s
+/// state sets in one pass): the same look-up of the device and the same sink.
+#[inline]
+pub(super) fn record_in(r: &mut Real, this: u32, cmd: Cmd<Data<'_>>) {
+    if let Some(mut s) = stream_of(r, this) {
         s.submit(cmd);
     }
 }
@@ -2094,6 +2101,7 @@ pub fn texture_created(
     let Some(mut s) = stream_of(r, this) else {
         return;
     };
+    engine_core::hitch::one(engine_core::hitch::Count::Textures);
     s.submit(Cmd::CreateTexture {
         device: this,
         texture,
@@ -2125,6 +2133,7 @@ pub fn cube_created(
     let Some(mut s) = stream_of(r, this) else {
         return;
     };
+    engine_core::hitch::one(engine_core::hitch::Count::Textures);
     s.submit(Cmd::CreateCubeTexture {
         device: this,
         texture,
@@ -2157,6 +2166,7 @@ pub fn surface_created(
     let Some(mut s) = stream_of(r, this) else {
         return;
     };
+    engine_core::hitch::one(engine_core::hitch::Count::Surfaces);
     s.submit(Cmd::CreateSurface {
         device: this,
         surface,
@@ -2240,6 +2250,10 @@ pub fn surface_unlocked(
         return false;
     };
     let read = |offset: u32, into: &mut [u8]| read_rows(mem, bits, pitch, row, offset, into);
+    engine_core::hitch::add(
+        engine_core::hitch::Count::TextureBytes,
+        u64::from(row) * u64::from(rows),
+    );
     s.submit(Cmd::UploadSurface {
         surface,
         row,
@@ -2274,6 +2288,7 @@ pub fn buffer_created(
     let Some(mut s) = stream_of(r, this) else {
         return;
     };
+    engine_core::hitch::one(engine_core::hitch::Count::Buffers);
     s.submit(Cmd::CreateBuffer {
         device: this,
         buffer,
@@ -2324,6 +2339,7 @@ pub fn buffer_unlocked(e: &mut Engine, buffer: u32, bits: u32, length: u32, mode
     let Some(mut s) = sink(r) else { return };
     let size = if size == 0 { length - offset } else { size };
     let read = |at: u32, into: &mut [u8]| mem.read(bits + offset + at, into);
+    engine_core::hitch::add(engine_core::hitch::Count::BufferBytes, u64::from(size));
     s.submit(Cmd::UploadBuffer {
         buffer,
         offset,
@@ -2345,6 +2361,7 @@ pub fn shader_created(e: &mut Engine, this: u32, shader: u32, pixel: bool, token
     // The tokens end with the end token: whole words (a stray tail padded, as the real call
     // reads words).
     let words = as_words(tokens);
+    engine_core::hitch::one(engine_core::hitch::Count::Shaders);
     s.submit(Cmd::CreateShader {
         device: this,
         shader,
@@ -2431,7 +2448,7 @@ pub fn set_constants(
     let held = crate::device_held(e);
     let mem = &e.mem;
     let g = crate::device_mut(&mut e.device, held);
-    let Some(mut s) = stream_of(&mut g.real, this) else {
+    let Some(s) = stream_of(&mut g.real, this) else {
         return;
     };
     let registers = super::d3d9resource::constant_registers(
@@ -2445,6 +2462,38 @@ pub fn set_constants(
     let Some(registers) = registers else {
         return set_constants_as_given(mem, s, this, kind, start, data, count);
     };
+    submit_registers(s, this, kind, start, count, registers);
+}
+
+/// The constant registers a set took, `registers` as the model holds them now (`count` of them
+/// from `start`), sent to the backend when it has the device `this` ([`set_constants`]'s
+/// command): for a model function that holds the bindings and the forwarding at once
+/// (`super::d3d9resource`'s constant sets in one pass).
+#[inline]
+pub(super) fn submit_constants(
+    r: &mut Real,
+    this: u32,
+    kind: u8,
+    start: u32,
+    count: u32,
+    registers: &[[u32; 4]],
+) {
+    if let Some(s) = stream_of(r, this) {
+        submit_registers(s, this, kind, start, count, registers);
+    }
+}
+
+/// [`set_constants`]'s command from the model's registers: a boolean register's first word,
+/// packed; 4 words a register otherwise.
+#[inline]
+fn submit_registers(
+    mut s: Sink<'_>,
+    this: u32,
+    kind: u8,
+    start: u32,
+    count: u32,
+    registers: &[[u32; 4]],
+) {
     if kind % 3 == 2 {
         // A boolean register keeps its word first: packed (at most 16 registers).
         let mut packed = [0u32; 16];
@@ -2883,6 +2932,7 @@ pub fn offscreen_created(
     let Some(mut s) = stream_of(r, this) else {
         return;
     };
+    engine_core::hitch::one(engine_core::hitch::Count::Surfaces);
     s.submit(Cmd::CreateOffscreenSurface {
         device: this,
         surface,
@@ -2969,6 +3019,55 @@ pub fn texture_set_lod(e: &mut Engine, texture: u32, lod: u32, model: u32) {
 // takes them only at those presents (counted from 1), so a short stretch can be taken every frame.
 // Nothing is read or made when `NV_SHOT` is unset; the game's state and the model are not touched.
 // ---------------------------------------------------------------------------------------------
+/// A host writes the place of every F12 report (`place.txt`): called each of its frames, so a
+/// report waits for the place from the session's first F12 on.
+pub fn report_place_writer() {
+    shot::place_writer();
+}
+
+/// Tests (the host's): an F12 report asked for, as the key asks it (without a report folder).
+#[doc(hidden)]
+pub fn report_ask_for_test() {
+    shot::ask_report();
+}
+
+/// Tests (the host's): the place the report asked for takes at a present now: none while it
+/// waits for one.
+#[doc(hidden)]
+pub fn report_take_place_for_test() -> Option<String> {
+    shot::take_report_place().ok()
+}
+
+/// Whether the F12 report asked for waits for its place (`place.txt`): the host's main loop then
+/// gives it with [`set_report_place`] between two of the game's frames.
+pub fn report_place_wanted() -> bool {
+    shot::place_wanted()
+}
+
+/// The place for the F12 report asked for, as plain lines (`place.txt` in the report's folder,
+/// and one line in the log).
+pub fn set_report_place(text: String) {
+    shot::set_place(text);
+}
+
+/// A hitch log line of this session (the host's `hitch_log`): kept for the F12 report's `hitches.txt` (the last
+/// [`shot::HITCHES_KEPT`]).
+pub fn note_report_hitch(line: String) {
+    shot::note_hitch(line);
+}
+
+/// The session's hitch totals for the report's `hitches.txt` (hitches, big ones, left out of the log by its cap), or
+/// none when the log is off (`NV_HITCH_LOG=0`).
+pub fn set_report_hitch_totals(totals: Option<(u64, u64, u64)>) {
+    shot::set_hitch_totals(totals);
+}
+
+/// The Presents submitted so far (the hitch log's loading-screen test, each frame): the stream's own count, read
+/// without the render thread's queue lock. None before the backend's stream.
+pub fn present_count(e: &mut Engine) -> Option<u32> {
+    real(e).stream.as_ref().map(|s| s.presents())
+}
+
 pub(super) mod shot {
     // Off Windows only the tests read most of this: the capture reads the real Direct3D 9.
     #![cfg_attr(not(windows), allow(dead_code))]
@@ -3101,8 +3200,170 @@ pub(super) mod shot {
     /// F12 on the window's thread: the next `Present` makes the report.
     pub(super) fn report_asked() {
         if report_dir().is_some() {
-            REPORT_ASKED.store(true, std::sync::atomic::Ordering::Relaxed);
+            ask_report();
         }
+    }
+
+    /// A report asked for: a place kept from an earlier one is dropped first (a place.txt must
+    /// never name where an earlier F12 was taken), then the report waits for its own.
+    pub(super) fn ask_report() {
+        PLACE.ask();
+        REPORT_ASKED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Tests: the place the report asked for takes now (as [`report_with`] does), the report
+    /// done when it gives one.
+    pub(super) fn take_report_place() -> Result<String, ()> {
+        let place = PLACE.take();
+        if place.is_ok() {
+            REPORT_ASKED.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        place
+    }
+
+    /// The place a report waits for (`place.txt`): the text the host wrote, whether a host
+    /// writes places at all, and the presents the report asked for has waited.
+    pub(super) struct PlaceWait {
+        place: std::sync::Mutex<Option<String>>,
+        writer: std::sync::atomic::AtomicBool,
+        waited: std::sync::atomic::AtomicU32,
+    }
+
+    /// The presents a report waits for its place at most (the host writes it between two of the
+    /// game's frames).
+    pub(super) const PLACE_WAIT: u32 = 8;
+
+    impl PlaceWait {
+        pub(super) const fn new() -> PlaceWait {
+            PlaceWait {
+                place: std::sync::Mutex::new(None),
+                writer: std::sync::atomic::AtomicBool::new(false),
+                waited: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+
+        /// A host writes the place for every report ([`PlaceWait::set`] when one waits): said
+        /// each of its frames, from its first on, so even the session's first F12 waits for it.
+        pub(super) fn writer(&self) {
+            self.writer
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// A new report is asked for: a place kept from before (one that came after an earlier
+        /// report went) is dropped and the wait starts again.
+        pub(super) fn ask(&self) {
+            if let Ok(mut p) = self.place.lock() {
+                *p = None;
+            }
+            self.waited.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Whether a report is `asked` for and has no place yet.
+        pub(super) fn wanted(&self, asked: bool) -> bool {
+            asked && self.place.lock().is_ok_and(|p| p.is_none())
+        }
+
+        /// The place for the report asked for (plain lines).
+        pub(super) fn set(&self, text: String) {
+            self.writer();
+            if let Ok(mut p) = self.place.lock() {
+                *p = Some(text);
+            }
+        }
+
+        /// The place to write now, or `Err(())` when the report should wait a present more for
+        /// it. With a host and no place after [`PLACE_WAIT`] presents, or with no host, the text
+        /// says why there is none.
+        pub(super) fn take(&self) -> Result<String, ()> {
+            use std::sync::atomic::Ordering::Relaxed;
+            let place = self.place.lock().ok().and_then(|mut p| p.take());
+            let waited = self.waited.load(Relaxed);
+            let writer = self.writer.load(Relaxed);
+            if place.is_none() && writer && waited < PLACE_WAIT {
+                self.waited.store(waited + 1, Relaxed);
+                return Err(());
+            }
+            self.waited.store(0, Relaxed);
+            Ok(place.unwrap_or_else(|| {
+                if writer {
+                    format!("place not given within {PLACE_WAIT} presents\n")
+                } else {
+                    "no place: nothing in this program writes it\n".to_string()
+                }
+            }))
+        }
+    }
+
+    /// The place of the report asked for.
+    static PLACE: PlaceWait = PlaceWait::new();
+
+    /// The hitch lines a report carries at most (the session's last ones).
+    pub(crate) const HITCHES_KEPT: usize = 1000;
+
+    /// The session's hitch lines (the last [`HITCHES_KEPT`]) and how many there were in all.
+    static HITCHES: Mutex<(std::collections::VecDeque<String>, u64)> =
+        Mutex::new((std::collections::VecDeque::new(), 0));
+
+    /// A hitch line of the session, kept for the next report.
+    pub(super) fn note_hitch(line: String) {
+        if let Ok(mut h) = HITCHES.lock() {
+            if h.0.len() >= HITCHES_KEPT {
+                h.0.pop_front();
+            }
+            h.0.push_back(line);
+            h.1 += 1;
+        }
+    }
+
+    /// The session's totals from the host's hitch log: (hitches, big ones, left out by the cap); none: the log off.
+    static HITCH_TOTALS: Mutex<Option<(u64, u64, u64)>> = Mutex::new(None);
+
+    pub(super) fn set_hitch_totals(totals: Option<(u64, u64, u64)>) {
+        if let Ok(mut t) = HITCH_TOTALS.lock() {
+            *t = totals;
+        }
+    }
+
+    /// `hitches.txt`'s text (Windows line ends): what the lines are and the session's totals, then the session's
+    /// lines, oldest first; with the log off, that it was off.
+    pub(super) fn hitches_text() -> String {
+        let Some((hitches, big, left_out)) = HITCH_TOTALS.lock().ok().and_then(|t| *t) else {
+            return "The hitch log was off in this session (NV_HITCH_LOG=0).\r\n".to_string();
+        };
+        let (lines, all) = HITCHES
+            .lock()
+            .map(|h| (h.0.iter().cloned().collect::<Vec<_>>(), h.1))
+            .unwrap_or_default();
+        let mut out = format!(
+            "Frames this session that took at least 8 ms (6 ms above 250 fps) and twice the typical frame: {hitches} \
+             in all, {big} of them 16 ms or more, {left_out} not written (at most 20 lines in any 10 s; a frame of \
+             16 ms or more is always written). {all} lines{}, oldest first.\r\n",
+            if all > lines.len() as u64 {
+                format!(", the last {} here", lines.len())
+            } else {
+                String::new()
+            }
+        );
+        for l in lines {
+            out += &l;
+            out += "\r\n";
+        }
+        out
+    }
+
+    /// A host writes the place of every report (called each of its frames).
+    pub(super) fn place_writer() {
+        PLACE.writer();
+    }
+
+    /// Whether a report is asked for and has no place yet (the host's main loop then writes it).
+    pub(super) fn place_wanted() -> bool {
+        PLACE.wanted(REPORT_ASKED.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// The place for the report asked for (plain lines).
+    pub(super) fn set_place(text: String) {
+        PLACE.set(text);
     }
 
     /// The first unused numbered folder under `dir`, made (`001`, `002`, ...).
@@ -3160,9 +3421,15 @@ pub(super) mod shot {
     /// [`report_at_present`] for any backend: `picture` gives the frame's pixels (rows top
     /// first, B, G, R, X), called only when a report was asked for.
     pub(crate) fn report_with(picture: impl FnOnce() -> Result<(u32, u32, Vec<u8>), String>) {
-        if !REPORT_ASKED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        if !REPORT_ASKED.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
+        // The place (`place.txt`): the host writes it between the game's frames; a few presents'
+        // wait for it, then the report says why it has none.
+        let Ok(place) = PLACE.take() else {
+            return;
+        };
+        REPORT_ASKED.store(false, std::sync::atomic::Ordering::Relaxed);
         let Some(folder) = report_dir().and_then(|dir| new_report_folder(dir)) else {
             eprintln!("F12: the report's folder could not be made");
             return;
@@ -3188,6 +3455,9 @@ pub(super) mod shot {
             folder.join("note.txt"),
             "Write here what went wrong and what you did just before it:\r\n\r\n",
         );
+        let _ = std::fs::write(folder.join("place.txt"), place.replace('\n', "\r\n"));
+        let _ = std::fs::write(folder.join("hitches.txt"), hitches_text());
+        eprintln!("F12: place: {}", place.trim_end().replace('\n', "; "));
         eprintln!("F12: report in {}", folder.display());
         #[cfg(windows)]
         #[link(name = "user32")]
@@ -4417,6 +4687,112 @@ mod tests {
             assert_eq!(Showing::of(Some(other), false), Showing::Activated);
             assert_eq!(Showing::of(Some(other), true), Showing::Background);
         }
+    }
+
+    /// The session's first F12 waits for its place: the host said it writes places (each of its
+    /// frames, before any place was written), so a report asked for at a present before the
+    /// host's next frame is held back, and the place the host then writes goes into it.
+    #[test]
+    fn the_first_report_of_a_session_waits_for_its_place() {
+        let wait = shot::PlaceWait::new();
+        wait.writer();
+        assert!(wait.wanted(true));
+        assert!(!wait.wanted(false));
+        assert_eq!(wait.take(), Err(()), "held back for the place");
+        wait.set("position: 1 2 3\n".into());
+        assert!(!wait.wanted(true));
+        assert_eq!(wait.take(), Ok("position: 1 2 3\n".to_string()));
+        // The next report waits again, from its first present.
+        assert!(wait.wanted(true));
+        assert_eq!(wait.take(), Err(()));
+    }
+
+    /// A place that comes after its report went (the host wrote it a frame late) never goes into
+    /// the next report: asking a report drops it, and the next report waits for its own.
+    #[test]
+    fn a_place_left_over_from_one_report_is_not_given_to_the_next() {
+        let wait = shot::PlaceWait::new();
+        wait.writer();
+        wait.ask();
+        for _ in 0..shot::PLACE_WAIT {
+            assert_eq!(wait.take(), Err(()));
+        }
+        assert!(wait.take().is_ok_and(|p| p.starts_with("place not given")));
+        // The host's place for that report, late.
+        wait.set("position: 1 2 3\n".into());
+        wait.ask();
+        assert_eq!(wait.take(), Err(()), "the earlier place dropped");
+        wait.set("position: 4 5 6\n".into());
+        assert_eq!(wait.take(), Ok("position: 4 5 6\n".to_string()));
+    }
+
+    /// With a host and no place after [`shot::PLACE_WAIT`] presents the report goes, its place
+    /// saying why there is none; with no host it goes at once, saying so.
+    #[test]
+    fn a_report_whose_place_never_comes_says_why() {
+        let wait = shot::PlaceWait::new();
+        wait.writer();
+        for _ in 0..shot::PLACE_WAIT {
+            assert_eq!(wait.take(), Err(()));
+        }
+        assert_eq!(
+            wait.take(),
+            Ok(format!(
+                "place not given within {} presents\n",
+                shot::PLACE_WAIT
+            ))
+        );
+        // The count starts again for the next report.
+        assert_eq!(wait.take(), Err(()));
+        let none = shot::PlaceWait::new();
+        assert_eq!(
+            none.take(),
+            Ok("no place: nothing in this program writes it\n".to_string())
+        );
+    }
+
+    /// An F12 report's `hitches.txt`: the session's hitch lines, oldest first, the last 1000 of them, with how many
+    /// there were in all. (The only test that notes hitch lines: they are the process's.)
+    #[test]
+    fn the_report_carries_the_session_s_last_1000_hitch_lines() {
+        // The log off: the file says so.
+        shot::set_hitch_totals(None);
+        assert_eq!(
+            shot::hitches_text(),
+            "The hitch log was off in this session (NV_HITCH_LOG=0).\r\n"
+        );
+        shot::set_hitch_totals(Some((0, 0, 0)));
+        assert!(shot::hitches_text().contains(": 0 in all, 0 of them 16 ms or more, 0 not written"));
+        shot::note_hitch("hitch: first".into());
+        // The totals are the host's (the hitches the cap left out count too), the lines those written.
+        shot::set_hitch_totals(Some((7, 2, 6)));
+        let t = shot::hitches_text();
+        assert!(
+            t.contains(": 7 in all, 2 of them 16 ms or more, 6 not written")
+                && t.contains(" 1 lines, oldest first")
+                && t.ends_with("\r\nhitch: first\r\n"),
+            "{t}"
+        );
+        for i in 0..shot::HITCHES_KEPT + 1 {
+            shot::note_hitch(format!("hitch: {i}"));
+        }
+        let t = shot::hitches_text();
+        let lines: Vec<&str> = t.split("\r\n").filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            shot::HITCHES_KEPT + 1,
+            "the header and the last 1000"
+        );
+        assert!(
+            lines[0].contains("1002 lines, the last 1000 here, oldest first"),
+            "{}",
+            lines[0]
+        );
+        assert_eq!(lines[1], "hitch: 1");
+        assert_eq!(
+            lines[shot::HITCHES_KEPT],
+            format!("hitch: {}", shot::HITCHES_KEPT)
+        );
     }
 
     /// An F12 report's `log-start.txt`: the log's first bytes, cut back to a whole line.

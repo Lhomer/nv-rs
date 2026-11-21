@@ -2,7 +2,7 @@
 //! its children, a geometry hands itself to the process to be drawn).
 
 use super::layout::{
-    BSCullingProcess, BSMultiBound, BSMultiBoundNode, BSMultiBoundShape, NiAVObject,
+    BSCullingProcess, BSMultiBound, BSMultiBoundNode, BSMultiBoundShape, NiAVObject, NiBound,
     NiCullingProcess, NiGeometry, NiNode,
 };
 use super::{radius_not_zero, FAMILY, FLAG_APP_CULLED};
@@ -50,6 +50,62 @@ fn child(e: &Engine, node: Ptr<NiNode>, index: u32) -> Ptr<NiAVObject> {
     Ptr::new(e.mem.u32(base.index(index, 4).addr()))
 }
 
+/// The children read ahead at most (a node or a task with more reads the first ones ahead).
+pub(crate) const READ_AHEAD_MAX: u32 = 256;
+
+/// Whether the read-ahead runs (always, but in a test that compares the walk with and without it).
+static READ_AHEAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// For the tests that compare the walk with and without the read-ahead: turns it on or off.
+#[doc(hidden)]
+pub fn set_read_ahead_for_tests(on: bool) {
+    READ_AHEAD.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reads ahead what the walk of each child will read first, for every child before the first is
+/// walked: its flags word, its world bound's radius and its vtable's `OnVisible` slot. A scene's
+/// objects lie scattered over the heap, so the walk waited for one cache miss after another; read
+/// together, the misses overlap. Nothing is kept or written: the walk reads the same words again
+/// when it gets there, so it sees what it always did. Only memory [`engine_core::Mem::span`] finds
+/// plainly mapped is read, so a dangling word (a child the walk never follows, a bound it never
+/// reads) is skipped and never stops the run, and a page the touch census counts is left to the walk.
+/// With real threads these are the same plain loads of the same words the walk makes a moment later.
+#[inline]
+pub(crate) fn read_ahead(e: &Engine, children: impl Iterator<Item = u32>) {
+    if !READ_AHEAD.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut seen = 0u32;
+    for child in children {
+        let Some(object) = (child != 0).then(|| e.mem.span(child)).flatten() else {
+            continue;
+        };
+        seen ^= object.u32(NiAVObject::m_uFlags.off);
+        if let Some(bound) = e.mem.span(object.u32(NiAVObject::m_kWorldBound.off)) {
+            seen ^= bound.u32(NiBound::m_fRadius.off);
+        }
+        if let Some(vtable) = e.mem.span(object.u32(NiAVObject::vtable.off)) {
+            seen ^= vtable.u32(super::process::SLOT_ON_VISIBLE);
+        }
+    }
+    // The loads are the point: keep them.
+    std::hint::black_box(seen);
+}
+
+/// [`read_ahead`] of a node's children (the first [`READ_AHEAD_MAX`] slots in use), their array
+/// and count read as [`read_ahead`] reads (never faulting, never counted).
+#[inline]
+fn read_children_ahead(e: &Engine, node: Ptr<NiNode>) {
+    let Some(n) = e.mem.span(node.addr()) else {
+        return;
+    };
+    // `m_usMaxSize` and `m_usSize` share the word at +0xa4 (little-endian: the size above).
+    let count = n.u32(NiNode::m_usMaxSize.off) >> 16;
+    if let Some(words) = e.mem.span(n.u32(NiNode::m_pBase.off)) {
+        read_ahead(e, (0..count.min(READ_AHEAD_MAX)).map(|i| words.u32(4 * i)));
+    }
+}
+
 // Typed from 00a59e00
 /// `NiAVObject::Cull` (Xbox PDB, `thiscall(object, process)`): unless the application culled the
 /// object, the process's `Process` (slot 0x44) gets it.
@@ -86,6 +142,7 @@ pub fn node_on_visible(e: &mut Engine, this: Ptr<NiNode>, process: Ptr<NiCulling
     if super::par::wants_split(count) && super::par::split(e, this, process.addr(), count) {
         return;
     }
+    read_children_ahead(e, this);
     for index in 0..count {
         let child = child(e, this, index);
         if !child.is_null() {
@@ -169,6 +226,7 @@ pub fn multibound_node_on_visible(
         let own = e.get(this, BSMultiBoundNode::CullingMode);
         e.set(process, BSCullingProcess::kCullMode, own);
     }
+    read_children_ahead(e, node);
     let mut index = 0;
     while index < u32::from(e.get(node, NiNode::m_usSize)) {
         let child = child(e, node, index);
@@ -182,4 +240,92 @@ pub fn multibound_node_on_visible(
         index += 1;
     }
     e.set(process, BSCullingProcess::kCullMode, mode);
+}
+
+#[cfg(test)]
+mod read_ahead_tests {
+    use super::*;
+
+    /// Two mapped pages for the test's objects (the read-ahead reads only where a word's page
+    /// and the next are mapped, so a lone page at the end of a heap would hide what it reads).
+    const BASE: u32 = 0x0800_0000;
+    const UNMAPPED: u32 = 0x0900_0040;
+
+    fn engine() -> Engine {
+        let mut e = Engine::new();
+        e.mem.map(BASE, 0x4000);
+        assert!(!e.mem.is_mapped(UNMAPPED));
+        e
+    }
+
+    /// A child at `at`: its flags, bound and vtable words (the bound's radius and the vtable's
+    /// `OnVisible` slot made nonzero where they are mapped).
+    fn child(e: &mut Engine, at: u32, bound: u32, vtable: u32) {
+        e.mem
+            .set_u32(at + NiAVObject::m_uFlags.off, FLAG_APP_CULLED);
+        e.mem.set_u32(at + NiAVObject::m_kWorldBound.off, bound);
+        e.mem.set_u32(at + NiAVObject::vtable.off, vtable);
+        if e.mem.is_mapped(bound) {
+            e.mem.set_u32(bound + NiBound::m_fRadius.off, 0x3f80_0000);
+        }
+        if e.mem.is_mapped(vtable) {
+            e.mem
+                .set_u32(vtable + super::super::process::SLOT_ON_VISIBLE, 0x00a5_dbe0);
+        }
+    }
+
+    /// A node at `BASE` with `count` slots in use in the storage at `storage`.
+    fn node(e: &mut Engine, storage: u32, count: u16) -> Ptr<NiNode> {
+        e.mem.set_u32(BASE + NiNode::m_pBase.off, storage);
+        e.mem.set_u16(BASE + NiNode::m_usMaxSize.off, count);
+        e.mem.set_u16(BASE + NiNode::m_usSize.off, count);
+        Ptr::new(BASE)
+    }
+
+    /// No slot in use and the storage at unmapped memory: the read-ahead reads none of it (nor
+    /// does the walk).
+    #[test]
+    fn no_slot_in_use_reads_no_storage() {
+        let mut e = engine();
+        let n = node(&mut e, UNMAPPED, 0);
+        read_children_ahead(&e, n);
+    }
+
+    /// Children whose bound, vtable or both are dangling, an empty slot, and two whole children:
+    /// the read-ahead stops on nothing and writes nothing anywhere (the test's pages, the shared
+    /// empty bound).
+    #[test]
+    fn dangling_children_stop_nothing_and_nothing_is_written() {
+        let mut e = engine();
+        let null_bound = super::super::NULL_BOUND.addr() & !0xfff;
+        e.mem.map(null_bound, 0x2000);
+        let storage = BASE + 0x1000;
+        let bounds = BASE + 0x1800;
+        let vtables = BASE + 0x2000;
+        let children = [
+            (BASE + 0x200, bounds, vtables),
+            (BASE + 0x300, UNMAPPED, vtables),
+            (BASE + 0x400, bounds + 0x10, UNMAPPED),
+            (BASE + 0x500, UNMAPPED, UNMAPPED),
+            (BASE + 0x600, bounds + 0x20, vtables + 0x100),
+        ];
+        for (i, &(at, bound, vtable)) in (0u32..).zip(children.iter()) {
+            child(&mut e, at, bound, vtable);
+            e.mem.set_u32(storage + 4 * i, at);
+        }
+        const CHILDREN: u16 = 5;
+        assert_eq!(children.len(), usize::from(CHILDREN));
+        // An empty slot and one pointing at unmapped memory.
+        e.mem.set_u32(storage + 4 * u32::from(CHILDREN), 0);
+        e.mem
+            .set_u32(storage + 4 * (u32::from(CHILDREN) + 1), UNMAPPED);
+        let n = node(&mut e, storage, CHILDREN + 2);
+        e.mem.watch(BASE, 0x4000, false);
+        e.mem.watch(null_bound, 0x2000, false);
+        read_children_ahead(&e, n);
+        assert!(
+            e.mem.take_watch_hits().is_empty(),
+            "the read-ahead wrote to memory"
+        );
+    }
 }

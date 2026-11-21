@@ -188,7 +188,7 @@ fn a_players_file_overlays_vnvs_values_key_by_key() {
 }
 
 /// The S0079 row (`bDialogSpeechNullCheck`), which the key tests use.
-const PROOF: &rows::Row = &rows::ROWS[24];
+const PROOF: &rows::Row = &rows::ROWS[28];
 
 #[test]
 fn every_row_has_its_own_bit_and_key() {
@@ -424,6 +424,27 @@ fn engine(file: Option<&[u8]>) -> Engine {
     e
 }
 
+/// Tweaks' co-save callbacks as xNVSE gets them: the `AMID` reader at the load AFTER the game's
+/// (`load`, not `pre_load`), the save writer, and the listener whose PreLoadGame clears the saved
+/// count (S0089.01) before the next save is read, so it never reaches another load.
+#[test]
+fn the_install_registers_tweaks_co_save_callbacks_and_listener() {
+    let mut e = engine(None);
+    set_on(&mut e, true);
+    install(&mut e);
+    let tweaks = nvse::plugins::by_opcode_base(&e, OPCODE_BASE).unwrap();
+    assert!(tweaks.load.is_some(), "AMID is read after the game's load");
+    assert!(tweaks.pre_load.is_none(), "not before it");
+    assert!(tweaks.save.is_some());
+    assert!(tweaks.listener.is_some());
+    let kept = e.stewie_kept(bits::kept::SAVED_AMMO_COUNT, 4);
+    e.mem.set_u32(kept, 8);
+    nvse::plugins::dispatch(&mut e, nvse::plugins::msg::LOAD_GAME, 0, 0);
+    assert_eq!(e.mem.u32(kept), 8, "only PreLoadGame clears it");
+    nvse::plugins::dispatch(&mut e, nvse::plugins::msg::PRE_LOAD_GAME, 0, 0);
+    assert_eq!(e.mem.u32(kept), 0);
+}
+
 /// The install: off, nothing; on, the rows' bits reach the engine (the bit the seam tests), Tweaks is
 /// listed with xNVSE, and a row's key keeps its bit clear.
 #[test]
@@ -472,16 +493,16 @@ fn the_install_sets_the_bits_and_lists_tweaks() {
 fn the_start_lines_name_what_was_read() {
     let keys = rows::Keys::default();
     let (settings, on) = settings_and_rows(None, &[], &keys);
+    // Every row built is on with VNV's values (the count is the table's, so a share adding rows
+    // does not edit this line).
+    let built = rows::all().count();
+    assert_eq!(on.len(), built);
     assert_eq!(
         start_lines(false, &settings, &keys, on.len()),
         [
             "lStewieAl's Tweaks: no Data\\NVSE\\Plugins\\nvse_stewie_tweaks.ini: VNV's values"
                 .to_string(),
-            // Every row is on by default: the count follows the rows built (every share's list).
-            format!(
-                "lStewieAl's Tweaks: {n} of its {n} rows built are on",
-                n = rows::all().count()
-            ),
+            format!("lStewieAl's Tweaks: {built} of its {built} rows built are on"),
         ]
     );
     let (settings, on) = settings_and_rows(Some(b"[Tweaks]\nbBetterAutoWalk=1\n"), &[], &keys);
@@ -928,11 +949,27 @@ fn each_rows_plan_number_key_and_bit_are_pinned() {
         ),
         ("S0022.36", "bMenuFixesListBoxNullItem", Row::at(CRASH, 16)),
         (
+            "S0022.43",
+            "bMenuFixesFontIconNoTexture",
+            Row::at(CRASH, 68),
+        ),
+        ("S0022.48", "bMenuFixesRepairTargetKept", Row::at(CRASH, 69)),
+        (
+            "S0022.49",
+            "bMenuFixesSelectableRefFreed",
+            Row::at(CRASH, 70),
+        ),
+        (
             "S0022.56",
             "bMenuFixesTileLabelNullName",
             Row::at(CRASH, 17),
         ),
         ("S0023", "bPrintBSXCrash", Row::at(CRASH, 62)),
+        (
+            "S0025",
+            "bFixCrashWhenControllerReconnectsInHackingMenu",
+            Row::at(CRASH, 71),
+        ),
         ("S0027", "bFixPipboyEquipCrash", Row::at(CRASH, 28)),
         ("S0031", "bAddNifShapeNullChecks", Row::at(CRASH, 63)),
         (
@@ -1025,6 +1062,11 @@ fn each_rows_plan_number_key_and_bit_are_pinned() {
             "S0130.03",
             "bContinuousBeamProjectileCrashFixLoad",
             Row::at(CRASH, 44),
+        ),
+        (
+            "S0136",
+            "bTryCatchingQueuedTextureLoadCrash",
+            Row::at(CRASH, 67),
         ),
         (
             "S0139",
