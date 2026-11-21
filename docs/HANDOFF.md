@@ -7,6 +7,16 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-21 (the sixth upstream merge: 2b93014, to b10470de; 69f4661)
+
+**Status: pushed and on the launcher (69f4661).** slaterain/main b860fdbe..b10470de (7 commits:
+native face morphing, Stewie S0216 and menus 3, the light lists, the native HUD update, and JIP,
+MCM and UI Organizer on in the fixes preset). Patrick's call: JIP, MCM and UIO are on as upstream
+sets them (the old "JIP stays off" rule is gone). No conflicts, no lock file change. 69f4661: the
+two rig_fixture skeleton tests take the shared test lock (beside a New Physics test, its actor's
+drawn pose was written into their fixture: a thigh 33 degrees off). The running fix and the front
+rise still wait on question 5 (above).
+
 ### Claude, 2026-11-21 (Patrick's answers 1-4 applied: the running fix and the front rise, `docs/wip/np-running-seed.patch`)
 
 **Status: not pushed; 44 of 45 New Physics tests pass with the patch (on 345a2d4), question 5
