@@ -2880,6 +2880,25 @@ pub fn still_up(actor: u32) -> bool {
         .is_some_and(|np| np.still_up())
 }
 
+/// Downed, `actor`'s reading this frame (`np_down::Reading`): its pelvis's height over its ground
+/// (game units) and what its hands carry (N).
+#[cfg(test)]
+pub(crate) fn down_reading(actor: u32) -> Option<(f32, f32)> {
+    ACTORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|a| a.actor == actor)
+        .and_then(|a| a.np.as_ref())
+        .and_then(|np| np.down.as_ref())
+        .map(|d| {
+            (
+                d.reading.pelvis_height * ragdoll_core::np_body::UNITS,
+                d.reading.hands,
+            )
+        })
+}
+
 /// Whether New Physics has `actor` downed (the game's path movement is held for it).
 pub fn is_down(actor: u32) -> bool {
     ACTORS

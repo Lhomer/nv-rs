@@ -23,6 +23,8 @@ use crate::np_body::{Model, State, StepReport, GRAVITY};
 
 /// How long a new label must hold before it is the label (s).
 pub const LABEL_HOLD: f32 = 0.25;
+/// The highest a lying body's pelvis lies over its ground (m: 30 game units).
+pub const LYING_MOST: f32 = 30.0 / crate::np_body::UNITS;
 /// The most an arm's contacts may carry and the arm still be free to aim (N).
 pub const ARM_FREE: f32 = 40.0;
 /// The most a target may lie off the torso's facing and the shoulder still bring the weapon onto
@@ -96,6 +98,16 @@ impl Labeler {
             self.candidate = raw;
             self.held = 0.0;
             return None;
+        }
+        // Up off the ground from lying is taken at once (held, a quick rise read "lying" with
+        // the pelvis 40 units up).
+        if self.label == Label::Lying
+            && matches!(raw, Label::Crouched | Label::Rising | Label::Standing)
+        {
+            self.label = raw;
+            self.candidate = raw;
+            self.held = 0.0;
+            return Some(raw);
         }
         if raw != self.candidate {
             self.candidate = raw;
@@ -404,6 +416,11 @@ pub fn classify(r: &Reading, rising: bool) -> Label {
     }
     if r.seat > 0.25 * w && tilt < 55.0 {
         return Label::Seated;
+    }
+    // Up on its hands and knees (or propped on them) is no lying: the 14:09 clip's "lying" with
+    // the pelvis 66 units up.
+    if r.pelvis_height >= LYING_MOST {
+        return Label::Crouched;
     }
     Label::Lying
 }

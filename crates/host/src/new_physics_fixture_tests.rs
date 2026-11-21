@@ -2756,6 +2756,15 @@ struct CycleRun {
     stray_steps: u32,
     /// Standing (not downed or falling): the most the floor carried (body weights).
     floor_most: f32,
+    /// Downed, from half a second after it went down (its landing's own): the most the floor
+    /// carried (body weights, the same 50 ms mean).
+    floor_down_most: f32,
+    /// While New Physics owns it: the furthest any body's capsule lay under its ground (units).
+    body_under_most: f32,
+    /// Downed and labelled lying: the pelvis's greatest height over its ground (units); downed,
+    /// from half a second after it went down, the most the hands carried (N).
+    lying_pelvis_most: f32,
+    hands_most: f32,
     /// Every frame New Physics had it: drawn at the world pass against simulated.
     drawn_off: (f32, f32),
     /// The hand-over: whether it came, the pose handed outside the skeleton's limits (degrees),
@@ -2959,6 +2968,7 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
     let (mut prev_down, mut last_ref) = (false, [0.0f32; 3]);
     let mut settled = false;
     let mut stood_at: Option<f32> = None;
+    let mut down_floor_window = FloorWindow::default();
     let mut downed_at = 0.0f32;
     let mut down_refs: Vec<(f32, V3, V3)> = Vec::new();
     let (mut game_moved, mut down_time) = (0.0f32, 0.0f32);
@@ -3287,6 +3297,40 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
                     }
                     if std::env::var_os("NP_TRACE").is_some() && n / weight > 2.5 {
                         eprintln!("FLOOR t {t:.3} dt {dt:.3} {:.2} BW since hit {:.2} stood_at {stood_at:?} {}", n / weight, t - last_hit, sample_field(ACTOR));
+                    }
+                }
+            }
+            // Downed: the floor's load past the landing, the lying pelvis's height, the hands.
+            if down && t - downed_at >= 0.5 {
+                if let Some(n) = floor_force(ACTOR) {
+                    if let Some(load) = down_floor_window.push(dt, n / weight) {
+                        run.floor_down_most = run.floor_down_most.max(load);
+                    }
+                }
+            } else {
+                down_floor_window.clear();
+            }
+            if down {
+                if let Some((pelvis, hands)) = crate::new_physics::down_reading(ACTOR) {
+                    // Past the landing's own half second, as the floor's: the cap is the arms'
+                    // push (a fall onto the hands carried 2200 N for a frame).
+                    if t - downed_at >= 0.5 {
+                        run.hands_most = run.hands_most.max(hands);
+                    }
+                    if label_of(ACTOR) == Some("lying") {
+                        run.lying_pelvis_most = run.lying_pelvis_most.max(pelvis);
+                    }
+                }
+            }
+            // Every body's capsule against its ground.
+            if let Some((p, _)) = drawn(ACTOR) {
+                let k = ragdoll_core::np_body::UNITS;
+                for (b, def) in model().bodies.iter().enumerate() {
+                    let (r, x) = p[b];
+                    for e in &def.ends {
+                        let end = add(x, apply_m(&r, scale(*e, k)));
+                        let under = ground(end) - (end[2] - def.radius * k);
+                        run.body_under_most = run.body_under_most.max(under);
                     }
                 }
             }
@@ -3989,6 +4033,172 @@ fn np_rise_root_bounded() {
         }
         if a.lag > 3.0 {
             failed.push(format!("{name}: {:.2} u behind the pelvis", a.lag));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// The 14:09 clip's knockdowns on open, flat ground (the anti-materiel rifle at 4.6 m/s): from
+/// the front, from behind and from the side, each left to rise (12 s), and the full cycle's fall
+/// whose rises are given up and handed to the game's ragdoll and its get-up (30 s). One run each,
+/// shared by tests d to g.
+fn flat_falls() -> &'static [(&'static str, CycleRun)] {
+    static RUNS: std::sync::OnceLock<Vec<(&'static str, CycleRun)>> = std::sync::OnceLock::new();
+    RUNS.get_or_init(|| {
+        let rise = |knock: V3| Cycle {
+            below: 1.0,
+            seconds: 12.0,
+            heavy: 4.6,
+            knock,
+            ..Default::default()
+        };
+        let worlds: Vec<(&'static str, Cycle)> = vec![
+            ("from the front", rise([0.0, 1.0, 0.0])),
+            ("from behind", rise([0.0, -1.0, 0.0])),
+            ("from the side", rise([1.0, 0.0, 0.0])),
+            (
+                "given up",
+                Cycle {
+                    below: 1.0,
+                    give_up: true,
+                    seconds: 30.0,
+                    ..Default::default()
+                },
+            ),
+        ];
+        worlds
+            .into_iter()
+            .map(|(name, cfg)| {
+                let r = cycle_run(&cfg);
+                let given_up = r
+                    .notes
+                    .iter()
+                    .filter(|n| n.contains("[np choice] wait"))
+                    .count();
+                eprintln!(
+                    "RESULT np flat fall {name}: downed {}, stood {} (first after {:?} s), rises \
+                     given up {given_up}, the reference jumped {:.1} u at a rise, walls {} lines, at \
+                     most {:.0} N, the floor downed at most {:.2} body weights, a body at most \
+                     {:.2} u under its ground, handed {}, the game's get-up's pelvis, head or feet \
+                     {:?} under the floor, the lying pelvis at most {:.1} u up, the hands at most {:.0} N",
+                    r.downed,
+                    r.stood,
+                    r.first_stood,
+                    r.ref_rise_jump,
+                    r.wall_logged,
+                    r.wall_most,
+                    r.floor_down_most,
+                    r.body_under_most,
+                    r.handed,
+                    r.get_up.map(|g| g.1),
+                    r.lying_pelvis_most,
+                    r.hands_most
+                );
+                (name, r)
+            })
+            .collect()
+    })
+}
+
+/// Test d (the 14:09 clip: a head "wall" of 8.5 to 22.3 kN on open ground): no wall is met on
+/// open, flat ground: no `[np wall]` line and no wall load in any outcome.
+#[test]
+fn np_open_ground_has_no_walls() {
+    let mut failed = Vec::new();
+    for (name, r) in flat_falls() {
+        if r.downed == 0 {
+            failed.push(format!("{name}: never downed"));
+        }
+        if r.wall_logged > 0 || r.wall_most > 0.0 {
+            failed.push(format!(
+                "{name}: {} [np wall] lines, a wall at most {:.0} N",
+                r.wall_logged, r.wall_most
+            ));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// Test e (the 14:09 clip: the floor at 20 to 31 body weights while lying, pops and sinking):
+/// downed, past its landing's own half second, the floor carries at most 4 body weights (the
+/// 50 ms mean); no body's capsule lies more than 1 unit under its ground while New Physics has it,
+/// and after the rises are given up the game's get-up keeps the pelvis, head and feet (its own
+/// log's) within 3 units of the floor (the full cycle's own bound).
+#[test]
+fn np_downed_floor_load_bounded() {
+    let mut failed = Vec::new();
+    for (name, r) in flat_falls() {
+        if r.floor_down_most > 4.0 {
+            failed.push(format!(
+                "{name}: the floor downed {:.2} body weights",
+                r.floor_down_most
+            ));
+        }
+        if r.body_under_most > 1.0 {
+            failed.push(format!(
+                "{name}: a body {:.2} u under its ground",
+                r.body_under_most
+            ));
+        }
+        if let Some((_, lowest)) = r.get_up.filter(|g| !(g.1 >= -3.0)) {
+            failed.push(format!(
+                "{name}: the game's get-up's pelvis, head or feet {lowest:.1} u under the floor"
+            ));
+        }
+    }
+    let (_, given) = &flat_falls()[3];
+    if !given.handed {
+        failed.push("given up: never handed to the game's ragdoll".to_string());
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// Test f (the 14:09 clip: rises back to lying until given up, the reference 1.3 m off at
+/// "standing again"): on flat ground it stands again within three tries (fewer than three rises
+/// given up) and the reference moves at most 10 units in the frame it stands.
+#[test]
+fn np_rise_succeeds_on_flat() {
+    let mut failed = Vec::new();
+    for (name, r) in flat_falls().iter().take(3) {
+        let given_up = r
+            .notes
+            .iter()
+            .filter(|n| n.contains("[np choice] wait"))
+            .count();
+        if r.stood == 0 || r.first_stood.is_none() {
+            failed.push(format!("{name}: never stood"));
+        }
+        if given_up >= 3 {
+            failed.push(format!("{name}: {given_up} rises given up"));
+        }
+        if r.ref_rise_jump > 10.0 {
+            failed.push(format!(
+                "{name}: the reference jumped {:.1} u",
+                r.ref_rise_jump
+            ));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// Test g (the 14:09 clip: "lying/propped" with the pelvis 66 u up, the hands at 1963 N): downed
+/// and labelled lying, the pelvis is never 30 units or more over its ground; past the landing's
+/// own half second the hands never carry more than the arms' 1500 N cap.
+#[test]
+fn np_pose_label_matches_height() {
+    let mut failed = Vec::new();
+    for (name, r) in flat_falls() {
+        if r.lying_pelvis_most <= 0.0 {
+            failed.push(format!("{name}: never lying"));
+        }
+        if r.lying_pelvis_most >= 30.0 {
+            failed.push(format!(
+                "{name}: lying with the pelvis {:.1} u up",
+                r.lying_pelvis_most
+            ));
+        }
+        if r.hands_most > 1500.0 {
+            failed.push(format!("{name}: the hands {:.0} N", r.hands_most));
         }
     }
     assert!(failed.is_empty(), "{failed:#?}");

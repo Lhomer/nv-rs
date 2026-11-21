@@ -7,6 +7,30 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-21 (tests d to g; the lying label; the Ragdoll lab's stand)
+
+**Status: pushed (the commit after 38461b8); 38461b8 is on the launcher (Play, Windows and Linux
+rooms, Android green).** The host library 479 of 479.
+- **Tests d to g** (the 14:09 spec), on four shared flat runs (`flat_falls`: downed from the front,
+  from behind, from the side, and the full cycle's give-up): `np_open_ground_has_no_walls` (no
+  `[np wall]` line, 0 N), `np_downed_floor_load_bounded` (downed past its landing's half second at
+  most 4 body weights; no capsule over 1 u under its ground; the given-up get-up's pelvis, head and
+  feet within 3 u), `np_rise_succeeds_on_flat` (fewer than three rises given up, the reference at
+  most 10 u at the stand), `np_pose_label_matches_height` (lying: the pelvis under 30 u; past the
+  landing the hands at most the arms' 1500 N). d, e and f pass on 38461b8 (the 14:09 faults were
+  fixed before); g failed there ("lying" with the pelvis 40-52 u up).
+- **The lying label:** the classifier's fallback is crouched once the pelvis is 30 u or more up
+  (`LYING_MOST`; on hands and knees read "lying"), and a change from lying to crouched, rising or
+  standing is taken at once (the 0.25 s hold kept "lying" through a quick rise to 40 u).
+- **The Ragdoll lab fails since 38461b8** (`np_m6_stands_by_balance`: on its back the centre 0.10 m
+  outside the feet past 80% of standing height; the head change moved the lab body's rise). Two
+  causes found: the lift outruns the carry over the feet (0.10 m at 54 u), and once a foot rises
+  3.7 cm with no load while the legs push (the centre over the other foot alone, 0.07 m). Holding
+  the pelvis under 0.78 of standing height until the centre is over the feet, and holding a lifted
+  foot down while the legs push, fixes the lab, but each then moved host tests over their bounds
+  (the slab, the arms on a slope): not committed. Next: make both hold without moving the host
+  runs, then task C's tests, test c (threads) and the three ignored tests.
+
 ### Claude, 2026-11-21 (the running fix, the front rise and the settle; question 5 (a))
 
 **Status: committed and pushed (see the commit after d8156cd); every New Physics test passes (42,
