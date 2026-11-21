@@ -7,6 +7,16 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-21 (the fifth upstream merge: 556cc88, to b860fdbe)
+
+**Status: pushed.** slaterain/main 5d48a0ff..b860fdbe (35 commits: Stewie's shares and crash
+groups I-J, xNVSE argument expressions, JIP combat lights and silenced shots, sun shadows, F12's
+place.txt and the hitch log, draw batching and reuse, the drawing thread's own state with ~55
+native draw functions, the thread still off, GOG 1.4.0.525(a), the ARM lock). Two conflicts, both
+additive: `crates/host/src/lib.rs` (upstream's `hitch_log` and `report_place` with the fork's
+modules) and `viewer/src/main.rs` (the frame log and F12 place note, then the room's clips). No
+lock file changed. Items 1 and 3 still wait on questions 1 to 4.
+
 ### Claude, 2026-11-20 (the fourth upstream merge: 74d2156, to 5d48a0ff)
 
 **Status: pushed.** slaterain/main 1abed1e8..5d48a0ff (35 commits), with upstream's new launcher.
