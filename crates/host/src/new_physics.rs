@@ -102,6 +102,9 @@ struct NpActor {
     choice: &'static str,
     choice_for: f32,
     fails: u32,
+    /// Downed: how long its centre has been still ([`SETTLE_STILL`]) since it went down or last
+    /// moved (s).
+    still_for: f32,
     fired: f32,
     /// Waiting for the main thread to hand it to the game's ragdoll (the reason: "steps",
     /// "unreachable", "path", "give up", "death"); simulated and drawn meanwhile.
@@ -164,6 +167,9 @@ struct NpActor {
     root_budget: f32,
     /// The pelvis drawn at the last frame's set-up (game units): how far the body moved.
     pelvis_last: Option<V3>,
+    /// The actor's velocity when New Physics took it (game units a second): its character
+    /// controller's (the run or walk it was in), seeding the body and its animation's velocity.
+    take_v: V3,
     /// The body's last frames since its last hit (the frame's time, each body's velocity and
     /// spin at its end): the hand-over's velocities, their mean.
     history: std::collections::VecDeque<(f32, Vec<(V3, V3)>)>,
@@ -174,7 +180,10 @@ struct NpActor {
     joints_said: f32,
     /// Each body's walls found beside it (world, metres; where the cast met it, game units):
     /// kept while the body stays within [`WALL_KEEP`] of it.
-    walls: Vec<Vec<(ragdoll_core::np_body::Plane, V3)>>,
+    walls: Vec<Vec<(ragdoll_core::np_body::Plane, V3, f32)>>,
+    /// The steps' edges the ground's casts found (world, metres; found again when the ground is
+    /// cast again).
+    step_edges: Vec<ragdoll_core::np_body::Edge>,
     /// The wall lines said since the last hit.
     wall_logs: u32,
 }
@@ -758,6 +767,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             choice: "",
             choice_for: 0.0,
             fails: 0,
+            still_for: 0.0,
             fired: 0.0,
             handing: None,
             handing_frames: 0,
@@ -779,10 +789,12 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             last_pellet: false,
             root_budget: ROOT_STEP,
             pelvis_last: None,
+            take_v: crate::knockdown::actor_velocity(e, actor),
             history: std::collections::VecDeque::new(),
             jumps_said: 0,
             joints_said: JOINTS_EVERY,
             walls: Vec::new(),
+            step_edges: Vec::new(),
             wall_logs: 0,
             grounds: Vec::new(),
             ref_after: None,
@@ -883,6 +895,72 @@ pub fn blast(e: &mut Engine, actor: u32, centre: V3, force: f32, radius: f32) {
         length(sub(worlds.get(body).map_or(centre, |w| w.1), centre))
     );
     strike(a, total, body, &against, pushes, false);
+}
+
+/// For the tests (Patrick's answer 4: a body that starts lying face down, a fixture pose only):
+/// New Physics' bodies of `actor` turned onto their front about the pelvis (the head along the
+/// way it faced, the front down), their lowest point where the standing body's was, and still.
+/// Answers whether it had a body to turn.
+#[cfg(test)]
+pub(crate) fn lay_prone(actor: u32) -> bool {
+    let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(np) = actors
+        .iter_mut()
+        .find(|a| a.actor == actor)
+        .and_then(|a| a.np.as_mut())
+    else {
+        return false;
+    };
+    let m = model();
+    let k = ragdoll_core::np_body::UNITS;
+    let lowest = ragdoll_core::np_body::lowest_point(m, &np.states);
+    let worlds = m.node_worlds(&np.states);
+    let pivot = worlds[m.root].1;
+    // The way it faces (the pelvis's forward, flat) and its side: the turn is about the side.
+    let facing = np.facing();
+    let side = ragdoll_core::flinch::unit(ragdoll_core::flinch::cross(facing, [0.0, 0.0, 1.0]))
+        .unwrap_or([1.0, 0.0, 0.0]);
+    // About `side` by 90 degrees: up goes to the facing, the facing goes down.
+    let turn = |v: V3| {
+        let along = scale(side, ragdoll_core::flinch::dot(side, v));
+        let rest = sub(v, along);
+        add(along, ragdoll_core::flinch::cross(rest, side))
+    };
+    let r_turn: M3 = {
+        let c = [
+            turn([1.0, 0.0, 0.0]),
+            turn([0.0, 1.0, 0.0]),
+            turn([0.0, 0.0, 1.0]),
+        ];
+        [
+            c[0][0], c[1][0], c[2][0], c[0][1], c[1][1], c[2][1], c[0][2], c[1][2], c[2][2],
+        ]
+    };
+    let turned: Vec<(M3, V3)> = worlds
+        .iter()
+        .map(|(r, t)| {
+            (
+                ragdoll_core::flinch::mul(&r_turn, r),
+                add(pivot, turn(sub(*t, pivot))),
+            )
+        })
+        .collect();
+    let states = m.states_from_nodes(&turned);
+    let drop = (lowest - ragdoll_core::np_body::lowest_point(m, &states)) * k;
+    let placed: Vec<(M3, V3)> = turned
+        .iter()
+        .map(|(r, t)| (*r, add(*t, [0.0, 0.0, drop])))
+        .collect();
+    np.states = m.states_from_nodes(&placed);
+    for st in np.states.iter_mut() {
+        st.v = [0.0; 3];
+        st.w = [0.0; 3];
+    }
+    // Down as a fall leaves it (the balance past any step), not a stance to step back into.
+    np.balance.phase = ragdoll_core::np_balance::Phase::Falling;
+    np.balance.since = 0.0;
+    np.balance.fall_reason = "a test's start lying face down";
+    true
 }
 
 /// The last hit's or blast's pushes (each body, its point, its impulse), for the tests.
@@ -1117,6 +1195,9 @@ pub fn apply(e: &mut Engine) {
             // animation's, which the keyframed bodies follow): held to the body from now on.
             a.holds = crate::knockdown::body_holds(e, a.actor, &a.nodes);
             let mut np = Np::new(model().clone(), &anim, 1.0);
+            // Moving as the actor was when taken (a runner taken at 0 m/s sat 3.27 m/s off its
+            // 3.65 m/s run: catching steps with no hit, "downed (steps)", Patrick's 14:06 clip).
+            np.set_anim_velocity([a.take_v[0], a.take_v[1], 0.0]);
             np.keep_down = KEEP_DOWN.load(std::sync::atomic::Ordering::Relaxed);
             for (b, p, j) in a.pending.drain(..) {
                 np.hit(b, p, j);
@@ -1139,7 +1220,19 @@ pub fn apply(e: &mut Engine) {
         } else {
             anim.clone()
         };
-        let (planes, under_pelvis, under_feet) = ground_planes(e, &mut a.grounds, &pose, floor);
+        let (planes, end_planes, edges, under_pelvis, under_feet) =
+            ground_planes(e, &mut a.grounds, &pose, floor);
+        // The steps' edges, found again only when the ground was cast again.
+        if let Some(edges) = edges {
+            let lift = a.floor_lift.unwrap_or(0.0) / ragdoll_core::np_body::UNITS;
+            a.step_edges = edges
+                .into_iter()
+                .map(|ed| ragdoll_core::np_body::Edge {
+                    p: add(ed.p, [0.0, 0.0, lift]),
+                    ..ed
+                })
+                .collect();
+        }
         // Each body's ground raised by what the feet stood over it at the take (the floor taken
         // then, kept): its shape from the casts, never a flat plane that follows the reference
         // (downed, it pushed shins and knees into a slope; standing, it rose under a planted foot
@@ -1154,21 +1247,35 @@ pub fn apply(e: &mut Engine) {
                 })
                 .collect::<Vec<_>>()
         };
+        let lifted_ends = |ends: Vec<[ragdoll_core::np_body::Plane; 2]>| {
+            ends.into_iter()
+                .map(|pair| {
+                    pair.map(|p| ragdoll_core::np_body::Plane {
+                        p: add(p.p, [0.0, 0.0, lift / ragdoll_core::np_body::UNITS]),
+                        n: p.n,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
         let floor = if np.down.is_some() {
             // Its movement held while it is down (the mover's at its update too).
             crate::knockdown::hold_controller(e, a.actor);
             if planes.is_empty() {
                 np.floors = Vec::new();
+                np.end_floors = Vec::new();
                 floor
             } else {
                 np.floors = lifted(planes);
+                np.end_floors = lifted_ends(end_planes);
                 under_pelvis + lift
             }
         } else if let (Some(_), Some(feet)) = (a.floor_lift, under_feet) {
             np.floors = lifted(planes);
+            np.end_floors = lifted_ends(end_planes);
             feet + lift
         } else {
             np.floors = Vec::new();
+            np.end_floors = Vec::new();
             floor
         };
         // The walls beside each body: cast along its motion from where it was (a fast body
@@ -1183,6 +1290,37 @@ pub fn apply(e: &mut Engine) {
             .iter()
             .map(|ws| ws.iter().map(|w| w.0).collect())
             .collect();
+        np.body_wall_tops = a
+            .walls
+            .iter()
+            .map(|ws| ws.iter().map(|w| w.2).collect())
+            .collect();
+        // The edges: the ground's, and the top edge of every step's face a wall cast found (a step
+        // the ground's casts never reached across: a toe swung into a slab's corner, 2.4 units).
+        np.edges = a.step_edges.clone();
+        for (plane, hit, top) in a.walls.iter().flatten() {
+            if !top.is_finite() {
+                continue;
+            }
+            let k = ragdoll_core::np_body::UNITS;
+            let Some(up) = ragdoll_core::flinch::unit([-plane.n[0], -plane.n[1], 0.0]) else {
+                continue;
+            };
+            let edge = ragdoll_core::np_body::Edge {
+                p: [hit[0] / k, hit[1] / k, *top],
+                dir: [-up[1], up[0], 0.0],
+                reach: EDGE_REACH / k,
+                up,
+            };
+            let same = np.edges.iter().any(|ed| {
+                let off = sub(edge.p, ed.p);
+                let off = sub(off, scale(ed.dir, ragdoll_core::flinch::dot(off, ed.dir)));
+                length(off) * k < 2.0 * EDGE_FOUND
+            });
+            if !same {
+                np.edges.push(edge);
+            }
+        }
         let drawn = np.frame(&anim, floor, dt);
         floor_load_said(&mut a, floor, dt);
         wall_load_said(&mut a);
@@ -1523,26 +1661,63 @@ const GROUND_STEP: f32 = 4.0;
 /// plane fitted through them (its slope, leaning to flat for samples in a line), through the
 /// cast nearest each body; `flat` (game units) where nothing was found. Also the ground under
 /// the pelvis and under the feet (their mean; game units).
+#[allow(clippy::type_complexity)]
 fn ground_planes(
     e: &mut Engine,
     cache: &mut Vec<Option<(V3, Option<f32>)>>,
     pose: &[(M3, V3)],
     flat: f32,
-) -> (Vec<ragdoll_core::np_body::Plane>, f32, Option<f32>) {
+) -> (
+    Vec<ragdoll_core::np_body::Plane>,
+    Vec<[ragdoll_core::np_body::Plane; 2]>,
+    Option<Vec<ragdoll_core::np_body::Edge>>,
+    f32,
+    Option<f32>,
+) {
     let m = model();
     let k = ragdoll_core::np_body::UNITS;
-    cache.resize(GROUND_SAMPLES.len(), None);
+    // The samples: under each of [`GROUND_SAMPLES`]' nodes, then under each end of each foot
+    // (a foot across a step's edge has its toe over the step and its heel below).
+    let mut points: Vec<(Option<&str>, V3)> = Vec::new();
+    for name in GROUND_SAMPLES {
+        if let Some(at) = m.body(name).and_then(|b| pose.get(b)).map(|p| p.1) {
+            points.push((Some(name), at));
+        } else {
+            points.push((Some(name), [f32::NAN; 3]));
+        }
+    }
+    for name in ["Bip01 L Foot", "Bip01 R Foot"] {
+        let Some(b) = m.body(name) else { continue };
+        let Some((r, t)) = pose.get(b) else { continue };
+        let radius = m.bodies[b].radius * k;
+        for end in m.bodies[b].ends {
+            let at = add(*t, apply_m(r, scale(end, k)));
+            points.push((None, at));
+            // And a radius around it each way (flat): a foot resting across a step's edge has
+            // ground on both levels within its radius (a heel on a slab's corner had every cast
+            // on the floor below, and no edge was found: 2.4 units in).
+            for off in [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]] {
+                points.push((
+                    None,
+                    [at[0] + off[0] * radius, at[1] + off[1] * radius, at[2]],
+                ));
+            }
+        }
+    }
+    cache.resize(points.len(), None);
+    let mut recast = false;
     let mut found: Vec<V3> = Vec::new();
     let mut pelvis = flat;
     let mut feet = Vec::new();
-    for (i, name) in GROUND_SAMPLES.iter().enumerate() {
-        let Some(at) = m.body(name).and_then(|b| pose.get(b)).map(|p| p.1) else {
+    for (i, (name, at)) in points.iter().copied().enumerate() {
+        if !at[0].is_finite() {
             continue;
-        };
+        }
         let stale = cache[i].map_or(true, |(xy, _)| {
             length([at[0] - xy[0], at[1] - xy[1], 0.0]) > GROUND_RECAST
         });
         if stale {
+            recast = true;
             cache[i] = Some((
                 [at[0], at[1], 0.0],
                 crate::active_ragdoll::floor_under(e, at),
@@ -1550,20 +1725,20 @@ fn ground_planes(
         }
         if let Some((xy, Some(z))) = cache[i] {
             found.push([xy[0], xy[1], z]);
-            if *name == "Bip01 NonAccum" {
+            if name == Some("Bip01 NonAccum") {
                 pelvis = z;
             }
-            if name.ends_with("Foot") {
+            if name.is_some_and(|n| n.ends_with("Foot")) {
                 feet.push(z);
             }
         }
     }
     let feet = (!feet.is_empty()).then(|| feet.iter().sum::<f32>() / feet.len() as f32);
     if found.is_empty() {
-        return (Vec::new(), flat, None);
+        return (Vec::new(), Vec::new(), Some(Vec::new()), flat, None);
     }
     // z = a (x - x0) + b (y - y0) + c, least squares, leaning to flat.
-    let fit = |pts: &[V3]| -> (V3, f32, f32) {
+    let fit_with = |pts: &[V3], bias: f32| -> (V3, f32, f32) {
         let n = pts.len() as f32;
         let mean = scale(pts.iter().fold([0.0; 3], |s, p| add(s, *p)), 1.0 / n);
         let (mut sxx, mut syy, mut sxy, mut sxz, mut syz) = (0.0f32, 0.0, 0.0, 0.0, 0.0);
@@ -1575,8 +1750,8 @@ fn ground_planes(
             sxz += x * z;
             syz += y * z;
         }
-        sxx += GROUND_FLAT_BIAS * n;
-        syy += GROUND_FLAT_BIAS * n;
+        sxx += bias * n;
+        syy += bias * n;
         let det = sxx * syy - sxy * sxy;
         let (mut a, mut b) = if det.abs() > 1e-6 {
             ((sxz * syy - syz * sxy) / det, (syz * sxx - sxz * sxy) / det)
@@ -1590,6 +1765,7 @@ fn ground_planes(
         }
         (mean, a, b)
     };
+    let fit = |pts: &[V3]| fit_with(pts, GROUND_FLAT_BIAS);
     let off = |p: &V3, (mean, a, b): (V3, f32, f32)| {
         p[2] - (mean[2] + a * (p[0] - mean[0]) + b * (p[1] - mean[1]))
     };
@@ -1597,46 +1773,202 @@ fn ground_planes(
     // slab's top, a crate's, a pit): fitted without those, it never tilts or lifts the rest, and
     // a body over one stands on it flat (one plane through all tilted at a slab's edge and pushed
     // a body into it: Patrick's 10:08 clip). On one even ground nothing changes.
-    let mut plane = fit(&found);
-    let mut other = vec![false; found.len()];
-    for _ in 0..2 {
-        let flags: Vec<bool> = found
-            .iter()
-            .map(|p| off(p, plane).abs() > GROUND_STEP)
-            .collect();
-        let level: Vec<V3> = found
-            .iter()
-            .zip(&flags)
-            .filter(|(_, o)| !**o)
-            .map(|(p, _)| *p)
-            .collect();
-        if !flags.iter().any(|o| *o) || level.len() < 3 {
-            break;
-        }
-        other = flags;
-        plane = fit(&level);
-    }
-    let (_, a, b) = plane;
-    let normal = ragdoll_core::flinch::unit([-a, -b, 1.0]).unwrap_or([0.0, 0.0, 1.0]);
-    let planes = pose
-        .iter()
-        .map(|(_, t)| {
-            let near = found
-                .iter()
-                .enumerate()
-                .min_by(|(_, p), (_, q)| {
-                    let d = |c: &V3| length([c[0] - t[0], c[1] - t[1], 0.0]);
-                    d(p).total_cmp(&d(q))
-                })
-                .map(|(i, p)| (*p, other[i]));
-            let (at, flat_here) = near.unwrap_or(([t[0], t[1], flat], false));
-            ragdoll_core::np_body::Plane {
-                p: scale(at, 1.0 / k),
-                n: if flat_here { [0.0, 0.0, 1.0] } else { normal },
+    // Two levels (a slab's top and the floor beside it, a crate's, a pit's): the casts split at
+    // their largest height gap when one plane leaves any of them more than GROUND_STEP off, each
+    // level fitted on its own (one plane through both tilted 22 degrees on a flat slab top and
+    // pushed a foot resting on it up at 8 body weights). A level of fewer than three casts is
+    // flat. On one even ground or a slope nothing splits.
+    let whole = fit(&found);
+    let mut group = vec![0usize; found.len()];
+    let mut planes_of: Vec<(V3, f32, f32)> = vec![whole];
+    // Judged against a fit leaning to nothing (a slope's casts lie on its plane, a step's
+    // don't), within the steepest ground taken.
+    let exact = fit_with(&found, 0.0);
+    let steep = (exact.1 * exact.1 + exact.2 * exact.2).sqrt() <= GROUND_STEEPEST;
+    if found.len() >= 3 && !(steep && found.iter().all(|p| off(p, exact).abs() <= GROUND_STEP)) {
+        let mut zs: Vec<f32> = found.iter().map(|p| p[2]).collect();
+        zs.sort_by(f32::total_cmp);
+        let (gap, at) = zs
+            .windows(2)
+            .map(|w| (w[1] - w[0], 0.5 * (w[0] + w[1])))
+            .fold(
+                (0.0f32, 0.0f32),
+                |best, g| if g.0 > best.0 { g } else { best },
+            );
+        if gap > GROUND_STEP {
+            let low: Vec<V3> = found.iter().copied().filter(|p| p[2] < at).collect();
+            let high: Vec<V3> = found.iter().copied().filter(|p| p[2] >= at).collect();
+            let level = |pts: &[V3]| {
+                if pts.len() >= 3 {
+                    fit(pts)
+                } else {
+                    let n = pts.len().max(1) as f32;
+                    (
+                        scale(pts.iter().fold([0.0; 3], |s, p| add(s, *p)), 1.0 / n),
+                        0.0,
+                        0.0,
+                    )
+                }
+            };
+            planes_of = vec![level(&low), level(&high)];
+            for (i, p) in found.iter().enumerate() {
+                group[i] = usize::from(p[2] >= at);
             }
+        }
+    }
+    // The main level (the most casts) and the others (a step's edges lie between them).
+    let main = if group.iter().filter(|&&g| g == 1).count() * 2 > group.len() {
+        1
+    } else {
+        0
+    };
+    let other: Vec<bool> = group.iter().map(|&g| g != main).collect();
+    let normal_of = |g: usize| {
+        let (_, a, b) = planes_of[g];
+        ragdoll_core::flinch::unit([-a, -b, 1.0]).unwrap_or([0.0, 0.0, 1.0])
+    };
+    let normal = normal_of(main);
+    // The plane through the cast nearest a point, its level's slope.
+    let plane_at = |t: V3| {
+        let near = found
+            .iter()
+            .enumerate()
+            .min_by(|(_, p), (_, q)| {
+                let d = |c: &V3| length([c[0] - t[0], c[1] - t[1], 0.0]);
+                d(p).total_cmp(&d(q))
+            })
+            .map(|(i, p)| (*p, group[i]));
+        let (at, g) = near.unwrap_or(([t[0], t[1], flat], main));
+        ragdoll_core::np_body::Plane {
+            p: scale(at, 1.0 / k),
+            n: if g == main { normal } else { normal_of(g) },
+        }
+    };
+    let planes = pose.iter().map(|(_, t)| plane_at(*t)).collect();
+    let end_planes = pose
+        .iter()
+        .enumerate()
+        .map(|(b, (r, t))| {
+            let ends = m.bodies.get(b).map_or([[0.0; 3]; 2], |d| d.ends);
+            ends.map(|e| plane_at(add(*t, apply_m(r, scale(e, k)))))
         })
         .collect();
-    (planes, pelvis, feet)
+    let edges = recast.then(|| step_edges(e, &found, &other));
+    // The heights under the pelvis and the feet read off their planes where they are now: the
+    // casts are kept until a sample moves [`GROUND_RECAST`], so read from the casts a walk up a
+    // slope raised the floor in steps (1.4 units in a frame) and a planted foot took the step at
+    // 3 body weights.
+    let height_at = |name: &str| -> Option<f32> {
+        let b = m.body(name)?;
+        let t = pose.get(b)?.1;
+        let pl = plane_at(t);
+        let n = pl.n;
+        if n[2].abs() < 1e-3 {
+            return None;
+        }
+        let p = scale(pl.p, k);
+        Some(p[2] - (n[0] * (t[0] - p[0]) + n[1] * (t[1] - p[1])) / n[2])
+    };
+    let pelvis = height_at("Bip01 NonAccum").unwrap_or(pelvis);
+    let feet = {
+        let hs: Vec<f32> = ["Bip01 L Foot", "Bip01 R Foot"]
+            .iter()
+            .filter_map(|n| height_at(n))
+            .collect();
+        if hs.is_empty() {
+            feet
+        } else {
+            Some(hs.iter().sum::<f32>() / hs.len() as f32)
+        }
+    };
+    (planes, end_planes, edges, pelvis, feet)
+}
+
+/// Two casts this far apart or nearer (flat, game units), on two levels, have a step's edge
+/// between them; it is found to [`EDGE_FOUND`] by halving, along two lines [`EDGE_SIDE`] apart
+/// (its direction), and reaches [`EDGE_REACH`] each way. At most [`EDGES_MOST`].
+const EDGE_PAIR: f32 = 80.0;
+const EDGE_FOUND: f32 = 1.0;
+const EDGE_SIDE: f32 = 8.0;
+const EDGE_REACH: f32 = 30.0;
+const EDGES_MOST: usize = 2;
+
+/// The edges between the casts `found` on the fitted level and those on another (`other`): for
+/// each such pair near enough, the place the ground changes level halved down along the line
+/// between them and along one beside it, at the higher level's height (game units).
+fn step_edges(e: &mut Engine, found: &[V3], other: &[bool]) -> Vec<ragdoll_core::np_body::Edge> {
+    let mut edges: Vec<ragdoll_core::np_body::Edge> = Vec::new();
+    for (i, a) in found.iter().enumerate() {
+        if other[i] {
+            continue;
+        }
+        for (j, b) in found.iter().enumerate() {
+            if !other[j] || edges.len() >= EDGES_MOST {
+                continue;
+            }
+            let flat = [b[0] - a[0], b[1] - a[1], 0.0];
+            let apart = length(flat);
+            if apart > EDGE_PAIR || apart < 1e-3 || (b[2] - a[2]).abs() <= GROUND_STEP {
+                continue;
+            }
+            let along = scale(flat, 1.0 / apart);
+            let across = [-along[1], along[0], 0.0];
+            let top = a[2].max(b[2]);
+            // Where the ground under the line from `from` (on `a`'s level) changes level.
+            let change = |e: &mut Engine, from: V3| -> Option<V3> {
+                let level = |e: &mut Engine, t: f32| {
+                    let at = add(from, scale(along, t));
+                    crate::active_ragdoll::floor_under(e, [at[0], at[1], top + 1.0])
+                        .map(|z| (z - a[2]).abs() <= GROUND_STEP)
+                };
+                if level(e, 0.0) != Some(true) || level(e, apart) != Some(false) {
+                    return None;
+                }
+                let (mut lo, mut hi) = (0.0f32, apart);
+                while hi - lo > EDGE_FOUND {
+                    let mid = 0.5 * (lo + hi);
+                    match level(e, mid) {
+                        Some(true) => lo = mid,
+                        Some(false) => hi = mid,
+                        None => return None,
+                    }
+                }
+                let at = add(from, scale(along, 0.5 * (lo + hi)));
+                Some([at[0], at[1], top])
+            };
+            let Some(p1) = change(e, *a) else { continue };
+            let dir = match change(e, add(*a, scale(across, EDGE_SIDE))) {
+                Some(p2) => ragdoll_core::flinch::unit([p2[0] - p1[0], p2[1] - p1[1], 0.0])
+                    .unwrap_or(across),
+                None => across,
+            };
+            let k = ragdoll_core::np_body::UNITS;
+            // Across the edge toward the higher ground: toward `b` when it is the higher.
+            let perp = [-dir[1], dir[0], 0.0];
+            let toward_b = ragdoll_core::flinch::dot(perp, flat) >= 0.0;
+            let up = if toward_b == (b[2] > a[2]) {
+                perp
+            } else {
+                scale(perp, -1.0)
+            };
+            let edge = ragdoll_core::np_body::Edge {
+                p: scale(p1, 1.0 / k),
+                dir,
+                reach: EDGE_REACH / k,
+                up,
+            };
+            // One edge already through here (the same line) is not found twice.
+            let same = edges.iter().any(|ed| {
+                let off = sub(edge.p, ed.p);
+                let off = sub(off, scale(ed.dir, ragdoll_core::flinch::dot(off, ed.dir)));
+                length(off) * k < 2.0 * EDGE_FOUND
+            });
+            if !same {
+                edges.push(edge);
+            }
+        }
+    }
+    edges
 }
 
 /// The heights over the reference a move is swept at (game units: the knees', the waist's).
@@ -1717,7 +2049,7 @@ const WALL_WALKABLE: f32 = 0.64;
 /// those it moved away from dropped.
 fn find_walls(
     e: &mut Engine,
-    walls: &mut Vec<Vec<(ragdoll_core::np_body::Plane, V3)>>,
+    walls: &mut Vec<Vec<(ragdoll_core::np_body::Plane, V3, f32)>>,
     pose: &[(M3, V3)],
     velocities: &[V3],
     dt: f32,
@@ -1729,60 +2061,140 @@ fn find_walls(
         let def = &m.bodies[b];
         let centre = add(*t, apply_m(r, scale(def.com, k)));
         walls[b].retain(|w| length([w.1[0] - centre[0], w.1[1] - centre[1], 0.0]) <= WALL_KEEP);
+        // A wall is a face of something the cast met at its height: a body that rose past
+        // that height keeps it only while a cast from where it is now still meets the face (a
+        // foot stepping up onto a slab leaves its side behind; kept, the side's plane shoved the
+        // foot back off the top at 23 m/s).
+        let mut kept = Vec::new();
+        for w in std::mem::take(&mut walls[b]) {
+            if centre[2] <= w.1[2] + WALL_RISE {
+                kept.push(w);
+                continue;
+            }
+            let towards = scale([w.0.n[0], w.0.n[1], 0.0], -1.0);
+            let Some(dir) = ragdoll_core::flinch::unit(towards) else {
+                continue;
+            };
+            let gap = ragdoll_core::flinch::dot(sub(scale(centre, 1.0 / k), w.0.p), w.0.n) * k;
+            let range = gap.max(0.0) + def.radius * k + 4.0;
+            if let Some(hit) = crate::active_ragdoll::cast_world(e, centre, dir, range) {
+                kept.push((w.0, hit, w.2));
+            }
+        }
+        walls[b] = kept;
         let v = velocities.get(b).copied().unwrap_or([0.0; 3]);
         let flat = [v[0], v[1], 0.0];
         let speed = length(flat);
-        if speed < WALL_CAST_SPEED {
-            continue;
+        if speed >= WALL_CAST_SPEED {
+            let dir = scale(flat, 1.0 / speed);
+            let range = (speed * (dt + WALL_LOOK) + def.radius) * k + 4.0;
+            cast_wall(e, &mut walls[b], centre, dir, range);
         }
-        let dir = scale(flat, 1.0 / speed);
-        let range = (speed * (dt + WALL_LOOK) + def.radius) * k + 4.0;
-        let Some(hit) = crate::active_ragdoll::cast_world(e, centre, dir, range) else {
-            continue;
-        };
-        // The surface's normal from three points: the hit, one to each side, and one raised
-        // (a ray each the same way); one a body could stand on is the floor's, not a wall.
-        let across = [-dir[1], dir[0], 0.0];
-        let ray = |e: &mut Engine, off: V3| {
-            crate::active_ragdoll::cast_world(e, add(centre, off), dir, range + 20.0)
-        };
-        let sides = (
-            ray(e, scale(across, WALL_SIDE)),
-            ray(e, scale(across, -WALL_SIDE)),
-        );
-        let up = ray(e, [0.0, 0.0, WALL_SIDE]);
-        let along = match sides {
-            (Some(p1), Some(p2)) => sub(p1, p2),
-            _ => across,
-        };
-        let rise = match up {
-            Some(pu) => sub(pu, hit),
-            None => [0.0, 0.0, 1.0],
-        };
-        let n = ragdoll_core::flinch::unit(ragdoll_core::flinch::cross(along, rise))
-            .unwrap_or(scale(dir, -1.0));
-        let n = if ragdoll_core::flinch::dot(n, dir) > 0.0 {
-            scale(n, -1.0)
-        } else {
-            n
-        };
-        if n[2] > WALL_WALKABLE {
-            continue;
-        }
-        let plane = ragdoll_core::np_body::Plane {
-            p: scale(hit, 1.0 / k),
-            n,
-        };
-        let same = walls[b].iter().any(|w| {
-            ragdoll_core::flinch::dot(w.0.n, n) > 0.95
-                && ragdoll_core::flinch::dot(sub(scale(hit, 1.0 / k), w.0.p), n).abs() < 0.04
-        });
-        if !same {
-            if walls[b].len() >= WALLS_MOST {
-                walls[b].remove(0);
+        // A foot or a hand also casts along its own length, each way, whatever its speed: a
+        // capsule creeping into a step's face or a wall (a rising foot's toe against a slab's
+        // side: no motion cast found it, the toe 4.8 units in) meets it there.
+        let node = def.node.as_str();
+        if node.ends_with("Foot") || node.ends_with("Hand") {
+            let ends = def.ends.map(|e| add(*t, apply_m(r, scale(e, k))));
+            for to in ends {
+                let axis = sub(to, centre);
+                let reach = length(axis);
+                if reach < 1e-3 {
+                    continue;
+                }
+                let dir = scale(axis, 1.0 / reach);
+                cast_wall(
+                    e,
+                    &mut walls[b],
+                    centre,
+                    dir,
+                    reach + def.radius * k + WALL_AXIS_MORE,
+                );
             }
-            walls[b].push((plane, hit));
         }
+    }
+}
+
+/// A face with ground on top of it within this above where the cast met it (game units) is a
+/// step's, its top found this far behind the face.
+const WALL_STEP_MOST: f32 = 30.0;
+const WALL_BEHIND: f32 = 2.0;
+
+/// How far a body may rise past where a cast met its wall before the wall is checked again
+/// (game units).
+const WALL_RISE: f32 = 1.0;
+/// How far past a foot's or a hand's end its axis casts look (game units).
+const WALL_AXIS_MORE: f32 = 2.0;
+
+/// A cast from `centre` along `dir` (unit) for `range` (game units): the face it meets, its
+/// normal from two side rays and a raised one (else against the cast), kept in `walls` unless a
+/// body could stand on it (the floors have those) or it is one kept already.
+fn cast_wall(
+    e: &mut Engine,
+    walls: &mut Vec<(ragdoll_core::np_body::Plane, V3, f32)>,
+    centre: V3,
+    dir: V3,
+    range: f32,
+) {
+    let k = ragdoll_core::np_body::UNITS;
+    let Some(hit) = crate::active_ragdoll::cast_world(e, centre, dir, range) else {
+        return;
+    };
+    // The surface's normal from three points: the hit, one to each side, and one raised (a ray
+    // each the same way); one a body could stand on is the floor's, not a wall.
+    let flat_dir = ragdoll_core::flinch::unit([dir[0], dir[1], 0.0]).unwrap_or([1.0, 0.0, 0.0]);
+    let across = [-flat_dir[1], flat_dir[0], 0.0];
+    let ray = |e: &mut Engine, off: V3| {
+        crate::active_ragdoll::cast_world(e, add(centre, off), dir, range + 20.0)
+    };
+    let sides = (
+        ray(e, scale(across, WALL_SIDE)),
+        ray(e, scale(across, -WALL_SIDE)),
+    );
+    let up = ray(e, [0.0, 0.0, WALL_SIDE]);
+    let along = match sides {
+        (Some(p1), Some(p2)) => sub(p1, p2),
+        _ => across,
+    };
+    let rise = match up {
+        Some(pu) => sub(pu, hit),
+        None => [0.0, 0.0, 1.0],
+    };
+    let n = ragdoll_core::flinch::unit(ragdoll_core::flinch::cross(along, rise))
+        .unwrap_or(scale(dir, -1.0));
+    let n = if ragdoll_core::flinch::dot(n, dir) > 0.0 {
+        scale(n, -1.0)
+    } else {
+        n
+    };
+    if n[2] > WALL_WALKABLE {
+        return;
+    }
+    let plane = ragdoll_core::np_body::Plane {
+        p: scale(hit, 1.0 / k),
+        n,
+    };
+    let same = walls.iter().any(|w| {
+        ragdoll_core::flinch::dot(w.0.n, n) > 0.95
+            && ragdoll_core::flinch::dot(sub(scale(hit, 1.0 / k), w.0.p), n).abs() < 0.04
+    });
+    if !same {
+        if walls.len() >= WALLS_MOST {
+            walls.remove(0);
+        }
+        // A step's face, not a wall, when there is ground on top of it within
+        // [`WALL_STEP_MOST`] above the hit: it holds only what lies below that top.
+        let behind = sub(hit, scale([n[0], n[1], 0.0], WALL_BEHIND));
+        let top = crate::active_ragdoll::cast_world(
+            e,
+            add(behind, [0.0, 0.0, WALL_STEP_MOST]),
+            [0.0, 0.0, -1.0],
+            WALL_STEP_MOST,
+        )
+        .map(|t| t[2])
+        .filter(|&z| z > hit[2])
+        .map_or(f32::INFINITY, |z| z / k);
+        walls.push((plane, hit, top));
     }
 }
 
@@ -1921,7 +2333,11 @@ fn move_reference(e: &mut Engine, a: &mut NpActor) {
         // (PLANCK's fade of the root, adamhynek/activeragdoll: a root that snaps to the ragdoll
         // pops the capsule).
         // ... but never more than `LAG_MOST` behind the pelvis.
-        let budget = a.root_budget.max(length(mv) - LAG_MOST);
+        // Its budget less a few of the position's last places: the move lands in the world's f32
+        // position, which rounds (a capped 1.9 u move read back as 1.900012).
+        let ulps = 4.0 * f32::EPSILON * at.iter().fold(1.0f32, |m, x| m.max(x.abs()));
+        let step = (a.root_budget - ulps).max(0.0);
+        let budget = step.max(length(mv) - LAG_MOST);
         if length(mv) > budget {
             mv = scale(mv, budget / length(mv));
         }
@@ -1933,9 +2349,7 @@ fn move_reference(e: &mut Engine, a: &mut NpActor) {
         if let Some(g) = crate::active_ragdoll::floor_under(e, [to[0], to[1], at[2] + 30.0]) {
             let z = g + a.floor_lift.unwrap_or(0.0) - a.floor_offset.unwrap_or(0.0);
             let flat = length([to[0] - at[0], to[1] - at[1], 0.0]);
-            let room = (a.root_budget * a.root_budget - flat * flat)
-                .max(0.0)
-                .sqrt();
+            let room = (step * step - flat * flat).max(0.0).sqrt();
             to[2] = at[2] + (z - at[2]).clamp(-room, room);
         }
         if crate::knockdown::place_in_world(e, a.actor, to) {
@@ -2387,6 +2801,16 @@ pub fn deaths() -> Vec<(u32, usize, usize)> {
 /// The downed actors whose shots are withheld now (they cannot aim from the pose they have).
 static WITHHELD: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
+/// Settle, then rise: the centre's speed (m/s) under which a downed body is still, how long it is
+/// still before a rise (s), and the longest it settles (s).
+const SETTLE_STILL: f32 = 0.15;
+const SETTLE_FOR: f32 = 0.3;
+const SETTLE_MOST: f32 = 4.0;
+/// Down on the ground: the pelvis under this share of its standing height, its centre falling
+/// slower than this (m/s).
+const SETTLE_LOW: f32 = 0.5;
+const SETTLE_FALLING: f32 = 0.2;
+
 /// Downed, how long the body settles before the AI chooses (s), how long it fires from the
 /// ground before it tries to stand (s), its shots' extra spread (as a support hand this far off a
 /// two-handed grip, `crate::one_hand`), the rises that may give up before it collapses into the
@@ -2565,7 +2989,21 @@ fn downed(e: &mut Engine, a: &mut NpActor, dt: f32) -> bool {
             d.rise_failed = false;
         }
     }
-    let choice = if since < DOWN_SETTLE {
+    // Settle, then rise (Patrick's answer 2): a downed body lies still before the AI has it
+    // stand; a rise chosen while it still moved (folded over its feet after a shove in the back)
+    // straightened it with no hand down. Its centre still for [`SETTLE_FOR`], at most
+    // [`SETTLE_MOST`] (a body sliding on a slope).
+    // Settled: still, or down on the ground (the pelvis under [`SETTLE_LOW`] of its standing
+    // height) and no longer falling (a body folded over its feet, the pelvis 0.7 to 0.95 m up,
+    // is neither; a body sliding slowly down a slope on its back is the second).
+    let low = reading.pelvis_height < SETTLE_LOW * reading.stand_height;
+    if length(reading.com_v) < SETTLE_STILL || (low && reading.com_v[2] > -SETTLE_FALLING) {
+        a.still_for += dt;
+    } else {
+        a.still_for = 0.0;
+    }
+    let settling = !np.rise && a.still_for < SETTLE_FOR && since < SETTLE_MOST;
+    let choice = if since < DOWN_SETTLE || settling {
         "settle"
     } else if a.fails >= DOWN_TRIES {
         "give up"
@@ -2899,6 +3337,12 @@ pub(crate) struct Probe {
     pub hand_low: [f32; 2],
     pub weapon_side: Option<usize>,
     pub lifting: bool,
+    /// The torso's front: how much it points up (-1 face down, 1 face up), and the pelvis's
+    /// height over its standing height (downed; 1 standing).
+    pub front_up: f32,
+    pub pelvis_share: f32,
+    /// The downed AI wishes a rise (it settled and chose to stand).
+    pub rise_wished: bool,
 }
 
 #[cfg(test)]
@@ -2931,6 +3375,14 @@ pub(crate) fn probe(actor: u32) -> Option<Probe> {
         }),
         weapon_side: np.weapon_side,
         lifting: np.down.as_ref().is_some_and(|d| d.lifting),
+        front_up: {
+            let f = np.bodies.forward_of(&np.states, np.bodies.torso);
+            f[2] / length(f).max(1e-6)
+        },
+        pelvis_share: np.down.as_ref().map_or(1.0, |d| {
+            d.reading.pelvis_height / d.reading.stand_height.max(1e-3)
+        }),
+        rise_wished: np.rise,
     })
 }
 

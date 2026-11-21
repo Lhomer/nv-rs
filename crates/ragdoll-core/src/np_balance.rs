@@ -37,6 +37,12 @@ pub const STEP_LEAST: f32 = 0.15;
 pub const STEPS_FALL_OUTSIDE: f32 = 0.15;
 pub const STEP_TIME: f32 = 0.3;
 pub const STEP_LIFT: f32 = 0.08;
+/// A landing whose sole reaches this far over a step's edge (m) lands on its top.
+pub const SOLE_OVER: f32 = 0.05;
+/// A step whose landing is this much higher than its lift-off (m) is a step up: the foot rises to
+/// its height by the swing's middle, then goes on over (a straight line between clipped the
+/// step's corner).
+pub const STEP_UP: f32 = 0.03;
 /// Steps before it falls, and how far outside its feet the capture point may be before no step can
 /// catch it (m: the longest step and the foot's reach past it): it falls at once.
 pub const MAX_STEPS: u32 = 3;
@@ -56,6 +62,13 @@ pub const ANIM_FOOT_MOVING: f32 = 0.05;
 /// Moving: how far its capture point may leave the animation's before a gather step (m), and the
 /// animation's speed that counts as moving (m/s).
 pub const GATHER: f32 = 0.12;
+/// Moving: gather steps come only this long after a hit (s); a walk starting under a body that
+/// stood still is no knock (the steps after a rise into a walk).
+pub const GATHER_AFTER_HIT: f32 = 1.0;
+/// Standing: catching steps come within this long of a hit (s), or with the capture point at least
+/// [`WELL_OUTSIDE`] outside the feet (m).
+pub const STEP_AFTER_HIT: f32 = 3.0;
+pub const WELL_OUTSIDE: f32 = 0.15;
 pub const MOVING: f32 = 0.3;
 /// Moving: how fast its path follows its knocked body (per second), and how far its capture point
 /// may be off its path (the walk's speed at the knock) before it falls (m).
@@ -161,6 +174,15 @@ pub struct Balance {
     pub foot_floor: [Option<crate::np_body::Plane>; 2],
     /// The last frame's centre of mass velocity against the animation's (m/s).
     pub rel_v: V3,
+    /// The animation's velocity the last update was given (m/s).
+    pub anim_v: V3,
+    /// Seconds since the last hit (its owner's; infinite with none).
+    pub since_hit: f32,
+    /// The steps' and ledges' edges near the body (its owner's, the frame's coordinates).
+    pub edges: Vec<crate::np_body::Edge>,
+    /// Gather steps taken since the last hit, and its clock at the last update.
+    gathers: u32,
+    gather_hit_was: f32,
 }
 
 /// What the balance asks of the body this frame.
@@ -235,6 +257,11 @@ impl Balance {
             floor_was: None,
             foot_floor: [None, None],
             rel_v: [0.0; 3],
+            anim_v: [0.0; 3],
+            since_hit: f32::INFINITY,
+            edges: Vec::new(),
+            gathers: 0,
+            gather_hit_was: f32::INFINITY,
         }
     }
 
@@ -316,11 +343,22 @@ impl Balance {
     /// The ground under `at` (flat) on `side`'s foot's own ground plane (a slope's), or `floor`
     /// without one (m).
     fn ground(&self, side: usize, at: V3, floor: f32) -> f32 {
-        self.foot_floor[side]
+        let under = self.foot_floor[side]
             .filter(|p| p.n[2] > 0.1)
             .map_or(floor, |p| {
                 p.p[2] - (p.n[0] * (at[0] - p.p[0]) + p.n[1] * (at[1] - p.p[1])) / p.n[2]
+            });
+        // A step's top where `at` lies over it (past its edge toward the higher ground, less a
+        // sole's overlap): a catching step onto a slab landed at the floor under the slab, its
+        // shin against the slab's face at 5000 N.
+        self.edges
+            .iter()
+            .filter(|ed| {
+                let off = sub(at, ed.p);
+                dot(off, ed.dir).abs() <= ed.reach && dot([off[0], off[1], 0.0], ed.up) > -SOLE_OVER
             })
+            .map(|ed| ed.p[2])
+            .fold(under, f32::max)
     }
 
     /// How far outside this balance's support (the planted feet's soles: [`Balance::measure`])
@@ -356,6 +394,7 @@ impl Balance {
         let omega = (GRAVITY / height).sqrt();
         let rel_v = sub(v, anim_v);
         self.rel_v = rel_v;
+        self.anim_v = anim_v;
         let flat = |a: V3| [a[0], a[1], 0.0];
         self.capture = add(flat(com), scale(flat(rel_v), 1.0 / omega));
         self.moving = length(flat(anim_v)) > MOVING;
@@ -379,8 +418,9 @@ impl Balance {
             let at = sub(anim[self.feet[side]].x, self.shift);
             let moved = self.anim_feet[side].map_or(0.0, |was| length(sub(at, was)));
             self.anim_feet[side] = Some(at);
-            if self.phase == Phase::Standing
-                && self.since >= SETTLE
+            // Moving on its path (a walk, a run the game keeps moving), at once: the gait's own
+            // feet carry it on.
+            if (self.moving || (self.phase == Phase::Standing && self.since >= SETTLE))
                 && self.step.is_none()
                 && dt > 0.0
                 && moved / dt > ANIM_FOOT_MOVING
@@ -491,6 +531,9 @@ impl Balance {
                 let s = (st.t / st.time).clamp(0.0, 1.0);
                 let along = ease(s);
                 let mut at = add(st.from, scale(sub(st.to, st.from), along));
+                if st.to[2] - st.from[2] > STEP_UP {
+                    at[2] = st.from[2] + (st.to[2] - st.from[2]) * ease((2.0 * s).min(1.0));
+                }
                 at[2] += st.lift * (std::f32::consts::PI * s).sin();
                 // A stance step's foot goes at its arc's own pace (from rest, lifted before it
                 // moves on: led at the step's mean pace from its first frame, still on the floor,
@@ -545,6 +588,34 @@ impl Balance {
                 ask.hold_across = 0.0;
                 return ask;
             }
+            // Knocked off its path past what the gait's own sway is: a gather step toward where
+            // its capture point went, then back on its run (Patrick's 14:06 clip: a light hit on a
+            // runner took none, or fell it "path"). Not right after landing one.
+            let landed_just = self.phase == Phase::Recovering && self.since < LAND_WAIT;
+            // The knock's own part: the body's velocity off the gait's over the pendulum's rate
+            // (a walk's sway leaves its centre off its path for a while; that is no knock).
+            let knock = length(flat(rel_v)) / omega;
+            // A new hit (its clock went back) starts its own count of gather steps.
+            if self.since_hit < self.gather_hit_was {
+                self.gathers = 0;
+            }
+            self.gather_hit_was = self.since_hit;
+            // The first gather step past [`GATHER`]; each further one for the same hit only while
+            // the knock is still twice that (a light hit on a walker on a slope took a second
+            // step for what was left of the walk's own sway).
+            let gather_past = GATHER * (1.0 + self.gathers.min(1) as f32);
+            if knock > gather_past
+                && !landed_just
+                && self.steps < MAX_STEPS
+                && self.since_hit < GATHER_AFTER_HIT
+            {
+                if let Some(st) = self.plan(model, states, anim, floor) {
+                    self.gathers += 1;
+                    self.begin(st, states, anim);
+                    ask.hold_across = 0.6;
+                    return ask;
+                }
+            }
             // Settled on its path as standing does: the steps start again (they were counted
             // across hits while the animation moved).
             self.settle();
@@ -556,11 +627,15 @@ impl Balance {
             let b = self.feet[side];
             !self.planted(model, &states[b], b, floor)
         };
+        // Standing: a catching step for a hit's knock (within `STEP_AFTER_HIT`), or for the
+        // capture point well outside; never for a gait starting under a body that stood (the steps
+        // with no hit after a rise into a walk).
         let out = !landing
             && if self.moving {
                 length(off_path) > GATHER
             } else {
                 self.outside > MARGIN
+                    && (self.since_hit < STEP_AFTER_HIT || self.outside > WELL_OUTSIDE)
             };
         if out {
             if (self.steps >= MAX_STEPS && self.outside > STEPS_FALL_OUTSIDE)
@@ -655,7 +730,9 @@ impl Balance {
             // knock (the animated feet's middle plus the capture point's offset).
             let (anim_com, _) = model.centre_of_mass(anim);
             let off = sub(self.capture, flat(anim_com));
-            (add(self.capture, [0.0; 3]), unit(off)?)
+            // Where the run carries it while the step swings: the foot lands there, not behind.
+            let ahead = scale(flat(self.anim_v), STEP_TIME);
+            (add(self.capture, ahead), unit(off)?)
         } else {
             (self.capture, unit(sub(self.capture, mid))?)
         };

@@ -575,9 +575,11 @@ fn np_creature_hits_never_corrupt_the_actor_value_table() {
         // The main thread's frame before the AI tasks: New Physics' hit, a pellet on the
         // creature (`HitMe` with no AI task running: the game's own, not queued).
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if frame == 4 {
+            // New Physics' actor hit at frame 4 and again each second (it steps through the
+            // pellets, never let go of meanwhile).
+            if frame % 60 == 4 {
                 f.animate();
-                np_hit = claim(&mut f.e, ACTOR);
+                np_hit = claim(&mut f.e, ACTOR) || np_hit;
                 let chest = f.world("Bip01 Spine2").unwrap().1;
                 crate::new_physics::hit(
                     &mut f.e,

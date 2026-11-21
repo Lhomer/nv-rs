@@ -393,7 +393,9 @@ impl Fixture {
         e.register_double(CONTROLLER_SET_POSITION, |_, _| 0u32.into_ret());
         e.register_double(CONTROLLER_SET_VELOCITY, |e, a| {
             let v = read3(e, a[1]);
-            write3(e, CONTROLLER + 0x700, v);
+            // The game's `SetLinearVelocity` takes game units and keeps Havok units
+            // (`00926980` through `004a3e00`); `GethkLinearVelocity` hands those back.
+            write3(e, CONTROLLER + 0x700, v.map(|x| x / HK));
             0u32.into_ret()
         });
         e.register_double(CONTROLLER_VELOCITY, |_, _| (CONTROLLER + 0x700).into_ret());

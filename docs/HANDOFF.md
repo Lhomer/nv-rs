@@ -7,28 +7,40 @@ machinery runs.
 
 ## Resume here
 
-### Claude, 2026-11-21 (question 5 (a): the head through its centre, `docs/wip/np-running-wip2.patch`)
+### Claude, 2026-11-21 (the running fix, the front rise and the settle; question 5 (a))
 
-**Status: not pushed (38 of 42 run New Physics tests pass with the patch; work goes on).** The
-patch is the running seed (`np-running-seed.patch`) plus:
-- **The head (sphere-like bodies, ends within 0.25 of the radius of the centre):** pushed out
-  through its centre, and its stop (no bounce) and friction through it too; its sliding friction
-  0.3 of the others' and no static grip (`SPHERE_FRICTION`). Traced: with friction the head was
-  held where it hit while the body slid on and the neck swung it round (30-49 rad/s inside one
-  frame, 23-37 degrees beyond its spin); with 0.3 the full cycle's largest turn is 17.8 degrees.
-- **The rise's feet:** each rising foot is held as high as its capsule set on the ground
-  (`RISE_FOOT_PRESS` 0.3 u into it), or the animation's foot if lower: held at the running
-  animation's foot (mid-stride) the feet hovered 1-2 u up, never carried, and the legs never
-  pushed (every rise from sitting failed). Upright, set on the ground without the press.
-- **The stand's end:** `STAND_BLEND` 0.8 s (0.5: the spine straightening into the animation's pose
-  moved the centre 0.05 m/s); `TORSO_STILL` 2500 N s/m, 1000 N, in full up to 18 degrees of lean
-  (`TORSO_STILL_FULL`), none at 40 (it held a leaning torso back from straightening on a slope).
-- **The VATS lying run** opens VATS on the first frame from 1 s that the body lies (a fixed 3 s
-  met it sitting up as the rise quickened); its 40 u bound unchanged.
-- **Still failing (marginal, the suite chaotic):** the slab (a catching step drags the right foot
-  through the slab's edge after standing beside it: a real swing-clearance bug), the rise-end
-  bounds (side 8.5 s of 8, slope 0.057 m/s, wall drift 2.07 u), the arms' "on its back, slope",
-  the death hand-over 2.16 u of 1.5. Next: the swing clearance over an edge, then the rest.
+**Status: committed and pushed (see the commit after d8156cd); every New Physics test passes (42,
+3 ignored as before), the host library 475 of 475 twice in a row.** One full run before those two
+failed `np_walking_a_rifle_hit_goes_down_and_stays_on_the_floor` once (it passes alone and in both
+later full runs): watch for it. What landed (Patrick's answers 1-5):
+- **The running seed:** the body takes the actor's movement velocity at the take; fixture walkers
+  keep walking; `SimClock` (0.02 s) for the fixture runs; `FloorWindow` (50 ms mean) for the floor
+  bound; settle-then-rise in the downed AI; the rise's landing and progress fixes; the arms (chest up
+  to 60 degrees, the weapon's hand only where its own ground is in reach, armed-only kneel and lunge
+  from the front); edges, wall tops, split ground fits; `lay_prone` and `Cycle::prone` for the
+  tests (the game's falls unchanged).
+- **The head (question 5 (a)):** sphere-like bodies (ends within 0.25 of the radius of the centre)
+  are pushed out, stopped and rubbed through their centre; sliding faster than 0.5 m/s their
+  friction is 0.3 of the others' and they have no static grip (`SPHERE_FRICTION`, `SPHERE_SKID`).
+  Traced: held where it hit while the body slid on, the neck swung the head round (30-49 rad/s
+  within a frame, 23-37 degrees beyond its spin); gripping when slow keeps a body lying on a slope
+  from sliding. The snap test is unchanged (20 degrees).
+- **The rise's feet:** each rising foot is held as high as its capsule set on the ground, 0.5 u into
+  it (`RISE_FOOT_PRESS`), or at the animation's foot where that is lower; upright, set on the ground
+  without the press. Held at the running animation's mid-stride foot, the feet hovered and every
+  rise from sitting failed.
+- **The stand's end:** `STAND_BLEND` 0.8 s; `TORSO_STILL` 2500 N s/m and 1000 N, in full up to 18
+  degrees of lean, none at 40 (`TORSO_STILL_FULL`).
+- **A foot in a wall:** an animated foot inside a wall (below its top) engages the footing with its
+  goal moved out along the wall (a walker walking into the slab drove its foot 5.6 u into the face
+  at 3700 N; now 0.6 u, 600 N).
+- **The reference's move** keeps within its budget as stored (the f32 position read a capped 1.9 u
+  move as 1.900012).
+- **The VATS lying run** opens VATS on the first frame from 1 s that the body lies (bound kept).
+- **Next:** task C's tests (settle bounded from contorted and side starts, joints within limits,
+  no hand-over jump, the face-down give-up's game get-up face down, no flip with `front_low`), tests
+  c to g, then the three ignored tests (walls and crates, the reference clear of a wall, planted
+  hands).
 
 ### Claude, 2026-11-21 (the keyboard beside a pad: de9c3ab)
 

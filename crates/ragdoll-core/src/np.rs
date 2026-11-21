@@ -86,6 +86,17 @@ fn shift_by(pose: &[(M3, V3)], by: V3) -> Vec<(M3, V3)> {
 
 /// A rise's pelvis must gain this (m) to count as progress.
 pub const RISE_GAINED: f32 = 0.01;
+/// The centre's fall (m/s) past which a rising body is still coming down, within the rise's first
+/// [`RISE_LANDING`] seconds (a rise wished as it lands).
+pub const RISE_COMING_DOWN: f32 = 0.2;
+pub const RISE_LANDING: f32 = 1.0;
+/// A rise's progress (m of the pelvis's height) that starts its stall's clock again.
+pub const RISE_PROGRESS: f32 = 0.01;
+/// The centre's climb (m/s) at which a rise past [`RISE_MOST`] is still going up.
+pub const RISE_GOING_UP: f32 = 0.3;
+/// The pelvis's share of its standing height at which a rise past [`RISE_MOST`] is nearly up
+/// (it slowed through 0.88 m with the torso still coming up and was given up).
+pub const RISE_NEARLY_UP: f32 = 0.8;
 /// Rising, a joint's goal lies at most this far from where the joint is (rad): the muscles' effort
 /// a frame is bounded (goals given whole threw the body off the floor).
 pub const RISE_REACH: f32 = 0.3;
@@ -116,7 +127,7 @@ pub const LIMITS_SETTLE: f32 = 0.3;
 /// Standing again, the balance's joint targets and the pelvis's turn ease from the pose the body
 /// stood up in to the animation's over this long (s): switched at once, the legs and spine driven
 /// to the animation's stance pushed a still body to 0.3 to 0.4 m/s in its first frames.
-pub const STAND_BLEND: f32 = 0.5;
+pub const STAND_BLEND: f32 = 0.8;
 /// Standing again, the actor taken to the body at most this fast (m/s) for this long (s).
 pub const STAND_TAKE: (f32, f32) = (0.05, 1.0);
 /// A rise with nothing to push from (or too weak) this long gives up (s).
@@ -144,15 +155,41 @@ pub const STANCE_THERE: f32 = 0.01;
 /// Standing again, the torso against the pelvis at most this far from the animation's (degrees).
 pub const STAND_POSE: f32 = 10.0;
 /// Rising and upright, the torso's flat sway's damper (N·s/m) and its cap (N).
-pub const TORSO_STILL: (f32, f32) = (1500.0, 600.0);
+pub const TORSO_STILL: (f32, f32) = (2500.0, 1000.0);
+/// The torso's lean (degrees from upright) up to which [`TORSO_STILL`] damps it in full; less
+/// past it, none at [`STILL_TILT_OUT`].
+pub const TORSO_STILL_FULL: f32 = 18.0;
+/// How far (m) an animated foot may lie in a wall before its leg is bent to keep it out.
+pub const WALL_FOOT_IN: f32 = 0.005;
 /// While the feet lie further than this from the hips (m, flat) the rise goes toward them.
 pub const RISE_FEET_OUT: f32 = 0.15;
 /// Rising from the floor, each foot's goal lies this share of its leg in front of its hip (a hip
 /// on the floor; under it as the hip comes up a leg high).
 pub const RISE_FOOT_OUT: f32 = 0.3;
+/// How far (units) a rising foot is held into its ground, so that it carries from the start.
+const RISE_FOOT_PRESS: f32 = 0.5;
+/// The torso's front pointing up past this (its share of the vertical) is the chest facing the
+/// sky; otherwise, with the torso tilted past [`ARMS_UNTIL_TILT`] degrees from upright, the arms
+/// keep pushing while the legs do.
+pub const CHEST_UP: f32 = 0.5;
+pub const ARMS_UNTIL_TILT: f32 = 60.0;
 /// The legs push once the centre of mass is within this of the feet (m): their pull brings the
 /// hips forward over the feet as they lift.
 pub const RISE_OVER_FEET: f32 = 0.35;
+/// A rise that begins with the chest facing down (the front's up under minus this) rises from the
+/// front: first onto the knees (the pelvis to [`KNEEL_HEIGHT`] of standing height over the knees,
+/// each foot [`KNEEL_FOOT`] (m) behind its hip, the torso up), then a foot forward,
+/// [`LUNGE_FOOT`] (m) in front of its hip and lifted [`LUNGE_LIFT`] (m) until it is within
+/// [`LUNGE_THERE`] (m) of its place; each stage at most [`FRONT_STAGE_MOST`] (s). Rising off the
+/// front with the rise's own goals (the torso turned up and leant toward the feet, the feet drawn
+/// in front of the hips) it sat back on its heels and rolled onto its seat: a flip.
+pub const FRONT_START: f32 = 0.5;
+pub const KNEEL_HEIGHT: f32 = 0.5;
+pub const KNEEL_FOOT: f32 = 0.35;
+pub const LUNGE_FOOT: f32 = 0.3;
+pub const LUNGE_LIFT: f32 = 0.08;
+pub const LUNGE_THERE: f32 = 0.05;
+pub const FRONT_STAGE_MOST: f32 = 2.0;
 /// The legs' push brings the pelvis over its place at this rate (1/s) of the way left, at most
 /// this fast (m/s), the support's spring at this share and its damper at this many times.
 pub const RISE_FLAT: (f32, f32, f32, f32) = (3.0, 0.3, 0.5, 2.0);
@@ -247,9 +284,15 @@ pub struct Np {
     pub walls: Vec<Plane>,
     /// Each body's own walls (world, metres): what the world has beside it (its owner's casts).
     pub body_walls: Vec<Vec<Plane>>,
+    /// Each of [`Np::body_walls`]' tops (world, metres; infinite: none known).
+    pub body_wall_tops: Vec<Vec<f32>>,
     /// Each body's own floor (world, metres: the ground under it, a slope's; empty: the frame's
     /// flat floor).
     pub floors: Vec<Plane>,
+    /// Each body's floor under each of its ends (world, metres; empty: [`Np::floors`]).
+    pub end_floors: Vec<[Plane; 2]>,
+    /// The edges of steps and ledges near the body (world, metres).
+    pub edges: Vec<crate::np_body::Edge>,
     /// The arm that holds a weapon (0 left, 1 right; none unarmed): it keeps it, and its aim
     /// while the AI fires from the ground; the free arm pushes.
     pub weapon_side: Option<usize>,
@@ -302,6 +345,12 @@ pub struct Down {
     /// A rise's time so far and the pelvis's best height in it (m over the floor).
     pub rising: f32,
     pub rise_best: f32,
+    /// The rise's body has stopped coming down once (until then its gains are measured from
+    /// its lowest and no stall is counted).
+    pub rise_landed: bool,
+    /// The pelvis's height when the stall's clock last started again (m): it starts again only
+    /// for [`RISE_PROGRESS`] more.
+    pub rise_mark: f32,
     /// Seconds since the rise's pelvis last got higher.
     pub rise_stall: f32,
     /// Whether the last rise gave up (too weak, or nothing to push from).
@@ -332,6 +381,13 @@ pub struct Down {
     pub still_wait: bool,
     /// Up for the still stage ([`up_for_still`]) at the last frame.
     pub still_up: bool,
+    /// A rise from the front (it began with its chest facing down, [`FRONT_START`]): 1 onto the
+    /// knees, 2 a foot forward (the lunge, `front_side`'s), 0 the rise's own push; `front_done`
+    /// once past them (not begun again in this rise).
+    pub front_stage: u8,
+    pub front_side: usize,
+    pub front_done: bool,
+    pub front_for: f32,
     /// Upright, the foot going to its place in the animation's stance ([`STANCE_KEPT`]).
     pub stance_fixing: Option<usize>,
 }
@@ -372,7 +428,10 @@ impl Np {
             anim_v: [0.0; 3],
             walls: Vec::new(),
             floors: Vec::new(),
+            end_floors: Vec::new(),
+            edges: Vec::new(),
             body_walls: Vec::new(),
+            body_wall_tops: Vec::new(),
             weapon_side: None,
             firing: false,
             to_limits: false,
@@ -434,6 +493,11 @@ impl Np {
                 n: w.n,
             })
             .collect();
+        let body_wall_tops = std::mem::take(&mut self.body_wall_tops);
+        self.body_wall_tops = body_wall_tops
+            .iter()
+            .map(|ts| ts.iter().map(|t| t - self.origin[2] * to_m).collect())
+            .collect();
         let body_walls = std::mem::take(&mut self.body_walls);
         self.body_walls = body_walls
             .iter()
@@ -454,10 +518,31 @@ impl Np {
                 n: w.n,
             })
             .collect();
+        let end_floors = std::mem::take(&mut self.end_floors);
+        self.end_floors = end_floors
+            .iter()
+            .map(|ends| {
+                ends.map(|w| Plane {
+                    p: sub(w.p, scale(self.origin, to_m)),
+                    n: w.n,
+                })
+            })
+            .collect();
+        let edges = std::mem::take(&mut self.edges);
+        self.edges = edges
+            .iter()
+            .map(|ed| crate::np_body::Edge {
+                p: sub(ed.p, scale(self.origin, to_m)),
+                ..*ed
+            })
+            .collect();
         let out = self.frame_local(&local, floor, dt);
         self.walls = walls;
         self.floors = floors;
+        self.end_floors = end_floors;
+        self.edges = edges;
         self.body_walls = body_walls;
+        self.body_wall_tops = body_wall_tops;
         shift_by(&out, self.origin)
     }
 
@@ -499,6 +584,16 @@ impl Np {
                     self.anim_v = scale(sub(c1, c0), 1.0 / (t1 - t0));
                 }
             }
+        } else if dt > 0.0
+            && self
+                .anim_samples
+                .back()
+                .map_or(true, |&(t, _)| now_t - t >= ANIM_V_WINDOW)
+        {
+            // Not moved for the window: still (a seed of the walk it was taken in, or the last
+            // measure of a reference the game then held, was kept for good: the balance read a
+            // downed body's rise as a walk, its rise stalled at the pelvis 0.65 m).
+            self.anim_v = [0.0; 3];
         }
         let anim_v = self.anim_v;
         self.anim_com = Some(com_now);
@@ -542,6 +637,8 @@ impl Np {
         for side in 0..2 {
             self.balance.foot_floor[side] = self.floors.get(self.balance.feet[side]).copied();
         }
+        self.balance.edges = self.edges.clone();
+        self.balance.since_hit = self.since_hit.unwrap_or(f32::INFINITY);
         let ask = self.balance.update(
             &self.model,
             &self.states,
@@ -565,6 +662,8 @@ impl Np {
                 reading: Reading::default(),
                 rising: 0.0,
                 rise_best: 0.0,
+                rise_landed: false,
+                rise_mark: 0.0,
                 rise_stall: 0.0,
                 rise_failed: false,
                 push: 0.0,
@@ -581,6 +680,10 @@ impl Np {
                 still_wait: false,
                 still_up: false,
                 stance_fixing: None,
+                front_stage: 0,
+                front_side: 0,
+                front_done: false,
+                front_for: 0.0,
             });
             return self.down_frame(anim, floor, dt);
         }
@@ -726,8 +829,11 @@ impl Np {
             soft_limits: self.stood_up < 2.0 * LIMITS_SETTLE || self.to_limits,
             allow: Vec::new(),
             floors: self.floors.clone(),
+            end_floors: self.end_floors.clone(),
+            edges: self.edges.clone(),
             data_limits: self.to_limits,
             body_walls: self.body_walls.clone(),
+            body_wall_tops: self.body_wall_tops.clone(),
         };
         let tracking = self.with_allowance(tracking);
         self.stood_up += dt;
@@ -788,6 +894,8 @@ impl Np {
             reading,
             rising: 0.0,
             rise_best: 0.0,
+            rise_landed: false,
+            rise_mark: 0.0,
             rise_stall: 0.0,
             rise_failed: false,
             push,
@@ -804,6 +912,10 @@ impl Np {
             still_wait: false,
             still_up: false,
             stance_fixing: None,
+            front_stage: 0,
+            front_side: 0,
+            front_done: false,
+            front_for: 0.0,
         });
         down.since += dt;
         down.reading = reading;
@@ -858,19 +970,86 @@ impl Np {
         // clip rose for 7 and 17 s).
         if rising_wish {
             down.rising += dt;
+        } else {
+            down.front_stage = 0;
+            down.front_done = false;
         }
         if rising && !airborne {
             // Up already: no more height to gain, coming still is the rise's end (not a stall).
-            if reading.pelvis_height > down.rise_best + RISE_GAINED
-                || classify(&reading, false) == Label::Standing
+            if !down.rise_landed
+                && down.rising < RISE_LANDING
+                && reading.com_v[2] < -RISE_COMING_DOWN
             {
-                down.rise_best = down.rise_best.max(reading.pelvis_height);
+                // Still coming down (a rise wished as it lands): its gains are measured from the
+                // lowest it comes to, and no stall is counted meanwhile (measured from the
+                // height it fell through, a landing rise gave up 1.5 s after it touched down).
+                down.rise_best = down.rise_best.min(reading.pelvis_height);
+                down.rise_mark = down.rise_best;
                 down.rise_stall = 0.0;
+            } else if {
+                down.rise_landed |= down.rising >= RISE_LANDING;
+                reading.pelvis_height > down.rise_best + RISE_GAINED
+                    || classify(&reading, false) == Label::Standing
+            } {
+                down.rise_best = down.rise_best.max(reading.pelvis_height);
+                // The clock starts again for real progress only (a body bobbing face down at
+                // 0.3 to 0.45 m set a new best by a centimetre now and then and never stalled).
+                if reading.pelvis_height > down.rise_mark + RISE_PROGRESS
+                    || classify(&reading, false) == Label::Standing
+                {
+                    down.rise_mark = reading.pelvis_height;
+                    down.rise_stall = 0.0;
+                } else {
+                    down.rise_stall += dt;
+                }
             } else {
                 down.rise_stall += dt;
             }
             let worlds = self.model.node_worlds(&self.states);
             let feet_mid = scale(add(self.states[b.feet[0]].x, self.states[b.feet[1]].x), 0.5);
+            // A rise from the front ([`FRONT_START`]): onto the knees, a foot forward, then the
+            // rise's own push.
+            let front_up = {
+                let fw = b.forward_of(&self.states, b.torso);
+                fw[2] / crate::flinch::length(fw).max(1e-6)
+            };
+            // Judged once, as the rise begins from lying (a rise from the back pitches its front
+            // down as it comes over its feet: judged on, it was pulled back down to kneel).
+            // Armed only (one arm pushes, the weapon kept): both arms push the chest up and back
+            // over the feet, which a single arm could not (on knees and one hand its feet never
+            // took its weight); unarmed the rise's own push stands it in about 4 s.
+            if down.front_stage == 0
+                && !down.front_done
+                && down.rising <= dt
+                && down.labeler.label == Label::Lying
+                && front_up < -FRONT_START
+                && self.weapon_side.is_some()
+            {
+                down.front_stage = 1;
+                down.front_for = 0.0;
+                // The foot of the free arm's side forward (the weapon arm keeps its aim).
+                down.front_side = self.weapon_side.map_or(0, |w| 1 - w);
+            }
+            down.front_for += dt;
+            let kneel_z = KNEEL_HEIGHT * b.stand_height;
+            if down.front_stage == 1
+                && (reading.pelvis_height >= 0.85 * kneel_z && reading.tilt < 35f32.to_radians()
+                    || down.front_for > FRONT_STAGE_MOST)
+            {
+                down.front_stage = 2;
+                down.front_for = 0.0;
+            } else if down.front_stage == 2 && down.front_for > FRONT_STAGE_MOST {
+                down.front_stage = 0;
+                down.front_done = true;
+            }
+            let front_stage = down.front_stage;
+            // The body's way from its chest to its pelvis (flat): behind it, where the feet go
+            // kneeling.
+            let back_dir = crate::flinch::unit({
+                let d = sub(self.states[r].x, self.states[b.torso].x);
+                [d[0], d[1], 0.0]
+            })
+            .unwrap_or(reading.facing);
             // The way it rises: toward its feet while they lie out from the hips (on its back
             // the torso's facing points at the sky), the torso's facing once they are under it.
             let to_feet = sub(feet_mid, self.states[r].x);
@@ -887,7 +1066,7 @@ impl Np {
             // 0.2 to 0.3 m/s that never came still, Patrick's 22:19 clip).
             let upright = up_for_still(&reading, down.still_up);
             down.still_up = upright;
-            let lean = if upright {
+            let lean = if upright || front_stage != 0 {
                 0.0
             } else {
                 (crate::flinch::length(flat) * RISE_LEAN.0).min(RISE_LEAN.1)
@@ -977,7 +1156,28 @@ impl Np {
                 let (thigh, calf, foot) = (b.thighs[side], b.calves[side], b.feet[side]);
                 let hip = worlds[thigh].1;
                 let leg = self.balance.leg_length[side] * UNITS;
-                let foot_h = (anim[foot].1[2] - anim[r].1[2] + b.stand_height * UNITS).max(5.0);
+                // The foot's node as high as its capsule set on the ground as it lies now, held a
+                // little into it ([`RISE_FOOT_PRESS`]) (the
+                // animation's own foot is mid-stride while the actor runs: held at that height
+                // the feet hovered over the floor, never carried and the legs never pushed).
+                let foot_h = {
+                    let q = self.states[foot].q;
+                    let def = &self.model.bodies[foot];
+                    let low = def
+                        .ends
+                        .iter()
+                        .map(|e| crate::active::qrot(q, *e)[2])
+                        .fold(f32::INFINITY, f32::min);
+                    let press = if upright { 0.0 } else { RISE_FOOT_PRESS };
+                    let set = (def.radius - low) * UNITS - press;
+                    let animated =
+                        (anim[foot].1[2] - anim[r].1[2] + b.stand_height * UNITS).max(5.0);
+                    if upright {
+                        set
+                    } else {
+                        set.min(animated)
+                    }
+                };
                 // This foot's own ground under its hip (a slope's), game units.
                 let ground = self.ground_at(foot, hip).map_or(floor, |z| z * UNITS);
                 let up = ((hip[2] - ground - foot_h) / leg).clamp(0.0, 1.0);
@@ -987,7 +1187,26 @@ impl Np {
                 let ahead = scale(rise_dir, out);
                 // Upright, each foot stays where it is, set down on its own ground (followed
                 // under the hips, the feet and the hips chased each other).
-                let at = if let Some((_, to)) = stance_fix.filter(|f| f.0 == side) {
+                let at = if front_stage == 1 {
+                    // Kneeling: the foot behind its hip, the knee under it.
+                    [
+                        hip[0] + back_dir[0] * KNEEL_FOOT * UNITS,
+                        hip[1] + back_dir[1] * KNEEL_FOOT * UNITS,
+                        0.0,
+                    ]
+                } else if front_stage == 2 {
+                    if side == down.front_side {
+                        // The lunge: in front of its hip.
+                        [
+                            hip[0] - back_dir[0] * LUNGE_FOOT * UNITS,
+                            hip[1] - back_dir[1] * LUNGE_FOOT * UNITS,
+                            0.0,
+                        ]
+                    } else {
+                        let ft = worlds[foot].1;
+                        [ft[0], ft[1], 0.0]
+                    }
+                } else if let Some((_, to)) = stance_fix.filter(|f| f.0 == side) {
                     to
                 } else if upright {
                     let ft = worlds[foot].1;
@@ -999,14 +1218,35 @@ impl Np {
                 // The foot going to its place in the stance slides there, kept in the support
                 // (lifted, it tipped a body still moving on a 20 degree slope to 39 degrees).
                 let lift = 0.0;
+                // The lunging foot lifted while away from its place (dragged, it caught).
+                let lift = if front_stage == 2 && side == down.front_side {
+                    let ft = worlds[foot].1;
+                    let away = crate::flinch::length([at[0] - ft[0], at[1] - ft[1], 0.0]);
+                    if away > LUNGE_THERE * UNITS {
+                        LUNGE_LIFT * UNITS
+                    } else {
+                        // There: the rise's own push from here on.
+                        down.front_stage = 0;
+                        down.front_done = true;
+                        0.0
+                    }
+                } else {
+                    lift
+                };
                 let goal = [at[0], at[1], ground + foot_h + lift];
+                // Kneeling or lunging, the knees bend toward the head.
+                let knee_way = if front_stage != 0 {
+                    scale(back_dir, -1.0)
+                } else {
+                    rise_dir
+                };
                 let Some((r1, m, _)) = crate::flinch::leg_ik(
                     worlds[thigh].1,
                     worlds[calf].1,
                     worlds[foot].1,
                     hip,
                     goal,
-                    rise_dir,
+                    knee_way,
                 ) else {
                     continue;
                 };
@@ -1017,7 +1257,7 @@ impl Np {
                 // The foot drawn in along the floor (the leg's muscles against the floor's
                 // grip: a heel dragged, not a leg swung up); once the legs push the feet stand
                 // where they are; upright, each pressed onto its own ground where it is.
-                if down.lifting_was && !upright {
+                if down.lifting_was && !upright && front_stage == 0 {
                     continue;
                 }
                 let q = self.states[foot].q;
@@ -1045,11 +1285,25 @@ impl Np {
             // half the arm, so it pushes the torso up from lying, seated or propped; let go once
             // the legs push. The arms were held at the animation's sides before, the torso
             // turned by an abstract support alone (Patrick's 10:08 and 10:10 clips).
-            down.arms_off |= down.lifting_was;
+            // ... not while its chest still faces the ground (from its front the legs pushed at
+            // once and the arms let go with the chest down: the hands carried nothing, Patrick's
+            // design has the hands pushing the chest up first).
+            // (Not facing the sky, with the torso still past `ARMS_UNTIL_TILT` from upright.)
+            let chest = b.forward_of(&self.states, b.torso);
+            let chest_up = chest[2] / crate::flinch::length(chest).max(1e-6) > CHEST_UP;
+            let chest_low = !chest_up && reading.tilt > ARMS_UNTIL_TILT.to_radians();
+            down.arms_off |= down.lifting_was && !chest_low;
             let arms = if down.arms_off {
                 Vec::new()
             } else {
-                self.pushing_arms(&worlds, floor)
+                // Kneeling or lunging from the front, the free arm only (its shoulder up out of
+                // its reach there is no ledge to brace on: the weapon's hand went down on flat
+                // ground, 155 frames).
+                let arms = self.pushing_arms(&worlds, floor);
+                match self.weapon_side {
+                    Some(w) if front_stage != 0 => arms.into_iter().filter(|&s| s != w).collect(),
+                    _ => arms,
+                }
             };
             self.plant_hands(
                 &mut down, &arms, &worlds, floor, rise_dir, &mut posed, &mut pulls,
@@ -1091,7 +1345,32 @@ impl Np {
             } else if down.lifting_was {
                 down.lift_lapse += dt;
             }
-            if over || upright || (down.lifting_was && down.lift_lapse < LIFT_LAPSE) {
+            if front_stage != 0 {
+                // Onto the knees and over them while a foot comes forward: the pelvis held at
+                // kneeling height where it is (flat motion damped toward the ground's).
+                let ground_here = self
+                    .ground_at(r, scale(self.states[r].x, UNITS))
+                    .unwrap_or(f);
+                let z = ground_here + kneel_z;
+                let pace =
+                    ((z - self.states[r].x[2]) * RISE_PACE.1).clamp(-RISE_PACE.0, RISE_PACE.0);
+                pulls.push(Support {
+                    body: r,
+                    x: self.states[r].x,
+                    v: [self.ground_v[0], self.ground_v[1], pace],
+                    // The hips brought upright (a tall kneel, the torso over them).
+                    q: self.anim_states[r].q,
+                    kp: ROOT_SUPPORT.kp,
+                    kd: ROOT_SUPPORT.kd,
+                    max_force: push,
+                    kp_h: 0.0,
+                    kd_h: ROOT_SUPPORT.kd_h * 0.5,
+                    max_force_h: 400.0 * k,
+                    kp_turn: ROOT_SUPPORT.kp_turn * 0.5,
+                    kd_turn: self.root_kd_turn * 0.5,
+                    max_torque: 300.0 * k,
+                });
+            } else if over || upright || (down.lifting_was && down.lift_lapse < LIFT_LAPSE) {
                 down.lifting = true;
                 // Over the feet's own ground (a slope's).
                 let feet_ground = b
@@ -1165,6 +1444,12 @@ impl Np {
                 // held, the chest swung on: the centre never still). Not before: it held the
                 // torso back from coming over the feet.
                 let torso = b.torso;
+                // Less while the torso leans past [`TORSO_STILL_FULL`] (none at [`STILL_TILT_OUT`]): it held
+                // a leaning torso's centre back from coming over the pelvis, and a body leaning
+                // up a slope never straightened to stand.
+                let lean_left = ((STILL_TILT_OUT.to_radians() - reading.tilt)
+                    / (STILL_TILT_OUT - TORSO_STILL_FULL).to_radians())
+                .clamp(0.0, 1.0);
                 if upright {
                     pulls.push(Support {
                         body: torso,
@@ -1175,8 +1460,8 @@ impl Np {
                         kd: 0.0,
                         max_force: 0.0,
                         kp_h: 0.0,
-                        kd_h: TORSO_STILL.0,
-                        max_force_h: TORSO_STILL.1 * k,
+                        kd_h: TORSO_STILL.0 * lean_left,
+                        max_force_h: TORSO_STILL.1 * k * lean_left,
                         kp_turn: 0.0,
                         kd_turn: 0.0,
                         max_torque: 0.0,
@@ -1190,6 +1475,8 @@ impl Np {
                 down.rise_failed = true;
                 down.rising = 0.0;
                 down.rise_best = 0.0;
+                down.rise_landed = false;
+                down.rise_mark = 0.0;
                 down.arms_off = false;
                 down.arms_off = false;
                 down.rise_stall = 0.0;
@@ -1200,10 +1487,14 @@ impl Np {
             down.no_push = 0.0;
             down.rising = 0.0;
             down.rise_best = 0.0;
+            down.rise_landed = false;
+            down.rise_mark = 0.0;
             down.arms_off = false;
         } else if !rising_wish {
             down.rising = 0.0;
             down.rise_best = 0.0;
+            down.rise_landed = false;
+            down.rise_mark = 0.0;
             down.arms_off = false;
         }
         // Not rising: firing from the ground the weapon arm aims (the game's) and the free arm
@@ -1231,16 +1522,26 @@ impl Np {
         // (Upright as the still stage holds it too: read alone, its feet's contact flickered,
         // a body standing still timed out and was let go, and it fell.)
         let upright = classify(&reading, false) == Label::Standing || down.still_up;
-        if self.rise && down.rising > RISE_MOST && upright && down.rising <= RISE_MOST + STILL_MOST
-        {
+        // Going up at the end of its time (the pelvis rising at 1.3 m/s through 0.72 m when the
+        // time ran out, and the rise was given up): its time runs on as the still stage's does.
+        let going_up = reading.com_v[2] > RISE_GOING_UP
+            || reading.pelvis_height >= RISE_NEARLY_UP * reading.stand_height;
+        let over = down.rising > RISE_MOST && down.rising <= RISE_MOST + STILL_MOST;
+        if self.rise && over && upright {
             down.still_wait = true;
+        } else if self.rise && over && going_up {
+            // Still going up: the rise goes on.
         } else if self.rise && down.rising > RISE_MOST {
             self.rise = false;
             down.rise_failed = true;
             down.rising = 0.0;
             down.rise_best = 0.0;
+            down.rise_landed = false;
+            down.rise_mark = 0.0;
             down.arms_off = false;
             down.rise_stall = 0.0;
+            down.front_stage = 0;
+            down.front_done = false;
         }
         let drives: Vec<Drive> = targets
             .iter()
@@ -1280,8 +1581,11 @@ impl Np {
             soft_limits: down.since < LIMITS_SETTLE || self.to_limits,
             allow: Vec::new(),
             floors: self.floors.clone(),
+            end_floors: self.end_floors.clone(),
+            edges: self.edges.clone(),
             data_limits: self.to_limits,
             body_walls: self.body_walls.clone(),
+            body_wall_tops: self.body_wall_tops.clone(),
         };
         let tracking = self.with_allowance(tracking);
         self.report = self.model.step_world(
@@ -1538,7 +1842,15 @@ impl Np {
             + crate::flinch::length(sub(worlds[hand].1, worlds[fore].1));
         let shoulder = worlds[upper].1;
         let ground = self.ground_at(hand, shoulder).map_or(floor, |g| g * UNITS);
-        if shoulder[2] - ground <= reach * 1.05 {
+        // The weapon's hand only where its own ground is in its reach and the free hand's is not
+        // (a ledge's or a wall's foot under the free side); on flat ground both are as far, and
+        // the weapon's hand stays off it.
+        let [w_upper, _, w_hand] = b.arms[w];
+        let w_shoulder = worlds[w_upper].1;
+        let w_ground = self
+            .ground_at(w_hand, w_shoulder)
+            .map_or(floor, |g| g * UNITS);
+        if shoulder[2] - ground <= reach * 1.05 || w_shoulder[2] - w_ground > reach * 1.05 {
             vec![free]
         } else {
             vec![free, w]
@@ -1597,7 +1909,34 @@ impl Np {
                 .fold(0.0f32, f32::max)
         });
         let into_ground = under.iter().any(|&u| u > 0.01);
+        // How far each animated foot lies in a wall below its top, and the wall's way out (a
+        // walker kept walking into a slab's face: the animation's foot drove into it at 3700 N
+        // and lay 5.6 u inside).
+        let in_wall = [0, 1].map(|side| {
+            let f = b.feet[side];
+            let (Some(s), Some(walls)) = (self.anim_states.get(f), self.body_walls.get(f)) else {
+                return None;
+            };
+            let tops = self.body_wall_tops.get(f);
+            let def = &self.model.bodies[f];
+            let mut deepest: Option<(f32, V3)> = None;
+            for (k, w) in walls.iter().enumerate() {
+                for e in &def.ends {
+                    let end = add(s.x, crate::active::qrot(s.q, sub(*e, def.com)));
+                    if tops.and_then(|t| t.get(k)).is_some_and(|&top| end[2] > top) {
+                        continue;
+                    }
+                    let depth = def.radius - crate::flinch::dot(sub(end, w.p), w.n);
+                    if depth > deepest.map_or(WALL_FOOT_IN, |d| d.0) {
+                        deepest = Some((depth, w.n));
+                    }
+                }
+            }
+            deepest
+        });
+        let into_wall = in_wall.iter().any(|w| w.is_some());
         let engaged = into_ground
+            || into_wall
             || if b.moving {
                 // On its path the walk's legs drive; a gather step or a plant takes them.
                 b.step.is_some() || b.plants.iter().any(|p| p.is_some())
@@ -1631,6 +1970,13 @@ impl Np {
                 _ if under[side] > 0.01 => {
                     let s = &self.anim_states[foot];
                     node_of(foot, add(s.x, [0.0, 0.0, under[side]]), s.q)
+                }
+                // An animated foot in a wall: where the animation has it, out of the wall.
+                _ if in_wall[side].is_some() => {
+                    let s = &self.anim_states[foot];
+                    let (depth, n) = in_wall[side].unwrap_or((0.0, [0.0; 3]));
+                    let out = crate::flinch::unit([n[0], n[1], 0.0]).unwrap_or([0.0; 3]);
+                    node_of(foot, add(s.x, scale(out, depth)), s.q)
                 }
                 _ => node_of(foot, self.states[foot].x, self.states[foot].q),
             };
@@ -1687,6 +2033,12 @@ impl Np {
         for s in self.anim_samples.iter_mut() {
             s.1 = add(s.1, by);
         }
+    }
+
+    /// The way the body faces (its torso's forward, flat, unit).
+    pub fn facing(&self) -> V3 {
+        let f = self.bodies.forward_of(&self.states, self.bodies.torso);
+        crate::flinch::unit([f[0], f[1], 0.0]).unwrap_or([0.0, 1.0, 0.0])
     }
 
     /// The animation's velocity (m/s) the last frame measured.

@@ -167,6 +167,15 @@ pub struct Tracking {
     /// ground under it, a slope's included (a flat floor at one height pushed a downed body's
     /// shins and knees into a 20 degree slope: Patrick's 23:41 clip).
     pub floors: Vec<Plane>,
+    /// Each body's floor under each of its ends (world, metres; empty: [`Tracking::floors`]): a
+    /// foot across a step's edge rests its toe on the step and its heel below (one plane a body
+    /// left its toe in the step's corner, 4.8 units in).
+    pub end_floors: Vec<[Plane; 2]>,
+    /// The edges of steps and ledges near the body (world, metres): a point on the edge, its
+    /// direction (unit) and how far it reaches each way from the point. A capsule's end is kept
+    /// its radius off each (a toe swinging over a slab's corner went 2.3 units into it: planes
+    /// alone hold no corner).
+    pub edges: Vec<Edge>,
     /// The skeleton's own limits only (the game's ragdoll's: none widened by the animation, the
     /// targets or a reach), brought in gently (with `soft_limits`): a body about to be handed to
     /// the game's ragdoll (whose constraints snapped a pose far outside them: the tester's 08:13
@@ -176,6 +185,10 @@ pub struct Tracking {
     /// found near it (a plane holds only the body it was found for, so a crate's face never
     /// reaches a body beyond the crate).
     pub body_walls: Vec<Vec<Plane>>,
+    /// Each of [`Tracking::body_walls`]' tops (world, metres; missing or infinite: none known):
+    /// a wall holds only what lies below its top (a step's face, 12 units high, held a toe
+    /// resting on the step's top back off it at 1600 N).
+    pub body_wall_tops: Vec<Vec<f32>>,
 }
 
 /// A pull on a body this frame (the root's support, a swinging foot's carry): a spring and damper
@@ -205,6 +218,17 @@ pub struct Support {
 pub struct Plane {
     pub p: V3,
     pub n: V3,
+}
+
+/// A step's or a ledge's edge (world, metres): the segment through `p` along `dir` (unit),
+/// `reach` each way, `p`'s height the higher ground's, which lies toward `up`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Edge {
+    pub p: V3,
+    pub dir: V3,
+    pub reach: f32,
+    /// Flat, unit, across the edge toward the higher ground (the step's top).
+    pub up: V3,
 }
 
 /// What a frame's step found.
@@ -569,7 +593,10 @@ impl Model {
             })
             .collect();
         let floors: &[Plane] = tracking.map_or(&[], |t| &t.floors);
+        let end_floors: &[[Plane; 2]] = tracking.map_or(&[], |t| &t.end_floors);
+        let edges: &[Edge] = tracking.map_or(&[], |t| &t.edges);
         let body_walls: &[Vec<Plane>] = tracking.map_or(&[], |t| &t.body_walls);
+        let wall_tops: &[Vec<f32>] = tracking.map_or(&[], |t| &t.body_wall_tops);
         let mut allow: Vec<f32> = tracking.map_or(Vec::new(), |t| t.allow.clone());
         allow.resize(self.joints.len(), f32::INFINITY);
         for sub_i in 0..substeps {
@@ -634,7 +661,16 @@ impl Model {
             }
             let slip: &[usize] = tracking.map_or(&[], |t| &t.slip);
             let grip: &[usize] = tracking.map_or(&[], |t| &t.grip);
-            let loads = self.surfaces(states, &prev, &surfaces, floors, body_walls, slip, h);
+            let mut loads = self.surfaces(
+                states,
+                &prev,
+                &surfaces,
+                (floors, end_floors),
+                (body_walls, wall_tops),
+                slip,
+                h,
+            );
+            loads.extend(self.edge_contacts(states, &prev, edges, h));
             // Each surface's push this substep as a force (N), the frame's mean.
             let to_force = 1.0 / (h * h * substeps as f32);
             for &(b, k, lambda, _, _) in &loads {
@@ -671,8 +707,12 @@ impl Model {
             // No bounce (the paper's restitution, at 0): a contact's push out of a surface moves
             // the body out but leaves it no speed away from it.
             for &(b, _, _, local, n) in &loads {
-                let r = qrot(states[b].q, local);
-                let r = sub(r, scale(n, self.bodies[b].radius));
+                // A sphere-like body's push was through its centre: so is its stop.
+                let r = if is_sphere(&self.bodies[b]) {
+                    [0.0; 3]
+                } else {
+                    sub(qrot(states[b].q, local), scale(n, self.bodies[b].radius))
+                };
                 let v = add(states[b].v, cross(states[b].w, r));
                 let vn = dot(v, n);
                 if vn > 0.0 {
@@ -711,11 +751,11 @@ impl Model {
                 states[r].v = add(states[r].v, dv);
             }
             self.friction(states, &loads, h, slip, grip);
-            self.grip_friction(states, &surfaces, floors, h, grip);
+            self.grip_friction(states, &surfaces, (floors, end_floors), h, grip);
         }
         for (i, def) in self.bodies.iter().enumerate() {
-            let fl = floor_of(&surfaces, floors, i);
-            for e in def.ends {
+            for (end, e) in def.ends.into_iter().enumerate() {
+                let fl = end_floor(&surfaces, (floors, end_floors), i, end);
                 let p = add(states[i].x, qrot(states[i].q, sub(e, def.com)));
                 let d = dot(sub(p, fl.p), fl.n) - def.radius;
                 if d <= 0.005 {
@@ -724,7 +764,13 @@ impl Model {
                         .push((i, sub(p, scale(fl.n, d + def.radius))));
                 }
                 let own: &[Plane] = body_walls.get(i).map_or(&[], |w| w.as_slice());
+                let tops: &[f32] = wall_tops.get(i).map_or(&[], |w| w.as_slice());
                 for (k, w) in surfaces.iter().chain(own).enumerate().skip(1) {
+                    if k >= surfaces.len()
+                        && tops.get(k - surfaces.len()).is_some_and(|&top| p[2] > top)
+                    {
+                        continue;
+                    }
                     let d = dot(sub(p, w.p), w.n) - def.radius;
                     if d <= 0.005 {
                         report
@@ -952,6 +998,63 @@ impl Model {
         }
     }
 
+    /// Each capsule end kept its radius off each edge (nearest point of the segment), as
+    /// [`Model::surfaces`] keeps it off a plane: what lay inside as the substep began let out at
+    /// [`MAX_OUT`] at most. Its loads count as walls'.
+    fn edge_contacts(
+        &self,
+        states: &mut [State],
+        prev: &[State],
+        edges: &[Edge],
+        h: f32,
+    ) -> Vec<(usize, usize, f32, V3, V3)> {
+        let mut loads = Vec::new();
+        if edges.is_empty() {
+            return loads;
+        }
+        let nearest = |c: V3, ed: &Edge| {
+            let t = dot(sub(c, ed.p), ed.dir).clamp(-ed.reach, ed.reach);
+            add(ed.p, scale(ed.dir, t))
+        };
+        for (i, def) in self.bodies.iter().enumerate() {
+            for e in def.ends {
+                let local = sub(e, def.com);
+                for (k, ed) in edges.iter().enumerate() {
+                    let centre = add(states[i].x, qrot(states[i].q, local));
+                    let off = sub(centre, nearest(centre, ed));
+                    let d = length(off);
+                    if d >= def.radius {
+                        continue;
+                    }
+                    let n = if d > 1e-6 {
+                        scale(off, 1.0 / d)
+                    } else {
+                        [0.0, 0.0, 1.0]
+                    };
+                    let was = add(prev[i].x, qrot(prev[i].q, local));
+                    let inside = (def.radius - length(sub(was, nearest(was, ed)))).max(0.0);
+                    let depth = def.radius - d;
+                    let depth = depth.min((depth - inside).max(0.0) + inside.min(MAX_OUT * h));
+                    if depth <= 0.0 {
+                        continue;
+                    }
+                    // A sphere-like body (the head) is pushed out through its centre: its ends
+                    // lie inside its radius of it, so a push at an end's contact point only
+                    // spun it against the ground ([`is_sphere`]).
+                    let r = if is_sphere(def) {
+                        scale(n, -def.radius)
+                    } else {
+                        sub(sub(centre, scale(n, def.radius)), states[i].x)
+                    };
+                    let w = self.point_weight(states, i, r, n);
+                    self.move_at(states, i, r, scale(n, depth / w));
+                    loads.push((i, usize::MAX - k, depth / w, local, n));
+                }
+            }
+        }
+        loads
+    }
+
     /// The capsules kept on the outer side of each surface (the floor first, then the walls); a
     /// contact that has not slid past the static friction is held where it was. Answers each push
     /// (body, surface, its size: kg·m, the capsule end's centre in the body's turn, the surface's
@@ -963,22 +1066,27 @@ impl Model {
         states: &mut [State],
         prev: &[State],
         surfaces: &[Plane],
-        floors: &[Plane],
-        body_walls: &[Vec<Plane>],
+        floors: (&[Plane], &[[Plane; 2]]),
+        (body_walls, wall_tops): (&[Vec<Plane>], &[Vec<f32>]),
         slip: &[usize],
         h: f32,
     ) -> Vec<(usize, usize, f32, V3, V3)> {
         let mut loads = Vec::new();
         for (i, def) in self.bodies.iter().enumerate() {
             let grips = !slip.contains(&i);
-            let fl = floor_of(surfaces, floors, i);
             let own: &[Plane] = body_walls.get(i).map_or(&[], |w| w.as_slice());
-            for e in def.ends {
+            let tops: &[f32] = wall_tops.get(i).map_or(&[], |w| w.as_slice());
+            let shared = surfaces.len();
+            for (end, e) in def.ends.into_iter().enumerate() {
+                let fl = end_floor(surfaces, floors, i, end);
                 let local = sub(e, def.com);
                 for (k, sf) in surfaces.iter().chain(own).enumerate() {
                     let sf = if k == 0 { &fl } else { sf };
                     let n = sf.n;
                     let centre = add(states[i].x, qrot(states[i].q, local));
+                    if k >= shared && tops.get(k - shared).is_some_and(|&top| centre[2] > top) {
+                        continue;
+                    }
                     let depth = def.radius - dot(sub(centre, sf.p), n);
                     if depth <= 0.0 {
                         continue;
@@ -1004,9 +1112,17 @@ impl Model {
                     let slide = sub(now, was);
                     let slide = sub(slide, scale(n, dot(slide, n)));
                     let s_len = length(slide);
-                    if grips && s_len > 1e-7 && s_len < FRICTION.0 * depth {
+                    if grips
+                        && !(is_sphere(def) && s_len > SPHERE_SKID * h)
+                        && s_len > 1e-7
+                        && s_len < FRICTION.0 * depth
+                    {
                         let t = scale(slide, -1.0 / s_len);
-                        let r = sub(sub(now, scale(n, def.radius)), states[i].x);
+                        let r = if is_sphere(def) {
+                            [0.0; 3]
+                        } else {
+                            sub(sub(now, scale(n, def.radius)), states[i].x)
+                        };
                         let w = self.point_weight(states, i, r, t);
                         self.move_at(states, i, r, scale(t, s_len / w));
                     }
@@ -1032,7 +1148,13 @@ impl Model {
             if slip.contains(&i) || grip.contains(&i) || lambda <= 0.0 {
                 continue;
             }
-            let r = sub(qrot(states[i].q, local), scale(n, self.bodies[i].radius));
+            let def = &self.bodies[i];
+            // A sphere-like body's contact point is under its centre, as it is pushed out.
+            let r = if is_sphere(def) {
+                [0.0; 3]
+            } else {
+                sub(qrot(states[i].q, local), scale(n, def.radius))
+            };
             let v = add(states[i].v, cross(states[i].w, r));
             let vt = sub(v, scale(n, dot(v, n)));
             let s = length(vt);
@@ -1042,7 +1164,12 @@ impl Model {
             let t = scale(vt, -1.0 / s);
             let w = self.point_weight(states, i, r, t).max(1e-6);
             // At most what stops the slide, at most the friction of the push out.
-            let impulse = (s / w).min(FRICTION.1 * lambda / h);
+            let mu = if is_sphere(def) && s > SPHERE_SKID {
+                FRICTION.1 * SPHERE_FRICTION
+            } else {
+                FRICTION.1
+            };
+            let impulse = (s / w).min(mu * lambda / h);
             let p = scale(t, impulse);
             let s_ = &mut states[i];
             s_.v = add(s_.v, scale(p, self.bodies[i].inv_mass));
@@ -1058,7 +1185,7 @@ impl Model {
         &self,
         states: &mut [State],
         surfaces: &[Plane],
-        floors: &[Plane],
+        floors: (&[Plane], &[[Plane; 2]]),
         h: f32,
         grip: &[usize],
     ) {
@@ -1066,8 +1193,8 @@ impl Model {
             let Some(def) = self.bodies.get(i) else {
                 continue;
             };
-            let fl = floor_of(surfaces, floors, i);
-            for e in def.ends {
+            for (end, e) in def.ends.into_iter().enumerate() {
+                let fl = end_floor(surfaces, floors, i, end);
                 let local = sub(e, def.com);
                 for (k, sf) in surfaces.iter().enumerate() {
                     let sf = if k == 0 { &fl } else { sf };
@@ -1284,6 +1411,15 @@ fn floor_of(surfaces: &[Plane], floors: &[Plane], i: usize) -> Plane {
     }
 }
 
+/// Body `i`'s floor under its end `end`: its own end's ([`Tracking::end_floors`]), else the
+/// body's ([`floor_of`]).
+fn end_floor(surfaces: &[Plane], floors: (&[Plane], &[[Plane; 2]]), i: usize, end: usize) -> Plane {
+    match floors.1.get(i) {
+        Some(ends) => ends[end],
+        None => floor_of(surfaces, floors.0, i),
+    }
+}
+
 fn floor_inertia(inertia: M3, m: f32) -> M3 {
     let least = 0.4 * m * MIN_RADIUS * MIN_RADIUS;
     let mut out = inertia;
@@ -1336,6 +1472,25 @@ pub fn angle(a: Q, b: Q) -> f32 {
 /// The rotation vector of `w` as a quaternion (re-exported for the controller).
 pub fn turn_of(w: V3) -> Q {
     qexp(w)
+}
+
+/// How far a body's ends may lie from its centre, as a share of its radius, for it to be pushed out
+/// of a surface as a ball ([`is_sphere`]).
+pub const SPHERE_LIKE: f32 = 0.25;
+
+/// A sphere-like body's sliding friction as a share of the others' (and no static grip) while it
+/// slides faster than [`SPHERE_SKID`] (m/s): a head that hits the ground skids on with the body
+/// (held there, the neck swung it round it: a whip); slower, it grips as the rest (lying on a
+/// slope, a head that slid let the body slide 38 u).
+pub const SPHERE_FRICTION: f32 = 0.3;
+pub const SPHERE_SKID: f32 = 0.5;
+
+/// Whether a body is sphere-like: both its ends within [`SPHERE_LIKE`] of its radius from its
+/// centre (the head: ends 0.016 from its centre, radius 0.111).
+fn is_sphere(def: &BodyDef) -> bool {
+    def.ends
+        .iter()
+        .all(|e| length(sub(*e, def.com)) < SPHERE_LIKE * def.radius)
 }
 
 #[cfg(test)]

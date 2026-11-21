@@ -1882,6 +1882,22 @@ fn bodies(e: &mut Engine, actor: u32) -> Vec<(u32, u32)> {
     found
 }
 
+/// The actor's movement velocity (game units a second): its character controller's linear
+/// velocity (`bhkCharacterProxy::GethkLinearVelocity`, `00807080`, Havok units) scaled; zero
+/// without a controller.
+pub(crate) fn actor_velocity(e: &mut Engine, actor: u32) -> [f32; 3] {
+    let controller = e.call(CHAR_CONTROLLER, &args![actor]).u32();
+    if controller == 0 {
+        return [0.0; 3];
+    }
+    let at = e.call(CONTROLLER_VELOCITY, &args![controller]).u32();
+    if at == 0 {
+        return [0.0; 3];
+    }
+    let s = hk_scale(e);
+    read3(e, at).map(|x| if x.is_finite() { x * s } else { 0.0 })
+}
+
 /// Game units per Havok unit (the game's float at `011b1864`; 7 when it can't be read).
 fn hk_scale(e: &Engine) -> f32 {
     let s = e.mem.f32(HK_TO_GAME);

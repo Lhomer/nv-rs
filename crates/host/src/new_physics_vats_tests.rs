@@ -148,9 +148,12 @@ fn vats_run(pose: Pose) -> VatsRun {
         Pose::Stepping => 0.45,
         Pose::Lying => 3.0,
     };
-    // Until VATS opens: the game's frames.
+    // Until VATS opens: the game's frames. Lying, VATS opens on the first frame from 1 s on that
+    // the body lies (labelled lying), by 3 s at most: it settles, then rises (the downed AI's
+    // settle-then-rise), and a fixed moment met it sitting up as the rise quickened.
     let mut claimed = false;
-    while t < vats_at {
+    let lying_now = |t: f32| t >= 1.0 && label_of(ACTOR) == Some("lying");
+    while t < vats_at && !(matches!(pose, Pose::Lying) && lying_now(t)) {
         t += dt;
         game_frame(&mut f, dt, true);
         if !claimed {
