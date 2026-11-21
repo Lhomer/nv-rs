@@ -90,7 +90,7 @@ pub const DIERR_UNSUPPORTED: u32 = 0x8000_4001;
 pub const DIERR_OLDDIRECTINPUTVERSION: u32 = 0x8007_047e;
 
 /// `IID_IDirectInput8A` {BF798030-483A-4DA2-AA99-5D64ED369700}.
-const IID_IDIRECTINPUT8A: [u8; 16] = [
+pub const IID_IDIRECTINPUT8A: [u8; 16] = [
     0x30, 0x80, 0x79, 0xbf, 0x3a, 0x48, 0xa2, 0x4d, 0xaa, 0x99, 0x5d, 0x64, 0xed, 0x36, 0x97, 0x00,
 ];
 /// `GUID_SysMouse` {6F1D2B60-D5A0-11CF-BFC7-444553540000} and `GUID_SysKeyboard` (…2B61…).
@@ -166,6 +166,9 @@ pub struct Input {
     /// Mouse motion since the last read (relative axes) and the buttons down.
     mouse_motion: [i32; 3],
     mouse_buttons: [bool; 8],
+    /// How many times the keyboard or mouse was used: a key or mouse button going down, or the
+    /// mouse moving ([`keyboard_mouse_uses`]).
+    uses: u32,
     sequence: u32,
     /// When the game last read the keyboard (`GetDeviceState`): the frame's poll of the controls, for
     /// the delay log ([`controls_polled_at`]).
@@ -679,6 +682,7 @@ pub fn key(e: &mut Engine, code: u8, down: bool) {
     }
     input.keys[code as usize] = down;
     if down {
+        input.uses = input.uses.wrapping_add(1);
         if input.async_pressed.len() < KEYBOARD_KEYS as usize {
             input.async_pressed.resize(KEYBOARD_KEYS as usize, false);
         }
@@ -742,7 +746,11 @@ pub fn get_async_key_state(e: &mut Engine, virtual_key: u32) -> u32 {
 
 /// Mouse motion (mickeys) for the next read: x, y and the wheel.
 pub fn mouse_move(e: &mut Engine, dx: i32, dy: i32, wheel: i32) {
-    let m = &mut state!(e).input.mouse_motion;
+    let input = &mut state!(e).input;
+    if (dx, dy, wheel) != (0, 0, 0) {
+        input.uses = input.uses.wrapping_add(1);
+    }
+    let m = &mut input.mouse_motion;
     m[0] = m[0].wrapping_add(dx);
     m[1] = m[1].wrapping_add(dy);
     m[2] = m[2].wrapping_add(wheel);
@@ -750,7 +758,18 @@ pub fn mouse_move(e: &mut Engine, dx: i32, dy: i32, wheel: i32) {
 
 /// A mouse button (0..8) going down or up.
 pub fn mouse_button(e: &mut Engine, button: usize, down: bool) {
-    state!(e).input.mouse_buttons[button] = down;
+    let input = &mut state!(e).input;
+    if down && !input.mouse_buttons[button] {
+        input.uses = input.uses.wrapping_add(1);
+    }
+    input.mouse_buttons[button] = down;
+}
+
+/// How many times the keyboard or mouse was used so far (a key or mouse button going down, the
+/// mouse moving), wrapping: a change says they were used since the caller last looked. The fixes
+/// preset's pad switch reads it (`crates/host/src/pad_when_used.rs`).
+pub fn keyboard_mouse_uses(e: &mut Engine) -> u32 {
+    state!(e).input.uses
 }
 
 #[cfg(test)]

@@ -63,6 +63,7 @@ pub static FIXES: &[Fix] = &[
     crate::cell_entry_wait::FIX,
     crate::perk_every_level::FIX,
     crate::fov_slider::FIX,
+    crate::pad_when_used::FIX,
     crate::graphics_settings::FIX,
     crate::gunplay::FIX,
     crate::quick_loot::FIX,

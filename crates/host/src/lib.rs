@@ -50,6 +50,7 @@ pub mod movement;
 pub mod native_inflate;
 pub mod new_physics;
 pub mod one_hand;
+pub mod pad_when_used;
 pub mod patch_data;
 pub mod perk_every_level;
 pub mod perks;

@@ -7,9 +7,11 @@
 //! `InterfaceManager::Initialize` (`00709fd0`) and the settings list (`007d4399`); and
 //! `XInputSetState` (ordinal 3, slot `00fdf398`, thunk `00ee820a`) from `Controls::Rumble`
 //! (`00a255b0`), the rumble queue's update (`00a269f0`) and its stop (`00a25810`). The game's own
-//! switches stay the only ones: the Settings menu's "360 Controller" (`bDisable360Controller` in
-//! `[Interface]`, which `Controls::Poll` reads as "no pad" when set) and its vibration
-//! (`bGamePadRumble` in `[Controls]`).
+//! switches stay the only ones here: the Settings menu's "360 Controller" (`bDisable360Controller`
+//! in `[Interface]`, which `Controls::Poll` reads as "no pad" once the start menu has copied it into
+//! the input object) and its vibration (`bGamePadRumble` in `[Controls]`). Which device is in use
+//! (a pad counted only once it is used, the keyboard and mouse always read) is the fixes preset's
+//! row over the game's thunk (`crates/host/src/pad_when_used.rs`), on top of this layer.
 //!
 //! Without a source (the engine crates' tests, a repeatable run) every user answers "not
 //! connected", as a Windows machine with no pad does. The host puts the system's pads in
