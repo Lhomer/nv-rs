@@ -7,6 +7,21 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-21 (the seventh upstream merge: b10470de..f159fe43, 12 commits)
+
+**Status: pushed.** slaterain/main's form id map native, JohnnyGuitar's editor ids (#852, a new
+`johnnyguitar` crate built in, its `bJGEditorIDs` row), JIP's deferred start, the launcher with no
+title bar or border (drag its background to move it; Exit, Esc or Alt+F4 close it), drawing thread
+A (off by default), bind groups per sampler, the set-up drivers, typed draw writer, scripts and
+lights queue native, MCM's mass setters, the menu reaction map. Conflicts: the workspace members
+and `host/Cargo.toml` (upstream's `johnnyguitar` and the fork's `ragdoll-core`, both kept),
+`DEPENDENCY-LOCK.sha256` (recomputed; the scheme checked against upstream's own: it matches);
+the Linux and Android lock files get `johnnyguitar`. The launcher merged without conflict: the
+fork's updater, `latest.txt` channel, profiles and Testing list are untouched. JIP, MCM and UIO
+stay on. The extender warning still names JohnnyGuitar's DLL (only its editor ids are built in;
+Patrick asked for that warning). Host 480 of 480, launcher, mod crates, johnnyguitar, repo
+hygiene pass. Not merged: a9bfef63 (newer than the asked range).
+
 ### Claude, 2026-11-21 (tests d to g; the lying label; the Ragdoll lab's stand)
 
 **Status: pushed (the commit after 38461b8); 38461b8 is on the launcher (Play, Windows and Linux
