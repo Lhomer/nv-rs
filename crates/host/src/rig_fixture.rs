@@ -1039,6 +1039,13 @@ pub fn fnv_skeleton() -> Vec<Node> {
 /// limits but for the neck (20 degrees out of its 6.8 cone, as the data has it).
 #[test]
 fn the_joint_limits_on_the_fnv_skeleton_fixture() {
+    // One fixture at a time (as every New Physics test): the animation's update calls New
+    // Physics' hook, which finds an actor by its address in the process's list; beside another
+    // test's taken actor at the same address, its drawn pose was written into this fixture's
+    // nodes (a thigh 33 degrees off its data).
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     use ragdoll_core::np_skeleton::{Measure, Skeleton};
     let sk = Skeleton::fnv();
     let bind = sk.bind_worlds();
@@ -1086,6 +1093,13 @@ fn the_joint_limits_on_the_fnv_skeleton_fixture() {
 /// pelvis.
 #[test]
 fn the_fnv_skeleton_is_laid_out_as_the_game_has_it() {
+    // One fixture at a time (as every New Physics test): the animation's update calls New
+    // Physics' hook, which finds an actor by its address in the process's list; beside another
+    // test's taken actor at the same address, its drawn pose was written into this fixture's
+    // nodes (a thigh 33 degrees off its data).
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let nodes = fnv_skeleton();
     assert_eq!(nodes.len(), 66, "the 65 NiNodes and the scene root");
     assert_eq!(nodes.iter().filter(|n| n.body).count(), 18);
