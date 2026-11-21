@@ -7,6 +7,56 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-21 (Patrick's answers 1-4 applied: the running fix and the front rise, `docs/wip/np-running-seed.patch`)
+
+**Status: not pushed; 44 of 45 New Physics tests pass with the patch (on 345a2d4), question 5
+below decides the last.** The patch carries `NP_DBG*` eprintln lines and two `zz_` exploration
+tests to strip before a commit.
+- **Answer 1 (walkers keep walking):** kept for every fixture walker.
+- **Answer 2 (chest to the ground, hands push, settle then rise):** the downed AI chooses to stand
+  only once the body has settled: its centre still (`SETTLE_STILL` 0.15 m/s), or down on the
+  ground (pelvis under `SETTLE_LOW` 0.5 of standing) and no longer falling (`SETTLE_FALLING`),
+  for `SETTLE_FOR` 0.3 s, at most `SETTLE_MOST` 4 s. A 4.8 m/s shove in the back no longer folds
+  and straightens it: it goes down, settles, and the hands push it up (the arms test: on its face
+  0.54, on its back 0.51 of its weight). Armed (one free arm, the weapon kept), a rise from the front
+  kneels and lunges (`docs/wip/np-front-rise.patch`'s stages, now only for one-armed rises); the
+  weapon's hand pushes only where its own ground is in reach and the free hand's is not (a ledge),
+  never on flat ground. From the front the arms push until the torso is within 60 degrees of
+  upright (`CHEST_UP`, `ARMS_UNTIL_TILT`).
+- **Answer 3 (floor bound):** a 50 ms mean (`FloorWindow` in the fixture tests): a frame's own
+  mean is its impulse over its time, so the same landing read 3.3 body weights over a 13 ms frame
+  and half that over a 26 ms one; the load over a fixed span is what the body carries whatever the
+  frame rate. With it the slab's floor reads 2.9.
+- **Answer 4 (prone start):** `Cycle::prone` takes the actor as a hit does and, on the frame its body
+  is built, turns that body onto its front, still, with the balance falling
+  (`new_physics::lay_prone`, test-only; the game's falls are unchanged). From it the unarmed rise
+  stands in 4.0 s, the hands carrying 0.57, the front never turning up while low (at most -0.43),
+  still at the end (0.04 m/s, 0.6 u); armed in 7.7 s, the hands 0.26, the weapon's hand never down.
+  The probe has `front_up`, `pelvis_share`, `rise_wished`; `CycleRun::front_low` is the front's
+  range while the pelvis is under half its height (the "no flip" measure for task C).
+- **Fixed on the way:** the parallel-only failures (`np_run`, `down_run` and the two-thread run took
+  their frame time from the wall clock; now a simulated 20 ms frame: deterministic); the slab
+  (edges from every wall cast that finds a step's top, ground samples a radius around each foot end,
+  the ground fit split at a height gap judged against an unbiased fit, a wall holds only below its
+  top). `np_slope_downed_holds_the_games_movement` now holds the settle within 3 s and the get-up
+  within 5 s of it (the 5 s were for the get-up when a rise began mid-slide; Patrick to confirm);
+  the hitboxes test keeps its body lying (its strength gone once down).
+- **Still failing:** `np_full_cycle_with_a_racing_animation`: in its give-up stage's fall the head
+  lands and turns 24.5 degrees in one 34 ms frame beyond its spin (limit 20). Traced: the floor
+  pushes the head out at one end of its capsule, which is all but a sphere (its ends 1.6 cm off an
+  11 cm radius), so the push turns it, and the push's stop (no bounce) takes the spin back.
+- **Question 5 for Patrick:** (a) push sphere-like bodies (the head) out through their centre: it
+  fixes this, but three other tests then go just past their bounds (the slab 2.79 u of 2, the armed
+  hands 0.09 of 0.1, the side rise 8.9 s of 8) and need more work; or (b) the snap measure leaves out
+  the frames a body first lands in, as it leaves out the hit's own first 0.1 s. The suite is chaotic
+  (every change moves a different few tests over their bounds by a little), so (b) is the steadier.
+- **The 40mm grenade (keep 200 N s):** the blast's force is the form's own (N s at the centre);
+  without the 40mm form's value the code cannot be checked against 200 N s here: once read, a
+  scale constant in `new_physics::blast` can make it so.
+- **Not yet written:** task C's own tests (settle bounded from contorted and side-lying starts,
+  joints within limits, no hand-over jump, the face-down give-up's game get-up face down), tests c
+  to g, the three ignored tests.
+
 ### Claude, 2026-11-21 (the fifth upstream merge: 556cc88, to b860fdbe)
 
 **Status: pushed.** slaterain/main 5d48a0ff..b860fdbe (35 commits: Stewie's shares and crash

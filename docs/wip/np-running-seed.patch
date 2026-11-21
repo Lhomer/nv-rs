@@ -44,10 +44,20 @@ index 87a3793..2e5d87d 100644
  fn hk_scale(e: &Engine) -> f32 {
      let s = e.mem.f32(HK_TO_GAME);
 diff --git a/crates/host/src/new_physics.rs b/crates/host/src/new_physics.rs
-index 87d294d..a12400c 100644
+index 87d294d..e7017d7 100644
 --- a/crates/host/src/new_physics.rs
 +++ b/crates/host/src/new_physics.rs
-@@ -164,6 +164,9 @@ struct NpActor {
+@@ -102,6 +102,9 @@ struct NpActor {
+     choice: &'static str,
+     choice_for: f32,
+     fails: u32,
++    /// Downed: how long its centre has been still ([`SETTLE_STILL`]) since it went down or last
++    /// moved (s).
++    still_for: f32,
+     fired: f32,
+     /// Waiting for the main thread to hand it to the game's ragdoll (the reason: "steps",
+     /// "unreachable", "path", "give up", "death"); simulated and drawn meanwhile.
+@@ -164,6 +167,9 @@ struct NpActor {
      root_budget: f32,
      /// The pelvis drawn at the last frame's set-up (game units): how far the body moved.
      pelvis_last: Option<V3>,
@@ -57,16 +67,27 @@ index 87d294d..a12400c 100644
      /// The body's last frames since its last hit (the frame's time, each body's velocity and
      /// spin at its end): the hand-over's velocities, their mean.
      history: std::collections::VecDeque<(f32, Vec<(V3, V3)>)>,
-@@ -174,7 +177,7 @@ struct NpActor {
+@@ -174,7 +180,10 @@ struct NpActor {
      joints_said: f32,
      /// Each body's walls found beside it (world, metres; where the cast met it, game units):
      /// kept while the body stays within [`WALL_KEEP`] of it.
 -    walls: Vec<Vec<(ragdoll_core::np_body::Plane, V3)>>,
 +    walls: Vec<Vec<(ragdoll_core::np_body::Plane, V3, f32)>>,
++    /// The steps' edges the ground's casts found (world, metres; found again when the ground is
++    /// cast again).
++    step_edges: Vec<ragdoll_core::np_body::Edge>,
      /// The wall lines said since the last hit.
      wall_logs: u32,
  }
-@@ -779,6 +782,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
+@@ -758,6 +767,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
+             choice: "",
+             choice_for: 0.0,
+             fails: 0,
++            still_for: 0.0,
+             fired: 0.0,
+             handing: None,
+             handing_frames: 0,
+@@ -779,10 +789,12 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
              last_pellet: false,
              root_budget: ROOT_STEP,
              pelvis_last: None,
@@ -74,7 +95,79 @@ index 87d294d..a12400c 100644
              history: std::collections::VecDeque::new(),
              jumps_said: 0,
              joints_said: JOINTS_EVERY,
-@@ -1117,6 +1121,9 @@ pub fn apply(e: &mut Engine) {
+             walls: Vec::new(),
++            step_edges: Vec::new(),
+             wall_logs: 0,
+             grounds: Vec::new(),
+             ref_after: None,
+@@ -885,6 +897,66 @@ pub fn blast(e: &mut Engine, actor: u32, centre: V3, force: f32, radius: f32) {
+     strike(a, total, body, &against, pushes, false);
+ }
+ 
++/// For the tests (Patrick's answer 4: a body that starts lying face down, a fixture pose only):
++/// New Physics' bodies of `actor` turned onto their front about the pelvis (the head along the
++/// way it faced, the front down), their lowest point where the standing body's was, and still.
++/// Answers whether it had a body to turn.
++#[cfg(test)]
++pub(crate) fn lay_prone(actor: u32) -> bool {
++    let mut actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
++    let Some(np) = actors
++        .iter_mut()
++        .find(|a| a.actor == actor)
++        .and_then(|a| a.np.as_mut())
++    else {
++        return false;
++    };
++    let m = model();
++    let k = ragdoll_core::np_body::UNITS;
++    let lowest = ragdoll_core::np_body::lowest_point(m, &np.states);
++    let worlds = m.node_worlds(&np.states);
++    let pivot = worlds[m.root].1;
++    // The way it faces (the pelvis's forward, flat) and its side: the turn is about the side.
++    let facing = np.facing();
++    let side = ragdoll_core::flinch::unit(ragdoll_core::flinch::cross(facing, [0.0, 0.0, 1.0]))
++        .unwrap_or([1.0, 0.0, 0.0]);
++    // About `side` by 90 degrees: up goes to the facing, the facing goes down.
++    let turn = |v: V3| {
++        let along = scale(side, ragdoll_core::flinch::dot(side, v));
++        let rest = sub(v, along);
++        add(along, ragdoll_core::flinch::cross(rest, side))
++    };
++    let r_turn: M3 = {
++        let c = [turn([1.0, 0.0, 0.0]), turn([0.0, 1.0, 0.0]), turn([0.0, 0.0, 1.0])];
++        [c[0][0], c[1][0], c[2][0], c[0][1], c[1][1], c[2][1], c[0][2], c[1][2], c[2][2]]
++    };
++    let turned: Vec<(M3, V3)> = worlds
++        .iter()
++        .map(|(r, t)| {
++            (
++                ragdoll_core::flinch::mul(&r_turn, r),
++                add(pivot, turn(sub(*t, pivot))),
++            )
++        })
++        .collect();
++    let states = m.states_from_nodes(&turned);
++    let drop = (lowest - ragdoll_core::np_body::lowest_point(m, &states)) * k;
++    let placed: Vec<(M3, V3)> = turned
++        .iter()
++        .map(|(r, t)| (*r, add(*t, [0.0, 0.0, drop])))
++        .collect();
++    np.states = m.states_from_nodes(&placed);
++    for st in np.states.iter_mut() {
++        st.v = [0.0; 3];
++        st.w = [0.0; 3];
++    }
++    // Down as a fall leaves it (the balance past any step), not a stance to step back into.
++    np.balance.phase = ragdoll_core::np_balance::Phase::Falling;
++    np.balance.since = 0.0;
++    np.balance.fall_reason = "a test's start lying face down";
++    true
++}
++
+ /// The last hit's or blast's pushes (each body, its point, its impulse), for the tests.
+ #[cfg(test)]
+ pub(crate) static LAST_PUSHES: std::sync::Mutex<Vec<(usize, V3, V3)>> =
+@@ -1117,6 +1189,9 @@ pub fn apply(e: &mut Engine) {
              // animation's, which the keyframed bodies follow): held to the body from now on.
              a.holds = crate::knockdown::body_holds(e, a.actor, &a.nodes);
              let mut np = Np::new(model().clone(), &anim, 1.0);
@@ -84,7 +177,7 @@ index 87d294d..a12400c 100644
              np.keep_down = KEEP_DOWN.load(std::sync::atomic::Ordering::Relaxed);
              for (b, p, j) in a.pending.drain(..) {
                  np.hit(b, p, j);
-@@ -1139,7 +1146,22 @@ pub fn apply(e: &mut Engine) {
+@@ -1139,7 +1214,19 @@ pub fn apply(e: &mut Engine) {
          } else {
              anim.clone()
          };
@@ -93,11 +186,8 @@ index 87d294d..a12400c 100644
 +            ground_planes(e, &mut a.grounds, &pose, floor);
 +        // The steps' edges, found again only when the ground was cast again.
 +        if let Some(edges) = edges {
-+            if std::env::var_os("NP_DBG").is_some() && edges.len() != np.edges.len() {
-+                eprintln!("DBG edges {} {:?}", edges.len(), edges.iter().map(|e| (scale(e.p, ragdoll_core::np_body::UNITS).map(|x| x.round()), e.up)).collect::<Vec<_>>());
-+            }
 +            let lift = a.floor_lift.unwrap_or(0.0) / ragdoll_core::np_body::UNITS;
-+            np.edges = edges
++            a.step_edges = edges
 +                .into_iter()
 +                .map(|ed| ragdoll_core::np_body::Edge {
 +                    p: add(ed.p, [0.0, 0.0, lift]),
@@ -108,7 +198,7 @@ index 87d294d..a12400c 100644
          // Each body's ground raised by what the feet stood over it at the take (the floor taken
          // then, kept): its shape from the casts, never a flat plane that follows the reference
          // (downed, it pushed shins and knees into a slope; standing, it rose under a planted foot
-@@ -1154,21 +1176,35 @@ pub fn apply(e: &mut Engine) {
+@@ -1154,21 +1241,35 @@ pub fn apply(e: &mut Engine) {
                  })
                  .collect::<Vec<_>>()
          };
@@ -144,7 +234,7 @@ index 87d294d..a12400c 100644
              floor
          };
          // The walls beside each body: cast along its motion from where it was (a fast body
-@@ -1183,7 +1219,26 @@ pub fn apply(e: &mut Engine) {
+@@ -1183,7 +1284,78 @@ pub fn apply(e: &mut Engine) {
              .iter()
              .map(|ws| ws.iter().map(|w| w.0).collect())
              .collect();
@@ -153,7 +243,59 @@ index 87d294d..a12400c 100644
 +            .iter()
 +            .map(|ws| ws.iter().map(|w| w.2).collect())
 +            .collect();
++        // The edges: the ground's, and the top edge of every step's face a wall cast found (a step
++        // the ground's casts never reached across: a toe swung into a slab's corner, 2.4 units).
++        np.edges = a.step_edges.clone();
++        for (plane, hit, top) in a.walls.iter().flatten() {
++            if !top.is_finite() {
++                continue;
++            }
++            let k = ragdoll_core::np_body::UNITS;
++            let Some(up) = ragdoll_core::flinch::unit([-plane.n[0], -plane.n[1], 0.0]) else {
++                continue;
++            };
++            let edge = ragdoll_core::np_body::Edge {
++                p: [hit[0] / k, hit[1] / k, *top],
++                dir: [-up[1], up[0], 0.0],
++                reach: EDGE_REACH / k,
++                up,
++            };
++            let same = np.edges.iter().any(|ed| {
++                let off = sub(edge.p, ed.p);
++                let off = sub(off, scale(ed.dir, ragdoll_core::flinch::dot(off, ed.dir)));
++                length(off) * k < 2.0 * EDGE_FOUND
++            });
++            if !same {
++                np.edges.push(edge);
++            }
++        }
          let drawn = np.frame(&anim, floor, dt);
++        if std::env::var_os("NP_DBG4").is_some() && a.since_hit < 0.7 {
++            let k = ragdoll_core::np_body::UNITS;
++            if let Some(b) = model().body("Bip01 R Foot") {
++                let def = &model().bodies[b];
++                let st = &np.states[b];
++                let ends: Vec<V3> = def.ends.iter().map(|e| scale(add(st.x, ragdoll_core::active::qrot(st.q, sub(*e, def.com))), k).map(|x| x.round())).collect();
++                eprintln!("DBG4 t {:.3} R foot {:?} edges {:?} end_floors {:?} floors {} floor {:.1} walls {:?}", a.since_hit, ends, np.edges.iter().map(|e| scale(e.p, k).map(|x| x.round())).collect::<Vec<_>>(), np.end_floors.get(b).map(|p| p.map(|q| scale(q.p, k).map(|x| x.round()))), np.floors.len(), floor, a.walls.get(b).map(|w| w.iter().map(|x| (x.1.map(|v| v.round()), x.2 * k)).collect::<Vec<_>>()));
++            }
++        }
++        if std::env::var_os("NP_DBG3").is_some() {
++            let k = ragdoll_core::np_body::UNITS;
++            for b in [model().body("Bip01 L Foot"), model().body("Bip01 R Foot")].into_iter().flatten() {
++                let def = &model().bodies[b];
++                let st = &np.states[b];
++                for e in def.ends {
++                    let p = add(st.x, ragdoll_core::active::qrot(st.q, sub(e, def.com)));
++                    for ed in &np.edges {
++                        let t = ragdoll_core::flinch::dot(sub(p, ed.p), ed.dir).clamp(-ed.reach, ed.reach);
++                        let d = length(sub(p, add(ed.p, scale(ed.dir, t)))) * k;
++                        if d < def.radius * k {
++                            eprintln!("DBG3 {} end {:?} {:.2} u from edge {:?} (radius {:.1}) phase {:?} swinging {:?}", def.node, scale(p, k).map(|x| x.round()), d, scale(ed.p, k).map(|x| x.round()), def.radius * k, np.phase(), np.balance.step.map(|s| s.side));
++                        }
++                    }
++                }
++            }
++        }
 +        if std::env::var_os("NP_DBG").is_some() {
 +            let weight = model().mass * ragdoll_core::np_body::GRAVITY;
 +            for (b, l) in np.report.floor_load.iter().enumerate() {
@@ -171,7 +313,7 @@ index 87d294d..a12400c 100644
          floor_load_said(&mut a, floor, dt);
          wall_load_said(&mut a);
          let Some(np) = a.np.as_mut() else { continue };
-@@ -1523,26 +1578,52 @@ const GROUND_STEP: f32 = 4.0;
+@@ -1523,26 +1695,63 @@ const GROUND_STEP: f32 = 4.0;
  /// plane fitted through them (its slope, leaning to flat for samples in a line), through the
  /// cast nearest each body; `flat` (game units) where nothing was found. Also the ground under
  /// the pelvis and under the feet (their mean; game units).
@@ -205,8 +347,19 @@ index 87d294d..a12400c 100644
 +    for name in ["Bip01 L Foot", "Bip01 R Foot"] {
 +        let Some(b) = m.body(name) else { continue };
 +        let Some((r, t)) = pose.get(b) else { continue };
++        let radius = m.bodies[b].radius * k;
 +        for end in m.bodies[b].ends {
-+            points.push((None, add(*t, apply_m(r, scale(end, k)))));
++            let at = add(*t, apply_m(r, scale(end, k)));
++            points.push((None, at));
++            // And a radius around it each way (flat): a foot resting across a step's edge has
++            // ground on both levels within its radius (a heel on a slab's corner had every cast
++            // on the floor below, and no edge was found: 2.4 units in).
++            for off in [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]] {
++                points.push((
++                    None,
++                    [at[0] + off[0] * radius, at[1] + off[1] * radius, at[2]],
++                ));
++            }
 +        }
 +    }
 +    cache.resize(points.len(), None);
@@ -229,7 +382,7 @@ index 87d294d..a12400c 100644
              cache[i] = Some((
                  [at[0], at[1], 0.0],
                  crate::active_ragdoll::floor_under(e, at),
-@@ -1550,20 +1631,20 @@ fn ground_planes(
+@@ -1550,20 +1759,20 @@ fn ground_planes(
          }
          if let Some((xy, Some(z))) = cache[i] {
              found.push([xy[0], xy[1], z]);
@@ -254,7 +407,7 @@ index 87d294d..a12400c 100644
          let n = pts.len() as f32;
          let mean = scale(pts.iter().fold([0.0; 3], |s, p| add(s, *p)), 1.0 / n);
          let (mut sxx, mut syy, mut sxy, mut sxz, mut syz) = (0.0f32, 0.0, 0.0, 0.0, 0.0);
-@@ -1575,8 +1656,8 @@ fn ground_planes(
+@@ -1575,8 +1784,8 @@ fn ground_planes(
              sxz += x * z;
              syz += y * z;
          }
@@ -265,7 +418,7 @@ index 87d294d..a12400c 100644
          let det = sxx * syy - sxy * sxy;
          let (mut a, mut b) = if det.abs() > 1e-6 {
              ((sxz * syy - syz * sxy) / det, (syz * sxx - sxz * sxy) / det)
-@@ -1590,6 +1671,7 @@ fn ground_planes(
+@@ -1590,6 +1799,7 @@ fn ground_planes(
          }
          (mean, a, b)
      };
@@ -273,7 +426,7 @@ index 87d294d..a12400c 100644
      let off = |p: &V3, (mean, a, b): (V3, f32, f32)| {
          p[2] - (mean[2] + a * (p[0] - mean[0]) + b * (p[1] - mean[1]))
      };
-@@ -1597,46 +1679,196 @@ fn ground_planes(
+@@ -1597,46 +1807,196 @@ fn ground_planes(
      // slab's top, a crate's, a pit): fitted without those, it never tilts or lifts the rest, and
      // a body over one stands on it flat (one plane through all tilted at a slab's edge and pushed
      // a body into it: Patrick's 10:08 clip). On one even ground nothing changes.
@@ -505,7 +658,7 @@ index 87d294d..a12400c 100644
  }
  
  /// The heights over the reference a move is swept at (game units: the knees', the waist's).
-@@ -1717,7 +1949,7 @@ const WALL_WALKABLE: f32 = 0.64;
+@@ -1717,7 +2077,7 @@ const WALL_WALKABLE: f32 = 0.64;
  /// those it moved away from dropped.
  fn find_walls(
      e: &mut Engine,
@@ -514,7 +667,7 @@ index 87d294d..a12400c 100644
      pose: &[(M3, V3)],
      velocities: &[V3],
      dt: f32,
-@@ -1729,63 +1961,137 @@ fn find_walls(
+@@ -1729,63 +2089,137 @@ fn find_walls(
          let def = &m.bodies[b];
          let centre = add(*t, apply_m(r, scale(def.com, k)));
          walls[b].retain(|w| length([w.1[0] - centre[0], w.1[1] - centre[1], 0.0]) <= WALL_KEEP);
@@ -701,11 +854,284 @@ index 87d294d..a12400c 100644
  /// A wall's load on the body said (`[np wall]`, a few a hit): the bodies against it and how
  /// hard.
  fn wall_load_said(a: &mut NpActor) {
+@@ -2387,6 +2821,16 @@ pub fn deaths() -> Vec<(u32, usize, usize)> {
+ /// The downed actors whose shots are withheld now (they cannot aim from the pose they have).
+ static WITHHELD: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+ 
++/// Settle, then rise: the centre's speed (m/s) under which a downed body is still, how long it is
++/// still before a rise (s), and the longest it settles (s).
++const SETTLE_STILL: f32 = 0.15;
++const SETTLE_FOR: f32 = 0.3;
++const SETTLE_MOST: f32 = 4.0;
++/// Down on the ground: the pelvis under this share of its standing height, its centre falling
++/// slower than this (m/s).
++const SETTLE_LOW: f32 = 0.5;
++const SETTLE_FALLING: f32 = 0.2;
++
+ /// Downed, how long the body settles before the AI chooses (s), how long it fires from the
+ /// ground before it tries to stand (s), its shots' extra spread (as a support hand this far off a
+ /// two-handed grip, `crate::one_hand`), the rises that may give up before it collapses into the
+@@ -2565,7 +3009,24 @@ fn downed(e: &mut Engine, a: &mut NpActor, dt: f32) -> bool {
+             d.rise_failed = false;
+         }
+     }
+-    let choice = if since < DOWN_SETTLE {
++    // Settle, then rise (Patrick's answer 2): a downed body lies still before the AI has it
++    // stand; a rise chosen while it still moved (folded over its feet after a shove in the back)
++    // straightened it with no hand down. Its centre still for [`SETTLE_FOR`], at most
++    // [`SETTLE_MOST`] (a body sliding on a slope).
++    // Settled: still, or down on the ground (the pelvis under [`SETTLE_LOW`] of its standing
++    // height) and no longer falling (a body folded over its feet, the pelvis 0.7 to 0.95 m up,
++    // is neither; a body sliding slowly down a slope on its back is the second).
++    let low = reading.pelvis_height < SETTLE_LOW * reading.stand_height;
++    if length(reading.com_v) < SETTLE_STILL || (low && reading.com_v[2] > -SETTLE_FALLING) {
++        a.still_for += dt;
++    } else {
++        a.still_for = 0.0;
++    }
++    let settling = !np.rise && a.still_for < SETTLE_FOR && since < SETTLE_MOST;
++    if std::env::var_os("NP_DBG").is_some() && (since / 0.25).floor() != ((since - dt) / 0.25).floor() {
++        eprintln!("DBGS since {since:.2} still_for {:.2} speed {:.3} rise {} label {label}", a.still_for, length(reading.com_v), np.rise);
++    }
++    let choice = if since < DOWN_SETTLE || settling {
+         "settle"
+     } else if a.fails >= DOWN_TRIES {
+         "give up"
+@@ -2899,6 +3360,12 @@ pub(crate) struct Probe {
+     pub hand_low: [f32; 2],
+     pub weapon_side: Option<usize>,
+     pub lifting: bool,
++    /// The torso's front: how much it points up (-1 face down, 1 face up), and the pelvis's
++    /// height over its standing height (downed; 1 standing).
++    pub front_up: f32,
++    pub pelvis_share: f32,
++    /// The downed AI wishes a rise (it settled and chose to stand).
++    pub rise_wished: bool,
+ }
+ 
+ #[cfg(test)]
+@@ -2931,6 +3398,14 @@ pub(crate) fn probe(actor: u32) -> Option<Probe> {
+         }),
+         weapon_side: np.weapon_side,
+         lifting: np.down.as_ref().is_some_and(|d| d.lifting),
++        front_up: {
++            let f = np.bodies.forward_of(&np.states, np.bodies.torso);
++            f[2] / length(f).max(1e-6)
++        },
++        pelvis_share: np.down.as_ref().map_or(1.0, |d| {
++            d.reading.pelvis_height / d.reading.stand_height.max(1e-3)
++        }),
++        rise_wished: np.rise,
+     })
+ }
+ 
 diff --git a/crates/host/src/new_physics_fixture_tests.rs b/crates/host/src/new_physics_fixture_tests.rs
-index e3a71a6..22b6173 100644
+index e3a71a6..f05b4a8 100644
 --- a/crates/host/src/new_physics_fixture_tests.rs
 +++ b/crates/host/src/new_physics_fixture_tests.rs
-@@ -2234,10 +2234,16 @@ fn slope_run(cfg: &Slope) -> SlopeRun {
+@@ -37,6 +37,68 @@ struct Run {
+     sample_after: String,
+ }
+ 
++/// The runs' clock: simulated, each frame [`SIM_FRAME`] seconds (the wall clock's frames, a 16 ms
++/// sleep and the work, made the runs' physics depend on the machine's load: tests that passed
++/// alone failed beside others).
++#[derive(Clone, Default)]
++struct SimClock(std::rc::Rc<std::cell::Cell<f64>>);
++
++/// A moment of a [`SimClock`].
++#[derive(Clone)]
++struct SimInstant(std::rc::Rc<std::cell::Cell<f64>>, f64);
++
++/// A run's frame (s): the wall clock's typical frame here (16 ms slept and the frame's work).
++const SIM_FRAME: f64 = 0.02;
++
++impl SimClock {
++    fn now(&self) -> SimInstant {
++        SimInstant(self.0.clone(), self.0.get())
++    }
++    fn tick(&self) {
++        self.0.set(self.0.get() + SIM_FRAME);
++    }
++}
++
++impl SimInstant {
++    fn elapsed(&self) -> Duration {
++        Duration::from_secs_f64((self.0.get() - self.1).max(0.0))
++    }
++}
++
++/// The floor's load as a mean over the last [`FLOOR_WINDOW`] seconds (body weights): a frame's
++/// own mean is its impulse over its time, so the same landing read 3.3 body weights over a 13 ms
++/// frame and half that over a 26 ms one; the load over a fixed span is what the body carries
++/// whatever the frame rate (Patrick's question 3: our call). Frames not measured (downed,
++/// falling) start the window again; a window not yet that long says nothing.
++#[derive(Default)]
++struct FloorWindow(std::collections::VecDeque<(f32, f32)>);
++
++/// [`FloorWindow`]'s span (s).
++const FLOOR_WINDOW: f32 = 0.05;
++
++impl FloorWindow {
++    /// This frame's `dt` and load (body weights): the window's mean once it spans
++    /// [`FLOOR_WINDOW`].
++    fn push(&mut self, dt: f32, load: f32) -> Option<f32> {
++        if !(dt > 0.0) {
++            return None;
++        }
++        self.0.push_back((dt, load));
++        while self.0.len() > 1
++            && self.0.iter().skip(1).map(|f| f.0).sum::<f32>() >= FLOOR_WINDOW
++        {
++            self.0.pop_front();
++        }
++        let span: f32 = self.0.iter().map(|f| f.0).sum();
++        (span >= FLOOR_WINDOW - 1e-6)
++            .then(|| self.0.iter().map(|(d, l)| d * l).sum::<f32>() / span)
++    }
++
++    fn clear(&mut self) {
++        self.0.clear();
++    }
++}
++
+ /// A number field of a sample (`"name":value`).
+ fn field(sample: &str, name: &str) -> Option<f32> {
+     let at = sample.find(&format!("\"{name}\":"))? + name.len() + 3;
+@@ -89,16 +151,17 @@ fn np_run(speed: f32, seconds: f32, on: bool) -> Run {
+         sample_swinging: false,
+         sample_after: String::new(),
+     };
+-    let start = Instant::now();
++    let clock = SimClock::default();
++    let start = clock.now();
+     let mut hit_done = false;
+     let mut before: Option<Vec<(M3, V3)>> = None;
+-    let mut wall = Instant::now();
++    let mut wall = clock.now();
+     while start.elapsed() < Duration::from_secs_f32(seconds) {
+-        std::thread::sleep(Duration::from_millis(16));
++        clock.tick();
+         // The game's frame seconds (New Physics' step): this run's wall clock frame.
+         f.e.mem
+             .set_f32(0x011d_ea30, wall.elapsed().as_secs_f32().min(0.05));
+-        wall = Instant::now();
++        wall = clock.now();
+         // The game's frame: the root where the actor is, the animation's pose.
+         let reference = f.reference();
+         rig_fixture::write3(&mut f.e, root + rig_fixture::LOCAL_TRANSLATION, reference);
+@@ -381,21 +444,22 @@ fn fall_run(speed: f32) -> Fell {
+     };
+     keyframe(&mut f);
+     assert!(claim(&mut f.e, ACTOR));
+-    let start = Instant::now();
++    let clock = SimClock::default();
++    let start = clock.now();
+     let mut hit_done = false;
+     let mut frames_to_fall = 0;
+     let mut steps = 0;
+     let mut drawn_last: Vec<(M3, V3)> = Vec::new();
+     // The last frame's time (s), as New Physics measures it: from one frame's run to the next.
+     let mut frame = 0.0f32;
+-    let mut last_run: Option<Instant> = None;
+-    let mut wall = Instant::now();
++    let mut last_run: Option<SimInstant> = None;
++    let mut wall = clock.now();
+     while start.elapsed() < Duration::from_secs_f32(2.0) {
+-        std::thread::sleep(Duration::from_millis(16));
++        clock.tick();
+         // The game's frame seconds (New Physics' step): this run's wall clock frame.
+         f.e.mem
+             .set_f32(0x011d_ea30, wall.elapsed().as_secs_f32().min(0.05));
+-        wall = Instant::now();
++        wall = clock.now();
+         // The main thread's update: what waits for it (a fall's or a death's hand-over).
+         main_thread(&mut f.e);
+         if f.e.mem.u8(rig_fixture::PROCESS_AT + 0x13c) != 0 {
+@@ -419,7 +483,7 @@ fn fall_run(speed: f32) -> Fell {
+         if let Some(t) = last_run {
+             frame = t.elapsed().as_secs_f32();
+         }
+-        last_run = Some(Instant::now());
++        last_run = Some(clock.now());
+         crate::active_ragdoll::apply(&mut f.e);
+         // The world pass (what the frame draws: New Physics sets the bodies' worlds there).
+         crate::active_ragdoll::read_drawn(&mut f.e);
+@@ -665,19 +729,20 @@ fn down_run(seconds: f32, die_at: Option<f32>) -> Downed {
+         death: None,
+         death_off: 0.0,
+     };
+-    let start = Instant::now();
++    let clock = SimClock::default();
++    let start = clock.now();
+     let mut hit_done = false;
+     let mut died = false;
+     let mut drawn_at_death: Vec<(M3, V3)> = Vec::new();
+     let mut down_ref: Option<f32> = None;
+     let (mut prev_down, mut last_ref) = (false, [0.0f32; 3]);
+-    let mut wall = Instant::now();
++    let mut wall = clock.now();
+     while start.elapsed() < Duration::from_secs_f32(seconds) {
+-        std::thread::sleep(Duration::from_millis(16));
++        clock.tick();
+         // The game's frame seconds (New Physics' step): this run's wall clock frame.
+         f.e.mem
+             .set_f32(0x011d_ea30, wall.elapsed().as_secs_f32().min(0.05));
+-        wall = Instant::now();
++        wall = clock.now();
+         // The pose last drawn, then the main thread's update: what waits for it (a fall's or a
+         // death's hand-over takes that pose).
+         if died && owns(ACTOR) {
+@@ -1567,6 +1632,7 @@ fn walk_run_with(cfg: &Walk) -> WalkRun {
+         let rz: M3 = [c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0];
+         ragdoll_core::flinch::mul(r, &rz)
+     };
++    let mut floor_window = FloorWindow::default();
+     for (name, deg) in [
+         ("Bip01 L UpperArm", 50.0f32),
+         ("Bip01 R UpperArm", 50.0),
+@@ -1826,8 +1892,13 @@ fn walk_run_with(cfg: &Walk) -> WalkRun {
+                 run.drawn_off = (run.drawn_off.0.max(most.0), run.drawn_off.1.max(most.1));
+                 run.drawn_as_animation += u32::from(as_anim);
+             }
+-            if let Some(n) = floor_force(ACTOR) {
+-                run.floor_most = run.floor_most.max(n / weight);
++            match floor_force(ACTOR) {
++                Some(n) => {
++                    if let Some(load) = floor_window.push(dt, n / weight) {
++                        run.floor_most = run.floor_most.max(load);
++                    }
++                }
++                None => floor_window.clear(),
+             }
+             if let Some((phase, _, _)) = state(ACTOR) {
+                 run.fell |= phase == ragdoll_core::np_balance::Phase::Falling;
+@@ -2063,6 +2134,8 @@ struct SlopeRun {
+     /// second over the time downed).
+     game_speed: f32,
+     stood_after: Option<f32>,
++    /// When the downed AI first chose to stand, after it settled (s since it went down).
++    rose_after: Option<f32>,
+     gave_up_after: Option<f32>,
+     /// Each hit's catching steps (until the next hit or the end).
+     steps: Vec<u32>,
+@@ -2089,6 +2162,7 @@ fn slope_run(cfg: &Slope) -> SlopeRun {
+         let rz: M3 = [c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0];
+         ragdoll_core::flinch::mul(r, &rz)
+     };
++    let mut floor_window = FloorWindow::default();
+     for (name, deg) in [
+         ("Bip01 L UpperArm", 50.0f32),
+         ("Bip01 R UpperArm", 50.0),
+@@ -2201,6 +2275,7 @@ fn slope_run(cfg: &Slope) -> SlopeRun {
+         ref_rise_jump: 0.0,
+         game_speed: 0.0,
+         stood_after: None,
++        rose_after: None,
+         gave_up_after: None,
+         steps: Vec::new(),
+         fell: false,
+@@ -2234,10 +2309,16 @@ fn slope_run(cfg: &Slope) -> SlopeRun {
          if cfg.mover {
              let want = [0.0, cfg.walk * k, 0.0];
              crate::knockdown::mover_update(&mut f.e, MOVER, |e| {
@@ -724,7 +1150,114 @@ index e3a71a6..22b6173 100644
              reference = add(reference, scale(v, dt));
              if is_down(ACTOR) {
                  game_moved += length(v) * dt;
-@@ -2814,6 +2820,12 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+@@ -2308,8 +2389,13 @@ fn slope_run(cfg: &Slope) -> SlopeRun {
+         prev_down = down;
+         last_ref = f.reference();
+         if owns(ACTOR) {
+-            if let Some(n) = floor_force(ACTOR) {
+-                run.floor_most = run.floor_most.max(n / weight);
++            match floor_force(ACTOR) {
++                Some(n) => {
++                    if let Some(load) = floor_window.push(dt, n / weight) {
++                        run.floor_most = run.floor_most.max(load);
++                    }
++                }
++                None => floor_window.clear(),
+             }
+             if let Some((phase, _, _)) = state(ACTOR) {
+                 run.fell |= phase == ragdoll_core::np_balance::Phase::Falling;
+@@ -2338,6 +2424,9 @@ fn slope_run(cfg: &Slope) -> SlopeRun {
+         } else if was_down && owns(ACTOR) && run.stood_after.is_none() {
+             run.stood_after = run.downed_at.map(|d| t - d);
+         }
++        if run.rose_after.is_none() && probe(ACTOR).is_some_and(|p| p.rise_wished) {
++            run.rose_after = run.downed_at.map(|d| t - d);
++        }
+         if run.gave_up_after.is_none()
+             && run.downed_at.is_some()
+             && (f.e.mem.u8(rig_fixture::PROCESS_AT + 0x13c) != 0 || !falls().is_empty())
+@@ -2429,9 +2518,10 @@ fn np_slope_downed_lies_on_the_slope() {
+ /// The same, the game's mover and controller moving the reference at 30 units a second (the
+ /// clip's glide) while it is downed: the game moves the reference under 2 units a second while it
+ /// is down (New Physics holds the game's movement before it applies; the reference follows the
+-/// pelvis, which the fall, the rises and a collapse move), and it stands within 5 s of going
+-/// down or gives up into the game's ragdoll (Patrick, the 67d693e decisions: 5 s on the slope,
+-/// 4 s before; standing again waits for the body to come still, posed and in its stance).
++/// pelvis, which the fall, the rises and a collapse move), and it settles within 3 s of going down
++/// and stands within 5 s of settling, or gives up into the game's ragdoll (Patrick, the 67d693e
++/// decisions: 5 s on the slope, 4 s before; his answer 2: settle, then rise; standing again waits
++/// for the body to come still, posed and in its stance).
+ #[test]
+ fn np_slope_downed_holds_the_games_movement() {
+     let r = slope_run(&Slope {
+@@ -2459,10 +2549,21 @@ fn np_slope_downed_holds_the_games_movement() {
+         "the reference jumped {:.1} u",
+         r.ref_rise_jump
+     );
++    // Settle, then rise (Patrick's answer 2): it settles (lies still) before the AI has it stand,
++    // within 3 s of going down on the slope (it slides there first); the get-up within 5 s of
++    // that (the 5 s were for the get-up, when a rise began 0.7 s after the fall, sliding).
++    assert!(
++        r.gave_up_after.is_some() || r.rose_after.is_some_and(|s| s <= 3.0),
++        "settled after {:?}, gave up {:?}",
++        r.rose_after,
++        r.gave_up_after
++    );
+     assert!(
+-        r.stood_after.is_some_and(|s| s <= 5.0) || r.gave_up_after.is_some(),
+-        "stood {:?}, gave up {:?}",
++        r.gave_up_after.is_some()
++            || r.stood_after.zip(r.rose_after).is_some_and(|(s, f)| s - f <= 5.0),
++        "stood {:?} (settled {:?}), gave up {:?}",
+         r.stood_after,
++        r.rose_after,
+         r.gave_up_after
+     );
+ }
+@@ -2575,7 +2676,12 @@ struct Cycle {
+     light: f32,
+     pellets: u32,
+     /// It holds a weapon drawn (the right hand's).
+-    armed: bool,
++armed: bool,
++    /// The downing "hit" replaced by a start lying face down (Patrick's answer 4: a fixture pose
++    /// for the tests only): New Physics takes the actor as a hit's take does, and on the frame
++    /// its body is built that body is turned onto its front, still (`new_physics::lay_prone`);
++    /// the game's animation goes on as it was.
++    prone: bool,
+     /// Standing idle (the game's mover gives it no walk) and, once it stands again, left alone
+     /// (no light hits): the rise's end measured on its own ([`AfterStand`]).
+     still: bool,
+@@ -2595,6 +2701,7 @@ impl Default for Cycle {
+             light: 0.0,
+             pellets: 0,
+             armed: false,
++            prone: false,
+             still: false,
+         }
+     }
+@@ -2690,7 +2797,11 @@ struct CycleRun {
+     hand_slip: f32,
+     hand_bounce: u32,
+     hand_lift: f32,
+-    weapon_planted: u32,
++weapon_planted: u32,
++    /// Downed with its pelvis under half its standing height: the torso's front at its most
++    /// downward and most upward (-1 face down, 1 face up; a body that turned over between its
++    /// back and its front spans both).
++    front_low: (f32, f32),
+     planted_frames: u32,
+     /// The reference furthest along the knock (the most it moved to the body), the most any
+     /// reference position lay inside a box (units, the actor's capsule's radius taken in) and
+@@ -2724,6 +2835,7 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+         let rz: M3 = [c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0];
+         ragdoll_core::flinch::mul(r, &rz)
+     };
++    let mut floor_window = FloorWindow::default();
+     for (name, deg) in [
+         ("Bip01 L UpperArm", 50.0f32 * cfg.arms),
+         ("Bip01 R UpperArm", 50.0 * cfg.arms),
+@@ -2814,12 +2926,22 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
      let anim0: Vec<(M3, V3)> = body_nodes.iter().map(|&i| f.world_of(f.at[i])).collect();
      let low = ragdoll_core::np_body::lowest_point(model(), &model().states_from_nodes(&anim0)) * k;
      let drop = [0.0, 0.0, -low - 1.0];
@@ -737,7 +1270,26 @@ index e3a71a6..22b6173 100644
      rig_fixture::write3(&mut f.e, ACTOR + rig_fixture::REFR_POSITION, at);
      room_events::set_on(true);
      let _ = room_events::take();
-@@ -2868,10 +2880,16 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+     let clamps0 = crate::knockdown::CLAMPS.load(Ordering::Relaxed);
+     let weight = model().mass * 9.81;
+-    let mut run = CycleRun::default();
++    // (The front's range starts empty.)
++    let mut run = CycleRun {
++        front_low: (1.0, -1.0),
++        ..Default::default()
++    };
+     let mut seed = 0x1357_2468u32;
+     let mut rnd = move || {
+         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+@@ -2853,6 +2975,7 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+     let mut last_centre: Option<V3> = None;
+     let mut last_after_ref: Option<V3> = None;
+     let mut upright_from = false;
++    let mut prone_pending = false;
+     while t < cfg.seconds {
+         let dt = 0.008 + 0.030 * rnd();
+         t += dt;
+@@ -2868,10 +2991,16 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
              [0.0, 0.45 * k, 0.0]
          };
          crate::knockdown::mover_update(&mut f.e, MOVER, |e| {
@@ -756,7 +1308,7 @@ index e3a71a6..22b6173 100644
          let mut reference = add(f.reference(), scale(v, dt));
          if is_down(ACTOR) {
              game_moved += length(v) * dt;
-@@ -2891,6 +2909,11 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+@@ -2891,6 +3020,11 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
                  let i = f.nodes.iter().position(|n| n.name == name).unwrap();
                  f.nodes[i].r = turn_z(&bind[i].0, a);
              }
@@ -768,7 +1320,133 @@ index e3a71a6..22b6173 100644
              rig_fixture::write3(&mut f.e, f.at[0] + rig_fixture::LOCAL_TRANSLATION, root_at);
              f.animate();
          };
-@@ -4646,3 +4669,250 @@ fn np_rise_holds_the_root_and_capsule_on_flat_slope_and_by_a_wall() {
+@@ -2902,6 +3036,14 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+         if slot == 1 {
+             animate(&mut f);
+         }
++        if prone_pending && crate::new_physics::lay_prone(ACTOR) {
++            prone_pending = false;
++            last_hit = t;
++            eprintln!("DBGP laid at {t:.2}");
++        }
++        if cfg.prone && (t * 4.0).floor() != ((t - dt) * 4.0).floor() {
++            eprintln!("DBGP t {t:.2} owns {} state {:?} down {}", owns(ACTOR), state(ACTOR).map(|s| (s.0, s.1)), is_down(ACTOR));
++        }
+         // The script.
+         let (phase_now, steps_now, _) =
+             state(ACTOR).unwrap_or((ragdoll_core::np_balance::Phase::Standing, 0, [0.0; 3]));
+@@ -2919,7 +3061,18 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+                 claim(&mut f.e, ACTOR);
+                 let spine = model().body("Bip01 Spine2").unwrap();
+                 let chest = f.world_of(f.at[body_nodes[spine]]).1;
+-                let n = if speed < 1.0 { pellets } else { 1 };
++                let prone_start = cfg.prone && speed >= 1.0;
++                if prone_start {
++                    // Laid on its front once New Physics has built its body (next frame).
++                    prone_pending = true;
++                }
++                let n = if prone_start {
++                    0
++                } else if speed < 1.0 {
++                    pellets
++                } else {
++                    1
++                };
+                 for i in 0..n {
+                     // A burst's pellets a few units apart over the chest.
+                     let a = i as f32 * 2.4;
+@@ -3129,9 +3282,14 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+                     }
+                 }
+             }
++            if down || phase_now == ragdoll_core::np_balance::Phase::Falling {
++                floor_window.clear();
++            }
+             if !down && phase_now != ragdoll_core::np_balance::Phase::Falling {
+                 if let Some(n) = floor_force(ACTOR) {
+-                    run.floor_most = run.floor_most.max(n / weight);
++                    if let Some(load) = floor_window.push(dt, n / weight) {
++                        run.floor_most = run.floor_most.max(load);
++                    }
+                     if std::env::var_os("NP_TRACE").is_some() && n / weight > 2.5 {
+                         eprintln!("FLOOR t {t:.3} dt {dt:.3} {:.2} BW since hit {:.2} stood_at {stood_at:?} {}", n / weight, t - last_hit, sample_field(ACTOR));
+                     }
+@@ -3179,9 +3337,20 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
+             }
+             let pelvis = drawn(ACTOR).map_or(f.reference(), |p| p.0[model().root].1);
+             down_refs.push((t, f.reference(), pelvis));
++            if let Some(p) = probe(ACTOR) {
++                if p.pelvis_share < 0.5 {
++                    run.front_low = (run.front_low.0.min(p.front_up), run.front_low.1.max(p.front_up));
++                }
++            }
+             // Its strength gone (it cannot push itself up), its rises given up once it lies still
+             // (as after three that failed).
+-            if stage == 2 && cfg.give_up {
++            // (Once it lies, a second after it went down: taken mid-fall, every muscle let go at
++            // once and the limp neck whipped the head 24 degrees in a frame as it landed.)
++            if stage == 2
++                && cfg.give_up
++                && t > downed_at + 1.0
++                && label_of(ACTOR) == Some("lying")
++            {
+                 set_effort(ACTOR, 0.0);
+             }
+             if stage == 2
+@@ -4287,10 +4456,12 @@ struct Lying {
+ }
+ 
+ /// A 4.35 m/s hit downs New Physics' actor on FNV's skeleton (the game's frame as `down_run`
+-/// runs it, 60 frames a second, the bodies where their nodes were at the take), `seconds` of it;
++/// runs it, 60 frames a second, the bodies where their nodes were at the take), `seconds` of it
++/// (`keep_lying`: its strength gone once down, so it stays lying: it settles and would rise
++/// before 3 s);
+ /// then, lying, one more game update (the main thread's safe point, the animation's update) and
+ /// the hitboxes measured.
+-fn lying_run(seconds: f32) -> Lying {
++fn lying_run(seconds: f32, keep_lying: bool) -> Lying {
+     let _one = crate::active_ragdoll::tests::SERIAL
+         .lock()
+         .unwrap_or_else(|p| p.into_inner());
+@@ -4346,6 +4517,10 @@ fn lying_run(seconds: f32) -> Lying {
+                 [0.0, -1.0, 0.0],
+             );
+         }
++        // Lying for the measure (`keep_lying`): its strength gone once it is down.
++        if keep_lying && t > 0.5 {
++            set_effort(ACTOR, 0.0);
++        }
+         // The snapshot New Physics read is the animation's own (the locals as animated).
+         {
+             let actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+@@ -4526,7 +4701,7 @@ fn lying_run(seconds: f32) -> Lying {
+ /// Spine2 body at the drawn chest and nothing at the empty animated chest.
+ #[test]
+ fn np_hitboxes_follow_the_drawn_body() {
+-    let r = lying_run(3.0);
++    let r = lying_run(3.0, true);
+     eprintln!("RESULT np hitboxes: {r:#?}");
+     assert!(r.down, "not lying: {r:#?}");
+     assert!(r.anim_off > 100.0, "{:.1} u off its animation", r.anim_off);
+@@ -4557,7 +4732,7 @@ fn np_hitboxes_follow_the_drawn_body() {
+ /// and, once it rises and stands again (within 8 s), no jump over 10 units at that frame.
+ #[test]
+ fn np_reference_follows_a_downed_body() {
+-    let r = lying_run(8.0);
++    let r = lying_run(8.0, false);
+     eprintln!(
+         "RESULT np reference downed: {:.1} u off the pelvis at most, moved {:.1} u, stood again \
+          {}, {:.1} u at the rise",
+@@ -4579,7 +4754,7 @@ fn np_reference_follows_a_downed_body() {
+ /// body's worlds are put in after the animation's update.
+ #[test]
+ fn np_the_animation_never_reads_the_write() {
+-    let r = lying_run(3.0);
++    let r = lying_run(3.0, false);
+     eprintln!(
+         "RESULT np animation's own: {} frames, the locals not the animation's after the put-back \
+          {}, the snapshot not the animation {}",
+@@ -4646,3 +4821,285 @@ fn np_rise_holds_the_root_and_capsule_on_flat_slope_and_by_a_wall() {
      }
      assert!(failed.is_empty(), "{failed:#?}");
  }
@@ -1019,6 +1697,41 @@ index e3a71a6..22b6173 100644
 +    );
 +    assert!(r.rel_last < 0.3, "rel_v {:.2} m/s at the end", r.rel_last);
 +}
++
++#[test]
++fn zz_explore_prone() {
++    for armed in [false, true] {
++    let r = cycle_run(&Cycle {
++        below: 1.0,
++        seconds: 12.0,
++        prone: true,
++        still: true,
++        armed,
++        ..Default::default()
++    });
++    eprintln!(
++        "EXPLORE prone armed {armed}: downed {} stood {:?} hands {:.2} planted {} weapon planted {} front_low {:?} after {:?} gave up? {:?}",
++        r.downed,
++        r.first_stood,
++        r.hand_share,
++        r.planted_frames,
++        r.weapon_planted,
++        r.front_low,
++        r.after,
++        r.notes.iter().filter(|n| n.contains("[np choice]") || n.contains("[np pose]")).map(|n| n.chars().take(90).collect::<String>()).collect::<Vec<_>>()
++    );
++    }
++}
++
++#[test]
++fn zz_head_dump() {
++    let m = model();
++    for name in ["Bip01 Head", "Bip01 Neck1", "Bip01 Spine2", "Bip01 L Hand", "Bip01 L Foot"] {
++        let b = m.body(name).unwrap();
++        let d = &m.bodies[b];
++        eprintln!("HEAD {name}: com {:?} ends {:?} radius {:.3} mass {:.2} inv_inertia {:?}", d.com, d.ends, d.radius, d.mass, d.inv_inertia);
++    }
++}
 diff --git a/crates/host/src/rig_fixture.rs b/crates/host/src/rig_fixture.rs
 index 5e79d3b..1f4b1ee 100644
 --- a/crates/host/src/rig_fixture.rs
@@ -1035,7 +1748,7 @@ index 5e79d3b..1f4b1ee 100644
          });
          e.register_double(CONTROLLER_VELOCITY, |_, _| (CONTROLLER + 0x700).into_ret());
 diff --git a/crates/ragdoll-core/src/np.rs b/crates/ragdoll-core/src/np.rs
-index d4328db..37ab60c 100644
+index d4328db..748d9a7 100644
 --- a/crates/ragdoll-core/src/np.rs
 +++ b/crates/ragdoll-core/src/np.rs
 @@ -86,6 +86,17 @@ fn shift_by(pose: &[(M3, V3)], by: V3) -> Vec<(M3, V3)> {
@@ -1056,7 +1769,7 @@ index d4328db..37ab60c 100644
  /// Rising, a joint's goal lies at most this far from where the joint is (rad): the muscles' effort
  /// a frame is bounded (goals given whole threw the body off the floor).
  pub const RISE_REACH: f32 = 0.3;
-@@ -150,6 +161,11 @@ pub const RISE_FEET_OUT: f32 = 0.15;
+@@ -150,9 +161,28 @@ pub const RISE_FEET_OUT: f32 = 0.15;
  /// Rising from the floor, each foot's goal lies this share of its leg in front of its hip (a hip
  /// on the floor; under it as the hip comes up a leg high).
  pub const RISE_FOOT_OUT: f32 = 0.3;
@@ -1068,7 +1781,24 @@ index d4328db..37ab60c 100644
  /// The legs push once the centre of mass is within this of the feet (m): their pull brings the
  /// hips forward over the feet as they lift.
  pub const RISE_OVER_FEET: f32 = 0.35;
-@@ -247,9 +263,15 @@ pub struct Np {
++/// A rise that begins with the chest facing down (the front's up under minus this) rises from the
++/// front: first onto the knees (the pelvis to [`KNEEL_HEIGHT`] of standing height over the knees,
++/// each foot [`KNEEL_FOOT`] (m) behind its hip, the torso up), then a foot forward,
++/// [`LUNGE_FOOT`] (m) in front of its hip and lifted [`LUNGE_LIFT`] (m) until it is within
++/// [`LUNGE_THERE`] (m) of its place; each stage at most [`FRONT_STAGE_MOST`] (s). Rising off the
++/// front with the rise's own goals (the torso turned up and leant toward the feet, the feet drawn
++/// in front of the hips) it sat back on its heels and rolled onto its seat: a flip.
++pub const FRONT_START: f32 = 0.5;
++pub const KNEEL_HEIGHT: f32 = 0.5;
++pub const KNEEL_FOOT: f32 = 0.35;
++pub const LUNGE_FOOT: f32 = 0.3;
++pub const LUNGE_LIFT: f32 = 0.08;
++pub const LUNGE_THERE: f32 = 0.05;
++pub const FRONT_STAGE_MOST: f32 = 2.0;
+ /// The legs' push brings the pelvis over its place at this rate (1/s) of the way left, at most
+ /// this fast (m/s), the support's spring at this share and its damper at this many times.
+ pub const RISE_FLAT: (f32, f32, f32, f32) = (3.0, 0.3, 0.5, 2.0);
+@@ -247,9 +277,15 @@ pub struct Np {
      pub walls: Vec<Plane>,
      /// Each body's own walls (world, metres): what the world has beside it (its owner's casts).
      pub body_walls: Vec<Vec<Plane>>,
@@ -1084,7 +1814,7 @@ index d4328db..37ab60c 100644
      /// The arm that holds a weapon (0 left, 1 right; none unarmed): it keeps it, and its aim
      /// while the AI fires from the ground; the free arm pushes.
      pub weapon_side: Option<usize>,
-@@ -302,6 +324,12 @@ pub struct Down {
+@@ -302,6 +338,12 @@ pub struct Down {
      /// A rise's time so far and the pelvis's best height in it (m over the floor).
      pub rising: f32,
      pub rise_best: f32,
@@ -1097,7 +1827,21 @@ index d4328db..37ab60c 100644
      /// Seconds since the rise's pelvis last got higher.
      pub rise_stall: f32,
      /// Whether the last rise gave up (too weak, or nothing to push from).
-@@ -372,7 +400,10 @@ impl Np {
+@@ -332,6 +374,13 @@ pub struct Down {
+     pub still_wait: bool,
+     /// Up for the still stage ([`up_for_still`]) at the last frame.
+     pub still_up: bool,
++    /// A rise from the front (it began with its chest facing down, [`FRONT_START`]): 1 onto the
++    /// knees, 2 a foot forward (the lunge, `front_side`'s), 0 the rise's own push; `front_done`
++    /// once past them (not begun again in this rise).
++    pub front_stage: u8,
++    pub front_side: usize,
++    pub front_done: bool,
++    pub front_for: f32,
+     /// Upright, the foot going to its place in the animation's stance ([`STANCE_KEPT`]).
+     pub stance_fixing: Option<usize>,
+ }
+@@ -372,7 +421,10 @@ impl Np {
              anim_v: [0.0; 3],
              walls: Vec::new(),
              floors: Vec::new(),
@@ -1108,7 +1852,7 @@ index d4328db..37ab60c 100644
              weapon_side: None,
              firing: false,
              to_limits: false,
-@@ -434,6 +465,11 @@ impl Np {
+@@ -434,6 +486,11 @@ impl Np {
                  n: w.n,
              })
              .collect();
@@ -1120,7 +1864,7 @@ index d4328db..37ab60c 100644
          let body_walls = std::mem::take(&mut self.body_walls);
          self.body_walls = body_walls
              .iter()
-@@ -454,10 +490,31 @@ impl Np {
+@@ -454,10 +511,31 @@ impl Np {
                  n: w.n,
              })
              .collect();
@@ -1152,7 +1896,7 @@ index d4328db..37ab60c 100644
          shift_by(&out, self.origin)
      }
  
-@@ -499,6 +556,16 @@ impl Np {
+@@ -499,6 +577,16 @@ impl Np {
                      self.anim_v = scale(sub(c1, c0), 1.0 / (t1 - t0));
                  }
              }
@@ -1169,7 +1913,7 @@ index d4328db..37ab60c 100644
          }
          let anim_v = self.anim_v;
          self.anim_com = Some(com_now);
-@@ -542,6 +609,9 @@ impl Np {
+@@ -542,6 +630,9 @@ impl Np {
          for side in 0..2 {
              self.balance.foot_floor[side] = self.floors.get(self.balance.feet[side]).copied();
          }
@@ -1179,7 +1923,7 @@ index d4328db..37ab60c 100644
          let ask = self.balance.update(
              &self.model,
              &self.states,
-@@ -550,6 +620,13 @@ impl Np {
+@@ -550,6 +641,13 @@ impl Np {
              floor / UNITS,
              dt,
          );
@@ -1193,7 +1937,7 @@ index d4328db..37ab60c 100644
          // Engaged, the legs' targets are the animation's bent onto the footing (`leg_ik`): the
          // hips lowered as the feet spread, each ankle where its foot stands, lands or swings (the
          // animation's straight stance leg held the hips up, and a stepped foot hung in the air).
-@@ -565,6 +642,8 @@ impl Np {
+@@ -565,6 +663,8 @@ impl Np {
                  reading: Reading::default(),
                  rising: 0.0,
                  rise_best: 0.0,
@@ -1202,7 +1946,18 @@ index d4328db..37ab60c 100644
                  rise_stall: 0.0,
                  rise_failed: false,
                  push: 0.0,
-@@ -726,8 +805,11 @@ impl Np {
+@@ -581,6 +681,10 @@ impl Np {
+                 still_wait: false,
+                 still_up: false,
+                 stance_fixing: None,
++                front_stage: 0,
++                front_side: 0,
++                front_done: false,
++                front_for: 0.0,
+             });
+             return self.down_frame(anim, floor, dt);
+         }
+@@ -726,8 +830,11 @@ impl Np {
              soft_limits: self.stood_up < 2.0 * LIMITS_SETTLE || self.to_limits,
              allow: Vec::new(),
              floors: self.floors.clone(),
@@ -1214,7 +1969,7 @@ index d4328db..37ab60c 100644
          };
          let tracking = self.with_allowance(tracking);
          self.stood_up += dt;
-@@ -788,6 +870,8 @@ impl Np {
+@@ -788,6 +895,8 @@ impl Np {
              reading,
              rising: 0.0,
              rise_best: 0.0,
@@ -1223,13 +1978,28 @@ index d4328db..37ab60c 100644
              rise_stall: 0.0,
              rise_failed: false,
              push,
-@@ -859,13 +943,37 @@ impl Np {
+@@ -804,6 +913,10 @@ impl Np {
+             still_wait: false,
+             still_up: false,
+             stance_fixing: None,
++            front_stage: 0,
++            front_side: 0,
++            front_done: false,
++            front_for: 0.0,
+         });
+         down.since += dt;
+         down.reading = reading;
+@@ -858,19 +971,89 @@ impl Np {
+         // clip rose for 7 and 17 s).
          if rising_wish {
              down.rising += dt;
-         }
-+        if rising_wish && std::env::var_os("NP_DBG").is_some() && (down.rising / 0.25).floor() != ((down.rising - dt) / 0.25).floor() {
-+            eprintln!("DBG rising {:.2} pelvis {:.3}/{:.3} tilt {:.0} feet {:.0} seat {:.0} hands {:.0} over_feet {:.3} over_support {:.3} com_v {:?} lifting {} stall {:.2}", down.rising, reading.pelvis_height, reading.stand_height, reading.tilt.to_degrees(), reading.feet, reading.seat, reading.hands, reading.over_feet, reading.over_support, reading.com_v.map(|x| (x*100.0).round()/100.0), down.lifting_was, down.rise_stall);
++        } else {
++            down.front_stage = 0;
++            down.front_done = false;
 +        }
++        if rising_wish && std::env::var_os("NP_DBG").is_some() && (down.rising / 0.25).floor() != ((down.rising - dt) / 0.25).floor() {
++            eprintln!("DBG rising fz {:.2} ws {:?} {:.2} pelvis {:.3}/{:.3} tilt {:.0} feet {:.0} seat {:.0} hands {:.0} over_feet {:.3} over_support {:.3} com_v {:?} lifting {} stall {:.2}", { let fw = b.forward_of(&self.states, b.torso); fw[2] / crate::flinch::length(fw).max(1e-6) }, self.weapon_side, down.rising, reading.pelvis_height, reading.stand_height, reading.tilt.to_degrees(), reading.feet, reading.seat, reading.hands, reading.over_feet, reading.over_support, reading.com_v.map(|x| (x*100.0).round()/100.0), down.lifting_was, down.rise_stall);
+         }
          if rising && !airborne {
              // Up already: no more height to gain, coming still is the rise's end (not a stall).
 -            if reading.pelvis_height > down.rise_best + RISE_GAINED
@@ -1264,7 +2034,138 @@ index d4328db..37ab60c 100644
              } else {
                  down.rise_stall += dt;
              }
-@@ -1045,7 +1153,14 @@ impl Np {
+             let worlds = self.model.node_worlds(&self.states);
+             let feet_mid = scale(add(self.states[b.feet[0]].x, self.states[b.feet[1]].x), 0.5);
++            // A rise from the front ([`FRONT_START`]): onto the knees, a foot forward, then the
++            // rise's own push.
++            let front_up = {
++                let fw = b.forward_of(&self.states, b.torso);
++                fw[2] / crate::flinch::length(fw).max(1e-6)
++            };
++            // Judged once, as the rise begins from lying (a rise from the back pitches its front
++            // down as it comes over its feet: judged on, it was pulled back down to kneel).
++            // Armed only (one arm pushes, the weapon kept): both arms push the chest up and back
++            // over the feet, which a single arm could not (on knees and one hand its feet never
++            // took its weight); unarmed the rise's own push stands it in about 4 s.
++            if down.front_stage == 0
++                && !down.front_done
++                && down.rising <= dt
++                && down.labeler.label == Label::Lying
++                && front_up < -FRONT_START
++                && self.weapon_side.is_some()
++            {
++                down.front_stage = 1;
++                down.front_for = 0.0;
++                // The foot of the free arm's side forward (the weapon arm keeps its aim).
++                down.front_side = self.weapon_side.map_or(0, |w| 1 - w);
++            }
++            down.front_for += dt;
++            let kneel_z = KNEEL_HEIGHT * b.stand_height;
++            if down.front_stage == 1
++                && (reading.pelvis_height >= 0.85 * kneel_z && reading.tilt < 35f32.to_radians()
++                    || down.front_for > FRONT_STAGE_MOST)
++            {
++                down.front_stage = 2;
++                down.front_for = 0.0;
++            } else if down.front_stage == 2 && down.front_for > FRONT_STAGE_MOST {
++                down.front_stage = 0;
++                down.front_done = true;
++            }
++            let front_stage = down.front_stage;
++            // The body's way from its chest to its pelvis (flat): behind it, where the feet go
++            // kneeling.
++            let back_dir = crate::flinch::unit({
++                let d = sub(self.states[r].x, self.states[b.torso].x);
++                [d[0], d[1], 0.0]
++            })
++            .unwrap_or(reading.facing);
+             // The way it rises: toward its feet while they lie out from the hips (on its back
+             // the torso's facing points at the sky), the torso's facing once they are under it.
+             let to_feet = sub(feet_mid, self.states[r].x);
+@@ -887,7 +1070,7 @@ impl Np {
+             // 0.2 to 0.3 m/s that never came still, Patrick's 22:19 clip).
+             let upright = up_for_still(&reading, down.still_up);
+             down.still_up = upright;
+-            let lean = if upright {
++            let lean = if upright || front_stage != 0 {
+                 0.0
+             } else {
+                 (crate::flinch::length(flat) * RISE_LEAN.0).min(RISE_LEAN.1)
+@@ -987,7 +1170,26 @@ impl Np {
+                 let ahead = scale(rise_dir, out);
+                 // Upright, each foot stays where it is, set down on its own ground (followed
+                 // under the hips, the feet and the hips chased each other).
+-                let at = if let Some((_, to)) = stance_fix.filter(|f| f.0 == side) {
++                let at = if front_stage == 1 {
++                    // Kneeling: the foot behind its hip, the knee under it.
++                    [
++                        hip[0] + back_dir[0] * KNEEL_FOOT * UNITS,
++                        hip[1] + back_dir[1] * KNEEL_FOOT * UNITS,
++                        0.0,
++                    ]
++                } else if front_stage == 2 {
++                    if side == down.front_side {
++                        // The lunge: in front of its hip.
++                        [
++                            hip[0] - back_dir[0] * LUNGE_FOOT * UNITS,
++                            hip[1] - back_dir[1] * LUNGE_FOOT * UNITS,
++                            0.0,
++                        ]
++                    } else {
++                        let ft = worlds[foot].1;
++                        [ft[0], ft[1], 0.0]
++                    }
++                } else if let Some((_, to)) = stance_fix.filter(|f| f.0 == side) {
+                     to
+                 } else if upright {
+                     let ft = worlds[foot].1;
+@@ -999,14 +1201,35 @@ impl Np {
+                 // The foot going to its place in the stance slides there, kept in the support
+                 // (lifted, it tipped a body still moving on a 20 degree slope to 39 degrees).
+                 let lift = 0.0;
++                // The lunging foot lifted while away from its place (dragged, it caught).
++                let lift = if front_stage == 2 && side == down.front_side {
++                    let ft = worlds[foot].1;
++                    let away = crate::flinch::length([at[0] - ft[0], at[1] - ft[1], 0.0]);
++                    if away > LUNGE_THERE * UNITS {
++                        LUNGE_LIFT * UNITS
++                    } else {
++                        // There: the rise's own push from here on.
++                        down.front_stage = 0;
++                        down.front_done = true;
++                        0.0
++                    }
++                } else {
++                    lift
++                };
+                 let goal = [at[0], at[1], ground + foot_h + lift];
++                // Kneeling or lunging, the knees bend toward the head.
++                let knee_way = if front_stage != 0 {
++                    scale(back_dir, -1.0)
++                } else {
++                    rise_dir
++                };
+                 let Some((r1, m, _)) = crate::flinch::leg_ik(
+                     worlds[thigh].1,
+                     worlds[calf].1,
+                     worlds[foot].1,
+                     hip,
+                     goal,
+-                    rise_dir,
++                    knee_way,
+                 ) else {
+                     continue;
+                 };
+@@ -1017,7 +1240,7 @@ impl Np {
+                 // The foot drawn in along the floor (the leg's muscles against the floor's
+                 // grip: a heel dragged, not a leg swung up); once the legs push the feet stand
+                 // where they are; upright, each pressed onto its own ground where it is.
+-                if down.lifting_was && !upright {
++                if down.lifting_was && !upright && front_stage == 0 {
+                     continue;
+                 }
+                 let q = self.states[foot].q;
+@@ -1045,11 +1268,25 @@ impl Np {
              // half the arm, so it pushes the torso up from lying, seated or propped; let go once
              // the legs push. The arms were held at the animation's sides before, the torso
              // turned by an abstract support alone (Patrick's 10:08 and 10:10 clips).
@@ -1280,7 +2181,53 @@ index d4328db..37ab60c 100644
              let arms = if down.arms_off {
                  Vec::new()
              } else {
-@@ -1186,10 +1301,13 @@ impl Np {
+-                self.pushing_arms(&worlds, floor)
++                // Kneeling or lunging from the front, the free arm only (its shoulder up out of
++                // its reach there is no ledge to brace on: the weapon's hand went down on flat
++                // ground, 155 frames).
++                let arms = self.pushing_arms(&worlds, floor);
++                match self.weapon_side {
++                    Some(w) if front_stage != 0 => arms.into_iter().filter(|&s| s != w).collect(),
++                    _ => arms,
++                }
+             };
+             self.plant_hands(
+                 &mut down, &arms, &worlds, floor, rise_dir, &mut posed, &mut pulls,
+@@ -1091,7 +1328,32 @@ impl Np {
+             } else if down.lifting_was {
+                 down.lift_lapse += dt;
+             }
+-            if over || upright || (down.lifting_was && down.lift_lapse < LIFT_LAPSE) {
++            if front_stage != 0 {
++                // Onto the knees and over them while a foot comes forward: the pelvis held at
++                // kneeling height where it is (flat motion damped toward the ground's).
++                let ground_here = self
++                    .ground_at(r, scale(self.states[r].x, UNITS))
++                    .unwrap_or(f);
++                let z = ground_here + kneel_z;
++                let pace =
++                    ((z - self.states[r].x[2]) * RISE_PACE.1).clamp(-RISE_PACE.0, RISE_PACE.0);
++                pulls.push(Support {
++                    body: r,
++                    x: self.states[r].x,
++                    v: [self.ground_v[0], self.ground_v[1], pace],
++                    // The hips brought upright (a tall kneel, the torso over them).
++                    q: self.anim_states[r].q,
++                    kp: ROOT_SUPPORT.kp,
++                    kd: ROOT_SUPPORT.kd,
++                    max_force: push,
++                    kp_h: 0.0,
++                    kd_h: ROOT_SUPPORT.kd_h * 0.5,
++                    max_force_h: 400.0 * k,
++                    kp_turn: ROOT_SUPPORT.kp_turn * 0.5,
++                    kd_turn: self.root_kd_turn * 0.5,
++                    max_torque: 300.0 * k,
++                });
++            } else if over || upright || (down.lifting_was && down.lift_lapse < LIFT_LAPSE) {
+                 down.lifting = true;
+                 // Over the feet's own ground (a slope's).
+                 let feet_ground = b
+@@ -1186,10 +1448,13 @@ impl Np {
              // Not getting up (the pelvis no higher for a while): give up and settle back (the
              // AI may try again).
              if down.rise_stall > crate::np_down::RISE_STALL {
@@ -1294,7 +2241,7 @@ index d4328db..37ab60c 100644
                  down.arms_off = false;
                  down.arms_off = false;
                  down.rise_stall = 0.0;
-@@ -1200,10 +1318,14 @@ impl Np {
+@@ -1200,10 +1465,14 @@ impl Np {
              down.no_push = 0.0;
              down.rising = 0.0;
              down.rise_best = 0.0;
@@ -1309,7 +2256,7 @@ index d4328db..37ab60c 100644
              down.arms_off = false;
          }
          // Not rising: firing from the ground the weapon arm aims (the game's) and the free arm
-@@ -1231,14 +1353,22 @@ impl Np {
+@@ -1231,16 +1500,26 @@ impl Np {
          // (Upright as the still stage holds it too: read alone, its feet's contact flickered,
          // a body standing still timed out and was let go, and it fell.)
          let upright = classify(&reading, false) == Label::Standing || down.still_up;
@@ -1333,8 +2280,12 @@ index d4328db..37ab60c 100644
 +            down.rise_mark = 0.0;
              down.arms_off = false;
              down.rise_stall = 0.0;
++            down.front_stage = 0;
++            down.front_done = false;
          }
-@@ -1280,8 +1410,11 @@ impl Np {
+         let drives: Vec<Drive> = targets
+             .iter()
+@@ -1280,8 +1559,11 @@ impl Np {
              soft_limits: down.since < LIMITS_SETTLE || self.to_limits,
              allow: Vec::new(),
              floors: self.floors.clone(),
@@ -1346,6 +2297,45 @@ index d4328db..37ab60c 100644
          };
          let tracking = self.with_allowance(tracking);
          self.report = self.model.step_world(
+@@ -1293,6 +1575,10 @@ impl Np {
+             &self.walls,
+             dt,
+         );
++if std::env::var_os("NP_DBG5").is_some() && self.since_hit.is_some_and(|t| t > 0.25 && t < 0.45) {
++            let q = self.states[b.head].q;
++            eprintln!("DBG5 t {:.3} head q {:?} w {:?}", self.since_hit.unwrap(), q.map(|x| (x*1000.0).round()/1000.0), self.states[b.head].w.map(|x| (x*10.0).round()/10.0));
++        }
+         self.limit_allow = std::mem::take(&mut self.report.allow);
+         // Standing again, balanced over its feet: the balance has it.
+         let mut now = read(&self.model, &b, &self.states, &self.report, f);
+@@ -1538,7 +1824,13 @@ impl Np {
+             + crate::flinch::length(sub(worlds[hand].1, worlds[fore].1));
+         let shoulder = worlds[upper].1;
+         let ground = self.ground_at(hand, shoulder).map_or(floor, |g| g * UNITS);
+-        if shoulder[2] - ground <= reach * 1.05 {
++        // The weapon's hand only where its own ground is in its reach and the free hand's is not
++        // (a ledge's or a wall's foot under the free side); on flat ground both are as far, and
++        // the weapon's hand stays off it.
++        let [w_upper, _, w_hand] = b.arms[w];
++        let w_shoulder = worlds[w_upper].1;
++        let w_ground = self.ground_at(w_hand, w_shoulder).map_or(floor, |g| g * UNITS);
++        if shoulder[2] - ground <= reach * 1.05 || w_shoulder[2] - w_ground > reach * 1.05 {
+             vec![free]
+         } else {
+             vec![free, w]
+@@ -1689,6 +1981,12 @@ impl Np {
+         }
+     }
+ 
++    /// The way the body faces (its torso's forward, flat, unit).
++    pub fn facing(&self) -> V3 {
++        let f = self.bodies.forward_of(&self.states, self.bodies.torso);
++        crate::flinch::unit([f[0], f[1], 0.0]).unwrap_or([0.0, 1.0, 0.0])
++    }
++
+     /// The animation's velocity (m/s) the last frame measured.
+     pub fn anim_velocity(&self) -> V3 {
+         self.anim_v
 diff --git a/crates/ragdoll-core/src/np_balance.rs b/crates/ragdoll-core/src/np_balance.rs
 index b681add..da6296a 100644
 --- a/crates/ragdoll-core/src/np_balance.rs
