@@ -7,6 +7,29 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-21 (question 5 (a): the head through its centre, `docs/wip/np-running-wip2.patch`)
+
+**Status: not pushed (38 of 42 run New Physics tests pass with the patch; work goes on).** The
+patch is the running seed (`np-running-seed.patch`) plus:
+- **The head (sphere-like bodies, ends within 0.25 of the radius of the centre):** pushed out
+  through its centre, and its stop (no bounce) and friction through it too; its sliding friction
+  0.3 of the others' and no static grip (`SPHERE_FRICTION`). Traced: with friction the head was
+  held where it hit while the body slid on and the neck swung it round (30-49 rad/s inside one
+  frame, 23-37 degrees beyond its spin); with 0.3 the full cycle's largest turn is 17.8 degrees.
+- **The rise's feet:** each rising foot is held as high as its capsule set on the ground
+  (`RISE_FOOT_PRESS` 0.3 u into it), or the animation's foot if lower: held at the running
+  animation's foot (mid-stride) the feet hovered 1-2 u up, never carried, and the legs never
+  pushed (every rise from sitting failed). Upright, set on the ground without the press.
+- **The stand's end:** `STAND_BLEND` 0.8 s (0.5: the spine straightening into the animation's pose
+  moved the centre 0.05 m/s); `TORSO_STILL` 2500 N s/m, 1000 N, in full up to 18 degrees of lean
+  (`TORSO_STILL_FULL`), none at 40 (it held a leaning torso back from straightening on a slope).
+- **The VATS lying run** opens VATS on the first frame from 1 s that the body lies (a fixed 3 s
+  met it sitting up as the rise quickened); its 40 u bound unchanged.
+- **Still failing (marginal, the suite chaotic):** the slab (a catching step drags the right foot
+  through the slab's edge after standing beside it: a real swing-clearance bug), the rise-end
+  bounds (side 8.5 s of 8, slope 0.057 m/s, wall drift 2.07 u), the arms' "on its back, slope",
+  the death hand-over 2.16 u of 1.5. Next: the swing clearance over an edge, then the rest.
+
 ### Claude, 2026-11-21 (the keyboard beside a pad: de9c3ab)
 
 **Status: pushed and on the launcher (de9c3ab; Play, Windows room, Linux room, Android green).**
