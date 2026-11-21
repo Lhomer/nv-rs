@@ -7,6 +7,27 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-21 (the keyboard beside a pad: de9c3ab)
+
+**Status: pushed and on the launcher (de9c3ab; Play, Windows room, Linux room, Android green).**
+Patrick's report: with his ROG Raikiri II (and Steam's, ArmouryCrate's and the headset's virtual
+pads) the game and the tester started in pad mode; in the tester Esc did nothing, and with
+`bDisable360Controller=1` the keyboard stayed dead.
+- **Root cause:** `Controls::Poll` (`00a23010`) counts the pad connected whenever XInput answers
+  and `Controls` +0 is clear, and then the control reader (`00a24660`) and key test (`00a24280`)
+  read only the pad: no keyboard, no mouse, Esc only as the pad's Start. `[Interface]
+  bDisable360Controller` (`011d8c4c`) reaches `Controls` +0 only when the start menu makes its
+  Settings options (`007d2fc0`, `00719740`): the room never does, so the setting never held there.
+- **Fix:** the fixes-preset row `bPadWhenUsed` (`NV_PAD_WHEN_USED`, `crates/host/src/pad_when_used.rs`,
+  docs/FIXES.md) over the XInput thunk `009f996e`: the pad counts only while it is the device in
+  use (a state change past the dead zones), the keyboard and mouse take it back at once (a key or
+  button down, the mouse moving: `engine_platform::dinput::keyboard_mouse_uses`), a run starts
+  with them, `bDisable360Controller` is read from the setting itself, and the prompts switch
+  without the game's controller message. In the `vanilla` preset the original's behaviour stays.
+- **Tests:** four in `pad_when_used`, through the translated `Controls::Poll` and
+  `GetUserAction` with the platform's XInput and DirectInput keyboard (the bug reproduced
+  without the row).
+
 ### Claude, 2026-11-21 (the sixth upstream merge: 2b93014, to b10470de; 69f4661)
 
 **Status: pushed and on the launcher (69f4661).** slaterain/main b860fdbe..b10470de (7 commits:
