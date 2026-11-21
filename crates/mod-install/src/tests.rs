@@ -189,6 +189,61 @@ fn the_game_folder_is_never_written() {
     assert_eq!(std::fs::read(&plugins).unwrap(), b"Own order.esp\r\n");
 }
 
+/// The extender warning (Patrick installing MCM 1.5: the RobCo warning came only for its
+/// `NVSE/Plugins/MCM.dll`): no warning for the DLLs nv-rs has built in (MCM, JIP LN NVSE, UI
+/// Organizer, lStewieAl's Tweaks, xNVSE itself) or their settings; still one for another
+/// extender plugin (JohnnyGuitar, ShowOff) or a loose DLL.
+#[test]
+fn built_in_extender_plugins_are_no_warning() {
+    for (path, warns) in [
+        ("Data/NVSE/Plugins/MCM.dll", false),
+        ("Data/nvse/plugins/jip_nvse.dll", false),
+        ("Data/NVSE/Plugins/ui_organizer.dll", false),
+        ("Data/NVSE/Plugins/ui_organizer.ini", false),
+        ("Data/NVSE/Plugins/nvse_stewie_tweaks.dll", false),
+        ("Data/NVSE/Plugins/nvse_stewie_tweaks.ini", false),
+        ("Data/NVSE/plugins/ui_organizer/blank.txt", false),
+        ("Data/nvse_1_4.dll", false),
+        ("Data/NVSE/nvse_config.ini", false),
+        ("Data/NVSE/Plugins/JohnnyGuitar.dll", true),
+        ("Data/NVSE/Plugins/ShowOff.dll", true),
+        ("Data/NVSE/Plugins/ShowOff.ini", true),
+        ("Data\\NVSE\\Plugins\\johnnyguitar.dll", true),
+        ("Data/d3d9.dll", true),
+        ("Data/Textures/mcm.dds", false),
+        ("Data/MCM.esp", false),
+    ] {
+        assert_eq!(extender_plugin(path), warns, "{path}");
+    }
+
+    // Through a build: MCM's files alone (its DLL, ini, menus, textures and plugin) warn of
+    // nothing; JohnnyGuitar's DLL beside them does.
+    let dir = Scratch::new("extenders");
+    let game = game(&dir.0);
+    let mods = dir.0.join("mods");
+    write(&mods.join("NVSE").join("Plugins").join("MCM.dll"), b"MZ");
+    write(&mods.join("Config").join("MCM.ini"), b"[MCM]");
+    write(
+        &mods.join("menus").join("options").join("mcm.xml"),
+        b"<menu/>",
+    );
+    write(&mods.join("textures").join("MCM").join("box.dds"), b"dds");
+    write(
+        &mods.join("The Mod Configuration Menu.esp"),
+        &plugin(&["FalloutNV.esm"]),
+    );
+    let target = dir.0.join("modgame");
+    let plugins = dir.0.join("p").join("plugins.txt");
+    let built = build(&game, std::slice::from_ref(&mods), &target, &plugins).unwrap();
+    assert!(!built.extender_plugins);
+    write(
+        &mods.join("NVSE").join("Plugins").join("JohnnyGuitar.dll"),
+        b"MZ",
+    );
+    let built = build(&game, &[mods], &target, &plugins).unwrap();
+    assert!(built.extender_plugins);
+}
+
 /// Installed mods in their order, then the loose folder; records, archives and the installed
 /// archives folder stay out; a folder of another case is filled, not doubled (on every system).
 #[test]

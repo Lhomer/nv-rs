@@ -311,6 +311,97 @@ fn a_plain_archive_installs_and_is_removed() {
     assert!(installs::installed(&places.installs).unwrap().is_empty());
 }
 
+/// Patrick's MCM 1.5 (Nexus 42507): the download holds only a readme and an old FOMM package,
+/// `The Mod Configuration Menu.fomod` (a zip: `Config/MCM.ini`, `fomod/info.xml` and `script.cs`,
+/// `menus/`, `textures/MCM/`, the plugin, `NVSE/Plugins/MCM.dll`), and was refused as having no
+/// installer and no Data layout. Now the inner package is unpacked and installed from (its
+/// script not run, its files laid out as in Data), the download is the one recorded and moved
+/// aside, and the unpacking folder is gone after. Two packages inside are refused, naming them.
+#[test]
+fn a_package_inside_the_download_is_installed_from() {
+    let dir = Scratch::new("inner-package");
+    let places = dir.places();
+    let inner = dir.0.join("made").join("The Mod Configuration Menu.fomod");
+    make_zip(
+        &inner,
+        &[
+            ("Config/MCM.ini", b"[MCM]"),
+            (
+                "fomod/info.xml",
+                b"<fomod><Name>The Mod Configuration Menu</Name><Version>1.5</Version></fomod>",
+            ),
+            (
+                "fomod/script.cs",
+                b"class Script : FalloutNewVegasBaseScript {}",
+            ),
+            ("menus/options/mcm.xml", b"<menu/>"),
+            ("textures/MCM/mcm_box.dds", b"dds"),
+            ("The Mod Configuration Menu.esp", b"TES4"),
+            ("NVSE/Plugins/MCM.dll", b"MZ"),
+        ],
+    );
+    let inner_bytes = std::fs::read(&inner).unwrap();
+    let download = places
+        .loose
+        .join("The Mod Configuration Menu-42507-1-5.zip");
+    make_zip(
+        &download,
+        &[
+            ("The Mod Configuration Menu Readme.txt", b"read me"),
+            ("The Mod Configuration Menu.fomod", &inner_bytes),
+        ],
+    );
+    let said = run_with(&places, "1\nyes\n\n");
+    let words = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        words.contains("It holds the package \"The Mod Configuration Menu.fomod\""),
+        "{said}"
+    );
+    assert!(!said.contains("can't tell how to install this"), "{said}");
+    assert!(said.contains("Installed "), "{said}");
+    let folder = only_installed(&places);
+    for (path, bytes) in [
+        ("The Mod Configuration Menu.esp", &b"TES4"[..]),
+        ("NVSE/Plugins/MCM.dll", b"MZ"),
+        ("textures/MCM/mcm_box.dds", b"dds"),
+        ("menus/options/mcm.xml", b"<menu/>"),
+        ("Config/MCM.ini", b"[MCM]"),
+    ] {
+        assert_eq!(std::fs::read(folder.join(path)).unwrap(), bytes, "{path}");
+    }
+    let installed = installs::installed(&places.installs).unwrap();
+    assert_eq!(installed.len(), 1);
+    let record = read_record(&installed[0].folder);
+    assert_eq!(record.archive, "The Mod Configuration Menu-42507-1-5.zip");
+    assert_eq!(
+        record.archive_size,
+        std::fs::metadata(
+            places
+                .loose
+                .join(installs::KEPT)
+                .join("The Mod Configuration Menu-42507-1-5.zip")
+        )
+        .unwrap()
+        .len()
+    );
+    assert!(!download.exists(), "the download moved aside");
+    assert!(
+        !installs::staging_for(&places.installs.join(INNER_FOLDER)).exists(),
+        "the unpacking folder removed"
+    );
+
+    // Two packages inside: refused, naming them.
+    let two = places.loose.join("Two.zip");
+    make_zip(&two, &[("a.fomod", &inner_bytes), ("b.7z", b"7z")]);
+    let said = run_with(&places, "2\n\n");
+    let words = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        words.contains("it holds 2 packages inside (a.fomod, b.7z)"),
+        "{said}"
+    );
+    assert_eq!(installs::installed(&places.installs).unwrap().len(), 1);
+}
+
 /// Lines the list does not understand say what is understood, and the list is asked again: a
 /// word that is not a command, remove without a number, several numbers, bytes that are not
 /// UTF-8.

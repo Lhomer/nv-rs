@@ -11,7 +11,8 @@ recommended choice; a typo only asks again), and installs the mod into its own f
 userdata\mod installs, then moves the archive to "installed archives" here. Installed mods are
 laid over the game in the order installed, then the files you put here by hand. A RAR archive is
 not read: open it with 7-Zip and save it again as .7z or .zip. An installer's C# script is not
-run: the mod's plain layout is offered instead.
+run: the mod's plain layout is offered instead. A download that holds only another package (an
+old .fomod, .zip or .7z, such as MCM 1.5's) is installed from that package.
 
 Your game folder is never changed. Each start builds a whole game folder in userdata\modgame:
 your game's files linked, not copied, plus these on top. For that the nv-rs folder must be on
@@ -25,6 +26,8 @@ yourself, put a plugins.txt here (one file name per line, like the game's own pl
 
 Saves made with mods stay apart from your other nv-rs saves (userdata\mods).
 
-Regular .esp and .esm mods work. xNVSE, JIP LN NVSE, MCM's plugin and UI Organizer are built in (JIP,
-MCM and UIO with the bug fixes on), so mods that need only these work. Other plugins (.dll
-files, such as JohnnyGuitar NVSE and ShowOff) don't work yet: those files are not used.
+Regular .esp and .esm mods work. xNVSE, JIP LN NVSE, MCM's plugin, UI Organizer and lStewieAl's
+Tweaks are built in (JIP, MCM and UIO with the bug fixes on), so mods that need only these work,
+and their own copies of these plugins are no warning. Other plugins (.dll files, such as
+JohnnyGuitar NVSE and ShowOff) don't work yet: those files are not used, and starting with mods
+says so.

@@ -809,6 +809,25 @@ fn install_flow(
     places: &Places,
     archive: &Path,
 ) -> std::io::Result<()> {
+    install_from(input, out, places, archive, None)
+}
+
+/// The packages an archive with no installer and no Data layout may hold instead (an old FOMM
+/// `.fomod`, a zip or a 7z inside the download: Nexus's MCM 1.5 is a readme beside
+/// `The Mod Configuration Menu.fomod`).
+const INNER_PACKAGES: [&str; 3] = [".fomod", ".zip", ".7z"];
+
+/// Installs `archive`, the download itself or (`source` set) the package unpacked from inside
+/// the download `source`: the download is the one recorded and moved aside.
+fn install_from(
+    input: &mut dyn BufRead,
+    out: Out,
+    places: &Places,
+    archive: &Path,
+    source: Option<&Path>,
+) -> std::io::Result<()> {
+    let nested = source.is_some();
+    let source = source.unwrap_or(archive);
     let file_name = archive
         .file_name()
         .unwrap_or_default()
@@ -884,7 +903,15 @@ fn install_flow(
                 choices,
                 ..Record::default()
             };
-            install(out, places, archive, &name, wanted, record, limits)
+            install(
+                out,
+                places,
+                (archive, source),
+                &name,
+                wanted,
+                record,
+                limits,
+            )
         }
         Layout::Script { data, .. } => {
             say(
@@ -892,7 +919,15 @@ fn install_flow(
                 "This mod's installer is a small program (script.cs). nv-rs does not run programs that come with a download.",
             )?;
             match data {
-                Some(data) => plain_flow(input, out, places, archive, &entries, &data, &stem),
+                Some(data) => plain_flow(
+                    input,
+                    out,
+                    places,
+                    (archive, source),
+                    &entries,
+                    &data,
+                    &stem,
+                ),
                 None => say(
                     out,
                     "It has no files laid out as in the game's Data folder either. Install it with a mod manager and copy the result into the mods folder instead.",
@@ -902,14 +937,97 @@ fn install_flow(
         Layout::Plain { data, info } => {
             let info = read_info(&info);
             let name = first_of(&[&info.name, &stem]);
-            plain_flow(input, out, places, archive, &entries, &data, &name)
+            plain_flow(
+                input,
+                out,
+                places,
+                (archive, source),
+                &entries,
+                &data,
+                &name,
+            )
         }
-        Layout::Unknown => say(
-            out,
-            "nv-rs can't tell how to install this: it has no installer and no files laid out as in the game's Data folder (.esp, .esm, .bsa, Meshes, Textures...).",
-        ),
+        Layout::Unknown => {
+            let inner: Vec<&Entry> = entries
+                .iter()
+                .filter(|e| {
+                    let p = e.path.to_ascii_lowercase();
+                    INNER_PACKAGES.iter().any(|x| p.ends_with(x))
+                })
+                .collect();
+            match inner.as_slice() {
+                [one] if !nested => install_inner(input, out, places, archive, one),
+                [] | [_] => say(
+                    out,
+                    "nv-rs can't tell how to install this: it has no installer and no files laid out as in the game's Data folder (.esp, .esm, .bsa, Meshes, Textures...).",
+                ),
+                more => say(
+                    out,
+                    &format!(
+                        "nv-rs can't tell how to install this: it has no files laid out as in the game's Data folder, and it holds {} packages inside ({}). Unpack the one you want into the mods folder and install that.",
+                        more.len(),
+                        more.iter().map(|e| e.path.as_str()).collect::<Vec<_>>().join(", ")
+                    ),
+                ),
+            }
+        }
     }
 }
+
+/// The one package inside `archive` (`entry`) unpacked to a staging folder of its own in the mod
+/// installs folder (the guarded changes; a leftover is cleared at the next start, as any
+/// staging folder) and installed from there, as the download `archive`; the folder is removed
+/// after.
+fn install_inner(
+    input: &mut dyn BufRead,
+    out: Out,
+    places: &Places,
+    archive: &Path,
+    entry: &Entry,
+) -> std::io::Result<()> {
+    let inner_name = Path::new(&entry.path.replace('\\', "/"))
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    say(
+        out,
+        &format!("It holds the package \"{inner_name}\": installing from that."),
+    )?;
+    let folder = places.installs.join(INNER_FOLDER);
+    let staging = match installs::make_staging(&places.installs, &folder, &places.game) {
+        Ok(s) => s,
+        Err(e) => {
+            return say(
+                out,
+                &format!("Nothing was installed: a folder to unpack it in could not be made: {e}"),
+            )
+        }
+    };
+    let wanted = vec![(entry.path.clone(), inner_name.clone())];
+    let result = match mod_archive::extract(archive, &wanted, &staging, Limits::default()) {
+        Ok(_) => install_from(
+            input,
+            out,
+            places,
+            &staging.join(&inner_name),
+            Some(archive),
+        ),
+        Err(e) => say(out, &format!("Nothing was installed.\n{}", e.player_text())),
+    };
+    if let Err(e) = installs::discard_staging(&places.installs, &staging, &places.game) {
+        say(
+            out,
+            &format!(
+                "(The unpacked package could not be cleared: {e}. It is cleared the next time this starts.)"
+            ),
+        )?;
+    }
+    result
+}
+
+/// The mod folder name whose staging folder holds a package unpacked from inside a download.
+const INNER_FOLDER: &str = "00 package inside";
 
 fn first_of(names: &[&str]) -> String {
     names
@@ -988,7 +1106,7 @@ fn plain_flow(
     input: &mut dyn BufRead,
     out: Out,
     places: &Places,
-    archive: &Path,
+    (archive, source): (&Path, &Path),
     entries: &[Entry],
     data: &str,
     name: &str,
@@ -1013,7 +1131,7 @@ fn plain_flow(
                 name: name.to_owned(),
                 ..Record::default()
             };
-            install(out, places, archive, name, wanted, record, limits)
+            install(out, places, (archive, source), name, wanted, record, limits)
         }
         Confirm::Refused => Ok(()),
         Confirm::Back | Confirm::Stop => say(out, "Left as it is: nothing was installed."),
@@ -1272,7 +1390,7 @@ fn choices(session: &Session) -> Vec<String> {
 fn install(
     out: Out,
     places: &Places,
-    archive: &Path,
+    (archive, source): (&Path, &Path),
     name: &str,
     wanted: Wanted,
     mut record: Record,
@@ -1307,7 +1425,7 @@ fn install(
         }
         Ok(())
     };
-    let file_name = archive
+    let file_name = source
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
@@ -1403,7 +1521,7 @@ fn install(
         );
     }
     record.archive = file_name;
-    record.archive_size = std::fs::metadata(archive).map_or(0, |m| m.len());
+    record.archive_size = std::fs::metadata(source).map_or(0, |m| m.len());
     record.files = wanted.iter().map(|(_, d)| d.replace('\\', "/")).collect();
     if let Err(e) = installs::finish(&places.installs, &staging, &folder, &record, &places.game) {
         discard(out)?;
@@ -1417,7 +1535,7 @@ fn install(
             places.play_with_mods
         ),
     )?;
-    match installs::keep_archive(&places.loose, archive, &places.game) {
+    match installs::keep_archive(&places.loose, source, &places.game) {
         Ok(kept) => {
             say(out, "The archive was moved to:")?;
             writeln!(out, "{}", kept.display())?;

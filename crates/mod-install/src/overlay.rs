@@ -150,7 +150,8 @@ pub struct Built {
     pub removed: u64,
     /// Mods' files copied because a hard link could not reach them.
     pub copied: u64,
-    /// A script extender's plugin folder or a DLL among the mods: not used.
+    /// A script extender's plugin, or a DLL, among the mods that nv-rs does not have built in
+    /// ([`extender_plugin`]): not used.
     pub extender_plugins: bool,
     /// Installed mods' plugins added after the loose folder's own `plugins.txt`, which did not
     /// name them.
@@ -801,8 +802,7 @@ pub fn build_with(
     for (spelled, s) in wanted.files.values() {
         if !s.game {
             built.mod_files += 1;
-            let text = spelled.to_ascii_lowercase();
-            if text.contains("/nvse/") || text.ends_with(".dll") {
+            if extender_plugin(spelled) {
                 built.extender_plugins = true;
             }
         }
@@ -1007,4 +1007,41 @@ fn write_plugins(
         },
     )
     .map_err(|e| describe("writing", plugins_txt, e))
+}
+
+/// The script extender and its plugins nv-rs has built in, by file name without its extension
+/// (the DLL, its settings and its own folder): xNVSE (its DLLs, loaders and `nvse_config.ini`),
+/// JIP LN NVSE, MCM, UI Organizer and lStewieAl's Tweaks (the `jip`, `mcm`, `uio` and `stewie`
+/// crates' `FILE`s).
+pub const BUILT_IN_EXTENDER: [&str; 9] = [
+    "nvse_1_4",
+    "nvse_editor_1_4",
+    "nvse_loader",
+    "nvse_steam_loader",
+    "nvse_config",
+    "jip_nvse",
+    "mcm",
+    "ui_organizer",
+    "nvse_stewie_tweaks",
+];
+
+/// Whether a mod's file (its path in the folder, any case, `/` or `\\`) is a script extender's
+/// plugin or a DLL nv-rs does not have built in: under an `NVSE` folder or a `.dll`, and neither
+/// it nor a folder it lies in named as one of [`BUILT_IN_EXTENDER`] (MCM's `NVSE/Plugins/MCM.dll`
+/// is no warning; JohnnyGuitar's or ShowOff's DLL is).
+pub fn extender_plugin(path: &str) -> bool {
+    let text = path.replace('\\', "/").to_ascii_lowercase();
+    if !(text.contains("/nvse/") || text.starts_with("nvse/") || text.ends_with(".dll")) {
+        return false;
+    }
+    let mut parts = text
+        .split('/')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>();
+    let Some(file) = parts.pop() else {
+        return false;
+    };
+    let stem = file.split('.').next().unwrap_or(file);
+    let built_in = |name: &str| BUILT_IN_EXTENDER.contains(&name);
+    !(built_in(stem) || parts.iter().any(|p| built_in(p)))
 }
