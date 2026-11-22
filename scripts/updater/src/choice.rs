@@ -1,6 +1,6 @@
 //! What the launcher starts once the update check is done (Patrick, 2026-11-14: always ask):
-//! **Play** (Play.exe as `Play.cmd` starts it) or **Play with mods** (`Play.exe --mods`, as
-//! `Play with mods.cmd` does, with the `mods` folder). The last choice is remembered in
+//! **Play** (Play.exe as it is) or **Play with mods** (`Play.exe --mods`, with the `mods`
+//! folder). The last choice is remembered in
 //! `userdata\launcher-choice.txt` and offered as the default button the next time; the question is
 //! asked every time.
 
@@ -73,13 +73,16 @@ pub fn remember(install: &Path, choice: Choice) {
 mod tests {
     use super::*;
 
-    /// Play is Play.exe as it is, Play with mods is `--mods`, as the two .cmd files start it.
+    /// Play is Play.exe as it is, Play with mods is `--mods` and the physics tester `--room`:
+    /// options Play.exe's own command line reads (the .cmd files that started it so are gone; its
+    /// start screen has the Mods and Import saves entries).
     #[test]
-    fn the_choices_start_play_exe_as_the_cmd_files_do() {
+    fn the_choices_start_play_exe_with_its_own_options() {
         assert!(Choice::Play.args().is_empty());
         assert_eq!(Choice::Mods.args(), ["--mods"]);
-        let cmd = include_str!("../../../distribution/Play with mods.cmd");
-        assert!(cmd.contains("Play.exe\" --mods"), "{cmd}");
+        let play = include_str!("../../../crates/nv-launcher/src/play/mod.rs");
+        assert!(play.contains("\"--mods\" => options.mods = true"));
+        assert!(play.contains("\"--room\" => options.room = true"));
     }
 
     /// The last choice comes back; none, or a damaged file, is Play.

@@ -53,7 +53,6 @@ What the ZIP holds, and why each is allowed:
 | `Launcher.exe` | The updater (`scripts/updater`): the newest build from the package's GitHub Release (the `Play package` workflow's rolling prerelease of the branch), checked against its SHA-256, put in place of the programs, never touching `userdata`; then it asks Play or Play with mods (`Play.exe` / `Play.exe --mods`; the last choice the default, `userdata\launcher-choice.txt`) | Our code, GPL; no dependencies |
 | `app\FalloutNV.exe` | `nv-viewer` under that name | Our build. LEGAL.md covers the translated code; `package-check` looks for data of the game's own program in it, and its report goes with the release notes |
 | `app\tools\d3d9-capture.exe`, `nvapi-capture.exe`, `dsound-capture.exe` | The table tools (`scripts/`) | Our code, GPL. They read the player's Windows and drivers, on the player's PC |
-| `Play with mods.cmd`, `Install mods.cmd`, `Import my saves.cmd` | Launchers of single actions (the launcher with an option) | Our text |
 | `READ ME.txt`, `mods\READ ME.txt`, `BUILD.txt` | For players; the exact commit | Our text |
 | `LICENSE`, `LEGAL.md`, `THIRD-PARTY-NOTICES.txt`, `licenses\` | GPL, the MIT notice, the independence statement, the Rust crates' licences, libvorbis's BSD notice | Required by those licences and LEGAL.md |
 

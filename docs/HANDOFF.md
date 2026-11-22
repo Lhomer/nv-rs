@@ -7,6 +7,22 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-22 (the eighth upstream merge: f159fe43..cad5b671, 23 commits)
+
+**Status: pushed.** Loads finishing in small steps, faster menu closing, native menu searches, the
+user-trait map, fade-node visibility and bones on spare cores (both off), per-draw registers (off),
+the scrap-heap fix, audio following the output device, JIP's fixed-string pool and its patches
+complete, Stewie's Tweaks rows, and the launcher's start screen: Import saves and Mods entries
+(the installer in the terminal), the three .cmd files removed. One conflict, the package's READ ME
+(the fork's Launcher.exe line kept beside upstream's entries for Play.exe, with the fork's Settings
+detail). The fork's updater test read the removed `Play with mods.cmd`; it now reads Play.exe's
+own `--mods` and `--room` options (Launcher.exe starts Play.exe with them, never the .cmd files).
+README.md, the package READ ME, the updater and viewer/Cargo.toml no longer name the .cmd files.
+The Mods entry runs `--install-mods` (`mod_chooser::run_in_window`): the nested-package and
+extender-warning fixes apply there; the mods folder's READ ME already says Mods in Play.exe and
+keeps both. JIP, MCM and UIO stay on. No lock or notice change. Host 482, launcher, updater, mod
+crates, repo hygiene pass.
+
 ### Claude, 2026-11-22 (the same physics on every machine: libm; the settle 0.6 s)
 
 **Status: pushed (the commit after 28fed0a).** 28fed0a's lab fix passed here and failed in CI (on

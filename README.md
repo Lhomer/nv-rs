@@ -34,7 +34,7 @@ Builds from source (not yet the preview) also recognize one GOG build: the en-US
 1. Extract the ZIP to a folder of its own, for example `C:\Games\nv-rs`.
 2. Double-click `Play.exe`. The launcher opens, in the look of the game's terminals; `> Play` finds
    your game and starts it.
-3. `Import my saves.cmd` brings your saves over. The launcher's `> Settings` has the display
+3. The launcher's `> Import saves` brings your saves over; its `> Settings` has the display
    options and the game fixes.
 
 It never changes your game, your saves or your settings: everything it writes stays in its own

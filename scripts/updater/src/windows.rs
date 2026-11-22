@@ -691,7 +691,7 @@ fn start_tester(dir: &Path) {
 }
 
 /// Starts Play.exe from the install, as a double-click would (with `--mods` for Play with mods,
-/// as `Play with mods.cmd` does); the launcher ends.
+/// as its own Play with mods entry does); the launcher ends.
 fn play(install: &Path, choice: Choice) {
     let play = install.join("Play.exe");
     if let Err(why) = Command::new(&play)
