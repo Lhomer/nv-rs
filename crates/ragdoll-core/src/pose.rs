@@ -17,6 +17,8 @@
 //! written); and the offsets are checked ([`sane`]).
 
 use crate::flinch::{add, apply_m, length, mul, scale, sub, transpose, IDENTITY, M3, V3};
+#[allow(unused_imports)]
+use crate::fm::Fm;
 
 /// How close a bone's local must be to what was written to count as still holding it: rotation
 /// entries, translation (game units).
@@ -319,7 +321,7 @@ mod tests {
             s: 1.0,
         };
         let w = parent.then(&child);
-        assert!((w.t[0] - (10.0 + 2.0 * 1.0f32.cos())).abs() < 1e-4);
+        assert!((w.t[0] - (10.0 + 2.0 * 1.0f32.dcos())).abs() < 1e-4);
         assert_eq!(w.s, 2.0);
     }
 

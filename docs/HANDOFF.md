@@ -7,6 +7,26 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-22 (the same physics on every machine: libm; the settle 0.6 s)
+
+**Status: pushed (the commit after 28fed0a).** 28fed0a's lab fix passed here and failed in CI (on
+its back 0.07 m in CI, -0.03 m here, the same code): `f32::sin` and the like call the system's
+maths library, which picks its code by the processor, and the chaotic simulation grows the last
+bits into another fall. ragdoll-core's and the lab's transcendental functions now come from the
+portable `libm` crate (`ragdoll_core::fm::Fm`: `dsin`, `dcos`, `datan2`, `dacos`, `dexp`, ...; `sqrt`,
+`powi` and the four operations are exact already), so CI, this container and Patrick's PC run the
+same trajectories. libm 0.2.16 was already in the lock files and the notices; ragdoll-core now
+names it. The new numbers moved the side rise to 8.6 s (bound 8): its first rise began 0.3 s after
+the body lay and stalled; the settle's stillness now lasts 0.6 s (`SETTLE_FOR`, was 0.3), and every
+world stands on its first try. (0.5, 0.7 and 0.8 each moved another test over a bound: the suite
+stays chaotic.) Host 480 of 480, the lab 54 of 54, ragdoll-core 104.
+- **The death hand-over** (on the list): a lying body's limbs, held out of the skeleton's limits
+  by the floor, never come in during the 45-frame wait. Projecting the body in and drawing it so for
+  a frame does not help (the floor pushes them out again at the next step: 5.4 u off). Still open.
+- **Task C** needs the downed body held inside the skeleton's real limits throughout (today 20-60
+  degrees out while lying, the limits widened by the drive targets): a physics change, earlier
+  tries in `docs/wip/np-settled-limits.patch`.
+
 ### Claude, 2026-11-22 (the Ragdoll lab's stand fixed)
 
 **Status: pushed (the commit after 38be5ce).** `np_m6_stands_by_balance` (failing since 38461b8:

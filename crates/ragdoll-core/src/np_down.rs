@@ -18,6 +18,8 @@
 
 use crate::active::{qconj, qrot, Q};
 use crate::flinch::{add, dot, length, scale, sub, V3};
+#[allow(unused_imports)]
+use crate::fm::Fm;
 use crate::np_balance::{hull, outside};
 use crate::np_body::{Model, State, StepReport, GRAVITY};
 
@@ -341,7 +343,7 @@ pub fn read(
     let total = report.floor_load.iter().sum::<f32>() + report.wall_load.iter().sum::<f32>();
     let (com, com_v) = model.centre_of_mass(states);
     let up = b.up_of(states, b.torso);
-    let tilt = up[2].clamp(-1.0, 1.0).acos();
+    let tilt = up[2].clamp(-1.0, 1.0).dacos();
     let f = b.forward_of(states, b.torso);
     let facing = crate::flinch::unit([f[0], f[1], 0.0])
         .or_else(|| crate::flinch::unit([up[0], up[1], 0.0]))
@@ -453,7 +455,7 @@ pub fn reads(r: &Reading, target: Option<V3>, push: f32) -> Reads {
     let aim_off = target
         .and_then(|t| crate::flinch::unit([t[0], t[1], 0.0]))
         .map_or(0.0, |t| {
-            dot(t, r.facing).clamp(-1.0, 1.0).acos().to_degrees()
+            dot(t, r.facing).clamp(-1.0, 1.0).dacos().to_degrees()
         });
     let push_margin = push - r.weight;
     let under = r.feet > 1.0 || r.seat > 1.0 || r.hands > 1.0;
@@ -475,7 +477,7 @@ pub fn turn_between(from: V3, to: V3) -> V3 {
     if s < 1e-6 {
         return [0.0; 3];
     }
-    scale(c, s.atan2(cos) / s)
+    scale(c, s.datan2(cos) / s)
 }
 
 #[cfg(test)]

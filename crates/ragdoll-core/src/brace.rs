@@ -20,6 +20,8 @@
 //! Units: game units (70 a metre) and seconds.
 
 use crate::flinch::{add, dot, length, scale, sub, unit, M3, V3};
+#[allow(unused_imports)]
+use crate::fm::Fm;
 use crate::UNITS_PER_METRE;
 
 /// A two-handed weapon's support hand held on its grip while the body is handed back: fully
@@ -631,7 +633,7 @@ fn step_path(mut pos: V3, mut vel: V3, goal: V3, shoulder: V3, dt: f32) -> (V3, 
     let (a, b) = (sub(before, shoulder), sub(pos, shoulder));
     let (la, lb) = (length(a), length(b));
     if la > 1.0 && lb > 1.0 {
-        let angle = (dot(a, b) / (la * lb)).clamp(-1.0, 1.0).acos();
+        let angle = (dot(a, b) / (la * lb)).clamp(-1.0, 1.0).dacos();
         let most = REACH_SWEEP * dt;
         if angle > most {
             let swept = add(shoulder, around(a, b, most / angle));
@@ -663,7 +665,7 @@ fn step_home(mut off: V3, mut vel: V3, home: V3, shoulder: V3, dt: f32) -> (V3, 
         // Toward home at most om * d (and never past it in this step); across, damped away.
         let toward = dot(vel, n).clamp(0.0, (om * d).min(d / dt));
         let across = sub(vel, scale(n, dot(vel, n)));
-        vel = add(scale(n, toward), scale(across, (-2.0 * om * dt).exp()));
+        vel = add(scale(n, toward), scale(across, (-2.0 * om * dt).dexp()));
     }
     // Around the shoulder no faster than [`RETURN_SWEEP`] (the arm speed cap): the step shortened
     // (shorter toward home never goes past it).
@@ -673,7 +675,7 @@ fn step_home(mut off: V3, mut vel: V3, home: V3, shoulder: V3, dt: f32) -> (V3, 
     );
     let (la, lb) = (length(a), length(b));
     if la > 1.0 && lb > 1.0 {
-        let angle = (dot(a, b) / (la * lb)).clamp(-1.0, 1.0).acos();
+        let angle = (dot(a, b) / (la * lb)).clamp(-1.0, 1.0).dacos();
         let most = RETURN_SWEEP * dt;
         if angle > most {
             vel = scale(vel, most / angle);
@@ -691,7 +693,7 @@ fn around(a: V3, b: V3, w: f32) -> V3 {
         return add(a, scale(sub(b, a), w));
     };
     let c = dot(ua, ub).clamp(-1.0, 1.0);
-    let angle = c.acos();
+    let angle = c.dacos();
     let dir = if angle < 1e-3 {
         ua
     } else if angle > std::f32::consts::PI - 1e-2 {
@@ -700,12 +702,15 @@ fn around(a: V3, b: V3, w: f32) -> V3 {
         let perp = unit(sub(down, scale(ua, dot(down, ua))))
             .or_else(|| unit(crate::flinch::cross(ua, [1.0, 0.0, 0.0])))
             .unwrap_or([0.0, 1.0, 0.0]);
-        add(scale(ua, (w * angle).cos()), scale(perp, (w * angle).sin()))
-    } else {
-        let s = angle.sin();
         add(
-            scale(ua, ((1.0 - w) * angle).sin() / s),
-            scale(ub, (w * angle).sin() / s),
+            scale(ua, (w * angle).dcos()),
+            scale(perp, (w * angle).dsin()),
+        )
+    } else {
+        let s = angle.dsin();
+        add(
+            scale(ua, ((1.0 - w) * angle).dsin() / s),
+            scale(ub, (w * angle).dsin() / s),
         )
     };
     scale(dir, la + (lb - la) * w)
@@ -779,7 +784,7 @@ pub fn turned(from: V3, to: V3) -> f32 {
     let (Some(a), Some(b)) = (unit([from[0], from[1], 0.0]), unit([to[0], to[1], 0.0])) else {
         return 0.0;
     };
-    dot(a, b).clamp(-1.0, 1.0).acos()
+    dot(a, b).clamp(-1.0, 1.0).dacos()
 }
 
 pub fn recovered(stepping: bool, brace_t: f32, com_speed: f32) -> Option<&'static str> {
@@ -889,7 +894,7 @@ pub fn plant_arm(
     let least = rotation(between(u0, u1));
     let bend = (length(bent0).min(length(bent1)) / (l1 * l2))
         .clamp(0.0, 1.0)
-        .asin();
+        .dasin();
     let k = crate::active::ease((bend - 0.04) / 0.12);
     let r1 = match crate::flinch::align(u0, bent0, u1, bent1) {
         Some(hinged) if k > 0.0 => {
@@ -1097,7 +1102,7 @@ mod tests {
         for i in 0..240 {
             t += dt;
             // The grip moves with the weapon hand; the free arm's wrist gets there after a while.
-            let home = add(home0, [3.0 * (t * 2.0).sin(), 0.0, 0.0]);
+            let home = add(home0, [3.0 * (t * 2.0).dsin(), 0.0, 0.0]);
             let free = if i < 90 { p } else { home };
             h.update(
                 Some(&s),

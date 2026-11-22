@@ -5,6 +5,8 @@
 
 use crate::convert::{from_m, to_m};
 use ragdoll_core::flinch::V3;
+#[allow(unused_imports)]
+use ragdoll_core::fm::Fm;
 use rapier3d::prelude::*;
 
 /// The grounds the lab has.
@@ -180,7 +182,7 @@ pub fn ground_groups() -> InteractionGroups {
 
 /// The uneven ground's height at (x, y) (units).
 pub fn bumps(x: f32, y: f32) -> f32 {
-    6.0 * (x / 40.0).sin() * (y / 55.0).cos() + 4.0 * ((x + y) / 23.0).sin() - 4.0
+    6.0 * (x / 40.0).dsin() * (y / 55.0).dcos() + 4.0 * ((x + y) / 23.0).dsin() - 4.0
 }
 
 /// Builds `kind` into `world` (which holds no other fixed collider).
@@ -192,7 +194,7 @@ pub fn build(world: &mut PhysicsWorld, kind: GroundKind) -> Ground {
         GroundKind::Slope => {
             // A plane through the origin rising toward +Y.
             let a = SLOPE_DEGREES.to_radians();
-            let (s, c) = a.sin_cos();
+            let (s, c) = a.dsin_cos();
             let size = far;
             let corners = [
                 [-size, -size * c, -size * s],

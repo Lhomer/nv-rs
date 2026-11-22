@@ -10,6 +10,8 @@
 
 use crate::active::{qconj, qfrom_m, qmul, qnorm, Q};
 use crate::flinch::{add, dot, scale, sub, M3, V3};
+#[allow(unused_imports)]
+use crate::fm::Fm;
 use crate::np_balance::{Balance, Phase};
 use crate::np_body::{Drive, Model, Plane, State, StepReport, Support, Tracking, UNITS};
 use crate::np_down::{Bodies, Label, Labeler, Reading};
@@ -1077,7 +1079,7 @@ impl Np {
                 (crate::flinch::length(flat) * RISE_LEAN.0).min(RISE_LEAN.1)
             };
             let dir = crate::flinch::unit(flat).unwrap_or(rise_dir);
-            let want_up = add(scale([0.0, 0.0, 1.0], lean.cos()), scale(dir, lean.sin()));
+            let want_up = add(scale([0.0, 0.0, 1.0], lean.dcos()), scale(dir, lean.dsin()));
             let c = turn_between(b.up_of(&self.states, b.torso), want_up);
             // The arms' push off the floor (or a wall) behind and beside it, while the torso is
             // low enough for a hand to reach (its centre within an arm of a surface): the torso

@@ -18,6 +18,8 @@
 //! brace's hands), [`Body::pose`] for the bones, blended with the animation by [`weight`].
 
 use crate::flinch::{add, cross, dot, length, scale, sub, unit, Role, M3, V3};
+#[allow(unused_imports)]
+use crate::fm::Fm;
 use crate::tuning;
 
 /// Small steps a frame.
@@ -157,7 +159,7 @@ pub fn qexp(w: V3) -> Q {
     if !(a.is_finite() && a > 1e-9) {
         return Q_ID;
     }
-    let (s, c) = (a / 2.0).sin_cos();
+    let (s, c) = (a / 2.0).dsin_cos();
     let k = s / a;
     [c, w[0] * k, w[1] * k, w[2] * k]
 }
@@ -173,7 +175,7 @@ pub fn qlog(q: Q) -> V3 {
     if s < 1e-9 {
         return scale(v, 2.0);
     }
-    let a = 2.0 * s.atan2(q[0]);
+    let a = 2.0 * s.datan2(q[0]);
     scale(v, a / s)
 }
 pub fn qslerp(a: Q, b: Q, t: f32) -> Q {
@@ -262,7 +264,7 @@ pub fn weight(since: f32) -> f32 {
 pub fn heading_off(r: &M3, facing: V3) -> f32 {
     let f = [facing[0], facing[1], 0.0];
     let g = mv(r, f);
-    let (a, b) = (f[1].atan2(f[0]), g[1].atan2(g[0]));
+    let (a, b) = (f[1].datan2(f[0]), g[1].datan2(g[0]));
     let mut d = b - a;
     while d > std::f32::consts::PI {
         d -= std::f32::consts::TAU;
@@ -809,7 +811,7 @@ pub const PULL_MOVE: f32 = 40.0;
 /// The yaw of a world turn `q` about the vertical (rad, -pi to pi): its swing-twist twist.
 pub fn yaw_of(q: Q) -> f32 {
     let q = short(q);
-    2.0 * q[3].atan2(q[0])
+    2.0 * q[3].datan2(q[0])
 }
 
 /// A reaction's shown offsets held to what its push justifies ([`offset_most`]) and to
@@ -1485,7 +1487,7 @@ impl Body {
             let Some(axis) = unit(cross(from, to)) else {
                 continue;
             };
-            let angle = dot(from, to).clamp(-1.0, 1.0).acos().min(over - allowed);
+            let angle = dot(from, to).clamp(-1.0, 1.0).dacos().min(over - allowed);
             if angle < 1e-4 {
                 continue;
             }
@@ -1685,7 +1687,7 @@ impl Body {
                 continue;
             };
             let bent = cross(u, f);
-            let axis = if length(bent) > AXIS_BEND.sin() {
+            let axis = if length(bent) > AXIS_BEND.dsin() {
                 unit(bent)
             } else {
                 forward.and_then(|fw| {
@@ -1986,7 +1988,7 @@ impl Body {
         let w: Vec<f32> = (0..self.state.len())
             .map(|b| {
                 self.segments[b].mass
-                    * (-d[b] / spread.max(0.05)).exp()
+                    * (-d[b] / spread.max(0.05)).dexp()
                     * takes.get(b).copied().unwrap_or(1.0)
             })
             .collect();
@@ -2052,7 +2054,7 @@ impl Body {
         // a hitch: 50 ms in 8 steps of 6 ms blew an armed body up in the lab).
         let n = ((dt * 60.0 * t.substeps).ceil()).clamp(1.0, 64.0) as usize;
         let h = dt / n as f32;
-        let fade = (-dt / t.muscle_back.max(0.02)).exp();
+        let fade = (-dt / t.muscle_back.max(0.02)).dexp();
         self.update_hinges(targets);
         let hinged = self.hinged_targets(targets);
         let targets = hinged.as_ref().unwrap_or(targets);
@@ -2163,7 +2165,7 @@ impl Body {
             let speed = length(rel);
             let knee = most * SPIN_KNEE;
             if speed > knee && speed.is_finite() && most > knee {
-                let allowed = knee + (most - knee) * ((speed - knee) / (most - knee)).tanh();
+                let allowed = knee + (most - knee) * ((speed - knee) / (most - knee)).dtanh();
                 let off = scale(rel, 1.0 - allowed / speed);
                 self.state[i].w = sub(self.state[i].w, off);
             }
@@ -2194,7 +2196,7 @@ impl Body {
             if !(speed > knee && speed.is_finite() && most > knee) {
                 continue;
             }
-            let allowed = knee + (most - knee) * ((speed - knee) / (most - knee)).tanh();
+            let allowed = knee + (most - knee) * ((speed - knee) / (most - knee)).dtanh();
             let joint = self.joint(i);
             let rel = qmul(qexp(scale(d, allowed / speed)), was);
             let q = qnorm(qmul(self.state[p].q, rel));
@@ -2704,9 +2706,9 @@ fn scale4(a: Q, k: f32) -> Q {
 /// bent backwards) and the lean out of the hinge's plane (rad).
 pub fn hinge_angles(u: V3, f: V3, axis: V3) -> (f32, f32) {
     let n = unit(axis).unwrap_or([1.0, 0.0, 0.0]);
-    let lean = dot(f, n).clamp(-1.0, 1.0).asin();
+    let lean = dot(f, n).clamp(-1.0, 1.0).dasin();
     let inplane = sub(f, scale(n, dot(f, n)));
-    let flex = dot(cross(u, inplane), n).atan2(dot(u, inplane));
+    let flex = dot(cross(u, inplane), n).datan2(dot(u, inplane));
     (flex, lean)
 }
 
@@ -2740,7 +2742,7 @@ pub fn hinge_limit_from(u: V3, f: V3, axis: V3, low: f32, flex: f32, lean: f32) 
     }
     // The wanted direction: `u` turned about `n` by the flex, leaned toward `n`.
     let inplane = qrot(qexp(scale(n, a2)), u);
-    let want = add(scale(inplane, l2.cos()), scale(n, l2.sin()));
+    let want = add(scale(inplane, l2.dcos()), scale(n, l2.dsin()));
     let axis = cross(f, want);
     let s = length(axis);
     let c = dot(f, want).clamp(-1.0, 1.0);
@@ -2750,7 +2752,7 @@ pub fn hinge_limit_from(u: V3, f: V3, axis: V3, low: f32, flex: f32, lean: f32) 
         }
         return Some(qexp(scale(n, std::f32::consts::PI)));
     }
-    Some(qexp(scale(axis, s.atan2(c) / s)))
+    Some(qexp(scale(axis, s.datan2(c) / s)))
 }
 
 #[cfg(test)]
@@ -3201,7 +3203,7 @@ mod tests {
             assert!((flex - want).abs() < 1e-3, "{a}: {flex} vs {want}");
         }
         // A lean out of the plane is held to its bound.
-        let leaned = add(scale(bend(0.5), 0.6f32.cos()), scale(axis, 0.6f32.sin()));
+        let leaned = add(scale(bend(0.5), 0.6f32.dcos()), scale(axis, 0.6f32.dsin()));
         let t = hinge_limit(u, leaned, axis, ELBOW_FLEX, ELBOW_LEAN).expect("leaned too far");
         let (_, lean) = hinge_angles(u, qrot(t, leaned), axis);
         assert!((lean - ELBOW_LEAN).abs() < 1e-3);

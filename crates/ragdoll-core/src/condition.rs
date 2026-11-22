@@ -17,6 +17,8 @@
 //! - **Counter-side bracing** is the body's own (`crate::active::Body::hit`): bones away from a
 //!   hit stiffen, the hit side softens.
 
+#[allow(unused_imports)]
+use crate::fm::Fm;
 /// A body's region: the four limbs (left, right), the torso and the head.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Region {
@@ -92,7 +94,7 @@ pub struct Condition {
 }
 
 fn fade(x: f32, dt: f32, half: f32) -> f32 {
-    x * 0.5f32.powf(dt.max(0.0) / half.max(1e-3))
+    x * 0.5f32.dpowf(dt.max(0.0) / half.max(1e-3))
 }
 
 impl Condition {
@@ -100,7 +102,7 @@ impl Condition {
     pub fn decay(&mut self, dt: f32) {
         self.since += dt.max(0.0);
         self.fatigue = fade(self.fatigue, dt, FATIGUE_HALF);
-        let k = 1.0 - (-dt.max(0.0) / FATIGUE_RISE).exp();
+        let k = 1.0 - (-dt.max(0.0) / FATIGUE_RISE).dexp();
         self.felt += (self.fatigue - self.felt) * k;
         self.pain = fade(self.pain, dt, PAIN_HALF);
         for i in &mut self.injury {

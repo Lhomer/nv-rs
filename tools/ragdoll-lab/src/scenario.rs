@@ -26,6 +26,8 @@ use crate::weapons::{self, Weapon};
 use crate::world::GroundKind;
 use ragdoll_core::balance::Limbs;
 use ragdoll_core::flinch::*;
+#[allow(unused_imports)]
+use ragdoll_core::fm::Fm;
 use ragdoll_core::knock::Body;
 use ragdoll_core::tuning::Tuning;
 
@@ -657,7 +659,7 @@ pub fn fire(sim: &mut Sim, hit: &Hit) {
     sim.weapon = hit.weapon.clone();
     let yaw = hit.from.to_radians();
     // The attacker's side: 0 degrees is the body's front (+Y).
-    let side = [yaw.sin(), yaw.cos(), 0.0];
+    let side = [yaw.dsin(), yaw.dcos(), 0.0];
     match hit.weapon {
         Weapon::Blast { .. } => {
             let centre = add(
@@ -1645,7 +1647,7 @@ mod plank {
         let (a, b) = (from(anim), from(shown));
         (dot(a, b) / (length(a) * length(b)).max(1e-6))
             .clamp(-1.0, 1.0)
-            .acos()
+            .dacos()
             .to_degrees()
     }
 

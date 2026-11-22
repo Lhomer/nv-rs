@@ -6,6 +6,8 @@
 //! The constants are the game's tuning; the functions read the values through
 //! [`crate::tuning::get`], which in the game is always these constants.
 
+#[allow(unused_imports)]
+use crate::fm::Fm;
 use crate::tuning;
 
 /// A bone's role: its spring, its share of a kick (light parts move more), how far it may turn.
@@ -256,7 +258,7 @@ pub fn spread_of(v: f32) -> f32 {
 
 /// A bone's weight in a kick: its role's gain, fading with its distance (m) from the impact.
 pub fn weight(role: Role, distance: f32, spread: f32) -> f32 {
-    role.gain() * (-distance.max(0.0) / spread.max(0.05)).exp()
+    role.gain() * (-distance.max(0.0) / spread.max(0.05)).dexp()
 }
 
 // --- Vectors and matrices (row-major 3 x 3, as `NiMatrix3`). -----------------------------------
@@ -321,7 +323,7 @@ pub fn rotation(w: V3) -> M3 {
         return IDENTITY;
     }
     let [x, y, z] = scale(w, 1.0 / angle);
-    let (s, c) = angle.sin_cos();
+    let (s, c) = angle.dsin_cos();
     let t = 1.0 - c;
     [
         t * x * x + c,
@@ -393,7 +395,7 @@ impl Spring {
                 }
             }
         }
-        self.dip *= (-dt / tuning::get().muscle_back).exp();
+        self.dip *= (-dt / tuning::get().muscle_back).dexp();
     }
 
     pub fn at_rest(&self) -> bool {
@@ -491,11 +493,11 @@ pub fn human_reach(shoulder: V3, goal: V3, forward: V3, side: u8) -> V3 {
     let rest = sub(d, sideways);
     let len = length(rest);
     let down = -rest[2];
-    let angle = back.atan2(down);
+    let angle = back.datan2(down);
     if angle <= SHOULDER_BACK || len < 1e-3 {
         return goal;
     }
-    let (sin, cos) = SHOULDER_BACK.sin_cos();
+    let (sin, cos) = SHOULDER_BACK.dsin_cos();
     let turned = add(scale(fwd, -len * sin), [0.0, 0.0, -len * cos]);
     let wide = lateral.max(len * BACK_OUT);
     add(shoulder, add(turned, scale(out, wide)))
@@ -536,8 +538,8 @@ fn shoulder_angles(d: V3, fwd: V3, up: V3, side: u8) -> Option<(f32, f32, V3, V3
     let right = cross(fwd, up);
     let out = if side == 0 { scale(right, -1.0) } else { right };
     let d = unit(d)?;
-    let elevation = (-dot(d, up)).clamp(-1.0, 1.0).acos();
-    let azimuth = dot(d, out).atan2(dot(d, fwd));
+    let elevation = (-dot(d, up)).clamp(-1.0, 1.0).dacos();
+    let azimuth = dot(d, out).datan2(dot(d, fwd));
     Some((elevation, azimuth, fwd, out, up))
 }
 
@@ -560,8 +562,8 @@ pub fn shoulder_range(shoulder: V3, goal: V3, fwd: V3, up: V3, side: u8) -> V3 {
     if e <= most {
         return goal;
     }
-    let (se, ce) = most.sin_cos();
-    let (sa, ca) = az.sin_cos();
+    let (se, ce) = most.dsin_cos();
+    let (sa, ca) = az.dsin_cos();
     let dir = add(
         add(scale(fwd, se * ca), scale(out, se * sa)),
         scale(up, -ce),
@@ -584,7 +586,7 @@ pub fn held_turn(turn: &M3, dir: V3, fwd: V3, side: u8) -> M3 {
     let Some(axis) = unit(cross(a, b)) else {
         return *turn;
     };
-    let angle = dot(a, b).clamp(-1.0, 1.0).acos();
+    let angle = dot(a, b).clamp(-1.0, 1.0).dacos();
     mul(&rotation(scale(axis, angle)), turn)
 }
 
@@ -654,7 +656,7 @@ pub fn hinge_ik(
     let (u1, f1) = (sub(m, root), sub(reached, m));
     let bent1 = cross(u1, f1);
     let r1 = match hinge0 {
-        Some(h0) if length(bent1) > 0.1f32.sin() * l1 * l2 => {
+        Some(h0) if length(bent1) > 0.1f32.dsin() * l1 * l2 => {
             align(u0, h0, u1, bent1).unwrap_or_else(|| rotation(between(u0, u1)))
         }
         _ => rotation(between(u0, u1)),
@@ -669,7 +671,7 @@ pub fn hinge_ik(
 fn hinge_axis(root0: V3, mid0: V3, end0: V3, toward: Option<V3>) -> Option<V3> {
     let (u0, f0) = (sub(mid0, root0), sub(end0, mid0));
     let bent = cross(u0, f0);
-    if length(bent) > 0.2f32.sin() * length(u0) * length(f0) {
+    if length(bent) > 0.2f32.dsin() * length(u0) * length(f0) {
         return unit(bent);
     }
     let t = toward?;
@@ -706,7 +708,7 @@ pub fn reach_arm_ik(
         for _ in 0..3 {
             let upper = apply_m(&reach.0, sub(elbow0, shoulder));
             let back = -dot(upper, f);
-            let over = back.atan2(-upper[2]) - (SHOULDER_BACK + UPPER_ARM_BACK);
+            let over = back.datan2(-upper[2]) - (SHOULDER_BACK + UPPER_ARM_BACK);
             if back <= 0.0 || over <= 0.0 {
                 break;
             }
@@ -810,12 +812,12 @@ impl Follow {
 /// The rotation vector of a rotation (its axis times its angle; the inverse of [`rotation`]).
 pub fn rotation_vector(m: &M3) -> V3 {
     let c = ((m[0] + m[4] + m[8] - 1.0) / 2.0).clamp(-1.0, 1.0);
-    let angle = c.acos();
+    let angle = c.dacos();
     if !angle.is_finite() || angle < 1e-6 {
         return [0.0; 3];
     }
     let axis = [m[7] - m[5], m[2] - m[6], m[3] - m[1]];
-    let s = angle.sin();
+    let s = angle.dsin();
     if s.abs() < 1e-4 {
         // Near a half turn: the axis from the diagonal.
         let x = ((m[0] + 1.0) / 2.0).max(0.0).sqrt();
@@ -1018,7 +1020,7 @@ mod tests {
         let up = [0.0, 0.0, 1.0];
         let elevation = |g: V3| {
             let d = unit(sub(g, s)).unwrap();
-            (-dot(d, up)).acos().to_degrees()
+            (-dot(d, up)).dacos().to_degrees()
         };
         // Straight back and level (90 degrees up behind): down to 50.
         let back = shoulder_range(s, [0.0, -40.0, 100.0], fwd, up, 1);
@@ -1304,9 +1306,9 @@ mod tests {
             if back > 0.0 {
                 let down = -upper[2];
                 assert!(
-                    back.atan2(down) <= SHOULDER_BACK + UPPER_ARM_BACK + 0.02,
+                    back.datan2(down) <= SHOULDER_BACK + UPPER_ARM_BACK + 0.02,
                     "{goal:?}: the upper arm went {} back",
-                    back.atan2(down)
+                    back.datan2(down)
                 );
             }
         }

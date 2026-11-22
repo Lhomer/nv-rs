@@ -3,6 +3,8 @@
 //! the frames for a video (`examples/np_frames.rs`, rendered by `scripts/np_video.py`).
 
 use ragdoll_core::flinch::{add, length, sub, M3, V3};
+#[allow(unused_imports)]
+use ragdoll_core::fm::Fm;
 use ragdoll_core::np::Np;
 use ragdoll_core::np_body::{lowest_point, Model, UNITS};
 use ragdoll_core::np_skeleton::{angle_between, Skeleton};
@@ -340,22 +342,22 @@ pub fn walk(speed: f32, swing: f32) -> impl Fn(f32) -> Vec<(M3, V3)> {
         bind[body_nodes[thigh[0]]].t,
     ));
     // A step's length (one leg's swing back to front) and the cycle's rate (rad/s).
-    let stride = 2.0 * leg * swing.sin();
+    let stride = 2.0 * leg * swing.dsin();
     let omega = std::f32::consts::PI * speed / stride.max(1.0);
     move |t: f32| {
         let mut w: Vec<(M3, V3)> = body_nodes.iter().map(|&n| (bind[n].r, bind[n].t)).collect();
         let mut drop = 0.0f32;
         for side in 0..2 {
             let phase = omega * t + if side == 0 { 0.0 } else { std::f32::consts::PI };
-            let a = swing * phase.sin();
+            let a = swing * phase.dsin();
             // Forward swing (the angle rising): the knee bends to clear the floor.
-            let bend = if phase.cos() > 0.0 {
-                0.7 * phase.cos() * swing * 2.0
+            let bend = if phase.dcos() > 0.0 {
+                0.7 * phase.dcos() * swing * 2.0
             } else {
                 0.0
             };
-            if phase.cos() <= 0.0 {
-                drop = drop.max(leg * (1.0 - a.cos()));
+            if phase.dcos() <= 0.0 {
+                drop = drop.max(leg * (1.0 - a.dcos()));
             }
             let hip = w[thigh[side]].1;
             // About the hips' axis (+X): a positive angle swings the leg forward (+Y).
@@ -920,7 +922,7 @@ mod tests {
         for speed in [3.8f32, 4.35, 5.0] {
             for deg in [-30.0f32, -10.0, 0.0, 15.0, 35.0, 180.0] {
                 let a = deg.to_radians();
-                let dir = [a.sin(), -a.cos(), 0.0];
+                let dir = [a.dsin(), -a.dcos(), 0.0];
                 let hits = vec![NpHit {
                     at: 0.2,
                     body: "Bip01 Spine2",

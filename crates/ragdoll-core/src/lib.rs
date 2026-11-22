@@ -23,6 +23,7 @@ pub mod balance;
 pub mod brace;
 pub mod condition;
 pub mod flinch;
+pub mod fm;
 pub mod knock;
 pub mod np;
 pub mod np_balance;

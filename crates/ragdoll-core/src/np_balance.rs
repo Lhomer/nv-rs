@@ -20,6 +20,8 @@
 
 use crate::active::{ease, Q};
 use crate::flinch::{add, cross, dot, length, scale, sub, unit, V3};
+#[allow(unused_imports)]
+use crate::fm::Fm;
 use crate::np_body::{Model, State, GRAVITY};
 
 /// How far past the support the capture point goes before a step (m).
@@ -468,7 +470,7 @@ impl Balance {
         } else {
             need
         };
-        let k = 1.0 - (-8.0 * dt).exp();
+        let k = 1.0 - (-8.0 * dt).dexp();
         self.lower += (need.clamp(0.0, 0.15) - self.lower) * k;
         let mut ask = Ask {
             leg: [1.0, 1.0],
@@ -534,7 +536,7 @@ impl Balance {
                 if st.to[2] - st.from[2] > STEP_UP {
                     at[2] = st.from[2] + (st.to[2] - st.from[2]) * ease((2.0 * s).min(1.0));
                 }
-                at[2] += st.lift * (std::f32::consts::PI * s).sin();
+                at[2] += st.lift * (std::f32::consts::PI * s).dsin();
                 // A stance step's foot goes at its arc's own pace (from rest, lifted before it
                 // moves on: led at the step's mean pace from its first frame, still on the floor,
                 // the foot dragged and dug in, the other leg kicking the body up at 4.6 to 5.6
@@ -542,8 +544,8 @@ impl Balance {
                 let dv = if st.stance {
                     let pace = 30.0 * s * s * (1.0 - s) * (1.0 - s) / st.time;
                     let mut d = scale(sub(st.to, st.from), pace);
-                    d[2] +=
-                        st.lift * std::f32::consts::PI * (std::f32::consts::PI * s).cos() / st.time;
+                    d[2] += st.lift * std::f32::consts::PI * (std::f32::consts::PI * s).dcos()
+                        / st.time;
                     d
                 } else {
                     scale(sub(st.to, st.from), 1.0 / st.time)
@@ -559,7 +561,7 @@ impl Balance {
             |s: &[State]| scale(add(flat(s[self.feet[0]].x), flat(s[self.feet[1]].x)), 0.5);
         if !self.moving {
             let want = add(self.shift, sub(feet_mid(states), feet_mid(anim)));
-            let k = 1.0 - (-SHIFT_RATE * dt).exp();
+            let k = 1.0 - (-SHIFT_RATE * dt).dexp();
             self.shift = add(self.shift, scale(sub(flat(want), self.shift), k));
         } else {
             // Moving: the knock moves its path (the shift follows the body's centre); the walk's
@@ -573,7 +575,7 @@ impl Balance {
                 let off = flat(sub(com, anim_com));
                 let l = length(off);
                 if l > PATH_DEAD {
-                    let k = 1.0 - (-PATH_RATE * dt).exp();
+                    let k = 1.0 - (-PATH_RATE * dt).dexp();
                     self.shift = add(self.shift, scale(off, k * (l - PATH_DEAD) / l));
                 }
             }

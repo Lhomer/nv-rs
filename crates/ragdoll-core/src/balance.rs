@@ -36,6 +36,8 @@
 //! **No clock.** A stepping keeps the time it began on the caller's clock (seconds, [`Stepping::new`]'s
 //! `now`): the host's is a monotonic clock, the lab's its simulation time.
 
+#[allow(unused_imports)]
+use crate::fm::Fm;
 use crate::tuning;
 
 pub type V3 = [f32; 3];
@@ -276,8 +278,10 @@ pub fn swing(from: V3, to: V3, s: f32, scale: f32) -> V3 {
     let s = s.clamp(0.0, 1.0);
     let eased = s * s * (3.0 - 2.0 * s);
     // The lift eased too: the foot leaves and meets the ground at rest (no jump in its speed).
-    let lift =
-        tuning::get().swing_height * scale * UNITS_PER_METRE * (std::f32::consts::PI * eased).sin();
+    let lift = tuning::get().swing_height
+        * scale
+        * UNITS_PER_METRE
+        * (std::f32::consts::PI * eased).dsin();
     add(lerp(from, to, eased), [0.0, 0.0, lift])
 }
 
@@ -306,7 +310,7 @@ pub fn between(a: V3, b: V3) -> V3 {
     let c = dot(a, b).clamp(-1.0, 1.0);
     let axis = cross(a, b);
     match unit(axis) {
-        Some(n) => times(n, c.acos()),
+        Some(n) => times(n, c.dacos()),
         None => [0.0; 3],
     }
 }

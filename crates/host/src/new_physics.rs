@@ -2804,7 +2804,7 @@ static WITHHELD: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 /// Settle, then rise: the centre's speed (m/s) under which a downed body is still, how long it is
 /// still before a rise (s), and the longest it settles (s).
 const SETTLE_STILL: f32 = 0.15;
-const SETTLE_FOR: f32 = 0.3;
+const SETTLE_FOR: f32 = 0.6;
 const SETTLE_MOST: f32 = 4.0;
 /// Down on the ground: the pelvis under this share of its standing height, its centre falling
 /// slower than this (m/s).

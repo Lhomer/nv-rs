@@ -12,6 +12,8 @@
 use crate::mannequin::{self as mq, COUNT};
 use crate::sim::Sim;
 use ragdoll_core::flinch::*;
+#[allow(unused_imports)]
+use ragdoll_core::fm::Fm;
 
 pub const STRIDE: usize = 12;
 
@@ -45,8 +47,8 @@ const FOV: f32 = 0.9;
 
 impl Camera {
     pub fn eye(&self) -> V3 {
-        let (sy, cy) = self.yaw.sin_cos();
-        let (sp, cp) = self.pitch.sin_cos();
+        let (sy, cy) = self.yaw.dsin_cos();
+        let (sp, cp) = self.pitch.dsin_cos();
         add(self.target, scale([sy * cp, cy * cp, sp], self.distance))
     }
 
@@ -59,7 +61,7 @@ impl Camera {
     }
 
     fn focal(&self) -> f32 {
-        self.height / 2.0 / (FOV / 2.0).tan()
+        self.height / 2.0 / (FOV / 2.0).dtan()
     }
 
     /// A point on the screen (pixels) and its depth; `None` behind the camera.
@@ -196,7 +198,7 @@ pub fn draw(sim: &Sim, cam: &Camera, marked: Option<usize>, arrow: Option<(V3, V
     }
     ground.sort_by(|a, b| b[1].partial_cmp(&a[1]).unwrap_or(std::cmp::Ordering::Equal));
     let mut body: Vec<[f32; STRIDE]> = Vec::new();
-    let focal = cam.height / 2.0 / (FOV / 2.0).tan();
+    let focal = cam.height / 2.0 / (FOV / 2.0).dtan();
     let ragdoll = sim.in_ragdoll();
     for b in 0..COUNT {
         if !sim.has_bone(b) {

@@ -26,6 +26,8 @@
 
 use crate::active::{m_from_q, qconj, qexp, qfrom_m, qlog, qmul, qnorm, qrot, Q, Q_ID};
 use crate::flinch::{add, apply_m, cross, dot, length, mul, scale, sub, transpose, unit, M3, V3};
+#[allow(unused_imports)]
+use crate::fm::Fm;
 use crate::np_skeleton::{Limit, Measure, Skeleton, HAVOK_UNITS};
 
 /// Game units to a metre.
@@ -736,7 +738,7 @@ impl Model {
                     let (Some(&aw), Some(&rate)) = (tr.w.get(b), tr.rate.get(b)) else {
                         continue;
                     };
-                    let k = 1.0 - (-rate * h).exp();
+                    let k = 1.0 - (-rate * h).dexp();
                     st.w = add(st.w, scale(sub(aw, st.w), k));
                 }
             }
@@ -847,14 +849,14 @@ impl Model {
             } => {
                 let (ta, tb) = (apply_m(&ra, twist[0]), apply_m(&rb, twist[1]));
                 let pl_b = apply_m(&rb, plane[1]);
-                let phi = dot(ta, tb).clamp(-1.0, 1.0).acos();
+                let phi = dot(ta, tb).clamp(-1.0, 1.0).dacos();
                 if phi > cone {
                     if let Some(n) = unit(cross(ta, tb)) {
                         corrections.push(scale(n, phi - cone));
                         most = most.max(phi - cone);
                     }
                 }
-                let s = dot(ta, pl_b).clamp(-1.0, 1.0).asin();
+                let s = dot(ta, pl_b).clamp(-1.0, 1.0).dasin();
                 if let Some(k) = unit(cross(ta, pl_b)) {
                     if s > planes.1 {
                         corrections.push(scale(k, -(s - planes.1)));
@@ -869,7 +871,7 @@ impl Model {
                 if let (Some(pa), Some(pb)) =
                     (flat(apply_m(&ra, plane[0])), flat(apply_m(&rb, plane[1])))
                 {
-                    let tau = dot(cross(pb, pa), axis).atan2(dot(pb, pa));
+                    let tau = dot(cross(pb, pa), axis).datan2(dot(pb, pa));
                     if tau > twists.1 {
                         corrections.push(scale(axis, -(tau - twists.1)));
                         most = most.max(tau - twists.1);
@@ -888,7 +890,7 @@ impl Model {
                 // `perp2` carries the axles' allowed angle apart ([`widen`]).
                 let apart_most = perp2[0][0];
                 let (aa, ab) = (apply_m(&ra, axle[0]), apply_m(&rb, axle[1]));
-                let apart = dot(aa, ab).clamp(-1.0, 1.0).acos();
+                let apart = dot(aa, ab).clamp(-1.0, 1.0).dacos();
                 if apart > apart_most {
                     if let Some(n) = unit(cross(aa, ab)) {
                         corrections.push(scale(n, apart - apart_most));
@@ -896,7 +898,7 @@ impl Model {
                     }
                 }
                 let (pa, pb) = (apply_m(&ra, perp1[0]), apply_m(&rb, perp1[1]));
-                let theta = dot(cross(pb, pa), aa).atan2(dot(pb, pa));
+                let theta = dot(cross(pb, pa), aa).datan2(dot(pb, pa));
                 if theta > angles.1 {
                     corrections.push(scale(aa, -(theta - angles.1)));
                     most = most.max(theta - angles.1);
@@ -1355,7 +1357,7 @@ fn axle_apart(def: &JointDef, rel: Q) -> f32 {
     match def.limit {
         Limit::Hinge { axle, .. } => {
             let aa = qrot(rel, axle[0]);
-            dot(aa, axle[1]).clamp(-1.0, 1.0).acos()
+            dot(aa, axle[1]).clamp(-1.0, 1.0).dacos()
         }
         _ => 0.0,
     }

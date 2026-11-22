@@ -25,6 +25,8 @@ use ragdoll_core::balance::{plan, Limbs, Outcome, Stepping};
 use ragdoll_core::brace::{self as hands, Hand, Surface};
 use ragdoll_core::condition::{self, Condition};
 use ragdoll_core::flinch::*;
+#[allow(unused_imports)]
+use ragdoll_core::fm::Fm;
 use ragdoll_core::knock::{
     add_hit, body_mass, launch_direction, launch_speed, reaction, topple_speed, transferred, Body,
     Push, Reaction, HOLD_SECONDS, LYING_HEIGHT, STILL_FRAMES, STILL_SPEED,
@@ -443,7 +445,7 @@ pub fn hinge_bend(posed: &[Xf; COUNT], parent: usize, child: usize, sign: f32) -
     let f = apply_m(&rel, c);
     // In the hinge's plane (square to X): the turn from the parent's line to the child's.
     let (u2, f2) = ([0.0, u[1], u[2]], [0.0, f[1], f[2]]);
-    sign * (u2[1] * f2[2] - u2[2] * f2[1]).atan2(dot(u2, f2))
+    sign * (u2[1] * f2[2] - u2[2] * f2[1]).datan2(dot(u2, f2))
 }
 
 /// How far the pose `posed` bends an elbow or a knee backwards past straight and the hinges'
@@ -848,18 +850,18 @@ impl Sim {
         }
         if w > 0.0 {
             match b {
-                mq::L_THIGH => r = mul(&r, &rotation([0.45 * w * ph.sin(), 0.0, 0.0])),
-                mq::R_THIGH => r = mul(&r, &rotation([-0.45 * w * ph.sin(), 0.0, 0.0])),
+                mq::L_THIGH => r = mul(&r, &rotation([0.45 * w * ph.dsin(), 0.0, 0.0])),
+                mq::R_THIGH => r = mul(&r, &rotation([-0.45 * w * ph.dsin(), 0.0, 0.0])),
                 mq::SPINE1 => r = mul(&r, &rotation([0.0, 0.0, 0.25 * self.turning])),
-                mq::PELVIS => t[2] -= 1.5 * w * (1.0 - (2.0 * ph).cos()) * 0.5,
+                mq::PELVIS => t[2] -= 1.5 * w * (1.0 - (2.0 * ph).dcos()) * 0.5,
                 // The feet lift and swing (the walk's foot locals move: the clip's L Foot).
                 mq::L_FOOT => {
-                    t[2] += 6.0 * w * ph.sin().max(0.0);
-                    t[1] += 4.0 * w * ph.sin();
+                    t[2] += 6.0 * w * ph.dsin().max(0.0);
+                    t[1] += 4.0 * w * ph.dsin();
                 }
                 mq::R_FOOT => {
-                    t[2] += 6.0 * w * (-ph.sin()).max(0.0);
-                    t[1] -= 4.0 * w * ph.sin();
+                    t[2] += 6.0 * w * (-ph.dsin()).max(0.0);
+                    t[1] -= 4.0 * w * ph.dsin();
                 }
                 _ => {}
             }
@@ -1855,7 +1857,7 @@ impl Sim {
                 if let Some(u) = mq::bone_of(Role::UpperArm, side) {
                     let phase = if side == 0 { 0.0 } else { std::f32::consts::PI };
                     let a = t.windmill_swing
-                        * (std::f32::consts::TAU * t.windmill_hz * f.t + phase).sin();
+                        * (std::f32::consts::TAU * t.windmill_hz * f.t + phase).dsin();
                     // Inside the shoulder's human range (never up behind the back).
                     let dir = mq::bone_of(Role::Forearm, side).map_or([0.0, 0.0, -1.0], |fo| {
                         sub(self.posed[fo].1, self.posed[u].1)
@@ -2805,7 +2807,7 @@ impl Sim {
                 let c = sub(wrist, self.posed[f].1);
                 let bend = (dot(a, c) / (length(a) * length(c)).max(1e-6))
                     .clamp(-1.0, 1.0)
-                    .acos();
+                    .dacos();
                 // A turn back counts once the elbow has come back more than [`ELBOW_SWING`] from
                 // the furthest it went the other way (a visible swing, not the torso's sway).
                 match w.elbow {
@@ -3759,7 +3761,7 @@ impl Sim {
                     } else {
                         let a = self.random() * std::f32::consts::TAU;
                         let r = radius * self.random().sqrt();
-                        (r * a.cos(), r * a.sin())
+                        (r * a.dcos(), r * a.dsin())
                     };
                     let aim = add(point, add(scale(across, dx), scale(up, dy)));
                     let from = sub(aim, scale(direction, 300.0));

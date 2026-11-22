@@ -27,6 +27,8 @@
 //! 6.8 degree cone and its plane, so Havok's constraint pulls it in.
 
 use crate::flinch::{apply_m, cross, dot, length, mul, sub, unit, M3, V3};
+#[allow(unused_imports)]
+use crate::fm::Fm;
 use crate::pose::{self, Xf};
 
 /// FNV's skeleton's derived data.
@@ -107,13 +109,13 @@ impl Joint {
             Limit::Ragdoll { twist, plane, .. } => {
                 let (ta, tb) = (apply_m(a, twist[0]), apply_m(b, twist[1]));
                 let (pa, pb) = (apply_m(a, plane[0]), apply_m(b, plane[1]));
-                let cone = dot(ta, tb).clamp(-1.0, 1.0).acos();
-                let plane_angle = dot(ta, pb).clamp(-1.0, 1.0).asin();
+                let cone = dot(ta, tb).clamp(-1.0, 1.0).dacos();
+                let plane_angle = dot(ta, pb).clamp(-1.0, 1.0).dasin();
                 // The twist: A's plane axis against B's, both off the twist axis, about it.
                 let axis = unit(crate::flinch::add(ta, tb)).unwrap_or(ta);
                 let flat = |v: V3| unit(sub(v, crate::flinch::scale(axis, dot(v, axis))));
                 let twist_angle = match (flat(pa), flat(pb)) {
-                    (Some(x), Some(y)) => dot(cross(y, x), axis).atan2(dot(y, x)),
+                    (Some(x), Some(y)) => dot(cross(y, x), axis).datan2(dot(y, x)),
                     _ => 0.0,
                 };
                 Measure::Ragdoll {
@@ -126,7 +128,7 @@ impl Joint {
                 let ax = apply_m(a, axle[0]);
                 let (ra, rb) = (apply_m(a, perp1[0]), apply_m(b, perp1[1]));
                 Measure::Hinge {
-                    angle: dot(cross(rb, ra), ax).atan2(dot(rb, ra)),
+                    angle: dot(cross(rb, ra), ax).datan2(dot(rb, ra)),
                 }
             }
         }

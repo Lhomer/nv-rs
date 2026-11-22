@@ -8,3 +8,5 @@ rust-version.workspace = true
 
 # No dependencies: the host links it, and the ragdoll lab builds it for WebAssembly.
 [dependencies]
+# Portable transcendental functions, the same bits on every machine (src/fm.rs).
+libm = "0.2"

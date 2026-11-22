@@ -6,6 +6,8 @@
 //!
 //! The constants are the game's tuning; the functions read them through [`crate::tuning::get`].
 
+#[allow(unused_imports)]
+use crate::fm::Fm;
 use crate::rounds::Round;
 use crate::tuning;
 
@@ -83,7 +85,7 @@ pub fn lying(pelvis_over_floor: f32, spine: [f32; 3], head: [f32; 3], scale: f32
 pub fn tilt(spine: [f32; 3], head: [f32; 3]) -> f32 {
     let d = [head[0] - spine[0], head[1] - spine[1], head[2] - spine[2]];
     let flat = (d[0] * d[0] + d[1] * d[1]).sqrt();
-    d[2].abs().atan2(flat).to_degrees()
+    d[2].abs().datan2(flat).to_degrees()
 }
 
 /// How close two floors must be to be the same floor (game units, [`get_up_floor`]): the navmesh
@@ -354,7 +356,7 @@ pub fn fall_damage(drop: f32, min: f32, exponent: f32, mult: f32) -> f32 {
     if drop.is_nan() || drop <= min || !exponent.is_finite() || !mult.is_finite() {
         return 0.0;
     }
-    ((drop - min).powf(exponent) * mult).max(0.0)
+    ((drop - min).dpowf(exponent) * mult).max(0.0)
 }
 
 /// What the host's stack answers ([`add_hit`]): the momentum left of the earlier hits, the total with this one, the
@@ -372,7 +374,7 @@ pub fn decayed(p: f32, seconds: f32, half_life: f32) -> f32 {
     if half_life <= 0.0 || seconds.is_nan() {
         return 0.0;
     }
-    p * 0.5f32.powf(seconds.max(0.0) / half_life)
+    p * 0.5f32.dpowf(seconds.max(0.0) / half_life)
 }
 
 /// A stack's momentum and direction after a hit of `p` along `direction` (unit), the earlier
