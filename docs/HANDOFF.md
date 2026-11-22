@@ -7,6 +7,21 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-22 (the Ragdoll lab's stand fixed)
+
+**Status: pushed (the commit after 38be5ce).** `np_m6_stands_by_balance` (failing since 38461b8:
+on its back the centre 0.10 m outside the feet past 80% of standing height) passes: the lab 54 of
+54, New Physics 44 of 44, the host library 480 of 480.
+- Past 0.6 of standing height, with its feet down and the centre still more than 3 cm outside
+  them, the rise's lift goes at 0.3 of its pace (`RISE_SLOW_FROM`, `RISE_OVER_FIRST`,
+  `RISE_SLOW`): the lift had outrun the carry over the feet. A cap on the height there instead
+  fixed the lab but sent a host rise beside the slab otherwise (a foot 3.4 u in its edge).
+- A foot's sole counts in the reading's support while it carries or lies within 5 cm of the floor
+  (`SOLE_NEAR`, was 3 cm): a foot 3.7 cm up for a moment as the legs pushed read the centre over
+  the other foot alone. (Holding that foot down instead moved host tests over their bounds.)
+- Next: task C's tests, test c, the three ignored tests, then the slab's swing clearance, the
+  rise-end bounds, the arms on a slope and the death hand-over (the earlier entries).
+
 ### Claude, 2026-11-21 (the seventh upstream merge: b10470de..f159fe43, 12 commits)
 
 **Status: pushed.** slaterain/main's form id map native, JohnnyGuitar's editor ids (#852, a new

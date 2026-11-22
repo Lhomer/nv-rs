@@ -159,6 +159,11 @@ pub const TORSO_STILL: (f32, f32) = (2500.0, 1000.0);
 /// The torso's lean (degrees from upright) up to which [`TORSO_STILL`] damps it in full; less
 /// past it, none at [`STILL_TILT_OUT`].
 pub const TORSO_STILL_FULL: f32 = 18.0;
+/// Rising past this share of standing height with the centre further than [`RISE_OVER_FIRST`]
+/// (m) outside its feet, the lift goes at [`RISE_SLOW`] of its pace.
+pub const RISE_SLOW_FROM: f32 = 0.6;
+pub const RISE_OVER_FIRST: f32 = 0.03;
+pub const RISE_SLOW: f32 = 0.3;
 /// How far (m) an animated foot may lie in a wall before its leg is bent to keep it out.
 pub const WALL_FOOT_IN: f32 = 0.005;
 /// While the feet lie further than this from the hips (m, flat) the rise goes toward them.
@@ -1384,7 +1389,22 @@ impl Np {
                 // Damped against the rise's own pace, not against rising (damped toward still, the
                 // capped spring's push and an uncapped damper held the pelvis to 0.3 to 0.4 m/s:
                 // a rise of 2 s and more).
-                let pace = ((stand_z - self.states[r].x[2]) * RISE_PACE.1).clamp(0.0, RISE_PACE.0);
+                // Past [`RISE_SLOW_FROM`] of standing height with its feet down and the centre
+                // still outside them, the lift at [`RISE_SLOW`] of its pace (the lift outran the
+                // carry: the centre 0.10 m outside the feet at 80% of standing height, the lab's
+                // M6 stand; capped there instead, a host rise beside the slab went otherwise).
+                let slow = if !upright
+                    && reading.over_feet > RISE_OVER_FIRST
+                    && reading.over_feet < 1.0
+                    && self.states[r].x[2]
+                        > feet_ground.unwrap_or(f) + RISE_SLOW_FROM * b.stand_height
+                {
+                    RISE_SLOW
+                } else {
+                    1.0
+                };
+                let pace =
+                    ((stand_z - self.states[r].x[2]) * RISE_PACE.1).clamp(0.0, RISE_PACE.0) * slow;
                 // Its flat motion damped toward the ground's (the ground the body stands on may
                 // carry it), harder as it comes up: the rise ends still over its feet.
                 // Upright, the pelvis set so the centre of mass lies over the feet (the pelvis

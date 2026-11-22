@@ -25,6 +25,10 @@ use crate::np_body::{Model, State, StepReport, GRAVITY};
 pub const LABEL_HOLD: f32 = 0.25;
 /// The highest a lying body's pelvis lies over its ground (m: 30 game units).
 pub const LYING_MOST: f32 = 30.0 / crate::np_body::UNITS;
+/// A foot's sole counts in the support while it carries or lies within this (m) of the floor
+/// (3 cm left out a foot 3.7 cm up for a moment as the legs pushed a body up: the centre read
+/// 0.07 m outside the other foot alone, the lab's M6 stand).
+pub const SOLE_NEAR: f32 = 0.05;
 /// The most an arm's contacts may carry and the arm still be free to aim (N).
 pub const ARM_FREE: f32 = 40.0;
 /// The most a target may lie off the torso's facing and the shoulder still bring the weapon onto
@@ -345,7 +349,7 @@ pub fn read(
     // The feet's soles, and every contact on the floor.
     let mut soles: Vec<[f32; 2]> = Vec::new();
     for &foot in &b.feet {
-        if floor_at(foot) > 1.0 || lowest(model, states, foot) < floor + 0.03 {
+        if floor_at(foot) > 1.0 || lowest(model, states, foot) < floor + SOLE_NEAR {
             let def = &model.bodies[foot];
             for e in def.ends {
                 let p = add(states[foot].x, qrot(states[foot].q, sub(e, def.com)));
