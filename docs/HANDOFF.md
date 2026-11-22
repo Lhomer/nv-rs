@@ -7,6 +7,25 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-22 (test c: hits, moves and bullets on threads)
+
+**Status: pushed (the commit after c1fc398).** `np_hits_on_threads_never_corrupt` (test c of the
+14:06/14:09 spec), on the actor-value tests' two-thread world: 2000 frames; the main thread hits
+New Physics' actor each second, fires a pellet at the creature every 25th frame through the
+hooked `Actor::HitMe` and runs its pass (the reference through the controller's real
+`SetPosition` chain under the world's lock); the AI thread moves a mover's and a bullet's proxy
+four times a frame (`00cac920`, the game's chain to the broad phase). Asserted: no fault; the
+lock counts (`+0x94`/`+0x98`) never below 0 (read after every AI-thread call as well) and back at
+0, the queue empty and unlocked at every safe point; no queued record left once an AI-thread call
+returns (none can point into its freed frame); the actor-value table unchanged in 10,160 checks
+and never read past; 80 pellets, 8000 moves and 8000 bullets made. It passes on c1fc398 (the 14:05
+race was fixed in c08805c1). Not yet covered: a hit made on the AI thread: `HitMe` hands itself to
+`TaskQueueInterface::QueueIfActive`, which queues it while the task queue is active (`011a31f4`);
+the fixture has no task queue, so such a hit ran at once and queued itself again without end. It
+needs the game's task queue in the fixture. The test's platform gained `InterlockedIncrement` /
+`Decrement`, and the creature's answers are plain functions (not doubles), so an AI thread's engine
+view has them too.
+
 ### Claude, 2026-11-22 (the eighth upstream merge: f159fe43..cad5b671, 23 commits)
 
 **Status: pushed.** Loads finishing in small steps, faster menu closing, native menu searches, the

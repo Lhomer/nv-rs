@@ -85,22 +85,24 @@ pub(crate) fn lay_out_gecko(e: &mut Engine) {
     e.mem.set_f64(0x0101_2060, 0.0);
     // The hit's visual effects (`0088e8d0`: the blood spray and decals, drawn with the C
     // runtime's maths on the exe's constants, which the fixture does not load): called, counted.
-    e.register_double(0x0088_e8d0, |_, _| {
+    // (Plain functions, not doubles, here and for the answers below: an AI thread's engine view
+    // answers them too.)
+    e.register(0x0088_e8d0, |_, _| {
         EFFECTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ret::default()
     });
     // The platform's `GetLastError` (`00fdf094`; the C runtime's per-thread data asks it).
-    e.register_double(0x00fd_f094, |_, _| 0u32.into_ret());
+    e.register(0x00fd_f094, |_, _| 0u32.into_ret());
     // The platform's `GetTickCount` (the import at `00fdf060`): a clock in milliseconds.
     let mut tick = 1_000u32;
     e.register_double(0x00fd_f060, move |_, _| {
         tick += 16;
         tick.into_ret()
     });
-    e.register_double(ANSWER_NONE, |_, _| Ret::default());
-    e.register_double(ANSWER_YES, |_, _| 1u32.into_ret());
-    e.register_double(ANSWER_DEAD, |_, _| 1u32.into_ret());
-    e.register_double(ANSWER_SELF, |_, a| a[0].into_ret());
+    e.register(ANSWER_NONE, |_, _| Ret::default());
+    e.register(ANSWER_YES, |_, _| 1u32.into_ret());
+    e.register(ANSWER_DEAD, |_, _| 1u32.into_ret());
+    e.register(ANSWER_SELF, |_, a| a[0].into_ret());
     for slot in 0..0x400u32 {
         e.mem.set_u32(GECKO_VTABLE + 4 * slot, ANSWER_NONE);
         e.mem.set_u32(PROCESS_VTABLE + 4 * slot, ANSWER_NONE);
@@ -254,7 +256,7 @@ pub(crate) fn pellet(e: &mut Engine, part: u32) {
 
 /// The platform under both threads, as the game's imports answer (`TlsGetValue` `00fdf044`,
 /// `TlsSetValue` `00fdf04c`, `EnterCriticalSection` `00fdf05c`, `LeaveCriticalSection`
-/// `00fdf100`): thread-local slots per OS thread, and one recursive critical section that
+/// `00fdf100`, `InterlockedIncrement` `00fdf1c0`, `InterlockedDecrement` `00fdf1c4`): thread-local slots per OS thread, and one recursive critical section that
 /// really excludes the other thread. Plain functions, so the AI thread's engine has them too.
 pub(crate) mod platform {
     use engine::prelude::*;
@@ -300,12 +302,34 @@ pub(crate) mod platform {
         Ret::default()
     }
 
+    /// `InterlockedIncrement` / `InterlockedDecrement` (`00fdf1c0`, `00fdf1c4`): the word at the
+    /// pointer changed atomically, its new value answered.
+    fn interlocked(e: &mut Engine, at: u32, by: i32) -> Ret {
+        let now = match e.mem.atomic_u32(at) {
+            Some(w) => w.fetch_add(by as u32, SeqCst).wrapping_add(by as u32),
+            None => {
+                let v = e.mem.u32(at).wrapping_add(by as u32);
+                e.mem.set_u32(at, v);
+                v
+            }
+        };
+        now.into_ret()
+    }
+    fn increment(e: &mut Engine, a: &[u32]) -> Ret {
+        interlocked(e, a[0], 1)
+    }
+    fn decrement(e: &mut Engine, a: &[u32]) -> Ret {
+        interlocked(e, a[0], -1)
+    }
+
     /// The imports registered (before the AI thread's engine is made from this one).
     pub fn install(e: &mut Engine) {
         e.register(0x00fd_f044, tls_get);
         e.register(0x00fd_f04c, tls_set);
         e.register(0x00fd_f05c, enter);
         e.register(0x00fd_f100, leave);
+        e.register(0x00fd_f1c0, increment);
+        e.register(0x00fd_f1c4, decrement);
     }
 
     /// This thread's slot `index` set (the thread's Havok memory router, as its start-up does).
@@ -338,9 +362,10 @@ mod world {
     const SHAPE: u32 = AREA + 0x5000;
     const LOCK: u32 = AREA + 0x6000;
     const NOTHING_FN: u32 = 0x7200_0f00;
-    /// The proxies: the NP actor's controller's (main thread) and an AI mover's (AI thread).
-    pub const PROXIES: [u32; 2] = [AREA + 0x8000, AREA + 0x9000];
-    const PHANTOMS: [u32; 2] = [AREA + 0xa000, AREA + 0xb000];
+    /// The proxies: the NP actor's controller's (main thread), an AI mover's and a bullet's
+    /// (AI thread).
+    pub const PROXIES: [u32; 3] = [AREA + 0x8000, AREA + 0x9000, AREA + 0xe000];
+    const PHANTOMS: [u32; 3] = [AREA + 0xa000, AREA + 0xb000, AREA + 0xf000];
     /// The threads' memory routers (stack top at `+0`, allocator at `+0x10`) and their stacks.
     pub const ROUTERS: [u32; 2] = [AREA + 0xc000, AREA + 0xc100];
     const STACKS: [u32; 2] = [AREA + 0x1_0000, AREA + 0x2_0000];
@@ -392,7 +417,7 @@ mod world {
         }
         e.mem.set_u32(VTABLES + 0x100 + 0x1c, 0x00cd_8100);
         e.mem.set_f32(SHAPE + 0x10, 0.3);
-        for k in 0..2 {
+        for k in 0..3 {
             let (proxy, phantom) = (PROXIES[k], PHANTOMS[k]);
             e.mem.set_u32(proxy + 0x30, phantom);
             e.mem.set_f32(proxy + 0x58, 0.1);
@@ -744,6 +769,258 @@ fn np_creature_hits_never_corrupt_the_actor_value_table() {
         bones_written > 0,
         "the creature's hit reaction wrote no bone"
     );
+}
+
+/// Test c of Patrick's 14:06/14:09 spec (the 14:05 crash: hkpWorld `+0x94` at -1 after an
+/// unlocked write raced the movers, queued records pointing into dead frames, the actor-value
+/// table overwritten): hits, moves and bullets on real threads for 2000 frames. The main thread:
+/// New Physics' actor hit each second and its pass (the reference moved through the controller's
+/// real `SetPosition` chain under the world's lock), pellets on the creature through the game's
+/// hooked `Actor::HitMe`. The AI thread, each frame's task: an AI mover's proxy moved
+/// (`hkpCharacterProxy::setPosition`, `00cac920`, the game's chain to the broad phase), a
+/// bullet's proxy moved the same way (`bhkCharacterController::Move`'s state 4 ends in that
+/// chain: `00c73170` < `MissileProjectile::UpdateProjectile` `009b8030`). (A hit made on the AI
+/// thread is the game's to queue: `HitMe` hands itself to `TaskQueueInterface::QueueIfActive`,
+/// which queues it while the task queue is active, `011a31f4`; the fixture has no task queue, so
+/// such a hit ran at once and queued itself again without end. Not here yet: it needs the
+/// game's task queue in the fixture.)
+///
+/// Asserted: no fault on either thread; the world's lock counts never below 0 (also read after
+/// every AI-thread call) and back at 0, its queue empty and unlocked at every frame's safe point;
+/// no queued record left once an AI-thread call returns (none can point into its freed frame);
+/// the actor-value table unchanged word for word and never read past; every move and hit made.
+#[test]
+fn np_hits_on_threads_never_corrupt() {
+    use std::sync::atomic::{AtomicI32, AtomicU32, Ordering::SeqCst};
+    use std::sync::{mpsc, Arc};
+    const FRAMES: u32 = 2000;
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut f = Fixture::new(
+        rig_fixture::fnv_skeleton(),
+        Ground {
+            collision: Some(-1.0),
+            navmesh: -9.0,
+        },
+    );
+    f.make_character();
+    lay_out_gecko(&mut f.e);
+    f.add_actor(GECKO, GECKO_ID, gecko_like(), CREATURE_TREE);
+    f.e.mem.set_u32(GECKO + rig_fixture::FORM_ID, GECKO_ID);
+    f.game_update();
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    crate::av_table::clear();
+    PELLETS.store(0, SeqCst);
+    EFFECTS.store(0, SeqCst);
+    let was = crate::gunplay::tuning();
+    crate::gunplay::set_tuning(crate::gunplay::Tuning {
+        new_physics: true,
+        knockdowns: true,
+        ..was
+    });
+    crate::knockdown::install(&mut f.e);
+    fn ai_running(_: &mut Engine, _: &[u32]) -> Ret {
+        u32::from(AI_RUNNING.load(SeqCst)).into_ret()
+    }
+    f.e.register(0x008c_7aa0, ai_running);
+    platform::install(&mut f.e);
+    world::lay_out(&mut f.e, rig_fixture::CONTROLLER);
+    f.e.register(
+        0x0056_20e0,
+        engine::entry!(
+            0x0056_20e0,
+            engine::units::fallout_shared::tesobjectrefr::bhk_character_controller_set_position(
+                Ptr, Ptr
+            )
+        )
+        .1,
+    );
+    f.e.mem.set_f32(0x011c_582c, 1.0 / rig_fixture::HK);
+    platform::set_slot(world::ROUTER_TLS, world::ROUTERS[0]);
+    room_events::set_on(true);
+    let _ = room_events::take();
+
+    // The AI thread's task: the mover and the bullet; the lock counts and the queue read after
+    // each call.
+    let lowest = Arc::new(AtomicI32::new(0));
+    let (moves, bullets, left_queued) = (
+        Arc::new(AtomicU32::new(0)),
+        Arc::new(AtomicU32::new(0)),
+        Arc::new(AtomicU32::new(0)),
+    );
+    let (go, task) = mpsc::channel::<Option<u32>>();
+    let (done, finished) = mpsc::channel::<Result<(), String>>();
+    let ai = Sent(f.e.thread_view());
+    let (low, mv, bl, left) = (
+        lowest.clone(),
+        moves.clone(),
+        bullets.clone(),
+        left_queued.clone(),
+    );
+    // The game's hit path is deep in a debug build: a stack as the real threads' (64 MB).
+    let handle = std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            let mut ai = ai;
+            platform::set_slot(world::ROUTER_TLS, world::ROUTERS[1]);
+            let at = ai.0.mem.alloc(0x10);
+            let (mut x, mut b) = (0.0f32, 0.0f32);
+            while let Ok(Some(_frame)) = task.recv() {
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut after = |ai: &mut Sent| {
+                        let (a, c, queued, _) = world::state(&ai.0);
+                        low.fetch_min(a.min(c), SeqCst);
+                        if queued != 0 {
+                            left.fetch_add(1, SeqCst);
+                        }
+                    };
+                    for _ in 0..4 {
+                        x += 0.01;
+                        for (i, v) in [x, 2.0, 0.5, 0.0].into_iter().enumerate() {
+                            ai.0.mem.set_f32(at + 4 * i as u32, v);
+                        }
+                        ai.0.call(0x00ca_c920, &[world::PROXIES[1], at]);
+                        mv.fetch_add(1, SeqCst);
+                        after(&mut ai);
+                        // The bullet, faster and further on.
+                        b += 0.5;
+                        for (i, v) in [-3.0, b, 1.2, 0.0].into_iter().enumerate() {
+                            ai.0.mem.set_f32(at + 4 * i as u32, v);
+                        }
+                        ai.0.call(0x00ca_c920, &[world::PROXIES[2], at]);
+                        bl.fetch_add(1, SeqCst);
+                        after(&mut ai);
+                    }
+                }));
+                let r = r.map_err(|p| text_of(&p));
+                let failed = r.is_err();
+                let _ = done.send(r);
+                if failed {
+                    break;
+                }
+            }
+        })
+        .unwrap();
+
+    let mut faults = Vec::new();
+    let mut unsettled = Vec::new();
+    for frame in 0..FRAMES {
+        f.e.mem.set_f32(0x011d_ea30, 1.0 / 60.0);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if frame % 60 == 4 {
+                f.animate();
+                let _ = claim(&mut f.e, ACTOR);
+                let chest = f.world("Bip01 Spine2").unwrap().1;
+                crate::new_physics::hit(
+                    &mut f.e,
+                    ACTOR,
+                    1.4 * crate::new_physics::model().mass,
+                    [chest[0], chest[1] + 8.0, chest[2]],
+                    [0.0, -1.0, 0.0],
+                );
+            }
+            if frame % 25 == 0 {
+                let part = PARTS[(frame / 25) as usize % PARTS.len()].0;
+                pellet(&mut f.e, part);
+                f.e.call(crate::knockdown::HIT_ME, &[GECKO, HIT, 0]);
+                PELLETS.fetch_add(1, SeqCst);
+            }
+        }));
+        if let Err(p) = r {
+            faults.push(format!(
+                "frame {frame}, main thread's hits: {}",
+                text_of(&p)
+            ));
+            break;
+        }
+        AI_RUNNING.store(true, SeqCst);
+        go.send(Some(frame)).unwrap();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            f.animate();
+            crate::active_ragdoll::apply(&mut f.e);
+        }));
+        if let Err(p) = r {
+            faults.push(format!(
+                "frame {frame}, main thread's draw set-up: {}",
+                text_of(&p)
+            ));
+            break;
+        }
+        match finished.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(m)) => {
+                faults.push(format!("frame {frame}, AI thread: {m}"));
+                break;
+            }
+            Err(_) => {
+                faults.push(format!("frame {frame}, AI thread gone"));
+                break;
+            }
+        }
+        AI_RUNNING.store(false, SeqCst);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::new_physics::main_thread(&mut f.e);
+            crate::active_ragdoll::read_drawn(&mut f.e);
+            crate::active_ragdoll::after_draw(&mut f.e);
+            crate::active_ragdoll::unwrite(&mut f.e);
+        }));
+        if let Err(p) = r {
+            faults.push(format!(
+                "frame {frame}, main thread's pass: {}",
+                text_of(&p)
+            ));
+            break;
+        }
+        let (a, b, queued, locked) = world::state(&f.e);
+        lowest.fetch_min(a.min(b), SeqCst);
+        if (a, b, queued, locked) != (0, 0, 0, 0) {
+            unsettled.push((frame, a, b, queued, locked));
+        }
+    }
+    let _ = go.send(None);
+    handle.join().unwrap();
+    room_events::set_on(false);
+    let _ = room_events::take();
+    let (past, changes, checks) = (
+        crate::av_table::reads_past(),
+        crate::av_table::changes(),
+        crate::av_table::checks(),
+    );
+    eprintln!(
+        "RESULT np hits on threads: {FRAMES} frames; main-thread pellets {}, AI moves {}, \
+         bullets {}; lowest lock count {}, frames not settled {}, records left after \
+         an AI-thread call {}; the table read past {past}, changed {changes} in {checks} checks; \
+         faults {faults:#?}",
+        PELLETS.load(SeqCst),
+        moves.load(SeqCst),
+        bullets.load(SeqCst),
+        lowest.load(SeqCst),
+        unsettled.len(),
+        left_queued.load(SeqCst)
+    );
+    crate::active_ragdoll::clear();
+    crate::knockdown::clear();
+    crate::gunplay::set_tuning(was);
+    assert!(faults.is_empty(), "{faults:#?}");
+    assert_eq!(PELLETS.load(SeqCst), FRAMES / 25);
+    assert_eq!(moves.load(SeqCst), FRAMES * 4);
+    assert_eq!(bullets.load(SeqCst), FRAMES * 4);
+    assert!(lowest.load(SeqCst) >= 0, "a lock count went below 0");
+    assert!(
+        unsettled.is_empty(),
+        "{:?}",
+        &unsettled[..unsettled.len().min(8)]
+    );
+    assert_eq!(
+        left_queued.load(SeqCst),
+        0,
+        "records left after an AI-thread call"
+    );
+    assert_eq!(past, 0, "00406d70 read past the table");
+    assert_eq!(changes, 0, "the actor-value table changed");
+    assert!(checks >= 2 * FRAMES, "the table checked {checks} times");
 }
 
 /// The NPC's actor values (its owner's slot `+0xC`): Strength 6, damage threshold 2, health
