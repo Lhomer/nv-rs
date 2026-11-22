@@ -18,8 +18,12 @@ machinery runs.
 - `np_walls_and_crates_hold_the_body`: the wall holds now (0 u inside, stands after 3.4 s); the
   crate does not: Spine1 8.4 u inside 0.21 s after the hit, falling onto the crate's top edge, a
   wall load of 119 kN. The top edges' contacts (`np_body::Edge`, `edge_contacts`) reach the feet's
-  steps; the torso meets the crate's top edge without them. Next: the edges of every wall top near
-  any body, not only the feet's steps.
+  steps; the torso meets the crate's top edge without them. (Edges from every body's wall tops are
+  in fact added already; the measure's 8.4 u is from above: the end over the crate lies above the
+  wall's top, the wall then holds nothing and no floor is at the top. Holding such an end up by
+  the top as a floor, within 0.3 m behind the face, made it far worse (bodies at 25 m/s, walls at
+  360 kN): the top plane fights the face's contacts. Reverted; needs the top as a proper floor of
+  that body's ground, not a per-wall plane.)
 - `np_the_reference_moves_clear_of_a_wall`: never stands in 12 s (rises against the wall given up),
   so the reference's move at the rise's end is never made.
 
