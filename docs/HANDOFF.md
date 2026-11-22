@@ -7,6 +7,22 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-22 (the three ignored tests: where each stands)
+
+**Status: findings only (no code change pushed).** On 4d59333:
+- `np_planted_hands_hold_still`: the hands slide 27 to 32 u (bound 2). Letting a landed hand go
+  once dragged 1.5 u and putting it down afresh makes this test pass, but seven New Physics tests
+  (the slab, the rise-end trio, rise on flat, the slope, the arms) and the lab's stand then fail:
+  the rises lean on the hand held where it lands. Re-balancing the rises around re-placed hands is
+  the work; reverted.
+- `np_walls_and_crates_hold_the_body`: the wall holds now (0 u inside, stands after 3.4 s); the
+  crate does not: Spine1 8.4 u inside 0.21 s after the hit, falling onto the crate's top edge, a
+  wall load of 119 kN. The top edges' contacts (`np_body::Edge`, `edge_contacts`) reach the feet's
+  steps; the torso meets the crate's top edge without them. Next: the edges of every wall top near
+  any body, not only the feet's steps.
+- `np_the_reference_moves_clear_of_a_wall`: never stands in 12 s (rises against the wall given up),
+  so the reference's move at the rise's end is never made.
+
 ### Claude, 2026-11-22 (test c: hits, moves and bullets on threads)
 
 **Status: pushed (the commit after c1fc398).** `np_hits_on_threads_never_corrupt` (test c of the
