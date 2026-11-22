@@ -7,6 +7,18 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-22 (the crate's top as ground: tried, not landed)
+
+**Status: findings only.** Casting the ground under the torso and the head too (Spine, Spine2,
+Head, from a radius above each node): (1) inside the shared ground fit, they moved the main level
+onto the crate's top with the feet's planes (bodies at 26 m/s, the floor 34 body weights); (2)
+kept out of the fit, a torso body's own cast as its floor where it lies a step over the fitted
+ground: the torso is then held on the crate's top, but the legs swing into the crate's side below
+the top (a thigh 12.9 u inside, no wall found for it) and the contacts' conflict throws the body at
+29 m/s. A crate wants real box geometry for every body (its faces and its top together, found
+once per obstacle, not per body cast), not per-body planes. Reverted. The planted hands (the rises
+around re-placed hands) and the rise beside a wall are as in the entry below.
+
 ### Claude, 2026-11-22 (the three ignored tests: where each stands)
 
 **Status: findings only (no code change pushed).** On 4d59333:
