@@ -7,6 +7,25 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-23 (the ninth upstream merge: cad5b671..9342aefe, 42 commits)
+
+**Status: pushed.** Among them: settings changed in the game's own menus kept (#956: the
+platform's `WritePrivateProfileStringA` now changes the run's INI as Windows does), brightness in
+nv-rs's window (#970, the wgpu presenter applies the gamma ramps), New Game with another card's
+name in the profile (#947, `host::launcher`), no 8.3 short names under Wine (#958), a sound
+table that disagrees said once (#957), the dead-light guard row. Conflicts: README (the fork's
+Launcher.exe, Import saves and Settings lines kept); `dsound.rs` (the fork's no-device table
+kept beside upstream's `load_table`); `ini.rs` and `files.rs` (upstream's writer taken whole,
+with its `write_whole` returning the Windows error; the fork's two write tests removed: they
+wrote into a folder not there, which Windows refuses, and upstream's tests cover the write, the
+read-back and the change count the copy-out looks at, `files.rs` the stamps); `test_range.rs`
+handles a refused write of the prepared save; host's module list (union); Play.exe's
+`play/mod.rs` (the fork's, which already had the sound-table check). The fork's Settings packaging
+and FOV row write through `save_out.rs` and the copy-out (`NV_PREFS_OUT`), which #956 feeds; the
+launcher and updater path are untouched by #947/#958. JIP, MCM and UIO stay on. Lock files
+consistent; DEPENDENCY-LOCK updated. engine-platform 608, engine-core 1191, host 492,
+nv-launcher, updater, mod crates and repo hygiene 87 pass; fmt clean on the touched files.
+
 ### Claude, 2026-11-22 (the crate's top as ground: tried, not landed)
 
 **Status: findings only.** Casting the ground under the torso and the head too (Spine, Spine2,

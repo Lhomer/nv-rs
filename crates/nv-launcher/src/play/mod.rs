@@ -1679,7 +1679,7 @@ mod tests {
         assert!(text.contains("status 3"));
         assert!(text.contains("Game's main stopped in frame 12"));
         assert!(plain_end(
-            "panicked: the sound table disagrees with the layer",
+            "panicked: the sound table has a line this layer does not know: DsNew",
             Some(3)
         )
         .contains("Sound on this PC"));

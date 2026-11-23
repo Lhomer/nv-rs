@@ -859,10 +859,20 @@ fn resume(e: &mut Engine) -> bool {
         return false;
     };
     let fos = virtual_path(e, "fos");
-    engine_platform::files::write_whole(e, &fos, prepared.save.clone());
+    if let Err(code) = engine_platform::files::write_whole(e, &fos, prepared.save.clone()) {
+        step(&format!(
+            "the prepared save could not be put in place (error {code}): setting up, then saving it"
+        ));
+        return false;
+    }
     if let Some(bytes) = &prepared.cosave {
         let nvse = virtual_path(e, "nvse");
-        engine_platform::files::write_whole(e, &nvse, bytes.clone());
+        if let Err(code) = engine_platform::files::write_whole(e, &nvse, bytes.clone()) {
+            step(&format!(
+                "the prepared save's cosave could not be put in place (error {code}): setting up, then saving it"
+            ));
+            return false;
+        }
     }
     let kept = prepared.kept.clone();
     with_range(|r| {

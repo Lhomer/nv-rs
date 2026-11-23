@@ -206,9 +206,9 @@ page is checked by a test (`the_readme_counts_the_built_commands` in `crates/jip
 
 ### Game patches
 
-JIP's game patches change the game's own code. 171 of its 183 are built, inert until
-JIP answers "installed"; three more are folded into other rows, one waits and eight are left out on
-purpose (below; that list also names Enhanced Camera's patch, which is not one of the 183). They include:
+JIP's game patches change the game's own code. 174 of its 183 are built, inert until
+JIP answers "installed"; three more are folded into other rows and six do nothing on this port
+(below; that list also names Enhanced Camera's patch, which is not one of the 183). They include:
 
 - **Framework and the player:** the patch framework, the first two fixes, the player's update 3D
   (both views, weapon and queued references), the detection patch (forced detection values and the
@@ -298,12 +298,12 @@ More in [FIXES.md, "UI Organizer"](FIXES.md#ui-organizer).
 
 ## lStewieAl's Tweaks built in
 
-🔨 Its engine fixes and tweaks, with nothing to install. 158 of its changes are built:
+🔨 Its engine fixes and tweaks, with nothing to install. 184 of its changes are built:
 
 - 72 of its crash and leak fixes;
 - Engine Optimizations' first change (a save's changed-forms map);
-- 85 other fixes and tweaks: 8 to the engines and the console; 14 to forms, cells, scripts, saves
-  and sound; 32 to AI, actors and the player; 31 to menus and the HUD.
+- 111 other fixes and tweaks: 16 to the engines and the console; 14 to forms, cells, scripts, saves
+  and sound; 32 to AI, actors and the player; 49 to menus and the HUD.
 
 - Each change is on with the fixes preset and has its own off key in `Fallout.ini`'s
   `[nv-rs Stewie]`.
@@ -323,6 +323,16 @@ More in [FIXES.md, "UI Organizer"](FIXES.md#ui-organizer).
   shift as it is now; arrow keys keep a menu's selection from the mouse; the pad's key repeat no
   longer carries over; the left thumbstick moves the console's pointer; menus get L3 and R3; the
   Pip-Boy light fades when it should; the console shows the selected reference's model path.
+- Pad and keyboard in menus and the console: the pad's activate button clicks and B closes the
+  console, the D-pad, A and right stick work the console, RB (not E) picks in the console,
+  shift-arrows read shift as it is now, closing a book no longer closes the Pip-Boy, F1 to F3 wait
+  while typing, menus' keyboard buttons answer number keys, Tab, Caps Lock, Alt and F-keys, and a
+  terminal behind a trade menu leaves the mouse alone. All work with JIP's console key fix on or
+  off.
+- More small fixes: Escape, the console key and Print Screen work with a pad connected;
+  backslash can be bound; NPCs' grenades no longer show the player a "can't remove" message; a
+  plugin's map marker shows its own faction's reputation; opening the map keeps forced
+  full-detail trees; the TestAllCells console command no longer re-reads settings per cell.
 - The remaining crash fixes and tweaks come next.
 
 More in [FIXES.md, "lStewieAl's Tweaks"](FIXES.md#lstewieals-tweaks).
@@ -347,7 +357,7 @@ More in [FIXES.md, "lStewieAl's Tweaks"](FIXES.md#lstewieals-tweaks).
 ## The launcher
 
 🔨 One window in the look of the game's own terminals, where the player plays, changes the
-settings and the renderer and (next) picks mods. `Play.exe` opens it (`crates/nv-launcher`).
+settings and the renderer, installs mods and imports saves. `Play.exe` opens it (`crates/nv-launcher`).
 
 - The terminal's font, colour, header lines and intro are read from the player's game at every
   start (nothing of the game ships); before the game is found it has the port's own plain look.
@@ -358,7 +368,9 @@ settings and the renderer and (next) picks mods. `Play.exe` opens it (`crates/nv
   it has not been tried on those systems yet.
 - `> Settings` has the twelve settings Settings.cmd had (saved at once into both profiles, with
   and without mods) and a Testing list (the new lighting, JIP LN built in). Settings.cmd is gone.
-- Mods, Import saves and Help move in next; the other `.cmd` files and play.sh still work.
+- `> Mods` installs or removes mods from archives, and `> Import saves` copies the player's saves
+  over (shown when there are saves to import); the package's `.cmd` files are gone (#907). Help
+  comes next; play.sh still works.
 
 ## Modern graphics (wgpu)
 
@@ -381,6 +393,11 @@ original's Direct3D 9 instead, which also draws by itself where Vulkan and Direc
   NVIDIA.
 - F11 in the game shows a frame-rate counter (frames a second and the slowest recent frame) in the
   corner.
+- The brightness slider (Settings > Display) changes the picture, on every system. This differs
+  from the original, at the maintainer's request: the original shows its brightness only in
+  exclusive full screen, which nv-rs does not have (its full screen is the borderless window), so
+  in a window the slider did nothing. At the default brightness the picture is unchanged. The
+  Direct3D 9 renderer still shows no brightness in a window.
 
 ## Game pads
 
