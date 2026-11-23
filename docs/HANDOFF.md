@@ -7,6 +7,30 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-23 (a crate held as a box; its test still open on two measures)
+
+**Status: pushed (code only; `np_walls_and_crates_hold_the_body` unchanged, still ignored).** A
+wall cast's face with a top found behind it and along it (`top_extent`: casts down on the top,
+halved to a unit; only where the face's four rays lie on one plane, and only when the top ends
+within 60 units: a slab's or a ledge's goes on and stays the floors') is a box
+(`NpActor::boxes`, an `Edge` with `top` > 0): kept while any body or the actor's capsule is near
+it, whichever body found it; every body's capsule ends are held by it as a box (`box_side`: its
+top, its four sides down to the ground, their edges and corners; inside, out by the side it came
+in by) and a body's own plane for that face is not used twice. Motion casts also go from a
+body's underside (`WALL_LOW`): a torso falling back over a crate's top, its centre's cast a unit
+over the top, found nothing. The actor's move is swept along its capsule's sides as well as its
+centre (`SWEEP_SIDES`), looks for boxes where it ends (`boxes_near`) and is moved clear of their
+footprints (`clear_of_boxes`: the nudge's rays miss a corner).
+
+The crate run now: bodies at most 0.25 units in (was 8.4), the floor 0.98 body weights
+standing, stands after 6.0 s; thrown back at 4.8 m/s it lands on the crate's top and flips over
+it. Still failing, both measures, Patrick's call: (1) the flip lands 1.3 s after the hit with
+limbs at 8.9 m/s, inside the test's "past a second downed" window for speeds (three ways of
+ending the window at the fall's landing each narrowed the window in other runs too, reverted);
+(2) the actor's capsule, round, lies 0.37 units into the crate's corner, 5.35 by the test's box
+widened square by the radius (bound 1). Every other New Physics test (45) and the Ragdoll lab
+pass.
+
 ### Claude, 2026-11-23 (the ninth upstream merge: cad5b671..9342aefe, 42 commits)
 
 **Status: pushed.** Among them: settings changed in the game's own menus kept (#956: the

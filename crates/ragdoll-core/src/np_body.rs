@@ -231,6 +231,12 @@ pub struct Edge {
     pub reach: f32,
     /// Flat, unit, across the edge toward the higher ground (the step's top).
     pub up: V3,
+    /// How far toward `up` the edge's top reaches (metres; 0: the floors hold what lies over it
+    /// and the bodies' own walls its face): a crate's, held as a box for every body, its top as
+    /// a floor and its face under the edge as a wall (a torso thrown back over a crate's edge
+    /// sank 8.4 units into its top; held up there, a thigh no cast had found the face for went
+    /// 11 units in under it).
+    pub top: f32,
 }
 
 /// What a frame's step found.
@@ -668,7 +674,7 @@ impl Model {
                 &prev,
                 &surfaces,
                 (floors, end_floors),
-                (body_walls, wall_tops),
+                (body_walls, wall_tops, edges),
                 slip,
                 h,
             );
@@ -1023,6 +1029,31 @@ impl Model {
                 let local = sub(e, def.com);
                 for (k, ed) in edges.iter().enumerate() {
                     let centre = add(states[i].x, qrot(states[i].q, local));
+                    // A box's edge: over its top held up by the top, under the edge held out
+                    // by its face, as a box holds it ([`box_side`]).
+                    let was = add(prev[i].x, qrot(prev[i].q, local));
+                    if let Some((n, gap)) = box_side(centre, was, ed) {
+                        let depth = def.radius - gap;
+                        if depth <= 0.0 {
+                            continue;
+                        }
+                        let inside = box_side(was, was, ed)
+                            .filter(|w| dot(w.0, n) > 0.5)
+                            .map_or(0.0, |w| (def.radius - w.1).max(0.0));
+                        let depth = depth.min((depth - inside).max(0.0) + inside.min(MAX_OUT * h));
+                        if depth <= 0.0 {
+                            continue;
+                        }
+                        let r = if is_sphere(def) {
+                            scale(n, -def.radius)
+                        } else {
+                            sub(sub(centre, scale(n, def.radius)), states[i].x)
+                        };
+                        let w = self.point_weight(states, i, r, n);
+                        self.move_at(states, i, r, scale(n, depth / w));
+                        loads.push((i, usize::MAX - k, depth / w, local, n));
+                        continue;
+                    }
                     let off = sub(centre, nearest(centre, ed));
                     let d = length(off);
                     if d >= def.radius {
@@ -1069,7 +1100,7 @@ impl Model {
         prev: &[State],
         surfaces: &[Plane],
         floors: (&[Plane], &[[Plane; 2]]),
-        (body_walls, wall_tops): (&[Vec<Plane>], &[Vec<f32>]),
+        (body_walls, wall_tops, edges): (&[Vec<Plane>], &[Vec<f32>], &[Edge]),
         slip: &[usize],
         h: f32,
     ) -> Vec<(usize, usize, f32, V3, V3)> {
@@ -1087,6 +1118,14 @@ impl Model {
                     let n = sf.n;
                     let centre = add(states[i].x, qrot(states[i].q, local));
                     if k >= shared && tops.get(k - shared).is_some_and(|&top| centre[2] > top) {
+                        continue;
+                    }
+                    // A box's face: its edge's ([`box_side`]).
+                    if k >= shared
+                        && tops.get(k - shared).is_some_and(|&top| {
+                            top.is_finite() && boxed_wall(sf, top, edges, centre)
+                        })
+                    {
                         continue;
                     }
                     let depth = def.radius - dot(sub(centre, sf.p), n);
@@ -1404,6 +1443,86 @@ pub const MIN_RADIUS: f32 = 0.08;
 
 /// `inertia` with every principal value at least a [`MIN_RADIUS`] ball's of mass `m` (added on
 /// the diagonal: the capsule's own axes are kept).
+/// A point's place in a box edge's frame ([`Edge::top`]): along the edge from its middle,
+/// behind the face (toward `up`), and over the top (metres).
+fn box_local(c: V3, ed: &Edge) -> V3 {
+    let rel = sub(c, ed.p);
+    [dot(rel, ed.dir), dot(rel, ed.up), rel[2]]
+}
+
+/// A box ([`Edge::top`]: its footprint the rectangle `reach` each way along the edge and `top`
+/// behind it, its top at the edge's height, its sides down to the ground): the surface holding
+/// a capsule end's centre `c` (at `was` as the substep began) and how far `c` lies out of it
+/// (metres; under 0 inside). Outside, the nearest point of the box (a face, an edge, a corner:
+/// a thigh at a crate's upright corner, where no plane reached, lay 3.7 units in it); inside,
+/// out by the side it came in by (where `was` lay outside the box the most), else the nearest.
+fn box_side(c: V3, was: V3, ed: &Edge) -> Option<(V3, f32)> {
+    if ed.top <= 0.0 {
+        return None;
+    }
+    let l = box_local(c, ed);
+    let q = [
+        l[0].clamp(-ed.reach, ed.reach),
+        l[1].clamp(0.0, ed.top),
+        l[2].min(0.0),
+    ];
+    let off = sub(l, q);
+    let world = |v: V3| {
+        add(
+            add(scale(ed.dir, v[0]), scale(ed.up, v[1])),
+            [0.0, 0.0, v[2]],
+        )
+    };
+    let d = length(off);
+    if d > 1e-6 {
+        return Some((world(scale(off, 1.0 / d)), d));
+    }
+    // Inside: each side's way out (its outward normal in the box's frame, the distance).
+    let outs = [
+        ([1.0, 0.0, 0.0], ed.reach - l[0]),
+        ([-1.0, 0.0, 0.0], ed.reach + l[0]),
+        ([0.0, 1.0, 0.0], ed.top - l[1]),
+        ([0.0, -1.0, 0.0], l[1]),
+        ([0.0, 0.0, 1.0], -l[2]),
+    ];
+    let w = box_local(was, ed);
+    let came = [
+        w[0] - ed.reach,
+        -ed.reach - w[0],
+        w[1] - ed.top,
+        -w[1],
+        w[2],
+    ];
+    let pick = match came
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| **v > 0.0)
+        .max_by(|a, b| a.1.total_cmp(b.1))
+    {
+        Some((i, _)) => i,
+        None => outs
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
+            .map_or(4, |(i, _)| i),
+    };
+    let (n, gap) = outs[pick];
+    Some((world(n), -gap))
+}
+
+/// Whether the wall `w` (a body's own, its top at `top`) is a box edge's face (`edges`) where
+/// the point `c` lies along it: the box's contacts hold every body against it ([`box_side`]),
+/// so the body's own plane is not used twice; past the box's ends the plane is the body's.
+fn boxed_wall(w: &Plane, top: f32, edges: &[Edge], c: V3) -> bool {
+    edges.iter().any(|ed| {
+        ed.top > 0.0
+            && dot(w.n, scale(ed.up, -1.0)) > 0.95
+            && dot(sub(ed.p, w.p), w.n).abs() < 0.04
+            && (ed.p[2] - top).abs() < 0.03
+            && dot(sub(c, ed.p), ed.dir).abs() <= ed.reach
+    })
+}
+
 /// Body `i`'s floor: its own (`floors`, when given for every body), else the frame's flat one
 /// (`surfaces[0]`).
 fn floor_of(surfaces: &[Plane], floors: &[Plane], i: usize) -> Plane {

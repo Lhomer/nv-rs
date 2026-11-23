@@ -178,12 +178,19 @@ struct NpActor {
     /// Seconds since its joints' figure out of the skeleton's limits was last logged (downed,
     /// every [`JOINTS_EVERY`]).
     joints_said: f32,
-    /// Each body's walls found beside it (world, metres; where the cast met it, game units):
-    /// kept while the body stays within [`WALL_KEEP`] of it.
-    walls: Vec<Vec<(ragdoll_core::np_body::Plane, V3, f32)>>,
+    /// Each body's walls found beside it (world, metres; where the cast met it, game units; its
+    /// top, metres, infinite: none; how far behind the face its top reaches and along the face
+    /// each way from the hit, metres, [`top_extent`]): kept while the body stays within
+    /// [`WALL_KEEP`] of it.
+    walls: Vec<Vec<(ragdoll_core::np_body::Plane, V3, f32, (f32, f32, f32))>>,
     /// The steps' edges the ground's casts found (world, metres; found again when the ground is
     /// cast again).
     step_edges: Vec<ragdoll_core::np_body::Edge>,
+    /// The boxes found (crates: a wall cast's face with a top behind it and along it, world,
+    /// metres, [`top_extent`]): kept while a body is near one, whichever body's cast found it
+    /// (a torso thrown back over a crate's face was past the face's height a frame after the
+    /// pelvis's cast found it, and no body kept it).
+    boxes: Vec<ragdoll_core::np_body::Edge>,
     /// The wall lines said since the last hit.
     wall_logs: u32,
 }
@@ -795,6 +802,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             joints_said: JOINTS_EVERY,
             walls: Vec::new(),
             step_edges: Vec::new(),
+            boxes: Vec::new(),
             wall_logs: 0,
             grounds: Vec::new(),
             ref_after: None,
@@ -1296,31 +1304,52 @@ pub fn apply(e: &mut Engine) {
             .map(|ws| ws.iter().map(|w| w.2).collect())
             .collect();
         // The edges: the ground's, and the top edge of every step's face a wall cast found (a step
-        // the ground's casts never reached across: a toe swung into a slab's corner, 2.4 units).
+        // the ground's casts never reached across: a toe swung into a slab's corner, 2.4 units);
+        // a face with a top behind it and along it is a box's, kept while a body is near it.
         np.edges = a.step_edges.clone();
-        for (plane, hit, top) in a.walls.iter().flatten() {
+        let k = ragdoll_core::np_body::UNITS;
+        let same_line = |edge: &ragdoll_core::np_body::Edge, ed: &ragdoll_core::np_body::Edge| {
+            let off = sub(edge.p, ed.p);
+            let off = sub(off, scale(ed.dir, ragdoll_core::flinch::dot(off, ed.dir)));
+            length(off) * k < 2.0 * EDGE_FOUND
+        };
+        let centres: Vec<V3> = pose
+            .iter()
+            .zip(&model().bodies)
+            .map(|((r, t), def)| scale(add(*t, apply_m(r, scale(def.com, k))), 1.0 / k))
+            .collect();
+        // Kept while a body or the actor's capsule is near it (the actor is moved to the body
+        // past it).
+        let actor_at = scale(reference, 1.0 / k);
+        let capsule = crate::knockdown::capsule(e, a.actor);
+        a.boxes.retain(|bx| {
+            centres.iter().any(|c| box_distance(*c, bx) * k <= BOX_KEEP)
+                || box_distance(actor_at, bx) * k <= BOX_KEEP + capsule
+        });
+        for (plane, hit, top, (depth, ahead, behind)) in a.walls.iter().flatten() {
             if !top.is_finite() {
                 continue;
             }
-            let k = ragdoll_core::np_body::UNITS;
             let Some(up) = ragdoll_core::flinch::unit([-plane.n[0], -plane.n[1], 0.0]) else {
                 continue;
             };
+            let dir = [-up[1], up[0], 0.0];
+            if let Some(bx) = box_of(plane, *hit, *top, (*depth, *ahead, *behind)) {
+                add_box(&mut a.boxes, bx);
+                continue;
+            }
             let edge = ragdoll_core::np_body::Edge {
                 p: [hit[0] / k, hit[1] / k, *top],
-                dir: [-up[1], up[0], 0.0],
+                dir,
                 reach: EDGE_REACH / k,
                 up,
+                top: 0.0,
             };
-            let same = np.edges.iter().any(|ed| {
-                let off = sub(edge.p, ed.p);
-                let off = sub(off, scale(ed.dir, ragdoll_core::flinch::dot(off, ed.dir)));
-                length(off) * k < 2.0 * EDGE_FOUND
-            });
-            if !same {
+            if !np.edges.iter().any(|ed| same_line(&edge, ed)) {
                 np.edges.push(edge);
             }
         }
+        np.edges.extend(a.boxes.iter().copied());
         let drawn = np.frame(&anim, floor, dt);
         floor_load_said(&mut a, floor, dt);
         wall_load_said(&mut a);
@@ -1956,6 +1985,7 @@ fn step_edges(e: &mut Engine, found: &[V3], other: &[bool]) -> Vec<ragdoll_core:
                 dir,
                 reach: EDGE_REACH / k,
                 up,
+                top: 0.0,
             };
             // One edge already through here (the same line) is not found twice.
             let same = edges.iter().any(|ed| {
@@ -1970,6 +2000,9 @@ fn step_edges(e: &mut Engine, found: &[V3], other: &[bool]) -> Vec<ragdoll_core:
     }
     edges
 }
+
+/// The rays a move is swept along, across its way (a share of the capsule's radius each side).
+const SWEEP_SIDES: [f32; 3] = [0.0, 0.9, -0.9];
 
 /// The heights over the reference a move is swept at (game units: the knees', the waist's).
 const SWEEP_HEIGHTS: [f32; 2] = [12.0, 30.0];
@@ -1987,16 +2020,24 @@ fn swept_move(e: &mut Engine, actor: u32, at: V3, mv: V3) -> (V3, Option<String>
     let dir = [mv[0] / dist, mv[1] / dist, 0.0];
     let mut allowed = dist;
     let mut said = None;
+    // Along its centre and along each side of it (a corner between them: the capsule moved past
+    // a crate's corner 2.7 units into it): a side ray `o` across meets what the capsule's front
+    // meets `sqrt(r² - o²)` before its centre gets there.
+    let across = [-dir[1], dir[0], 0.0];
     for h in SWEEP_HEIGHTS {
-        let from = add(at, [0.0, 0.0, h]);
-        if let Some(hit) = crate::active_ragdoll::cast_world(e, from, dir, dist + radius) {
-            let d = length(sub(hit, from));
-            if d - radius < allowed {
-                allowed = (d - radius).max(0.0);
-                said = Some(format!(
-                    "a wall {:.0} units along the way at {:.0} units up",
-                    d, h
-                ));
+        for side in SWEEP_SIDES {
+            let o = side * radius;
+            let ahead = (radius * radius - o * o).max(0.0).sqrt();
+            let from = add(add(at, [0.0, 0.0, h]), scale(across, o));
+            if let Some(hit) = crate::active_ragdoll::cast_world(e, from, dir, dist + ahead) {
+                let d = length(sub(hit, from));
+                if d - ahead < allowed {
+                    allowed = (d - ahead).max(0.0);
+                    said = Some(format!(
+                        "a wall {:.0} units along the way at {:.0} units up",
+                        d, h
+                    ));
+                }
             }
         }
     }
@@ -2032,6 +2073,50 @@ fn swept_move(e: &mut Engine, actor: u32, at: V3, mv: V3) -> (V3, Option<String>
     (to, said)
 }
 
+/// `to` (the reference, game units) moved clear of the boxes found (`boxes`, [`NpActor::boxes`])
+/// by the actor's capsule (`radius`): a box's footprint is a rectangle, whose corner lies
+/// between the nudge's rays (the capsule 2.7 units into a crate's corner, every ray clear).
+/// Boxes lower than the sweep's lowest height are stepped over, as the sweep does.
+fn clear_of_boxes(to: V3, radius: f32, boxes: &[ragdoll_core::np_body::Edge]) -> V3 {
+    let k = ragdoll_core::np_body::UNITS;
+    let mut to = to;
+    for bx in boxes {
+        if bx.p[2] * k <= to[2] + SWEEP_HEIGHTS[0] {
+            continue;
+        }
+        let rel = sub(scale([to[0], to[1], 0.0], 1.0 / k), [bx.p[0], bx.p[1], 0.0]);
+        let along = ragdoll_core::flinch::dot(rel, bx.dir);
+        let behind = ragdoll_core::flinch::dot(rel, bx.up);
+        let near = add(
+            scale(bx.dir, along.clamp(-bx.reach, bx.reach)),
+            scale(bx.up, behind.clamp(0.0, bx.top)),
+        );
+        let off = scale(sub(rel, near), k);
+        let d = length(off);
+        let push = if d > 1e-3 {
+            if d >= radius {
+                continue;
+            }
+            scale(off, (radius - d) / d)
+        } else {
+            // Inside: out by its nearest side.
+            let outs = [
+                (bx.reach - along, bx.dir),
+                (bx.reach + along, scale(bx.dir, -1.0)),
+                (bx.top - behind, bx.up),
+                (behind, scale(bx.up, -1.0)),
+            ];
+            let (gap, dir) = outs
+                .into_iter()
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .unwrap_or((0.0, bx.up));
+            scale(dir, gap * k + radius)
+        };
+        to = add(to, [push[0], push[1], 0.0]);
+    }
+    to
+}
+
 /// A wall found is kept while its body stays within this of where the cast met it (game units),
 /// at most [`WALLS_MOST`] a body; a body casts along its motion past [`WALL_CAST_SPEED`] (m/s),
 /// as far as it goes in [`WALL_LOOK`] seconds and its radius more.
@@ -2049,7 +2134,7 @@ const WALL_WALKABLE: f32 = 0.64;
 /// those it moved away from dropped.
 fn find_walls(
     e: &mut Engine,
-    walls: &mut Vec<Vec<(ragdoll_core::np_body::Plane, V3, f32)>>,
+    walls: &mut Vec<Vec<(ragdoll_core::np_body::Plane, V3, f32, (f32, f32, f32))>>,
     pose: &[(M3, V3)],
     velocities: &[V3],
     dt: f32,
@@ -2078,7 +2163,7 @@ fn find_walls(
             let gap = ragdoll_core::flinch::dot(sub(scale(centre, 1.0 / k), w.0.p), w.0.n) * k;
             let range = gap.max(0.0) + def.radius * k + 4.0;
             if let Some(hit) = crate::active_ragdoll::cast_world(e, centre, dir, range) {
-                kept.push((w.0, hit, w.2));
+                kept.push((w.0, hit, w.2, w.3));
             }
         }
         walls[b] = kept;
@@ -2089,6 +2174,11 @@ fn find_walls(
             let dir = scale(flat, 1.0 / speed);
             let range = (speed * (dt + WALL_LOOK) + def.radius) * k + 4.0;
             cast_wall(e, &mut walls[b], centre, dir, range);
+            // And from its capsule's underside: a crate's face a little under the centre's cast
+            // (a torso falling back over a crate's top, its centre's cast a unit over the top,
+            // met the face with nothing found for it: 8.4 units into the top).
+            let low = [centre[0], centre[1], centre[2] - WALL_LOW * def.radius * k];
+            cast_wall(e, &mut walls[b], low, dir, range);
         }
         // A foot or a hand also casts along its own length, each way, whatever its speed: a
         // capsule creeping into a step's face or a wall (a rising foot's toe against a slab's
@@ -2115,6 +2205,9 @@ fn find_walls(
     }
 }
 
+/// How far under a body's centre (a share of its radius) its second motion cast goes.
+const WALL_LOW: f32 = 0.8;
+
 /// A face with ground on top of it within this above where the cast met it (game units) is a
 /// step's, its top found this far behind the face.
 const WALL_STEP_MOST: f32 = 30.0;
@@ -2126,12 +2219,170 @@ const WALL_RISE: f32 = 1.0;
 /// How far past a foot's or a hand's end its axis casts look (game units).
 const WALL_AXIS_MORE: f32 = 2.0;
 
+/// How far behind a step's face, and along it each way, its top is cast (game units, each
+/// farther), and how near the top's height a cast must meet ground to be on it.
+const TOP_DEPTHS: [f32; 8] = [6.0, 12.0, 18.0, 24.0, 32.0, 40.0, 50.0, 60.0];
+const TOP_SAME: f32 = 1.0;
+
+/// How far off the face's plane a ray's hit may lie for the face to be one plane (game units).
+const FACE_FLAT: f32 = 0.5;
+
+/// A box is kept while a body's centre lies within this of it (game units).
+const BOX_KEEP: f32 = 40.0;
+
+/// The box a wall cast found (its face `plane`, where the cast met it `hit` in game units, its
+/// top and [`top_extent`] in metres), when its top reaches behind the face and along it.
+fn box_of(
+    plane: &ragdoll_core::np_body::Plane,
+    hit: V3,
+    top: f32,
+    (depth, ahead, behind): (f32, f32, f32),
+) -> Option<ragdoll_core::np_body::Edge> {
+    let k = ragdoll_core::np_body::UNITS;
+    // A top that goes on past the last cast is a ledge's or a slab's (the floors hold what lies
+    // on it), not a box's.
+    let deepest = TOP_DEPTHS[TOP_DEPTHS.len() - 1];
+    if !top.is_finite()
+        || depth * k <= WALL_BEHIND
+        || depth * k >= deepest
+        || (ahead + behind) * k <= 2.0 * WALL_SIDE
+    {
+        return None;
+    }
+    let up = ragdoll_core::flinch::unit([-plane.n[0], -plane.n[1], 0.0])?;
+    let dir = [-up[1], up[0], 0.0];
+    Some(ragdoll_core::np_body::Edge {
+        p: add(
+            [hit[0] / k, hit[1] / k, top],
+            scale(dir, 0.5 * (ahead - behind)),
+        ),
+        dir,
+        reach: 0.5 * (ahead + behind),
+        up,
+        top: depth,
+    })
+}
+
+/// `bx` added to `boxes` unless the same face of a box is there already.
+fn add_box(boxes: &mut Vec<ragdoll_core::np_body::Edge>, bx: ragdoll_core::np_body::Edge) {
+    let k = ragdoll_core::np_body::UNITS;
+    let same = boxes.iter().any(|ed| {
+        let off = sub(bx.p, ed.p);
+        let off = sub(off, scale(ed.dir, ragdoll_core::flinch::dot(off, ed.dir)));
+        length(off) * k < 2.0 * EDGE_FOUND && ragdoll_core::flinch::dot(ed.up, bx.up) > 0.95
+    });
+    if !same {
+        boxes.push(bx);
+    }
+}
+
+/// The boxes beside where the actor's capsule (`radius`) is moved to (`to`, from `at`, game
+/// units): cast from its waist along the move and to each side of it; a face of a box already
+/// known is not cast again ([`box_distance`]).
+fn boxes_near(
+    e: &mut Engine,
+    boxes: &mut Vec<ragdoll_core::np_body::Edge>,
+    at: V3,
+    to: V3,
+    radius: f32,
+) {
+    let k = ragdoll_core::np_body::UNITS;
+    let Some(dir) = ragdoll_core::flinch::unit([to[0] - at[0], to[1] - at[1], 0.0]) else {
+        return;
+    };
+    let from = add(to, [0.0, 0.0, SWEEP_HEIGHTS[1]]);
+    let turn = |a: f32| {
+        let (s, c) = a.sin_cos();
+        [dir[0] * c - dir[1] * s, dir[0] * s + dir[1] * c, 0.0]
+    };
+    for a in [0.0f32, 45.0, -45.0, 90.0, -90.0] {
+        let d = turn(a.to_radians());
+        let range = radius + WALL_SIDE;
+        let Some(hit) = crate::active_ragdoll::cast_world(e, from, d, range) else {
+            continue;
+        };
+        if boxes
+            .iter()
+            .any(|bx| box_distance(scale(hit, 1.0 / k), bx) * k < 2.0)
+        {
+            continue;
+        }
+        let mut found = Vec::new();
+        cast_wall(e, &mut found, from, d, range);
+        for (plane, hit, top, extent) in found {
+            if let Some(bx) = box_of(&plane, hit, top, extent) {
+                add_box(boxes, bx);
+            }
+        }
+    }
+}
+
+/// How far `c` (world, metres) lies from a box edge's footprint (its face, top and ends; above
+/// or below it counts nothing), metres.
+fn box_distance(c: V3, bx: &ragdoll_core::np_body::Edge) -> f32 {
+    let rel = sub(c, bx.p);
+    let behind = ragdoll_core::flinch::dot(rel, bx.up);
+    let along = ragdoll_core::flinch::dot(rel, bx.dir).abs();
+    let out_behind = (-behind).max(behind - bx.top).max(0.0);
+    let out_along = (along - bx.reach).max(0.0);
+    (out_behind * out_behind + out_along * out_along).sqrt()
+}
+
+/// Whether ground lies at the height `top` at `at` (game units).
+fn on_top(e: &mut Engine, at: V3, top: f32) -> bool {
+    crate::active_ragdoll::cast_world(
+        e,
+        [at[0], at[1], top + 2.0 * TOP_SAME],
+        [0.0, 0.0, -1.0],
+        4.0 * TOP_SAME,
+    )
+    .is_some_and(|p| (p[2] - top).abs() <= TOP_SAME)
+}
+
+/// How far from `from` along `dir` (game units) the top at `top` goes on: the last of
+/// [`TOP_DEPTHS`] a downward cast still meets it at, and half the gap to the next.
+fn top_reach(e: &mut Engine, from: V3, dir: V3, top: f32, least: f32) -> f32 {
+    let mut reach = least;
+    for d in TOP_DEPTHS {
+        if !on_top(e, add(from, scale(dir, d)), top) {
+            // Halved down to [`TOP_SAME`] between the last on it and the first off.
+            let (mut on, mut off) = (reach, d);
+            while off - on > TOP_SAME {
+                let mid = 0.5 * (on + off);
+                if on_top(e, add(from, scale(dir, mid)), top) {
+                    on = mid;
+                } else {
+                    off = mid;
+                }
+            }
+            return 0.5 * (on + off);
+        }
+        reach = d;
+    }
+    reach
+}
+
+/// A step's top as a box (game units in, metres out): how far behind the face met at `hit`
+/// (its normal `n`) its top at `top` reaches, and where along the face it ends each way
+/// (`along`, unit, from `hit`): a crate's top ends at its far side and its sides.
+fn top_extent(e: &mut Engine, hit: V3, n: V3, top: f32, along: V3) -> (f32, f32, f32) {
+    let k = ragdoll_core::np_body::UNITS;
+    let Some(back) = ragdoll_core::flinch::unit([-n[0], -n[1], 0.0]) else {
+        return (0.0, 0.0, 0.0);
+    };
+    let depth = top_reach(e, hit, back, top, WALL_BEHIND);
+    let on = add(hit, scale(back, WALL_BEHIND));
+    let ahead = top_reach(e, on, along, top, 0.0);
+    let behind = top_reach(e, on, scale(along, -1.0), top, 0.0);
+    (depth / k, ahead / k, behind / k)
+}
+
 /// A cast from `centre` along `dir` (unit) for `range` (game units): the face it meets, its
 /// normal from two side rays and a raised one (else against the cast), kept in `walls` unless a
 /// body could stand on it (the floors have those) or it is one kept already.
 fn cast_wall(
     e: &mut Engine,
-    walls: &mut Vec<(ragdoll_core::np_body::Plane, V3, f32)>,
+    walls: &mut Vec<(ragdoll_core::np_body::Plane, V3, f32, (f32, f32, f32))>,
     centre: V3,
     dir: V3,
     range: f32,
@@ -2194,7 +2445,22 @@ fn cast_wall(
         .map(|t| t[2])
         .filter(|&z| z > hit[2])
         .map_or(f32::INFINITY, |z| z / k);
-        walls.push((plane, hit, top));
+        let along = ragdoll_core::flinch::unit([n[1], -n[0], 0.0]).unwrap_or([1.0, 0.0, 0.0]);
+        // A box only where the face is one plane through all four rays' hits (near a corner a
+        // side ray meets the next face: its normal skewed, the box found from it wrong).
+        let flat_face = match sides {
+            (Some(p1), Some(p2)) => {
+                let on = |q: V3| ragdoll_core::flinch::dot(sub(q, hit), n).abs() <= FACE_FLAT;
+                on(p1) && on(p2) && up.map_or(true, on)
+            }
+            _ => false,
+        };
+        let extent = if top.is_finite() && flat_face {
+            top_extent(e, hit, n, top * k, along)
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        walls.push((plane, hit, top, extent));
     }
 }
 
@@ -2342,6 +2608,9 @@ fn move_reference(e: &mut Engine, a: &mut NpActor) {
             mv = scale(mv, budget / length(mv));
         }
         let (to_flat, _) = swept_move(e, a.actor, at, mv);
+        let radius = crate::knockdown::capsule(e, a.actor);
+        boxes_near(e, &mut a.boxes, at, to_flat, radius);
+        let to_flat = clear_of_boxes(to_flat, radius, &a.boxes);
         let mut to = [to_flat[0], to_flat[1], at[2]];
         if length(sub(to, at)) < MOVE_LEAST {
             return;
@@ -2386,6 +2655,9 @@ fn move_reference(e: &mut Engine, a: &mut NpActor) {
         // where it ends (Patrick's 10:08 and 10:10 clips: moved 193 and 213 units in one
         // frame, through what lay between).
         let (to_flat, said) = swept_move(e, a.actor, at, mv);
+        let radius = crate::knockdown::capsule(e, a.actor);
+        boxes_near(e, &mut a.boxes, at, to_flat, radius);
+        let to_flat = clear_of_boxes(to_flat, radius, &a.boxes);
         let mut moved = sub(to_flat, at);
         if length([moved[0], moved[1], 0.0]) < MOVE_LEAST {
             moved = [0.0; 3];
