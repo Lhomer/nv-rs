@@ -2684,6 +2684,10 @@ struct Cycle {
     /// Standing idle (the game's mover gives it no walk) and, once it stands again, left alone
     /// (no light hits): the rise's end measured on its own ([`AfterStand`]).
     still: bool,
+    /// The hit's own fall ends where it lands ([`FALL_STILL`], [`FALL_REST`]), not a second after
+    /// it went down: the bodies' speeds downed are measured from there (a body thrown back over a
+    /// crate lands 1.3 s after the hit).
+    fall_lands: bool,
 }
 
 impl Default for Cycle {
@@ -2702,6 +2706,7 @@ impl Default for Cycle {
             armed: false,
             prone: false,
             still: false,
+            fall_lands: false,
         }
     }
 }
@@ -2967,6 +2972,7 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
     let mut was_down = false;
     let (mut prev_down, mut last_ref) = (false, [0.0f32; 3]);
     let mut settled = false;
+    let (mut fall_still, mut landed) = (0.0f32, false);
     let mut stood_at: Option<f32> = None;
     let mut down_floor_window = FloorWindow::default();
     let mut downed_at = 0.0f32;
@@ -3237,12 +3243,27 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
                     }
                 }
                 if let Some(was) = &last_bodies {
+                    let fastest = centres
+                        .iter()
+                        .zip(was)
+                        .map(|(c, w)| length(sub(*c, *w)) / dt / k)
+                        .fold(0.0f32, f32::max);
+                    // With `fall_lands`, the hit's fall has landed once every body has been
+                    // slower than [`FALL_STILL`] for [`FALL_REST`].
+                    if down && !landed && dt > 0.0 {
+                        fall_still = if fastest < FALL_STILL {
+                            fall_still + dt
+                        } else {
+                            0.0
+                        };
+                        landed = fall_still >= FALL_REST;
+                    }
                     // Past the hit's own (its push, the fall it causes): standing, or downed
-                    // past a second (settled, rising).
-                    if t - last_hit > 0.3 && (!down || t - downed_at > 1.0) {
-                        for (c, w) in centres.iter().zip(was) {
-                            run.fast_most = run.fast_most.max(length(sub(*c, *w)) / dt / k);
-                        }
+                    // past a second (settled, rising), and with `fall_lands` once it landed.
+                    if t - last_hit > 0.3
+                        && (!down || (t - downed_at > 1.0 && (!cfg.fall_lands || landed)))
+                    {
+                        run.fast_most = run.fast_most.max(fastest);
                     }
                 }
                 last_bodies = Some(centres);
@@ -3356,9 +3377,19 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
                     if p[2] < lo[2] || p[2] > hi[2] {
                         continue;
                     }
-                    let depth = (0..2)
-                        .map(|i| (p[i] - (lo[i] - radius)).min(hi[i] + radius - p[i]))
-                        .fold(f32::INFINITY, f32::min);
+                    // The capsule is round: how far its circle reaches into the box's rectangle
+                    // (outside it: the radius less its centre's distance to the nearest point;
+                    // inside: the radius and the way out).
+                    let near = [p[0].clamp(lo[0], hi[0]), p[1].clamp(lo[1], hi[1])];
+                    let out = ((p[0] - near[0]).powi(2) + (p[1] - near[1]).powi(2)).sqrt();
+                    let depth = if out > 0.0 {
+                        radius - out
+                    } else {
+                        radius
+                            + (0..2)
+                                .map(|i| (p[i] - lo[i]).min(hi[i] - p[i]))
+                                .fold(f32::INFINITY, f32::min)
+                    };
                     run.ref_inside = run.ref_inside.max(depth);
                 }
             }
@@ -3368,6 +3399,7 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
                 run.downed += 1;
                 downed_at = t;
                 settled = false;
+                (fall_still, landed) = (0.0, false);
                 down_refs.clear();
                 upright_at = None;
             }
@@ -3762,6 +3794,11 @@ fn np_slope_walking_with_a_racing_animation() {
     assert_eq!(r.jumps, 0, "the animation jumped {} times", r.jumps);
 }
 
+/// A fall has landed ([`Cycle::fall_lands`]) once every body has moved slower than
+/// [`FALL_STILL`] (m/s) for [`FALL_REST`] seconds.
+const FALL_STILL: f32 = 1.0;
+const FALL_REST: f32 = 0.1;
+
 /// A box about the reference (units): `x` and `y` its extents, standing `h` on the collision
 /// floor `below` under the reference.
 fn block(x: (f32, f32), y: (f32, f32), below: f32, h: f32) -> (V3, V3) {
@@ -3769,13 +3806,14 @@ fn block(x: (f32, f32), y: (f32, f32), below: f32, h: f32) -> (V3, V3) {
 }
 
 /// What [`barrier_runs`] found wrong (none: all held).
-fn barrier_runs(worlds: Vec<(&str, Vec<(V3, V3)>, bool)>) -> Vec<String> {
+fn barrier_runs(worlds: Vec<(&str, Vec<(V3, V3)>, bool, bool)>) -> Vec<String> {
     let mut failed = Vec::new();
-    for (name, boxes, wall) in worlds {
+    for (name, boxes, wall, fall_lands) in worlds {
         let r = cycle_run(&Cycle {
             below: 1.0,
             seconds: 14.0,
             boxes,
+            fall_lands,
             ..Default::default()
         });
         eprintln!(
@@ -3837,26 +3875,30 @@ fn np_a_slab_edge_holds_the_body() {
         "slab",
         vec![block((-150.0, 150.0), (-300.0, -48.0), 1.0, 12.0)],
         false,
+        false,
     )]);
     assert!(failed.is_empty(), "{failed:#?}");
 }
 
 /// Patrick's 10:08 clip: knocked down into a wall and against a crate: no body more than 2 units
-/// inside either and a wall's load and its `[np wall]` line (both hold now), but standing again
-/// by them is open: by the wall the floor reads 3.5 body weights once standing, by the crate its
-/// rises are given up (three) and it goes to the game's ragdoll.
+/// inside either, a wall's load and its `[np wall]` line, the floor under 3 body weights
+/// standing, no body faster than 6 m/s past the hit's own fall, the actor's capsule (round) never
+/// more than a unit in either; it stands again by each. The crate is held as a box for every
+/// body: thrown back against it the body comes down on its top and goes over it, so its speeds
+/// are measured from where that fall lands (Patrick's 2026-11-24 call, with the round capsule).
 #[test]
-#[ignore = "open: rising beside a wall or a crate (see the doc)"]
 fn np_walls_and_crates_hold_the_body() {
     let failed = barrier_runs(vec![
         (
             "wall",
             vec![block((-120.0, 120.0), (-62.0, -50.0), 1.0, 150.0)],
             true,
+            false,
         ),
         (
             "crate",
             vec![block((-22.0, 22.0), (-76.0, -40.0), 1.0, 50.0)],
+            true,
             true,
         ),
     ]);

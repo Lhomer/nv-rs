@@ -7,6 +7,17 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-24 (the crate test passes: Patrick's two measures)
+
+**Status: pushed.** Patrick's call on the two measures the crate run failed (entry of 2026-11-23
+below): `np_walls_and_crates_hold_the_body` runs, no longer ignored. Its crate world measures
+the bodies' speeds downed from where the hit's fall lands (`Cycle::fall_lands`: every body
+slower than 1 m/s for 0.1 s; only that world, every other run keeps "past a second downed"):
+3.10 m/s at most. The actor's capsule is measured as the round capsule it is against every
+box (the radius less its centre's distance to the box's rectangle), in every run: 0.37 units
+into the crate's corner, 0 by the wall. New Physics 45 pass; two still ignored (the planted
+hands, the reference beside a wall).
+
 ### Claude, 2026-11-24 (the tenth upstream merge: 9342aefe..7d700255, 28 commits)
 
 **Status: pushed.** The thread heap on by default; locks held shorter while loading; the
