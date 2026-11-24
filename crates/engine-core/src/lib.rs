@@ -63,6 +63,7 @@ pub mod abi;
 pub mod actor_values;
 #[cfg(test)]
 pub(crate) mod alloc_count;
+pub mod call_count;
 pub mod call_trace;
 pub mod census;
 pub mod cxx_exception;
@@ -86,6 +87,8 @@ pub mod sse;
 pub mod stage_time;
 pub mod static_exit;
 pub mod static_init;
+pub mod sync_direct;
+pub mod texture_ahead;
 pub mod thread_cpu;
 pub mod thread_host;
 pub mod typed;

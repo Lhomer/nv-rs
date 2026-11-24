@@ -422,7 +422,8 @@ fn run() {
         host::room_record::frame(&mut game.engine);
         if last.map_or(true, |at| at.elapsed() >= Duration::from_secs(5)) {
             last = Some(Instant::now());
-            println!("{}", game.movement.summary());
+            // Written off main, as the hitch lines are (a blocked write would hold the frame).
+            host::hitch_log::print_line(game.movement.summary());
             if let Some(path) = &args.movement_missing {
                 write_lists(&game, path);
             }

@@ -60,6 +60,7 @@ pub static FIXES: &[Fix] = &[
     IO_WAIT_ENDS_ON_COMPLETION,
     LOAD_STEPS,
     DEAD_LIGHTS,
+    THREAD_HEAP,
     crate::half_loaded_move::FIX,
     crate::thread_races::FIX,
     TEXTURE_READ_FIRST,
@@ -83,6 +84,7 @@ pub static FIXES: &[Fix] = &[
     crate::patch_data::STRIP_LOD_WATER,
     crate::direct_files::FIX,
     DRAW_THREAD,
+    HAVOK_REF_COUNTS,
 ];
 
 /// The IO manager's wait for queued loads (`00c3dfa0`: main at a cell border, a load, a save) sleeps
@@ -143,6 +145,25 @@ fn install_dead_lights(e: &mut Engine) {
     engine::dead_lights::install(e);
 }
 
+/// The thread heap (`engine_core`'s `mem/pools.rs`): the blocks of the game's memory pools (8 to
+/// 596 bytes, nearly every object, list node and string the game makes) come from runs of one
+/// pool each through each thread's own cache, with no lock and no table lookup on the common path;
+/// the same answers to the game (sizes, alignment, zero fill, a freed block reused only for its own
+/// pool). It changes where blocks go, nothing the game computes. Lead's check on 2026-11-23 (play
+/// build nov22e): the pause menu with mods opens in 45-54 ms (65-67 off), the staged fight runs 61.0
+/// fps with 0 stutters (53.3 and 21 off). Vanilla keeps the heap's own path.
+pub const THREAD_HEAP: Fix = Fix {
+    name: "thread heap",
+    env: "NV_THREAD_HEAP",
+    addresses: &[],
+    summary: "the game's small blocks (nearly every object and string) come from each thread's own cache, with no lock: pause menus with mods open faster and fights stutter less",
+    install: install_thread_heap,
+};
+
+fn install_thread_heap(e: &mut Engine) {
+    e.mem.enable_thread_heap();
+}
+
 /// The milliseconds a frame [`LOAD_STEPS`] gives each of the two in play.
 pub const LOAD_STEPS_MS: u32 = 1;
 
@@ -181,18 +202,25 @@ fn install_load_steps(e: &mut Engine) {
 /// lock (+0x180) and read and inflated the texture's file inside it, so main, binding another
 /// texture, waited for that read (6-13 ms in border frames). With the row the file is read first,
 /// with the same calls, and only the making stays under the lock, in the same order
-/// (`engine::units::unplaced::run_00e673f0::read_first`). Vanilla reads it under the lock.
+/// (`engine::units::unplaced::run_00e673f0::read_first`). A texture the model loader's queued
+/// texture makes with a file object of its own (`00a5fe30`, from `QueuedTexture::Run`) is read
+/// first too: that call makes the texture's renderer data before it hands the texture out, so its
+/// file is that making's alone. Vanilla reads both under the lock.
 pub const TEXTURE_READ_FIRST: Fix = Fix {
     name: "texture files read before the renderer's lock",
     env: "NV_TEXTURE_READ_FIRST",
-    addresses: &[0x00e6_dc40],
+    addresses: &[0x00e6_dc40, 0x00a5_fe30],
     summary: "a texture file is read and unpacked before the renderer's lock is taken, so drawing does not wait for it",
     install: install_texture_read_first,
 };
 
 fn install_texture_read_first(e: &mut Engine) {
-    use engine::units::unplaced::run_00e673f0::read_first::fn_00e6dc40_reading_first;
+    use engine::units::unplaced::run_00e673f0::read_first::{
+        fn_00a5fe30_reading_first, fn_00e6dc40_reading_first,
+    };
     let (at, f) = engine::entry!(0x00e6_dc40, fn_00e6dc40_reading_first(Ptr, Ptr) -> bool);
+    e.register(at, f);
+    let (at, f) = engine::entry!(0x00a5_fe30, fn_00a5fe30_reading_first(u32, Ptr, Ptr, u8) -> Ptr);
     e.register(at, f);
 }
 
@@ -560,6 +588,25 @@ pub const DRAW_THREAD: Fix = Fix {
     install: install_nothing,
 };
 
+/// Havok reference counts without the global lock (OFF in every preset, [`OFF_IN_EVERY_PRESET`], until its in-game
+/// check): every Havok object's reference count is guarded by one global critical section the game always has on
+/// (`00c90830` sets the lock mode 1), and the physics step holds it whole (`hkpWorld::stepDeltaTime` takes the
+/// world's lock, `00c91180`, which is `lockAll`), so a reference change on main while the physics thread steps waits
+/// for the step (7.0 ms in the 2026-11-22 play log). With the row the six reference functions change the count in one
+/// atomic operation and never take the section (`engine::units::havok_sdk::hkreferencedobject`, "Havok reference
+/// counts without the global lock"); the world's lock and `lockAll` keep it. Same counts, same deletes.
+pub const HAVOK_REF_COUNTS: Fix = Fix {
+    name: "Havok reference counts without the global lock",
+    env: "NV_HAVOK_REFS",
+    addresses: &engine::units::havok_sdk::hkreferencedobject::LOCK_FREE_ADDRESSES,
+    summary: "off in every preset until checked: a physics object's reference count changes in one atomic step instead of under Havok's one global lock, so the main thread no longer waits for the physics step to finish",
+    install: install_havok_ref_counts,
+};
+
+fn install_havok_ref_counts(e: &mut Engine) {
+    engine::units::havok_sdk::hkreferencedobject::lock_free_turn_on(e);
+}
+
 /// UI Organizer built in (`crates/uio`, parts 1 and 2): its lists (`Data\uio\supported.txt` and
 /// `Data\uio\public\*.txt`) put UI mods' additions into the menus, in memory, and every menu file
 /// is read through UIO's reader and parsed by its own XML parser. It changes how every menu file
@@ -635,7 +682,7 @@ fn install_nothing(_: &mut Engine) {}
 
 /// Rows that are off in every preset until the maintainer turns them on: only their own variable or `Fallout.ini`
 /// line turns them on.
-pub const OFF_IN_EVERY_PRESET: &[&str] = &[DRAW_THREAD.env];
+pub const OFF_IN_EVERY_PRESET: &[&str] = &[DRAW_THREAD.env, HAVOK_REF_COUNTS.env];
 
 /// The rows that register nothing at an exe address: the menu limit paces the uncapped step;
 /// the extender's rows set flags `crates/nvse` reads.
@@ -662,6 +709,7 @@ const NO_ADDRESS: &[&str] = &[
     XNVSE_EXTRACT_ARGS.name,
     SHADER_WARM.name,
     DEAD_LIGHTS.name,
+    THREAD_HEAP.name,
     DRAW_THREAD.name,
 ];
 
@@ -3164,6 +3212,36 @@ bSunShadowsCharacters=0
         // The other JIP rows still follow the preset.
         assert!(choices[1].is_on(&JIP_GAME_PATCHES));
         assert!(!choices[0].is_on(&JIP_GAME_PATCHES));
+    }
+
+    /// The thread heap: on in the fixes preset, off in vanilla, `bThreadHeap` or `NV_THREAD_HEAP` over
+    /// both; on, the install turns the memory's thread heap on.
+    #[test]
+    fn the_thread_heap_follows_the_preset() {
+        assert!(!Choice::vanilla().is_on(&THREAD_HEAP));
+        let fixes = Choice::from_parts(None, no_env).unwrap();
+        assert!(fixes.is_on(&THREAD_HEAP));
+        let off = with_ini(
+            None,
+            "[nv-rs Fixes]
+bThreadHeap=0
+",
+            &[],
+        );
+        assert!(!off.is_on(&THREAD_HEAP));
+        let env_off = Choice::from_parts(None, env_of(&[("NV_THREAD_HEAP", "0")])).unwrap();
+        assert!(!env_off.is_on(&THREAD_HEAP));
+        let on = Choice::from_parts(
+            None,
+            env_of(&[("NV_THREAD_HEAP", "1"), ("NV_PRESET", "vanilla")]),
+        )
+        .unwrap();
+        assert!(on.is_on(&THREAD_HEAP));
+        for choice in [fixes, off, env_off, Choice::vanilla(), on] {
+            let mut e = Engine::new();
+            install(&mut e, &choice);
+            assert_eq!(e.mem.thread_heap_on(), choice.is_on(&THREAD_HEAP));
+        }
     }
 
     /// JohnnyGuitar's editor ids: on in the fixes preset, off in vanilla, its own key or variable over

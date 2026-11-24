@@ -22,6 +22,7 @@ use crate::shot::{self, Shots};
 use crate::sm::{self, wgsl, Stage};
 use crate::state::{self, rs, SamplerKey};
 use crate::sun_shadow;
+use d3d9_stream::hitch;
 use d3d9_stream::{Handle, Rect};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -1179,6 +1180,9 @@ pub struct Device {
     held_index: Map<HeldKey, usize>,
     held_geometry: Map<Surface, usize>,
     held_draws: u32,
+    /// Sorted ([`Device::sort_draws`]): the colour channels every held draw writes
+    /// ([`Device::colour_channels`]); a draw writing others has the held draws drawn first.
+    held_channels: Option<u32>,
     /// Keys drawn from held draws and the draws they held ([`Device::held_counts`]).
     held_drawn: (u64, u64),
     /// Held draws whose pass state when drawn differed from what their state asked for
@@ -1275,6 +1279,8 @@ pub struct Device {
     /// frame reads it, `None` while none was set or the last changes no level; that copy's
     /// pipelines and layout, made at its first use.
     ramp: Option<wgpu::Buffer>,
+    /// Which of its brightness lines are printed ([`crate::ramp::Said`]).
+    said: crate::ramp::Said,
     ramp_blit: Map<wgpu::TextureFormat, wgpu::RenderPipeline>,
     ramp_layout: Option<wgpu::BindGroupLayout>,
     #[allow(clippy::type_complexity)]
@@ -2009,6 +2015,7 @@ impl Device {
             held_index: Map::default(),
             held_geometry: Map::default(),
             held_draws: 0,
+            held_channels: None,
             held_drawn: (0, 0),
             held_mismatches: 0,
             emitted_digests: None,
@@ -2070,6 +2077,7 @@ impl Device {
             blit: Map::default(),
             blit_layout: None,
             ramp: None,
+            said: crate::ramp::Said::default(),
             ramp_blit: Map::default(),
             ramp_layout: None,
             gamma_resolves: Map::default(),
@@ -2219,8 +2227,11 @@ impl Device {
 
     /// `SetGammaRamp` of the swap chain 0, the game's only one: its brightness, applied to the
     /// frames shown in the window from the next `Present` on ([`crate::ramp`]); a ramp that
-    /// changes no level ([`crate::ramp::Ramp::is_identity`]) leaves the plain copy. Another swap
-    /// chain or a ramp of another size is not provided.
+    /// changes no level ([`crate::ramp::Ramp::is_identity`]) leaves the plain copy. On the game's
+    /// window its brightness is said in the log, bounded ([`crate::ramp::Said`]: the slider, the
+    /// start-up INI value and the `SetGamma` command, which a mod may send every frame, all send
+    /// ramps), and the brightness shown is kept for the F12 report ([`crate::ramp::shown`]).
+    /// Another swap chain or a ramp of another size is not provided.
     pub(crate) fn set_gamma_ramp(&mut self, swap_chain: u32, bytes: &[u8]) {
         let ramp = crate::ramp::Ramp::from_bytes(bytes);
         let Some(ramp) = ramp.filter(|_| swap_chain == 0) else {
@@ -2230,12 +2241,20 @@ impl Device {
             ));
             return;
         };
-        if ramp.is_identity() {
-            self.ramp = None;
-            return;
+        let identity = ramp.is_identity();
+        // Said, and kept for the F12 report, by the device on the game's window only: one without
+        // a window (a replay, the shadow of the real Direct3D 9) shows no ramp.
+        if self.surface.is_some() {
+            if !identity {
+                self.warn(crate::ramp::FIRST_LINE);
+            }
+            let line = crate::ramp::change_line(&ramp);
+            if let Some(line) = self.said.ramp(line, std::time::Instant::now()) {
+                eprintln!("NV_D3D9 wgpu: {line}");
+            }
+            crate::ramp::set_shown((!identity).then_some(&ramp));
         }
-        self.warn("the game's brightness (its gamma ramp) is applied to the frames in the window");
-        self.ramp = Some(crate::ramp::buffer(&self.device, &ramp));
+        self.ramp = (!identity).then(|| crate::ramp::buffer(&self.device, &ramp));
     }
 
     fn make_back_buffers(
@@ -2321,6 +2340,7 @@ impl Device {
             ));
         }
         let layers = if cube { 6 } else { 1 };
+        let made = hitch::Timed::new(hitch::Call::CreateTexture);
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -2347,6 +2367,8 @@ impl Device {
             },
             view_formats: &[],
         });
+        drop(made);
+        let _made = hitch::Timed::new(hitch::Call::CreateView);
         let view = texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(if cube {
                 wgpu::TextureViewDimension::Cube
@@ -2379,6 +2401,7 @@ impl Device {
     }
 
     fn level_surface(&mut self, tex: &Arc<Tex>, level: u32, layer: u32) -> Arc<Surf> {
+        let made = hitch::Timed::new(hitch::Call::CreateView);
         let view = tex.texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2),
             base_mip_level: level,
@@ -2387,6 +2410,7 @@ impl Device {
             array_layer_count: Some(1),
             ..Default::default()
         });
+        drop(made);
         let id = self.id();
         Arc::new(Surf {
             tex: Some(tex.clone()),
@@ -2619,15 +2643,17 @@ impl Device {
     pub(crate) fn create_buffer(&mut self, buffer: Handle, index: bool, length: u32, format: u32) {
         self.st.bound.forget(buffer);
         let size = u64::from(length.max(4).div_ceil(4) * 4);
-        let wgpu_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size,
-            usage: if index {
-                wgpu::BufferUsages::INDEX
-            } else {
-                wgpu::BufferUsages::VERTEX
-            } | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let wgpu_buffer = hitch::timed(hitch::Call::CreateBuffer, || {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size,
+                usage: if index {
+                    wgpu::BufferUsages::INDEX
+                } else {
+                    wgpu::BufferUsages::VERTEX
+                } | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
         let b = Arc::new(Buf {
             buffer: wgpu_buffer,
@@ -2931,7 +2957,9 @@ impl Device {
                 (table_buffer, &mut self.table),
             ] {
                 if !bytes.is_empty() {
-                    self.queue.write_buffer(buffer, 0, bytes);
+                    hitch::timed(hitch::Call::WriteBuffer, || {
+                        self.queue.write_buffer(buffer, 0, bytes)
+                    });
                     bytes.clear();
                 }
             }
@@ -2973,7 +3001,9 @@ impl Device {
             let mut bytes = bytes;
             for (buffer, b) in targets.iter().zip(bytes.iter_mut()) {
                 if !b.is_empty() {
-                    queue.write_buffer(buffer, 0, b);
+                    hitch::timed(hitch::Call::WriteBuffer, || {
+                        queue.write_buffer(buffer, 0, b)
+                    });
                     b.clear();
                 }
             }
@@ -3001,7 +3031,7 @@ impl Device {
     /// window, a screen that submits by itself, the end); its failure, if one, said here.
     fn sync(&self) {
         if let Some(s) = &self.submitter {
-            s.sync();
+            hitch::timed(hitch::Call::QueueWait, || s.sync());
         }
     }
 
@@ -3052,6 +3082,7 @@ impl Device {
         };
         let (texture, level, layer) = (tex.texture.clone(), s.level, s.layer);
         let write = move |queue: &wgpu::Queue, bytes: &[u8]| {
+            let _timed = hitch::Timed::new(hitch::Call::WriteTexture);
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &texture,
@@ -3136,11 +3167,17 @@ impl Device {
         // After the batches handed to the queue thread, as when they were submitted here.
         if let Some(Obj::Buffer(_, shadow)) = self.objects.get(&buffer) {
             if self.queue_idle() {
-                self.queue
-                    .write_buffer(&b.buffer, start as u64, &shadow[start..end]);
+                hitch::timed(hitch::Call::WriteBuffer, || {
+                    self.queue
+                        .write_buffer(&b.buffer, start as u64, &shadow[start..end])
+                });
             } else {
                 let (target, bytes) = (b.buffer.clone(), shadow[start..end].to_vec());
-                self.on_queue(move |queue| queue.write_buffer(&target, start as u64, &bytes));
+                self.on_queue(move |queue| {
+                    hitch::timed(hitch::Call::WriteBuffer, || {
+                        queue.write_buffer(&target, start as u64, &bytes)
+                    })
+                });
             }
         }
     }
@@ -3713,8 +3750,10 @@ impl Device {
         self.encoder_uses += 1;
         self.batch_uses += 1;
         self.encoder.get_or_insert_with(|| {
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None })
+            hitch::timed(hitch::Call::CreateEncoder, || {
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None })
+            })
         })
     }
 
@@ -3725,8 +3764,10 @@ impl Device {
     /// timed stretch, well inside the room [`SUBMIT_USES`] leaves.
     fn timing_encoder(&mut self) -> &mut wgpu::CommandEncoder {
         self.encoder.get_or_insert_with(|| {
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None })
+            hitch::timed(hitch::Call::CreateEncoder, || {
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None })
+            })
         })
     }
 
@@ -3742,7 +3783,7 @@ impl Device {
         if let Some(e) = self.encoder.take() {
             let f = match &self.finisher {
                 Some(f) => f.send(e),
-                None => Finishing::Ready(e.finish()),
+                None => Finishing::Ready(hitch::timed(hitch::Call::Finish, || e.finish())),
             };
             self.finishing.push((f, self.encoder_uses));
         }
@@ -4713,10 +4754,12 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                     resource: wgpu::BindingResource::Sampler(s),
                 });
             }
-            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: draw_layout(&self.last_pipeline, k),
-                entries: &entries,
+            let group = hitch::timed(hitch::Call::CreateBindGroup, || {
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: draw_layout(&self.last_pipeline, k),
+                    entries: &entries,
+                })
             });
             self.groups.insert(key.to_vec(), group.clone());
             group
@@ -5032,8 +5075,10 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
     /// not depend on the draws around it except where two surfaces meet at exactly the same depth:
     /// the depth test LESS or LESSEQUAL with depth writes, no blending (so never a see-through,
     /// fading or decal draw), no stencil, no occlusion count open. With the registers from
-    /// storage only.
-    fn may_hold(&self, depth: bool) -> bool {
+    /// storage only. Sorted ([`Device::sort_draws`]), also only a draw whose colour channels are
+    /// known (`channels`, [`Device::colour_channels`]); [`Device::hold`] keeps the held draws to
+    /// one set of channels.
+    fn may_hold(&self, depth: bool, channels: Option<u32>) -> bool {
         let r = &self.st.rs;
         self.merge_draws
             && self.storage_regs
@@ -5045,15 +5090,51 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             && r[rs::ALPHABLENDENABLE] == 0
             && r[rs::STENCILENABLE] == 0
             && self.counting.is_none()
+            && (!self.sort_draws || channels.is_some())
+    }
+
+    /// The colour channels the draw about to be given writes, as one word: for each bound colour
+    /// target (five bits each) its write mask, or a mark of its own where the pixel shader writes
+    /// no colour to it (`written`: the targets it writes); None without a pipeline. Sorting moves
+    /// held draws past each other: draws that write depth and the same channels leave each pixel
+    /// with the channels of the one in front whatever their order (except where two surfaces meet
+    /// at exactly the same depth), and the other channels untouched. A draw that writes depth but
+    /// fewer channels (a depth-only draw, a draw with masked colour writes) would not: drawn ahead
+    /// of a draw it lies in front of on another surface, it would hide that draw's colour, which
+    /// the game's order let show. So the held draws all write the same channels
+    /// ([`Device::hold`]). None too for a draw whose pixel shader writes a target past the first:
+    /// such a draw is not held while sorting (no frame test binds two targets).
+    fn colour_channels(&self, written: u32) -> Option<u32> {
+        const MASKS: [usize; 4] = [
+            rs::COLORWRITEENABLE,
+            rs::COLORWRITEENABLE1,
+            rs::COLORWRITEENABLE2,
+            rs::COLORWRITEENABLE3,
+        ];
+        if written & !1 != 0 {
+            return None;
+        }
+        let (key, _, _) = self.last_pipeline.as_ref()?;
+        let mut channels = 0u32;
+        for (i, c) in key.colours.iter().enumerate().take(MASKS.len()) {
+            let bits = match c {
+                None => 0,
+                Some(_) if written & (1 << i) == 0 => 0x10,
+                Some((_, opaque)) => state::write_mask(self.st.rs[MASKS[i]], *opaque).bits(),
+            };
+            channels |= bits << (5 * i);
+        }
+        Some(channels)
     }
 
     /// Holds a draw of `key` with its blocks: with the held draws of its key when they are the
     /// last ones held (or, with [`Device::sort_draws`], wherever they are held; it is drawn with
     /// the first of them), else as a new key after the others. When a held draw reads the same
     /// vertices with another key (another pass over the same surface, which must stay after it),
-    /// or a blended draw is held ([`Device::held_after`]), the held draws are drawn first. The
-    /// key's place in [`Device::held`].
-    fn hold(&mut self, key: HeldKey, member: Member) -> usize {
+    /// or a blended draw is held ([`Device::held_after`]), or, sorted, the held draws write other
+    /// colour channels (`channels`, [`Device::colour_channels`]), the held draws are drawn first.
+    /// The key's place in [`Device::held`].
+    fn hold(&mut self, key: HeldKey, member: Member, channels: Option<u32>) -> usize {
         // An opaque draw given after a held blended draw may lie behind it on screen: drawn ahead
         // of it, the blended draw would be laid over it instead of being covered by it. So only
         // the opaque draws between two blended ones are drawn together.
@@ -5066,6 +5147,15 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             if g == AFTER || self.held[g].key != key {
                 self.emit_held();
             }
+        }
+        // Sorted, only draws that write the same colour channels are moved past each other. Noted
+        // after the emits above (an emit forgets it), right before the draw is held, so it is
+        // known for every held draw.
+        if self.sort_draws {
+            if self.held_channels.is_some() && self.held_channels != channels {
+                self.emit_held();
+            }
+            self.held_channels = channels;
         }
         // In place unless sorted: a draw joins its key only when no draw of another key was held
         // after it, so where two surfaces meet at exactly the same depth the one drawn last still
@@ -5137,6 +5227,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         self.held_index.clear();
         self.held_geometry.clear();
         self.held_draws = 0;
+        self.held_channels = None;
         if self.sort_draws {
             held.sort_by(|a, b| {
                 (&a.key.pipeline, &a.key.groups, &a.key.geometry).cmp(&(
@@ -5490,7 +5581,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         if let Some(s) = self.samplers.get(&key) {
             return s.clone();
         }
-        let s = self.device.create_sampler(&key.descriptor(self.border));
+        let s = hitch::timed(hitch::Call::CreateSampler, || {
+            self.device.create_sampler(&key.descriptor(self.border))
+        });
         self.samplers.insert(key, s.clone());
         s
     }
@@ -5953,7 +6046,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         // Held to be drawn with the other draws of its key ([`Device::may_hold`]), or given to the
         // pass now, after the draws held before it.
         let holdable = up.is_none() && copies.iter().all(Option::is_none);
-        let hold = holdable && self.may_hold(depth.is_some());
+        let channels = self.colour_channels(u32::from(ps.sig.colours));
+        let hold = holdable && self.may_hold(depth.is_some(), channels);
         let after = holdable && !hold && self.may_hold_after(depth.is_some());
         if !hold && !after {
             self.emit_held();
@@ -6078,7 +6172,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             let at = if after {
                 (true, self.hold_after(key, member))
             } else {
-                (false, self.hold(key, member))
+                (false, self.hold(key, member, channels))
             };
             (Some(at), None)
         } else {
@@ -6731,6 +6825,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             "NV_D3D9 wgpu: the start: {waiting} shader modules, {libraries} with their pipeline library ({}), {:.0} ms on {cores} cores (threads' time: converting {:.0} ms, modules {:.0} ms, libraries {:.0} ms)",
             if self.warm_start {
                 "the pipeline cache warm: the listed shaders'"
+            } else if self.pipeline_cache.as_ref().is_some_and(|c| c.carried) {
+                "the pipeline cache from the previous build: every shader's, unchanged ones from it"
             } else {
                 "the pipeline cache cold: every shader's"
             },
@@ -7968,7 +8064,11 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             height: rt.height,
         };
         let (buffer, bytes) = gpu.uniforms(&params, &targets);
-        self.on_queue(move |q| q.write_buffer(&buffer, 0, &bytes));
+        self.on_queue(move |q| {
+            hitch::timed(hitch::Call::WriteBuffer, || {
+                q.write_buffer(&buffer, 0, &bytes)
+            })
+        });
         let device = self.device.clone();
         let span = self.span_begin(Kind::Other);
         gpu.encode(&device, self.encoder(), &targets);
@@ -8985,7 +9085,11 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             rt.width,
             rt.height,
         );
-        self.on_queue(move |q| q.write_buffer(&uniforms, 0, &bytes));
+        self.on_queue(move |q| {
+            hitch::timed(hitch::Call::WriteBuffer, || {
+                q.write_buffer(&uniforms, 0, &bytes)
+            })
+        });
         let targets = sun_shadow::Targets {
             colour: &colour,
             colour_format: rt.format.wgpu,
@@ -9470,7 +9574,11 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         );
         self.span_end(span);
         for (buffer, bytes) in writes {
-            self.on_queue(move |q| q.write_buffer(&buffer, 0, &bytes));
+            self.on_queue(move |q| {
+                hitch::timed(hitch::Call::WriteBuffer, || {
+                    q.write_buffer(&buffer, 0, &bytes)
+                })
+            });
         }
         sun.frames += 1;
         sun.casters += on_scene;
@@ -9903,7 +10011,11 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         let offset = (self.presents % sun_shadow::LIGHT_SLOTS) * sun_shadow::LIGHT_SLOT;
         let ring = sun.gpu.light_ring.clone();
         sun.light = Some(offset as u32);
-        self.on_queue(move |q| q.write_buffer(&ring, offset, &bytes));
+        self.on_queue(move |q| {
+            hitch::timed(hitch::Call::WriteBuffer, || {
+                q.write_buffer(&ring, offset, &bytes)
+            })
+        });
     }
 
     pub(crate) fn update_texture(&mut self, source: Handle, destination: Handle) {
@@ -10082,11 +10194,13 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                     }
                     self.flush();
                 }
-                let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("occlusion count read-back"),
-                    size: 4,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                    mapped_at_creation: false,
+                let buffer = hitch::timed(hitch::Call::CreateBuffer, || {
+                    self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("occlusion count read-back"),
+                        size: 4,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    })
                 });
                 let mut e = self
                     .device
@@ -10098,7 +10212,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                 // Submitted after the batch that counted, and mapped after that submit.
                 let target = buffer.clone();
                 self.on_queue(move |queue| {
-                    queue.submit([copy]);
+                    hitch::timed(hitch::Call::Submit, || queue.submit([copy]));
                     target.slice(..).map_async(wgpu::MapMode::Read, move |r| {
                         mapped.store(if r.is_ok() { 1 } else { 2 }, Ordering::Release);
                     });
@@ -10110,7 +10224,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                 read
             }
         };
-        let _ = self.device.poll(wgpu::PollType::Poll);
+        let _ = hitch::timed(hitch::Call::Poll, || self.device.poll(wgpu::PollType::Poll));
         let mapped = match read.state.load(Ordering::Acquire) {
             0 => return Some((S_FALSE, 0)),
             1 => read
@@ -10210,7 +10324,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         self.flush();
         self.sync();
         buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = hitch::timed(hitch::Call::GpuWait, || {
+            self.device.poll(wgpu::PollType::wait_indefinitely())
+        });
         let mut out = Vec::with_capacity((s.width * bpp * s.height) as usize);
         {
             let data = buffer.slice(..).get_mapped_range().ok()?;
@@ -10522,6 +10638,10 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
             self.made.longest_frame = self.made.longest_frame.max(now - t);
         }
         self.last_present = Some(now);
+        // A brightness held back from the log, once it has settled ([`crate::ramp::Said`]).
+        if let Some(line) = self.said.present(now) {
+            eprintln!("NV_D3D9 wgpu: {line}");
+        }
         // Listed pipelines whose shaders the game has now made, made before its next frame.
         self.prepare_listed();
         self.collect_sun_variants();
@@ -10543,7 +10663,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         self.collect_modules();
         // The HDR watch's reads that are back ([`bright`]): never waited for.
         if self.hdr_watch.waiting() {
-            let _ = self.device.poll(wgpu::PollType::Poll);
+            let _ = hitch::timed(hitch::Call::Poll, || self.device.poll(wgpu::PollType::Poll));
             self.hdr_watch.collect();
         }
         // The start is over once the game has shown a picture (the GPU's gate already stopped
@@ -10633,17 +10753,19 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         // the swap chain is not configured again while a present runs). Offscreen too, so the
         // render thread is never more than a frame ahead of the queue thread.
         let synced = std::time::Instant::now();
-        self.sync();
+        if let Some(s) = &self.submitter {
+            s.sync();
+        }
         let asked = std::time::Instant::now();
-        d3d9_stream::hitch::add_time(
-            d3d9_stream::hitch::Count::RenderSyncNs,
-            asked.duration_since(synced),
-        );
+        hitch::add_time(hitch::Count::RenderSyncNs, asked.duration_since(synced));
+        hitch::note(hitch::Call::FrameSync, asked.duration_since(synced));
         let taken = match (&mut self.surface, &back) {
             (Some(w), Some(_)) => w.frame(&self.device).map(|t| (t, w.config.usage)),
             _ => None,
         };
-        d3d9_stream::hitch::add_time(d3d9_stream::hitch::Count::AcquireNs, asked.elapsed());
+        let acquired = asked.elapsed();
+        hitch::add_time(hitch::Count::AcquireNs, acquired);
+        hitch::note(hitch::Call::Acquire, acquired);
         // The counter on: no frame taken (minimised, no area, lost) or the window away since the last
         // (activated, display changed, woke) makes the next present only start its clock.
         if fps && (taken.is_none() || frame_rate::take_gap()) {
@@ -10764,7 +10886,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
                 let _dpi = hwnd.map(crate::window::DpiScope::of);
                 let swapped = std::time::Instant::now();
                 queue.present(t);
-                d3d9_stream::hitch::add_time(d3d9_stream::hitch::Count::SwapNs, swapped.elapsed());
+                let took = swapped.elapsed();
+                hitch::add_time(hitch::Count::SwapNs, took);
+                hitch::note(hitch::Call::Present, took);
                 if let Some(Ok(mut m)) = meter.as_ref().map(|m| m.lock()) {
                     m.presented(std::time::Instant::now());
                 }
@@ -10775,7 +10899,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         }
         if let Some((buffer, row, width, height)) = window_shot {
             buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            let _ = hitch::timed(hitch::Call::GpuWait, || {
+                self.device.poll(wgpu::PollType::wait_indefinitely())
+            });
             let mut pixels = Vec::with_capacity((width * height * 4) as usize);
             if let Ok(data) = buffer.slice(..).get_mapped_range() {
                 for y in 0..height {
@@ -10793,7 +10919,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         }
         if let Some((buffer, row, width, height, format)) = readback {
             buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            let _ = hitch::timed(hitch::Call::GpuWait, || {
+                self.device.poll(wgpu::PollType::wait_indefinitely())
+            });
             let mut pixels = Vec::with_capacity((width * height * 4) as usize);
             match buffer.slice(..).get_mapped_range() {
                 Ok(data) => {
@@ -12416,8 +12544,10 @@ fn create_module(device: &wgpu::Device, source: String) -> Result<wgpu::ShaderMo
     // The hitch log's counts (`d3d9_stream::hitch`): a module made and its time, on whichever thread.
     let started = std::time::Instant::now();
     let made = create_module_here(device, source);
-    d3d9_stream::hitch::add(d3d9_stream::hitch::Count::Modules, 1);
-    d3d9_stream::hitch::add_time(d3d9_stream::hitch::Count::ModuleNs, started.elapsed());
+    let took = started.elapsed();
+    hitch::add(hitch::Count::Modules, 1);
+    hitch::add_time(hitch::Count::ModuleNs, took);
+    hitch::note(hitch::Call::Module, took);
     made
 }
 
@@ -12443,8 +12573,10 @@ fn build_pipeline(
     // The hitch log's counts (`d3d9_stream::hitch`): a pipeline made and its time, on whichever thread.
     let started = std::time::Instant::now();
     let made = build_pipeline_here(device, cache, job);
-    d3d9_stream::hitch::add(d3d9_stream::hitch::Count::Pipelines, 1);
-    d3d9_stream::hitch::add_time(d3d9_stream::hitch::Count::PipelineNs, started.elapsed());
+    let took = started.elapsed();
+    hitch::add(hitch::Count::Pipelines, 1);
+    hitch::add_time(hitch::Count::PipelineNs, took);
+    hitch::note(hitch::Call::Pipeline, took);
     made
 }
 
@@ -12763,7 +12895,7 @@ fn submit_in_parts(
     for &(n, uses) in parts {
         let part: Vec<wgpu::CommandBuffer> = buffers.by_ref().take(n).collect();
         let got = part.len();
-        queue.submit(part);
+        hitch::timed(hitch::Call::Submit, || queue.submit(part));
         submits.made.fetch_add(1, Ordering::Relaxed);
         submits.most_uses.fetch_max(uses, Ordering::Relaxed);
         submits
@@ -12860,7 +12992,7 @@ impl Finisher {
             Some(Ok(())) => Finishing::Pending(buffer),
             // The threads are gone: finished here.
             Some(Err(std::sync::mpsc::SendError((encoder, _)))) => {
-                Finishing::Ready(encoder.finish())
+                Finishing::Ready(hitch::timed(hitch::Call::Finish, || encoder.finish()))
             }
             None => unreachable!("the jobs' sender lives until the finisher is dropped"),
         }
@@ -12886,7 +13018,7 @@ fn finish_batch(
         .into_iter()
         .map(|f| match f {
             Finishing::Ready(b) => b,
-            Finishing::Pending(r) => match r.recv() {
+            Finishing::Pending(r) => match hitch::timed(hitch::Call::FinishWait, || r.recv()) {
                 Ok(Ok(b)) => b,
                 Ok(Err(why)) => panic!("a finishing thread could not finish an encoder: {why}"),
                 Err(_) => panic!("a finishing thread stopped before it finished an encoder"),
@@ -12894,7 +13026,7 @@ fn finish_batch(
         })
         .collect();
     if let Some(e) = encoder {
-        buffers.push(e.finish());
+        buffers.push(hitch::timed(hitch::Call::Finish, || e.finish()));
     }
     buffers
 }
@@ -12936,9 +13068,17 @@ impl Submitter {
                 .name("nv-wgpu-submit".into())
                 .spawn(move || {
                     qos::thread_started();
+                    // Its blocking calls are timed for the hitch log ([`d3d9_stream::hitch`]), handed over after
+                    // each job.
+                    hitch::set_side(hitch::Side::Queue);
                     for job in rx {
+                        let ran = hitch::timing().then(std::time::Instant::now);
                         let done =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&queue)));
+                        if let Some(t) = ran {
+                            hitch::add_time(hitch::Count::QueueBusyNs, t.elapsed());
+                        }
+                        hitch::publish();
                         if let Err(p) = done {
                             let why = p
                                 .downcast_ref::<&str>()

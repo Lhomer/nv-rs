@@ -133,6 +133,8 @@ fn window_closed() -> ! {
             std::thread::park();
         }
     }
+    // The log lines still on their way written first, so this line ends the log.
+    crate::run_end_hooks();
     eprintln!(
         "NV_D3D9={}: the game's window was closed: the run ends",
         tag()
@@ -3062,6 +3064,12 @@ pub fn set_report_hitch_totals(totals: Option<(u64, u64, u64)>) {
     shot::set_hitch_totals(totals);
 }
 
+/// Tests (the host's): the F12 report's `hitches.txt` as it would be written now.
+#[doc(hidden)]
+pub fn report_hitches_for_test() -> String {
+    shot::hitches_text()
+}
+
 /// The Presents submitted so far (the hitch log's loading-screen test, each frame): the stream's own count, read
 /// without the render thread's queue lock. None before the backend's stream.
 pub fn present_count(e: &mut Engine) -> Option<u32> {
@@ -3429,6 +3437,9 @@ pub(super) mod shot {
         let Ok(place) = PLACE.take() else {
             return;
         };
+        // And the brightness the game's window showed: the picture below is the back buffer,
+        // which never has it (`d3d9_wgpu::ramp`).
+        let place = format!("{place}{}", d3d9_wgpu::ramp::place_line());
         REPORT_ASKED.store(false, std::sync::atomic::Ordering::Relaxed);
         let Some(folder) = report_dir().and_then(|dir| new_report_folder(dir)) else {
             eprintln!("F12: the report's folder could not be made");

@@ -7,6 +7,27 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-24 (the tenth upstream merge: 9342aefe..7d700255, 28 commits)
+
+**Status: pushed.** The thread heap on by default; locks held shorter while loading; the
+shader cache carried over to a new build and kept to size (it lives in the launcher's
+`userdata\machine\wgpu-cache`, `NV_WGPU_CACHE`, which the updater never touches, so it carries
+across updates); bones and ragdolls on spare cores, Havok without the global lock, the
+multithreaded Havok step, more task-manager workers and draw sorting (all off by default:
+New Physics, off by default too, and its tests unchanged); face-gen heads and scripts'
+`ParseParameters` as native code; native thread and lock imports; per-frame log lines off the
+main thread; Stewie's Tweaks rows, among them the creature Pickpocket prompt (#944: the HUD's
+prompt; the fork's pickpocket chance, `00643400` and `pickpocket_chance`, untouched and both
+on). No conflicts. Lock files consistent; DEPENDENCY-LOCK unchanged. JIP, MCM and UIO stay
+on. engine-platform 611, engine-core 1201, host 496, nv-launcher 114, stewie 36, updater 14,
+mod-install 42, mod-chooser 31, repo hygiene 87, the Ragdoll lab 104 + 54 pass.
+
+Found while checking: the old reaction system's drawn-flinch tests in `active_ragdoll_mock_tests`
+fail now and then when run together (`the_drawn_flinch_reaches_the_spine_tops_node`, `..._shows_
+over_the_games_stagger`, `the_get_up_blends_from_the_ragdoll_without_a_snap`: 2 of 8 runs of the
+`active_ragdoll` tests on 8c65063, before this merge, the same after it; each passes alone).
+Something they share is not held by `SERIAL`; queued.
+
 ### Claude, 2026-11-23 (a crate held as a box; its test still open on two measures)
 
 **Status: pushed (code only; `np_walls_and_crates_hold_the_body` unchanged, still ignored).** A
