@@ -7,6 +7,17 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-24 (rising beside a wall: a hand's spot off the wall)
+
+**Status: pushed.** `np_the_reference_moves_clear_of_a_wall` runs, no longer ignored. Its rises
+by the wall were given up because the right hand's spot beside the shoulder lay in the wall: the
+arm drove the hand into it (180 to 200 N on the hand, the `[np wall]` lines) and held the torso
+about 30 degrees over at full height, past the upright line (25), until the rise gave up. A
+hand's spot is now kept the hand's radius and 5 cm off the face of any wall beside it
+(`HAND_WALL`; the frame's walls and each body's own, ground-like ones and those it lies far
+behind left out). It stands on its second rise; the capsule never in the wall. New Physics 46
+pass, one ignored (the planted hands), the Ragdoll lab 104 + 54.
+
 ### Claude, 2026-11-24 (the planted hands: the patch carried further, a sweep running)
 
 **Status: `docs/wip/np-planted-hands.patch` updated (not applied).** Since the entry below: the

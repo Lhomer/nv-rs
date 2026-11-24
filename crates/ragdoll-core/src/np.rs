@@ -124,6 +124,12 @@ pub const HAND_PLANT: (f32, f32, f32) = (3000.0, 150.0, 400.0);
 /// Until it touches, the hand is guided to its spot with at most this (N): the arm's muscles put
 /// it there (the plant's whole pull yanked the arm, turning the pelvis 20 degrees in a frame).
 pub const HAND_REACH: f32 = 60.0;
+/// A hand's spot is kept this far off a wall's face past the hand's radius (m); a wall whose
+/// normal rises past [`HAND_WALL_FLOOR`] is ground, and one the spot lies more than
+/// [`HAND_WALL_BEHIND`] (m) behind is another room's.
+pub const HAND_WALL: f32 = 0.05;
+pub const HAND_WALL_FLOOR: f32 = 0.64;
+pub const HAND_WALL_BEHIND: f32 = 0.3;
 /// How long the limits stay soft after a fall (s).
 pub const LIMITS_SETTLE: f32 = 0.3;
 /// Standing again, the balance's joint targets and the pelvis's turn ease from the pose the body
@@ -1782,6 +1788,22 @@ impl Np {
                     add(shoulder, scale(out, HAND_OUT * UNITS)),
                     scale(dir, HAND_AHEAD * UNITS),
                 );
+                // On the body's side of a wall beside it, the hand's radius and a little more
+                // off its face (a spot beside the shoulder lay in the wall: the arm drove the
+                // hand into it at 200 N, holding the torso 30 degrees over through the rise).
+                let walls = self.walls.iter().chain(self.body_walls.iter().flatten());
+                let xy = walls.fold(xy, |at, w| {
+                    if w.n[2].abs() > HAND_WALL_FLOOR {
+                        return at;
+                    }
+                    let gap = dot(sub(scale(at, 1.0 / UNITS), w.p), w.n);
+                    let need = hand_def.radius + HAND_WALL;
+                    if gap >= need || gap < -HAND_WALL_BEHIND {
+                        return at;
+                    }
+                    let n = [w.n[0], w.n[1], 0.0];
+                    add(at, scale(n, (need - gap) * UNITS))
+                });
                 let z =
                     self.ground_at(hand, xy).map_or(floor, |g| g * UNITS) + hand_def.radius * UNITS;
                 [xy[0], xy[1], z]

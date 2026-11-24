@@ -3908,9 +3908,9 @@ fn np_walls_and_crates_hold_the_body() {
 /// Downed by a wall off the reference (a 4.8 m/s hit carries it back and aside, against a wall):
 /// the reference's move to it at the rise's end is swept (`[np move]` when it meets or nudges
 /// off something) and the actor's capsule never lies in the wall, ending clear of it; it stands.
-/// Open: lying against the wall its rises are given up, so the move is never made.
+/// (Its hands' spots are kept off the wall's face: one beside the shoulder lay in the wall and
+/// the arm drove the hand into it, holding the torso 30 degrees over until the rise gave up.)
 #[test]
-#[ignore = "open: rising beside a wall (see the doc)"]
 fn np_the_reference_moves_clear_of_a_wall() {
     let below = 1.0;
     let r = cycle_run(&Cycle {
