@@ -7,6 +7,26 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-24 (the planted hands: the cause found, a patch that half works)
+
+**Status: findings and `docs/wip/np-planted-hands.patch` (not applied).** The 27 to 36 unit
+"slide" of `np_planted_hands_hold_still` is not the torso dragging a hand: a hand touches the
+ground short of its spot (32 units out beside the shoulder, at the arm's full stretch), is marked
+landed, and the plant's hold (3000 N/m, at most 400 N) then pulls it across the floor to its
+spot under the shoulder (wrist to spot 32.5 down to 5.4 units in 0.5 s, the slide's whole
+size). The patch: a hand that touches is planted where it touches (`HAND_ZONE`), held there
+firmly (`HAND_HOLD` 20000 N/m, at most the larger of 400 N and its load's static friction), and
+let go when the arm lifts it 3 cm off its spot or it loses the ground (`HAND_UP`): put down
+afresh, never held planted in the air. With it `np_planted_hands_hold_still` passes (at most
+1.08 units, no bounce), but `np_the_arms_push_it_up` fails face down (flat: the hands carry 0.13
+of the weight, 0.2 wanted; slope: it never stands; planted out at full stretch the arms cannot
+push a body up from its front, which the slide used to bring under the shoulders) and the slab
+run's fastest body is 6.38 m/s (6 wanted). Tried and worse: landing only within 0.6, 0.75 or
+0.9 of the arm from the shoulder, the hand carried in a little over the ground (the hands never
+landed in time: carried 0.02 to 0.09), and the arm's pose aimed over the spot while carried. The
+next try: face down, carry the hand in under the shoulder before it lands (a lift the arm can
+actually make), on its back keep it where it touches.
+
 ### Claude, 2026-11-24 (the crate test passes: Patrick's two measures)
 
 **Status: pushed.** Patrick's call on the two measures the crate run failed (entry of 2026-11-23

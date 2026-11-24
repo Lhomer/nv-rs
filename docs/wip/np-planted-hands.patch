@@ -1,0 +1,105 @@
+diff --git a/crates/ragdoll-core/src/np.rs b/crates/ragdoll-core/src/np.rs
+index 21356334..304d9e6f 100644
+--- a/crates/ragdoll-core/src/np.rs
++++ b/crates/ragdoll-core/src/np.rs
+@@ -124,6 +124,15 @@ pub const HAND_PLANT: (f32, f32, f32) = (3000.0, 150.0, 400.0);
+ /// Until it touches, the hand is guided to its spot with at most this (N): the arm's muscles put
+ /// it there (the plant's whole pull yanked the arm, turning the pelvis 20 degrees in a frame).
+ pub const HAND_REACH: f32 = 60.0;
++/// A hand lands only touching the ground within this share of the arm's length across from its
++/// shoulder (where it can push); carried in from further, it is held over the ground by up to
++/// this (m).
++pub const HAND_ZONE: f32 = 10.0;
++pub const HAND_LIFT: f32 = 0.05;
++/// A landed hand lifted this far over its spot lets go (m).
++pub const HAND_UP: f32 = 0.03;
++/// A landed hand's hold across (N/m).
++pub const HAND_HOLD: f32 = 20000.0;
+ /// How long the limits stay soft after a fall (s).
+ pub const LIMITS_SETTLE: f32 = 0.3;
+ /// Standing again, the balance's joint targets and the pelvis's turn ease from the pose the body
+@@ -1786,9 +1795,47 @@ impl Np {
+                     self.ground_at(hand, xy).map_or(floor, |g| g * UNITS) + hand_def.radius * UNITS;
+                 [xy[0], xy[1], z]
+             });
+-            let arm = crate::flinch::length(sub(elbow, shoulder))
++            // Brought down toward its spot until it touches the ground within the arm's push
++            // (under the shoulder, [`HAND_ZONE`] of the arm's length across); then it is held
++            // where it touched and the ground pushes it (a pull down held the torso down as the
++            // arm straightened). Touching further out is no landing: it is carried on a little
++            // over the ground (landed where it first touched, 32 units out beside the shoulder,
++            // the plant's hold pulled it across the floor to its spot: a 30 unit slide).
++            let hand_at = worlds[hand].1;
++            let across = sub(hand_at, shoulder);
++            let arm_len = crate::flinch::length(sub(elbow, shoulder))
+                 + crate::flinch::length(sub(wrist, elbow));
+-            let raised = add(shoulder, [0.0, 0.0, 0.5 * arm]);
++            let in_push = crate::flinch::length([across[0], across[1], 0.0]) <= HAND_ZONE * arm_len;
++            let touched = !down.hand_landed[side]
++                && in_push
++                && self.report.floor_load.get(hand).copied().unwrap_or(0.0) > 1.0;
++            let plant = if touched {
++                down.hand_plants[side] = Some(hand_at);
++                hand_at
++            } else {
++                plant
++            };
++            // A landed hand the arm lifts off its spot, or off the ground, lets go (it is no
++            // longer planted): it is put down afresh, never held planted in the air (planted
++            // hands rose 10 to 18 units and their load went and came back).
++            let load = self.report.floor_load.get(hand).copied().unwrap_or(0.0);
++            if down.hand_landed[side] && (hand_at[2] - plant[2] > HAND_UP * UNITS || load <= 1.0) {
++                down.hand_plants[side] = None;
++                down.hand_landed[side] = false;
++                continue;
++            }
++            let landed = down.hand_landed[side] || touched;
++            down.hand_landed[side] = landed;
++            let off = sub(hand_at, plant);
++            let far = crate::flinch::length([off[0], off[1], 0.0]);
++            let lift = if landed {
++                0.0
++            } else {
++                far.min(HAND_LIFT * UNITS)
++            };
++            // The arm posed to put the hand there, straight under a shoulder raised by half the
++            // arm, so it pushes the torso up.
++            let raised = add(shoulder, [0.0, 0.0, 0.5 * arm_len]);
+             if let Some((r1, m, _)) =
+                 crate::flinch::leg_ik(shoulder, elbow, wrist, raised, plant, scale(out, -1.0))
+             {
+@@ -1798,14 +1845,9 @@ impl Np {
+             }
+             let q = self.states[hand].q;
+             let x = add(
+-                scale(plant, 1.0 / UNITS),
++                scale(add(plant, [0.0, 0.0, lift]), 1.0 / UNITS),
+                 crate::active::qrot(q, hand_def.com),
+             );
+-            // Brought down onto its spot until it touches; then the ground pushes it (a pull
+-            // down held the torso down as the arm straightened).
+-            let landed = down.hand_landed[side]
+-                || self.report.floor_load.get(hand).copied().unwrap_or(0.0) > 1.0;
+-            down.hand_landed[side] = landed;
+             pulls.push(Support {
+                 body: hand,
+                 x,
+@@ -1814,9 +1856,16 @@ impl Np {
+                 kp: if landed { 0.0 } else { HAND_PLANT.0 },
+                 kd: if landed { 0.0 } else { HAND_PLANT.1 },
+                 max_force: HAND_REACH * k,
+-                kp_h: HAND_PLANT.0,
++                kp_h: if landed { HAND_HOLD } else { HAND_PLANT.0 },
+                 kd_h: HAND_PLANT.1,
+-                max_force_h: if landed { HAND_PLANT.2 } else { HAND_REACH } * k,
++                max_force_h: if landed {
++                    HAND_PLANT.2.max(
++                        crate::np_body::FRICTION.0
++                            * self.report.floor_load.get(hand).copied().unwrap_or(0.0),
++                    )
++                } else {
++                    HAND_REACH
++                } * k,
+                 kp_turn: 0.0,
+                 kd_turn: 0.0,
+                 max_torque: 0.0,
