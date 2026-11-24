@@ -20,6 +20,14 @@ go, and the bent-over torso has nothing to push it upright); keeping that hand p
 bounces back. Zone 0.6 the other way round. A sweep of the four constants (zone, carry, lift-off,
 hold) against the six tests runs in a separate worktree.
 
+The sweep's result (52 settings; the six: planted hands, the arms' push, the rise on flat, the
+rise's momentum trip, the rise's root bound, walls and crates): none passes all six. The
+closest each fail one: zone 0.8, carry 4, lift-off 3 cm, hold 10000 or 11000 (the crate run does
+not stand again within its 14 s after going over the crate); hold 9000 (the arms' push); carry
+4.5 at hold 10000 (the rise on flat). Neighbouring settings fail different tests (hold 12000 and
+16000 the two rise bounds, 14000 three), so a setting that happened to pass would be fragile: the
+rises want a firmer change than these constants, or Patrick's call on which test gives.
+
 ### Claude, 2026-11-24 (the planted hands: the cause found, a patch that half works)
 
 **Status: findings and `docs/wip/np-planted-hands.patch` (not applied).** The 27 to 36 unit
