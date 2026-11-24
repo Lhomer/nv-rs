@@ -17,6 +17,13 @@ hand's spot is now kept the hand's radius and 5 cm off the face of any wall besi
 (`HAND_WALL`; the frame's walls and each body's own, ground-like ones and those it lies far
 behind left out). It stands on its second rise; the capsule never in the wall. New Physics 46
 pass, one ignored (the planted hands), the Ragdoll lab 104 + 54.
+`docs/wip/np-planted-hands.patch` is rebuilt on this (the spot kept off walls carried into it);
+with it at its closest setting (zone 0.8, carry 4, hold 10000) the crate run and this wall run
+fail. The list's other items: the slab, the rise-end trio and the arms on a slope pass (their
+bounds were what earlier changes moved over); the death hand-over passes
+(`np_dies_while_downed_on_fnvs_skeleton`, within 1.5 units); what stays open there is a quality
+item with no failing test (limbs the floor holds out of the skeleton's limits are not brought in
+during the 45-frame wait, the entry of 2026-11-22).
 
 ### Claude, 2026-11-24 (the planted hands: the patch carried further, a sweep running)
 

@@ -1,11 +1,11 @@
 diff --git a/crates/ragdoll-core/src/np.rs b/crates/ragdoll-core/src/np.rs
-index 21356334..a9fdf99c 100644
+index e3749091..2e75cbbe 100644
 --- a/crates/ragdoll-core/src/np.rs
 +++ b/crates/ragdoll-core/src/np.rs
-@@ -124,6 +124,17 @@ pub const HAND_PLANT: (f32, f32, f32) = (3000.0, 150.0, 400.0);
- /// Until it touches, the hand is guided to its spot with at most this (N): the arm's muscles put
- /// it there (the plant's whole pull yanked the arm, turning the pelvis 20 degrees in a frame).
- pub const HAND_REACH: f32 = 60.0;
+@@ -130,6 +130,17 @@ pub const HAND_REACH: f32 = 60.0;
+ pub const HAND_WALL: f32 = 0.05;
+ pub const HAND_WALL_FLOOR: f32 = 0.64;
+ pub const HAND_WALL_BEHIND: f32 = 0.3;
 +/// A hand lands only touching the ground within this share of the arm's length across from its
 +/// shoulder (where it can push); carried in from further, it is held over the ground by up to
 +/// this (m).
@@ -20,7 +20,7 @@ index 21356334..a9fdf99c 100644
  /// How long the limits stay soft after a fall (s).
  pub const LIMITS_SETTLE: f32 = 0.3;
  /// Standing again, the balance's joint targets and the pelvis's turn ease from the pose the body
-@@ -1777,7 +1788,10 @@ impl Np {
+@@ -1783,7 +1794,10 @@ impl Np {
                  crate::flinch::unit([shoulder[0] - torso_at[0], shoulder[1] - torso_at[1], 0.0])
                      .unwrap_or([0.0; 3]);
              let hand_def = &self.model.bodies[hand];
@@ -32,7 +32,7 @@ index 21356334..a9fdf99c 100644
                  let xy = add(
                      add(shoulder, scale(out, HAND_OUT * UNITS)),
                      scale(dir, HAND_AHEAD * UNITS),
-@@ -1785,10 +1799,60 @@ impl Np {
+@@ -1807,10 +1821,60 @@ impl Np {
                  let z =
                      self.ground_at(hand, xy).map_or(floor, |g| g * UNITS) + hand_def.radius * UNITS;
                  [xy[0], xy[1], z]
@@ -96,7 +96,7 @@ index 21356334..a9fdf99c 100644
              if let Some((r1, m, _)) =
                  crate::flinch::leg_ik(shoulder, elbow, wrist, raised, plant, scale(out, -1.0))
              {
-@@ -1798,14 +1862,9 @@ impl Np {
+@@ -1820,14 +1884,9 @@ impl Np {
              }
              let q = self.states[hand].q;
              let x = add(
@@ -112,7 +112,7 @@ index 21356334..a9fdf99c 100644
              pulls.push(Support {
                  body: hand,
                  x,
-@@ -1814,9 +1873,16 @@ impl Np {
+@@ -1836,9 +1895,16 @@ impl Np {
                  kp: if landed { 0.0 } else { HAND_PLANT.0 },
                  kd: if landed { 0.0 } else { HAND_PLANT.1 },
                  max_force: HAND_REACH * k,
@@ -131,7 +131,7 @@ index 21356334..a9fdf99c 100644
                  kp_turn: 0.0,
                  kd_turn: 0.0,
                  max_torque: 0.0,
-@@ -1843,7 +1909,13 @@ impl Np {
+@@ -1865,7 +1931,13 @@ impl Np {
              }
              for (j, def) in self.model.joints.iter().enumerate() {
                  if self.bodies.arms[side][..2].contains(&def.child) {
