@@ -7,6 +7,19 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-24 (the planted hands: the patch carried further, a sweep running)
+
+**Status: `docs/wip/np-planted-hands.patch` updated (not applied).** Since the entry below: the
+hand's spot follows the shoulder until the hand lands (fixed where the shoulder first was, it lay
+25 units out by the time the hand got there); a hand lands only within `HAND_ZONE` of the arm's
+length of its spot and is carried in a little over the ground from further, no longer held up
+once within it; the arm turns `HAND_CARRY` times faster while it carries the hand in. With zone
+0.8 the planted-hands, arms, slab and crate runs all pass, but the rise from its side never
+stands (its lower hand, put down at full stretch, loses its load as the torso comes up and is let
+go, and the bent-over torso has nothing to push it upright); keeping that hand planted brings the
+bounces back. Zone 0.6 the other way round. A sweep of the four constants (zone, carry, lift-off,
+hold) against the six tests runs in a separate worktree.
+
 ### Claude, 2026-11-24 (the planted hands: the cause found, a patch that half works)
 
 **Status: findings and `docs/wip/np-planted-hands.patch` (not applied).** The 27 to 36 unit
