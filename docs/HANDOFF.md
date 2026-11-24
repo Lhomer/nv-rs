@@ -7,6 +7,33 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-25 (the planted hands, option 2: what the deeper rise change has to be)
+
+**Status: findings and `docs/wip/np-planted-hands-2.patch` (not applied; nothing shipped, per
+Patrick's option 2).** The patch is `np-planted-hands.patch` plus: the arms' push on the torso
+(`RISE_ARMS`) at a share (`RISE_ARMS_UNPLANTED`) while hands are being planted, the legs' lift
+waiting for a landed hand to push (`HANDS_FIRST`, at most `HANDS_FIRST_MOST`), a landed arm's
+drive and hold (`HAND_PUSH`), a hand landing within `HAND_ZONE` of the arm from the shoulder. A
+fourth sweep (24 settings with the arms' share) and the hand tries after it: none passes all
+seven tests (planted hands, the arms' push, the three rise tests, walls and crates, the reference
+by a wall); the best fail two.
+
+What the tries showed, the reason tuning cannot get there:
+- The torso is not pushed up through the hands. `RISE_ARMS` turns it up by an abstract torque
+  on the torso; a hand's ground load is a by-product. That is why the hands carried 0.04 to 0.13
+  of the weight (0.2 wanted, unarmed) whatever the zone, the carry, the arm's gain and hold, or
+  how long the legs waited: 0.07, 0.10 and 0.13 came back unchanged through every one of them.
+  Before the patch the 0.26 to 0.49 came from the slide: a hand dragged across the floor to its
+  spot under the shoulder pressed down as it went.
+- The share counts only before the legs lift (`probe.lifting` is the legs'). On flat ground the
+  hands touch down 0.6 to 1.0 s into the rise, as the centre comes over the feet, and with a spot
+  that follows the shoulder they are never "landed" there (the spot moves as it sits up).
+- So the change is the rise's: the arms must lift the torso themselves, through hands put down
+  under the shoulders first (a hand's swing, lifted, from where the arm lies to the spot), with
+  `RISE_ARMS` only for what no hand can reach (a wall's push, the weapon arm), and the legs
+  lifting after. That touches every rise (the side, the slope, the crate's flip, the wall), so
+  the cycle's tests must be rebalanced around it, not the constants.
+
 ### Claude, 2026-11-24 (rising beside a wall: a hand's spot off the wall)
 
 **Status: pushed.** `np_the_reference_moves_clear_of_a_wall` runs, no longer ignored. Its rises
