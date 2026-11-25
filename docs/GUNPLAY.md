@@ -668,9 +668,20 @@ crawl possible.
 Rising is the controller pursuing balance when the AI asks (`Np::rise`). Its goals each frame come from
 the pose it has: the torso turned up and leaning toward the feet (by how far the centre of mass is
 behind them), each foot drawn along the floor in front of its hip (pulled there as the leg's
-muscles drag a heel), the legs folded onto it by the legs' IK; the arms' push turns the torso up
-while a hand can reach the floor or a wall (`RISE_ARMS`, capped by strength); once the centre of
-mass is within 0.35 m of a foot that is down (a kneel counts), the legs' push lifts the pelvis
+muscles drag a heel), the legs folded onto it by the legs' IK. The hands go down first: each
+pushing arm's hand is carried, a little over the ground and faster than the arm pushes, to a spot
+beside its shoulder that follows the shoulder until the hand lands (`HAND_ZONE`, `HAND_CARRY`; put
+down where it is after `HAND_CARRY_FOR` if its arm cannot bring it in), is held where it lands
+and let go when lifted, off the ground, out of the shoulder's reach or once the body is mostly up
+(`HAND_UP`, `HAND_REACHABLE`, `HAND_LET_GO`). A landed hand's arm lifts the body through it: a
+force between the hand and the pelvis, along the arm and toward the rise, equal on both
+(`ARM_PUSH`, `ARM_FORWARD`; `Tracking::pushes`), so the ground's answer under the hand carries
+real weight. The arms' abstract push on the torso (`RISE_ARMS`, while a hand can reach the floor
+or a wall) is cut to `RISE_ARMS_UNPLANTED` of itself while hands are going down or pushing with
+the torso still lying (`ARMS_HANDS_BELOW`, `ARMS_HANDS_TILT`), and the legs wait up to
+`HANDS_FIRST_MOST` for a landed hand to push. An arm whose hand presses a wall and is put down
+nowhere gives (`ARM_YIELD`). Once the centre of mass is within 0.35 m of a foot that is down (a
+kneel counts), or 0.6 m while a landed hand carries (`RISE_OVER_FEET_HANDS`), the legs' push lifts the pelvis
 toward its standing height over the feet (`RISE_FORCE` 1500 N times strength and effort: the
 standing balance's root support is the same kind of abstraction). Each joint's goal lies at most
 0.3 rad from where it is (`RISE_REACH`). A rise whose pelvis gets no higher for 1.5 s gives up and

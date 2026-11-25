@@ -4448,12 +4448,11 @@ fn np_the_arms_push_it_up() {
 }
 
 /// A planted hand never slides (2 units at its node) nor bounces (its load gone and back while
-/// planted) in [`arms_runs`]. Open: the torso's move toward the feet drags a hand planted beside
-/// the shoulder 14 to 35 units across the ground (its hold 3000 N/m, at most 400 N), and on the
-/// slope a hand's load comes and goes 3 to 8 times; a stiffer hold and a let-go when dragged or
-/// lifted stopped both but changed the rises enough to break the cycle's own tests.
+/// planted) in [`arms_runs`]. A hand is put down where it can push (carried there over the
+/// ground, never pulled across it: the old hold dragged a hand that touched short of its spot
+/// 30 units to it), held where it lands, let go when lifted or off the ground; the arm lifts the
+/// torso through it (`np::ARM_PUSH`).
 #[test]
-#[ignore = "open: planted hands slide and, on a slope, bounce (see the doc)"]
 fn np_planted_hands_hold_still() {
     let bad: Vec<String> = arms_runs()
         .into_iter()

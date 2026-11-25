@@ -116,6 +116,25 @@ pub const RISE_FEET: (f32, f32, f32) = (2000.0, 120.0, 250.0);
 /// (m); only while the torso tilts past this (rad).
 pub const RISE_ARMS: (f32, f32, f32, f32) = (3000.0, 150.0, 160.0, 0.6);
 pub const RISE_ARMS_TILT: f32 = 0.5;
+/// The arms' push while its hands are still on their way down: this share of it.
+pub const RISE_ARMS_UNPLANTED: f32 = 0.3;
+/// The hands take the arms' push on the torso over only while the pelvis is under this share of
+/// standing height.
+pub const ARMS_HANDS_BELOW: f32 = 0.5;
+/// ... and the torso is still tilted past this (degrees from upright: sitting up, the lean over
+/// the feet is the arms' push on the torso; cut back there, a body sat against a wall at 58
+/// degrees with its hands down never came over its feet).
+pub const ARMS_HANDS_TILT: f32 = 65.0;
+/// The legs wait for a landed hand to push this long (s), at most this far into a rise (s).
+pub const HANDS_FIRST: f32 = 0.3;
+pub const HANDS_FIRST_MOST: f32 = 1.0;
+/// A landed hand's arm straightens with this (N, times the effort) while shorter than this share
+/// of its length and its shoulder over the hand (the push's rise past this share of its length).
+pub const ARM_PUSH: f32 = 300.0;
+pub const ARM_STRAIGHT: f32 = 1.05;
+pub const ARM_OVER: f32 = 0.3;
+/// How much of the arm's push goes toward the rise (a share of the push along the arm).
+pub const ARM_FORWARD: f32 = 0.5;
 /// A rise's hand plant: out from the shoulder and ahead toward the rise (m), and its pull
 /// (spring, damper, most force N).
 pub const HAND_OUT: f32 = 0.12;
@@ -130,6 +149,30 @@ pub const HAND_REACH: f32 = 60.0;
 pub const HAND_WALL: f32 = 0.05;
 pub const HAND_WALL_FLOOR: f32 = 0.64;
 pub const HAND_WALL_BEHIND: f32 = 0.3;
+/// A hand lands only touching the ground within this share of the arm's length across from its
+/// shoulder (where it can push); carried in from further, it is held over the ground by up to
+/// this (m).
+pub const HAND_ZONE: f32 = 0.8;
+pub const HAND_LIFT: f32 = 0.05;
+/// How much faster an arm carrying its hand in to its spot turns than [`RISE_REACH`].
+pub const HAND_CARRY: f32 = 3.0;
+/// A hand carried this long (s) without getting into [`HAND_ZONE`] is put down wherever it is
+/// within this share of the arm's reach.
+pub const HAND_CARRY_FOR: f32 = 0.4;
+pub const HAND_CARRY_REACH: f32 = 0.95;
+/// A shoulder further over its ground than this share of the arm's length puts no hand down.
+pub const HAND_REACHABLE: f32 = 1.0;
+/// Up past this share of standing height (the pelvis), the hands let go.
+pub const HAND_LET_GO: f32 = 0.75;
+/// An arm not put down whose hand presses a wall past this (N) gives: its drive and hold at this
+/// share.
+pub const ARM_YIELD: (f32, f32) = (30.0, 0.2);
+/// A landed hand lifted this far over its spot lets go (m).
+pub const HAND_UP: f32 = 0.03;
+/// A landed hand's hold across (N/m).
+pub const HAND_HOLD: f32 = 20000.0;
+/// A landed hand's arm: its drive's gain (times the rise's) and its hold of the weight below.
+pub const HAND_PUSH: (f32, f32) = (2.0, 1.0);
 /// How long the limits stay soft after a fall (s).
 pub const LIMITS_SETTLE: f32 = 0.3;
 /// Standing again, the balance's joint targets and the pelvis's turn ease from the pose the body
@@ -160,6 +203,11 @@ pub const STAND_INSIDE: f32 = -0.02;
 /// `np_balance::STANCE_OFF`).
 pub const STANCE_KEPT: f32 = 0.06;
 pub const STANCE_THERE: f32 = 0.01;
+/// A foot going to its stance place is done once within [`STANCE_NEAR`] (m) and no longer
+/// closing by [`STANCE_CLOSING`] (m) for [`STANCE_STALL`] (s).
+pub const STANCE_NEAR: f32 = 0.02;
+pub const STANCE_CLOSING: f32 = 0.001;
+pub const STANCE_STALL: f32 = 0.3;
 /// Standing again, the torso against the pelvis at most this far from the animation's (degrees).
 pub const STAND_POSE: f32 = 10.0;
 /// Rising and upright, the torso's flat sway's damper (N·s/m) and its cap (N).
@@ -189,6 +237,9 @@ pub const ARMS_UNTIL_TILT: f32 = 60.0;
 /// The legs push once the centre of mass is within this of the feet (m): their pull brings the
 /// hips forward over the feet as they lift.
 pub const RISE_OVER_FEET: f32 = 0.35;
+/// ... or this (m) while a landed hand carries more than [`HANDS_CARRY_LOAD`] (N).
+pub const RISE_OVER_FEET_HANDS: f32 = 0.6;
+pub const HANDS_CARRY_LOAD: f32 = 50.0;
 /// A rise that begins with the chest facing down (the front's up under minus this) rises from the
 /// front: first onto the knees (the pelvis to [`KNEEL_HEIGHT`] of standing height over the knees,
 /// each foot [`KNEEL_FOOT`] (m) behind its hip, the torso up), then a foot forward,
@@ -382,6 +433,10 @@ pub struct Down {
     /// Each hand's plant on the ground in a rise (game units, local): where it was put down,
     /// held there until the legs push.
     pub hand_plants: [Option<V3>; 2],
+    /// How long each hand has been landed (s; 0 while it is not).
+    pub hand_down_for: [f32; 2],
+    /// How long each hand has been carried toward its spot without landing (s).
+    pub hand_carried_for: [f32; 2],
     /// Each planted hand has touched the ground: from then the ground alone holds it up (it only
     /// pushes), the plant only keeps it from sliding.
     pub hand_landed: [bool; 2],
@@ -403,6 +458,9 @@ pub struct Down {
     pub front_for: f32,
     /// Upright, the foot going to its place in the animation's stance ([`STANCE_KEPT`]).
     pub stance_fixing: Option<usize>,
+    /// The stance's least gap while a foot goes to it (m) and the time since it last closed (s).
+    pub stance_best: f32,
+    pub stance_since: f32,
 }
 
 /// Each joint's relative rotation (`parent⁻¹ child`) in a pose of body-node worlds.
@@ -687,12 +745,16 @@ impl Np {
                 no_push: 0.0,
                 changes: Vec::new(),
                 hand_plants: [None, None],
+                hand_down_for: [0.0; 2],
+                hand_carried_for: [0.0; 2],
                 hand_landed: [false, false],
                 arms_off: false,
                 lift_lapse: 0.0,
                 still_wait: false,
                 still_up: false,
                 stance_fixing: None,
+                stance_best: f32::INFINITY,
+                stance_since: 0.0,
                 front_stage: 0,
                 front_side: 0,
                 front_done: false,
@@ -847,6 +909,7 @@ impl Np {
             data_limits: self.to_limits,
             body_walls: self.body_walls.clone(),
             body_wall_tops: self.body_wall_tops.clone(),
+            pushes: Vec::new(),
         };
         let tracking = self.with_allowance(tracking);
         self.stood_up += dt;
@@ -919,12 +982,16 @@ impl Np {
             no_push: 0.0,
             changes: Vec::new(),
             hand_plants: [None, None],
+            hand_down_for: [0.0; 2],
+            hand_carried_for: [0.0; 2],
             hand_landed: [false, false],
             arms_off: false,
             lift_lapse: 0.0,
             still_wait: false,
             still_up: false,
             stance_fixing: None,
+            stance_best: f32::INFINITY,
+            stance_since: 0.0,
             front_stage: 0,
             front_side: 0,
             front_done: false,
@@ -974,6 +1041,7 @@ impl Np {
                 holds[j] = hold * k;
             }
         }
+        let mut pushes: Vec<(usize, usize, V3)> = Vec::new();
         let mut pulls = Vec::new();
         down.lifting_was = down.lifting;
         down.lifting = false;
@@ -1096,6 +1164,26 @@ impl Np {
                 .walls
                 .iter()
                 .fold(torso_x[2] - f, |m, w| m.min(dot(sub(torso_x, w.p), w.n)));
+            // The arms push through their hands: while a hand is on its way down and none has
+            // landed, the torso comes up by its own strength alone (a sit-up's, a share of the
+            // arms'), so the hands are down before it is up (pushed up by the arms' strength
+            // at once, the body sat up before its hands got there and they carried 0.12 of its
+            // weight).
+            let coming = (0..2).any(|s| down.hand_plants[s].is_some());
+            let landed = (0..2).any(|s| down.hand_landed[s]);
+            // ... while the pelvis is low: up past [`ARMS_HANDS_BELOW`] of standing height the
+            // torso straightens on its own (cut back up there, a body folded over at full height
+            // with a hand still down never straightened and its rise was given up).
+            // (Not in a rise from the front, whose stages have their own free arm's brace.)
+            let low = reading.pelvis_height < ARMS_HANDS_BELOW * reading.stand_height
+                && reading.tilt > ARMS_HANDS_TILT.to_radians()
+                && down.front_stage == 0
+                && !down.front_done;
+            let hands_share = if low && (coming || landed) {
+                RISE_ARMS_UNPLANTED
+            } else {
+                1.0
+            };
             if reach < RISE_ARMS.3 && reading.tilt > RISE_ARMS_TILT {
                 let q = self.states[b.torso].q;
                 pulls.push(Support {
@@ -1111,7 +1199,7 @@ impl Np {
                     max_force_h: 0.0,
                     kp_turn: RISE_ARMS.0,
                     kd_turn: RISE_ARMS.1,
-                    max_torque: RISE_ARMS.2 * k,
+                    max_torque: RISE_ARMS.2 * k * hands_share,
                 });
                 down.arms = true;
             }
@@ -1150,13 +1238,24 @@ impl Np {
             // other before it stands (a stance step taken after standing moved it 3.8 units on,
             // Patrick's drift bound 2).
             let stance = self.stance_apart(anim);
+            // ... done there, or near and no longer closing (the floor's grip held a foot a
+            // millimetre short of [`STANCE_THERE`] and the stand was never taken).
+            if stance.0 < down.stance_best - STANCE_CLOSING {
+                down.stance_best = stance.0;
+                down.stance_since = 0.0;
+            } else {
+                down.stance_since += dt;
+            }
+            let settled = stance.0 <= STANCE_NEAR && down.stance_since >= STANCE_STALL;
             if !upright {
                 down.stance_fixing = None;
             } else if down.stance_fixing.is_none() && stance.0 > STANCE_KEPT {
                 // The foot that goes is chosen once (chosen each frame, it changed as the
                 // centre moved and the step never ended).
                 down.stance_fixing = Some(stance.1);
-            } else if stance.0 <= STANCE_THERE {
+                down.stance_best = f32::INFINITY;
+                down.stance_since = 0.0;
+            } else if stance.0 <= STANCE_THERE || settled {
                 down.stance_fixing = None;
             }
             let stance_fix = down
@@ -1319,7 +1418,15 @@ impl Np {
                 }
             };
             self.plant_hands(
-                &mut down, &arms, &worlds, floor, rise_dir, &mut posed, &mut pulls,
+                &mut down,
+                &arms,
+                &worlds,
+                floor,
+                rise_dir,
+                &mut posed,
+                &mut pulls,
+                &mut pushes,
+                dt,
             );
             let legs = relative_of(&self.model, &posed);
             self.drive_planted_arms(&down, &legs, &mut targets, &mut gains, &mut holds);
@@ -1352,7 +1459,41 @@ impl Np {
                 .any(|&ft| self.report.floor_load.get(ft).copied().unwrap_or(0.0) > 1.0);
             // A lapse of a few frames (a foot's load or the hips over it read off for a frame)
             // keeps the push: each lapse let the feet be pulled again and the hands planted.
-            let over = feet_down && reading.over_feet < RISE_OVER_FEET;
+            // ... or within [`RISE_OVER_FEET_HANDS`] while a landed hand carries (hands and feet
+            // hold it up between them as the hips lift: sat against a wall its centre stayed
+            // 0.5 m behind its feet and the legs never pushed).
+            let hands_carry = (0..2).any(|s| {
+                down.hand_landed[s]
+                    && self
+                        .report
+                        .floor_load
+                        .get(b.arms[s][2])
+                        .copied()
+                        .unwrap_or(0.0)
+                        > HANDS_CARRY_LOAD
+            });
+            let over = feet_down
+                && (reading.over_feet < RISE_OVER_FEET
+                    || (hands_carry && reading.over_feet < RISE_OVER_FEET_HANDS));
+            // The hands push first: the legs lift only once a landed hand has pushed for
+            // [`HANDS_FIRST`] (at most [`HANDS_FIRST_MOST`] into the rise): over the feet at once,
+            // the legs lifted as the hands touched down and they carried 0.04 to 0.12 of the
+            // weight.
+            for s in 0..2 {
+                down.hand_down_for[s] = if down.hand_landed[s] {
+                    down.hand_down_for[s] + dt
+                } else {
+                    0.0
+                };
+            }
+            let pushing = (0..2).any(|s| down.hand_plants[s].is_some());
+            let pushed = down.hand_down_for.iter().any(|&t| t >= HANDS_FIRST);
+            let hands_first = !down.lifting_was
+                && front_stage == 0
+                && !down.front_done
+                && pushing
+                && !pushed
+                && down.rising < HANDS_FIRST_MOST;
             if over {
                 down.lift_lapse = 0.0;
             } else if down.lifting_was {
@@ -1383,7 +1524,9 @@ impl Np {
                     kd_turn: self.root_kd_turn * 0.5,
                     max_torque: 300.0 * k,
                 });
-            } else if over || upright || (down.lifting_was && down.lift_lapse < LIFT_LAPSE) {
+            } else if !hands_first
+                && (over || upright || (down.lifting_was && down.lift_lapse < LIFT_LAPSE))
+            {
                 down.lifting = true;
                 // Over the feet's own ground (a slope's).
                 let feet_ground = b
@@ -1536,7 +1679,15 @@ impl Np {
             let mut posed = worlds.clone();
             let facing = reading.facing;
             self.plant_hands(
-                &mut down, &brace, &worlds, floor, facing, &mut posed, &mut pulls,
+                &mut down,
+                &brace,
+                &worlds,
+                floor,
+                facing,
+                &mut posed,
+                &mut pulls,
+                &mut pushes,
+                dt,
             );
             if !brace.is_empty() {
                 let rel = relative_of(&self.model, &posed);
@@ -1570,6 +1721,22 @@ impl Np {
             down.rise_stall = 0.0;
             down.front_stage = 0;
             down.front_done = false;
+        }
+        // An arm whose hand presses a wall and is put down nowhere gives (its drive and hold a
+        // share of theirs): its pose, driven into the wall, levered the body 25 to 28 degrees
+        // over at full height (the wall at 200 to 250 N on the hand) until the rise gave up.
+        for side in 0..2 {
+            let hand = self.bodies.arms[side][2];
+            let pressed = self.report.wall_load.get(hand).copied().unwrap_or(0.0);
+            if pressed <= ARM_YIELD.0 || down.hand_plants[side].is_some() {
+                continue;
+            }
+            for (j, def) in self.model.joints.iter().enumerate() {
+                if self.bodies.arms[side].contains(&def.child) {
+                    gains[j].0 *= ARM_YIELD.1;
+                    holds[j] *= ARM_YIELD.1;
+                }
+            }
         }
         let drives: Vec<Drive> = targets
             .iter()
@@ -1614,6 +1781,7 @@ impl Np {
             data_limits: self.to_limits,
             body_walls: self.body_walls.clone(),
             body_wall_tops: self.body_wall_tops.clone(),
+            pushes,
         };
         let tracking = self.with_allowance(tracking);
         self.report = self.model.step_world(
@@ -1767,11 +1935,16 @@ impl Np {
         dir: V3,
         posed: &mut [(M3, V3)],
         pulls: &mut Vec<Support>,
+        pushes: &mut Vec<(usize, usize, V3)>,
+        dt: f32,
     ) {
         let b = &self.bodies;
         let k = self.effort.clamp(0.0, 1.0);
         for side in 0..2 {
-            if !arms.contains(&side) {
+            // Handed over (a death, a give-up), the hands let go: the arms come inside the
+            // skeleton's limits over the wait (planted and posed to push, they lay out of them
+            // and the hand-over's projection moved the bodies 1.5 units off the pose drawn).
+            if !arms.contains(&side) || self.to_limits {
                 down.hand_plants[side] = None;
                 down.hand_landed[side] = false;
                 continue;
@@ -1783,7 +1956,10 @@ impl Np {
                 crate::flinch::unit([shoulder[0] - torso_at[0], shoulder[1] - torso_at[1], 0.0])
                     .unwrap_or([0.0; 3]);
             let hand_def = &self.model.bodies[hand];
-            let plant = *down.hand_plants[side].get_or_insert_with(|| {
+            // Its spot beside the shoulder, a little toward `dir`: kept once the hand lands there,
+            // until then following the shoulder (fixed where the shoulder first was, the spot
+            // lay 25 units out from it by the time the hand was carried there).
+            let spot = || {
                 let xy = add(
                     add(shoulder, scale(out, HAND_OUT * UNITS)),
                     scale(dir, HAND_AHEAD * UNITS),
@@ -1807,10 +1983,86 @@ impl Np {
                 let z =
                     self.ground_at(hand, xy).map_or(floor, |g| g * UNITS) + hand_def.radius * UNITS;
                 [xy[0], xy[1], z]
-            });
-            let arm = crate::flinch::length(sub(elbow, shoulder))
+            };
+            let plant = match down.hand_plants[side] {
+                Some(p) if down.hand_landed[side] => p,
+                _ => {
+                    let p = spot();
+                    down.hand_plants[side] = Some(p);
+                    p
+                }
+            };
+            // Brought down toward its spot until it touches the ground within the arm's push
+            // (under the shoulder, [`HAND_ZONE`] of the arm's length across); then it is held
+            // where it touched and the ground pushes it (a pull down held the torso down as the
+            // arm straightened). Touching further out is no landing: it is carried on a little
+            // over the ground (landed where it first touched, 32 units out beside the shoulder,
+            // the plant's hold pulled it across the floor to its spot: a 30 unit slide).
+            let hand_at = worlds[hand].1;
+            let arm_len = crate::flinch::length(sub(elbow, shoulder))
                 + crate::flinch::length(sub(wrist, elbow));
-            let raised = add(shoulder, [0.0, 0.0, 0.5 * arm]);
+            // A shoulder further over its ground than the arm reaches puts no hand down (the
+            // torso up and bent over, a hand hanging under it held the arms' push on the torso
+            // back as if it were coming: it never straightened).
+            let under = self.ground_at(hand, shoulder).map_or(floor, |g| g * UNITS);
+            // ... nor once the body is mostly up (planted on, a hand pushing at full height held
+            // the torso 27 degrees over, past the upright line, and the rise was given up).
+            let up = down.reading.pelvis_height >= HAND_LET_GO * down.reading.stand_height;
+            if up || shoulder[2] - under > HAND_REACHABLE * arm_len {
+                down.hand_plants[side] = None;
+                down.hand_landed[side] = false;
+                down.hand_carried_for[side] = 0.0;
+                continue;
+            }
+            let across = sub(hand_at, shoulder);
+            // ... or, carried [`HAND_CARRY_FOR`] without getting there (an arm whose limits keep
+            // it out from under the shoulder: the free hand on its back held at 29 units out),
+            // wherever it is within the arm's reach.
+            let out_by = crate::flinch::length([across[0], across[1], 0.0]);
+            let in_push = out_by <= HAND_ZONE * arm_len
+                || (down.hand_carried_for[side] >= HAND_CARRY_FOR
+                    && out_by <= HAND_CARRY_REACH * arm_len);
+            // Touching the ground, or a wall beside it (a brace: the arms push off a wall as off
+            // the floor; held up against a wall above the shoulder, a hand that waited for the
+            // floor never landed and the rises by the wall were given up).
+            let pressed = self.report.floor_load.get(hand).copied().unwrap_or(0.0)
+                + self.report.wall_load.get(hand).copied().unwrap_or(0.0);
+            let touched = !down.hand_landed[side] && in_push && pressed > 1.0;
+            let plant = if touched {
+                down.hand_plants[side] = Some(hand_at);
+                hand_at
+            } else {
+                plant
+            };
+            // A landed hand the arm lifts off its spot, or off the ground, lets go (it is no
+            // longer planted): it is put down afresh, never held planted in the air (planted
+            // hands rose 10 to 18 units and their load went and came back).
+            let load = self.report.floor_load.get(hand).copied().unwrap_or(0.0);
+            if down.hand_landed[side] && (hand_at[2] - plant[2] > HAND_UP * UNITS || load <= 1.0) {
+                down.hand_plants[side] = None;
+                down.hand_landed[side] = false;
+                continue;
+            }
+            let landed = down.hand_landed[side] || touched;
+            down.hand_landed[side] = landed;
+            down.hand_carried_for[side] = if landed {
+                0.0
+            } else {
+                down.hand_carried_for[side] + dt
+            };
+            // Carried in from out of the arm's push a little over the ground; within it, no
+            // longer held up (a hand already in reach was held off the ground and never
+            // pushed): it lands where it touches.
+            let off = sub(hand_at, plant);
+            let far = crate::flinch::length([off[0], off[1], 0.0]);
+            let lift = if landed || in_push {
+                0.0
+            } else {
+                far.min(HAND_LIFT * UNITS)
+            };
+            // The arm posed to put the hand there, straight under a shoulder raised by half the
+            // arm, so it pushes the torso up.
+            let raised = add(shoulder, [0.0, 0.0, 0.5 * arm_len]);
             if let Some((r1, m, _)) =
                 crate::flinch::leg_ik(shoulder, elbow, wrist, raised, plant, scale(out, -1.0))
             {
@@ -1820,14 +2072,29 @@ impl Np {
             }
             let q = self.states[hand].q;
             let x = add(
-                scale(plant, 1.0 / UNITS),
+                scale(add(plant, [0.0, 0.0, lift]), 1.0 / UNITS),
                 crate::active::qrot(q, hand_def.com),
             );
-            // Brought down onto its spot until it touches; then the ground pushes it (a pull
-            // down held the torso down as the arm straightened).
-            let landed = down.hand_landed[side]
-                || self.report.floor_load.get(hand).copied().unwrap_or(0.0) > 1.0;
-            down.hand_landed[side] = landed;
+            // Landed, the arm straightens between the hand and the shoulder (a muscle's push,
+            // equal on both: the ground's answer under the hand lifts the torso through the
+            // arm), while the arm is still bent and the shoulder over the hand.
+            // (Not the weapon's arm: it braces where the free hand has no ground, it does not lift.)
+            if landed && Some(side) != self.weapon_side {
+                let along = sub(shoulder, hand_at);
+                let len = crate::flinch::length(along);
+                if len > 1e-3 && len < ARM_STRAIGHT * arm_len && along[2] > ARM_OVER * len {
+                    // Along the arm and toward the rise (the hands push down and back, the
+                    // ground's grip sends the body forward over its feet: pushing only along
+                    // the arm, a body sat against a wall never came over them).
+                    let way = crate::flinch::unit(add(
+                        scale(along, 1.0 / len),
+                        scale([dir[0], dir[1], 0.0], ARM_FORWARD),
+                    ))
+                    .unwrap_or(scale(along, 1.0 / len));
+                    let f = scale(way, ARM_PUSH * k);
+                    pushes.push((self.model.root, hand, f));
+                }
+            }
             pulls.push(Support {
                 body: hand,
                 x,
@@ -1836,9 +2103,16 @@ impl Np {
                 kp: if landed { 0.0 } else { HAND_PLANT.0 },
                 kd: if landed { 0.0 } else { HAND_PLANT.1 },
                 max_force: HAND_REACH * k,
-                kp_h: HAND_PLANT.0,
+                kp_h: if landed { HAND_HOLD } else { HAND_PLANT.0 },
                 kd_h: HAND_PLANT.1,
-                max_force_h: if landed { HAND_PLANT.2 } else { HAND_REACH } * k,
+                max_force_h: if landed {
+                    HAND_PLANT.2.max(
+                        crate::np_body::FRICTION.0
+                            * self.report.floor_load.get(hand).copied().unwrap_or(0.0),
+                    )
+                } else {
+                    HAND_REACH
+                } * k,
                 kp_turn: 0.0,
                 kd_turn: 0.0,
                 max_torque: 0.0,
@@ -1865,9 +2139,20 @@ impl Np {
             }
             for (j, def) in self.model.joints.iter().enumerate() {
                 if self.bodies.arms[side][..2].contains(&def.child) {
-                    targets[j] = turn_toward(now[j], posed_rel[j], RISE_REACH);
-                    gains[j].0 = self.muscles.base[j].0 * RISE_GAIN * k;
-                    holds[j] = 0.5 * k;
+                    // Carrying the hand in to its spot, the arm moves faster than it pushes.
+                    let reach = if down.hand_landed[side] {
+                        RISE_REACH
+                    } else {
+                        RISE_REACH * HAND_CARRY
+                    };
+                    targets[j] = turn_toward(now[j], posed_rel[j], reach);
+                    let push = if down.hand_landed[side] {
+                        HAND_PUSH
+                    } else {
+                        (1.0, 0.5)
+                    };
+                    gains[j].0 = self.muscles.base[j].0 * RISE_GAIN * push.0 * k;
+                    holds[j] = push.1 * k;
                 }
             }
         }

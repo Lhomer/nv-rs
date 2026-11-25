@@ -191,6 +191,10 @@ pub struct Tracking {
     /// a wall holds only what lies below its top (a step's face, 12 units high, held a toe
     /// resting on the step's top back off it at 1600 N).
     pub body_wall_tops: Vec<Vec<f32>>,
+    /// Forces between two bodies this frame (N): the first body is pushed by the vector, the
+    /// second by its opposite, every substep; the body's momentum as a whole is unchanged (a
+    /// muscle between them: an arm straightening between its planted hand and its shoulder).
+    pub pushes: Vec<(usize, usize, V3)>,
 }
 
 /// A pull on a body this frame (the root's support, a swinging foot's carry): a spring and damper
@@ -627,6 +631,15 @@ impl Model {
                 let ip = world_inv_inertia(&self.bodies[def.parent], states[def.parent].q);
                 states[def.child].w = add(states[def.child].w, apply_m(&ic, tau));
                 states[def.parent].w = sub(states[def.parent].w, apply_m(&ip, tau));
+            }
+            // The muscles between bodies (equal and opposite).
+            if let Some(t) = tracking {
+                for &(a, b, f) in &t.pushes {
+                    if let (Some(da), Some(db)) = (self.bodies.get(a), self.bodies.get(b)) {
+                        states[a].v = add(states[a].v, scale(f, da.inv_mass * h));
+                        states[b].v = sub(states[b].v, scale(f, db.inv_mass * h));
+                    }
+                }
             }
             // Move.
             for (s, def) in states.iter_mut().zip(&self.bodies) {

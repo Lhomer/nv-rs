@@ -7,6 +7,36 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-25 (the rise redesign: hands first, the arms lift through them)
+
+**Status: pushed.** Patrick's option 2 done: every New Physics test passes, none ignored
+(`np_planted_hands_hold_still` runs: at most about 1 unit slid, no bounce), the host library 499,
+the Ragdoll lab 104 + 54. `docs/GUNPLAY.md`'s rise paragraph says how it works now. In short:
+- Hands down first. A pushing arm's hand is carried, a little over the ground and three times as
+  fast as the arm pushes, to a spot beside its shoulder that follows the shoulder until it lands
+  (fixed where the shoulder first was, it ended 25 units off); it lands only within 0.8 of the
+  arm from the shoulder, or wherever it is after 0.4 s of carrying (an arm whose limits keep it
+  out from under the shoulder); held where it lands (20000 N/m, at most its load's grip); let
+  go when lifted 3 cm, off the ground, its shoulder out of reach, or the pelvis past 0.75 of
+  standing height. The old plant hold pulled a hand that touched short of its spot 30 units
+  across the floor to it: that was the slide, and also what had scooted bodies forward.
+- The arms lift the body through the hands: `Tracking::pushes`, an equal and opposite force
+  between two bodies each substep (np_body), between the hand and the pelvis, along the arm and
+  half as much again toward the rise (300 N an arm); the ground's answer under the hand is real
+  weight carried (the hands carried 0.04 to 0.13 of it before, a by-product of the abstract
+  torque). Not the weapon's arm (it braces).
+- `RISE_ARMS` (the abstract turn of the torso) at 0.3 of itself while hands are going down or
+  pushing and the torso still lies (pelvis under half height, tilted past 65 degrees); the legs
+  wait up to 1 s for a landed hand to push 0.3 s; the legs may lift with the centre 0.6 m behind
+  the feet while a landed hand carries over 50 N (sat against a wall, 0.5 m behind, they never
+  did).
+- Beside: an arm not put down whose hand presses a wall gives (its drive at 0.2: driven into the
+  wall it levered the body 27 degrees over at full height); handed over (a death), the hands let
+  go so the arms come inside the limits over the wait (the death hand-over's 1.53 units, now
+  under 1.5); a foot going to its stance place is done within 2 cm once it stops closing for
+  0.3 s (held a millimetre short of 1 cm by the floor's grip, a slope's stand was never taken).
+`docs/wip/np-planted-hands*.patch` are gone (applied, superseded).
+
 ### Claude, 2026-11-25 (the planted hands, option 2: what the deeper rise change has to be)
 
 **Status: findings and `docs/wip/np-planted-hands-2.patch` (not applied; nothing shipped, per
