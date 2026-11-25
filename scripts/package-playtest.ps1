@@ -100,6 +100,11 @@ try {
     foreach ($file in @('READ ME.txt', 'THIRD-PARTY-NOTICES.txt')) {
         Copy-Item -LiteralPath (Join-Path $root "distribution/$file") -Destination $stage
     }
+    # The crash service's address beside Play.exe, in a release package only: a test build sends
+    # no crash reports.
+    if (!$TestBuild) {
+        Copy-Item -LiteralPath (Join-Path $root 'distribution/crash-reports.txt') -Destination $stage
+    }
     New-Item -ItemType Directory -Path (Join-Path $stage 'mods') | Out-Null
     Copy-Item -LiteralPath (Join-Path $root 'distribution/mods/READ ME.txt') -Destination (Join-Path $stage 'mods')
     # The licences and notices LEGAL.md asks for.
@@ -157,6 +162,11 @@ try {
     }
     # Every notice of distribution/notices.txt in licenses/ under its name.
     $checkArguments += @('--notices', $noticeList)
+    # The crash service's file beside Play.exe, as the repository has it (a public key only), in a
+    # release package.
+    if (!$TestBuild) {
+        $checkArguments += @('--crash-reports', (Join-Path $root 'distribution/crash-reports.txt'))
+    }
     & (Join-Path $x64 'package-check.exe') @checkArguments
     if ($LASTEXITCODE) { throw 'package-check found something that must not be in the package.' }
 

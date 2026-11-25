@@ -13,6 +13,17 @@
 //!   into a new head part's vertices (`0065a970`), the face tint summed from the EGT morphs
 //!   (`ApplyCoordinateTexturingToMesh`, `0065b410`) and packed into pixel bytes
 //!   (`BSFaceGenImage::GetCompressedImage`, `0064ceb0`).
+//! - [`coords`]: the sum of two face coordinate blocks (`00652af0`), which the race menu runs once
+//!   a slider at every click.
+//! - [`colours`]: the face image's colour vector's `assign` (`0064dcf0`) and range `erase` (`0064dc50`),
+//!   which fill a new tint image with a copy a texel (65,536 for a face) and empty it again, every
+//!   click in the race menu.
+//! - [`matrix`]: the face matrices' product (`00658360`) and the face shape statistic on it
+//!   (`00652230`), which the race menu's slider refresh reads every slider's value with.
+//! - [`vectors`]: the 6-byte element vector's `_Tidy` (`0065f430`) without its empty per-element
+//!   destroys, which every record of the face data that holds one runs when it goes.
+//! - [`sizes`]: the byte sizes of a face model's loaded EGM and EGT data (`0065c110`, `0065c490`), which
+//!   the face model map adds up over every model it holds when it checks its memory budget.
 //! - [`apply`]: the head's morph pass (`00663050`) with its appliers, the morph data's apply and tables,
 //!   the animation data's weight getters, and the exact skip of a reshape that would change nothing.
 //!
@@ -36,9 +47,14 @@ use engine_core::typed::{Family, FamilyId, Threads};
 use engine_core::{entry, AbiFn};
 
 pub mod apply;
+pub mod colours;
+pub mod coords;
 pub mod head;
 pub mod keyframe;
+pub mod matrix;
 pub mod morph;
+pub mod sizes;
+pub mod vectors;
 
 /// This family's bit: what each `typed_call!` of it names.
 pub const FAMILY: FamilyId = FamilyId::new(26);
@@ -89,5 +105,13 @@ fn funcs() -> Vec<(u32, AbiFn)> {
         entry!(0x0065_a970, head::apply_coordinates(Ptr, u32, u32, u8) -> bool),
         entry!(0x0065_b410, head::apply_coordinate_texturing(Ptr, u32, u32, u32) -> bool),
         entry!(0x0064_ceb0, head::get_compressed_image(Ptr, f32, f32, f32, u32) -> u32),
+        entry!(0x0065_2af0, coords::sum_coordinates(u32, u32, u32, u8, f32)),
+        entry!(0x0064_dcf0, colours::assign(Ptr, u32, u32)),
+        entry!(0x0064_dc50, colours::erase(Ptr, u32, u32, u32, u32, u32) -> u32),
+        entry!(0x0065_8360, matrix::product(Ptr, Ptr, Ptr) -> Ptr),
+        entry!(0x0065_2230, matrix::shape_statistic(u32, u32, u32, u32) -> f32),
+        entry!(0x0065_f430, vectors::tidy(Ptr)),
+        entry!(0x0065_c110, sizes::egm_size(Ptr) -> u32),
+        entry!(0x0065_c490, sizes::egt_size(Ptr) -> u32),
     ]
 }

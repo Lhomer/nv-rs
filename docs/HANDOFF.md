@@ -7,6 +7,31 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-25 (the eleventh upstream merge: 7d700255..9bf5ba1d, 55 commits)
+
+**Status: pushed.** Upstream took out the built-in MCM plugin (#1022), lStewieAl's Tweaks
+(#1023, with #1032 putting the game's own code back where the Tweaks had changed it) and four
+fixes from other plugins (#1014: V.A.T.S. waits only for the camera, causes keep no witness
+lists, radio song lengths, thread races); Patrick keeps all of them, on in his build as before.
+They were put back by applying those four commits backwards on the merge (`crates/mcm`,
+`crates/stewie`, `engine-core/src/extend/stewie*`, the Tweaks' seams in the game's units, the
+rows, `host/src/thread_races.rs` and its tests, the overridable rows): the pickpocket prompt
+(Tweaks' menus 7) and the fork's pickpocket chance with them. JIP's game patches, UI Organizer
+and JohnnyGuitar came back upstream (#1030); all on in the fixes preset (JIP, JG's editor ids,
+MCM, the Tweaks, UIO). MCM's notice keeps upstream's #1012 wording.
+#1031 took the docs, `AGENTS.md`, `CLAUDE.md` and the research tools out of the repository: the
+fork keeps its docs (this file, the wip patches, GUNPLAY and the rest), `AGENTS.md` and
+`CLAUDE.md` as they were (git had moved the fork's own docs into `.github`; put back); the research
+tools and `crates/fos` go, as upstream has it (nothing here uses them).
+Upstream's crash reports (the launcher builds a scrubbed report when the game stops, asks once
+with an example, a Settings row; sending only when the player agrees) merge beside the fork's
+updater; the Settings list's indexes move by the fork's row (17 entries, crash reports at 14).
+Other conflicts: the workspace and host manifests (both sides' crates), the host's module and
+install lists (MCM, the Tweaks, UIO in xNVSE's order), the engine's open-call fallback (the
+fork's, naming the object and slot), Play.exe's stop-text test (both sides' checks), the READ MEs
+(the fork's wording), the lock files (`mcm`, `stewie`, `ragdoll-core` added; DEPENDENCY-LOCK
+recomputed).
+
 ### Claude, 2026-11-25 (the rise redesign: hands first, the arms lift through them)
 
 **Status: pushed.** Patrick's option 2 done: every New Physics test passes, none ignored

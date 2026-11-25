@@ -34,7 +34,8 @@ pub(crate) fn install(e: &mut Engine) {
 // Translated from lStewieAl's Tweaks 10.05 (main.h): PlayerCharacterDamageActionPointsForAction.
 /// `thiscall(player, action)`: outside VATS, out of combat (+0xDF0) and with
 /// `[Tweaks] bRunAndGunAPInCombatOnly` nothing is taken; else the action's cost (`0066dca0` with
-/// the action, whether in VATS, 0.0 and 0) is held to the player's action points (`011dea3c`
+/// the action and whether in VATS: the two words its translation reads of the four the cdecl
+/// is given) is held to the player's action points (`011dea3c`
 /// +0xA4, `GetClampedActorFloatValue` `0066ef50` with 0xC: the smaller is kept) and, when above 0,
 /// spent (slot `0x33c`).
 pub(crate) fn action_points(e: &mut Engine, a: &[u32]) -> Ret {
@@ -43,9 +44,7 @@ pub(crate) fn action_points(e: &mut Engine, a: &[u32]) -> Ret {
     if !vats && e.mem.u8(this + 0xdf0) == 0 && e.stewie_run_and_gun_combat_only() {
         return Ret::default();
     }
-    let cost = e
-        .call(0x0066_dca0, &args![action, u32::from(vats), 0.0f32, 0u32])
-        .f32();
+    let cost = e.call(0x0066_dca0, &args![action, u32::from(vats)]).f32();
     let player = e.global::<u32>(PLAYER);
     let points = e.call(0x0066_ef50, &args![player + 0xa4, 0xcu32]).f32();
     // `min(actionCost, pcActionPoints)` (`(a < b) ? a : b`).

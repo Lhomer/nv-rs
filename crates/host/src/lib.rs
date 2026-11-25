@@ -147,8 +147,8 @@ pub(crate) fn install_rows_and_extenders(engine: &mut Engine, choice: &fixes::Ch
     // `fixes::install` above) switched it on (`crates/jip`).
     jip::install(engine);
     // JohnnyGuitar NVSE's editor ids, when their row is on (the fixes preset): xNVSE loads
-    // johnnyguitarnvse.dll after jip_nvse.dll and before MCM.dll (`crates/johnnyguitar`); after
-    // JIP, so its light slots stay JIP's.
+    // johnnyguitarnvse.dll after jip_nvse.dll (`crates/johnnyguitar`); after JIP, so its light
+    // slots stay JIP's.
     johnnyguitar::install(engine);
     // The Mod Configuration Menu's plugin, when its row is on: xNVSE loads MCM.dll after
     // jip_nvse.dll and before ui_organizer.dll (`crates/mcm`).
@@ -881,14 +881,10 @@ fn load_adapter_table(e: &mut Engine, data: &Path) -> Result<(), String> {
             Some(display) => {
                 let text = text + &display;
                 if fixes::is_play_run(|name| std::env::var(name).ok()) {
-                    match (own_folder(), data.parent()) {
-                        (Ok(own), Some(game)) => {
-                            let [documents, _, _] =
-                                engine_platform::machine_table::game_folders(&own);
-                            first_profile::first_start(&documents, game, &text)?;
-                        }
-                        (Err(why), _) => eprintln!("first start: no profile files: {why}"),
-                        (_, None) => {}
+                    if let (Some(documents), Some(game)) =
+                        (first_profile::documents_from_table(&text)?, data.parent())
+                    {
+                        first_profile::first_start(&documents, game, &text)?;
                     }
                 }
                 text
