@@ -93,6 +93,9 @@ pub struct Rig {
     off: Vec<Quat>,
     hips: usize,
     hips_off: Vec3,
+    /// Each part's frame in its bone's (its SDK's `take`): the part read from the bone's world.
+    /// Spine1's, which has no bone, in Spine0's bone's.
+    take: Vec<(usize, Transform)>,
 }
 
 /// FNV's human skeleton's bones' worlds in its bind pose, in Delirium's metres (`np_body::UNITS`
@@ -142,6 +145,20 @@ impl Rig {
             .ok_or("no pelvis bone")?;
         let hips_off =
             parts[0].rotation.inverse() * (rest[hips].translation - parts[0].translation);
+        let bones = part_bones(names);
+        let take = (0..21)
+            .map(|k| {
+                let b = bones[k]
+                    .or(PART_PARENT[k].and_then(|q| bones[q]))
+                    .ok_or("a part with no bone and no parent's")?;
+                let inv = rest[b].rotation.inverse();
+                Ok((
+                    b,
+                    Transform::from_translation(inv * (parts[k].translation - rest[b].translation))
+                        .with_rotation(inv * parts[k].rotation),
+                ))
+            })
+            .collect::<Result<Vec<_>, &'static str>>()?;
         Ok(Rig {
             parents: parents.to_vec(),
             part,
@@ -149,7 +166,21 @@ impl Rig {
             off,
             hips,
             hips_off,
+            take,
         })
+    }
+
+    /// Delirium's parts' worlds for FNV's bones at `worlds` (each bone's world): each part where
+    /// it lies in its bone, as in the bind pose (an actor taken mid-animation starts there).
+    pub fn parts_at(&self, worlds: &[Transform]) -> Vec<Transform> {
+        self.take
+            .iter()
+            .map(|&(b, t)| {
+                let w = worlds[b];
+                Transform::from_translation(w.translation + w.rotation * t.translation)
+                    .with_rotation((w.rotation * t.rotation).normalize())
+            })
+            .collect()
     }
 
     /// The bones' rotations under their parents for Delirium's parts at `parts` (their worlds),
@@ -367,6 +398,62 @@ mod tests {
         // The forearm's twist bone rides on the forearm.
         let tw = i("Bip01 L ForeTwist");
         assert!(ang(world[tw], turn * rest[tw].rotation) < 1e-4);
+    }
+
+    /// The parts read from the bones and the bones posed from those parts: the same pose, in any
+    /// pose (a made-up one: every bone turned under its parent), each bone within 0.006 degrees;
+    /// and in the bind pose the parts come back where they were.
+    #[test]
+    fn parts_from_bones_and_back() {
+        let (names, parents, rest) = bind();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let parts = parts_at(&names, &rest);
+        let rig = Rig::new(&names, &parents, &rest, &parts).unwrap();
+        let back = rig.parts_at(&rest);
+        for (k, (a, b)) in back.iter().zip(&parts).enumerate() {
+            if k != NO_BONE {
+                assert!(a.translation.distance(b.translation) < 1e-4, "{k}");
+                assert!(ang(a.rotation, b.rotation) < 1e-4, "{k}");
+            }
+        }
+        // A pose: each bone turned a little under its parent, the worlds built down the tree.
+        let n = names.len();
+        let mut worlds = rest.clone();
+        for b in 0..n {
+            let local = match parents[b] {
+                None => rest[b],
+                Some(p) => {
+                    let l = Transform::from_translation(
+                        rest[p].rotation.inverse() * (rest[b].translation - rest[p].translation),
+                    )
+                    .with_rotation(rest[p].rotation.inverse() * rest[b].rotation);
+                    let turn = Quat::from_euler(
+                        delirium::prelude::EulerRot::XYZ,
+                        0.05 * (b % 7) as f32,
+                        -0.04 * (b % 5) as f32,
+                        0.03 * (b % 3) as f32,
+                    );
+                    let l = l.with_rotation(l.rotation * turn);
+                    let w = worlds[p];
+                    Transform::from_translation(w.translation + w.rotation * l.translation)
+                        .with_rotation(w.rotation * l.rotation)
+                }
+            };
+            worlds[b] = local;
+        }
+        let (local, hips) = rig.pose(&rig.parts_at(&worlds));
+        let mut w = vec![Quat::IDENTITY; n];
+        let bones = part_bones(&names);
+        for b in 0..n {
+            w[b] = parents[b].map_or(local[b], |p| w[p] * local[b]);
+            // Each part's own bone comes back as posed (the others keep their bind pose under
+            // their parents or, Neck1, follow the neck's part with Neck, as Delirium's rig has it).
+            if bones.contains(&Some(b)) {
+                assert!(ang(w[b], worlds[b].rotation) < 1e-4, "{}", names[b]);
+            }
+        }
+        let pelvis = bones[0].unwrap();
+        assert!(hips.distance(worlds[pelvis].translation) < 1e-4);
     }
 
     /// A bone list out of order, or without a pelvis, is refused.
