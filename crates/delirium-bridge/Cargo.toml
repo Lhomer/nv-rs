@@ -9,5 +9,6 @@ description = "Delirium Physics (vendor/delirium-physics) behind New Physics: th
 [dependencies]
 delirium = { path = "../../vendor/delirium-physics/delirium" }
 delirium-data = { path = "../../vendor/delirium-physics/delirium-data" }
+delirium-sdk = { path = "../../vendor/delirium-physics/delirium-sdk" }
 ragdoll-core = { path = "../ragdoll-core" }
 

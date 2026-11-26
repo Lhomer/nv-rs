@@ -7,6 +7,22 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-26 (Delirium: its SDK vendored; the agent as safe handles)
+
+**Status: pushed.** Delirium's SDK (`delirium-sdk`, built as an rlib only) is vendored beside the
+engine: its agent layer holds the behaviours New Physics needs on top of the engine (the shot and
+blast tasks, falls, death, the extra reactions, near misses, `should_get_up`, part states in and
+out, worlds of meshes and moving boxes), so the bridge calls them rather than rebuild them.
+`delirium_bridge::agent` wraps them as safe handles: `World` (meshes by chunk id), `Body` (the
+fitted build, the profile's weight), `Agent` (made from FNV's pose read into parts with their
+velocities, the profile's strength and reactions; `shot`, `explosion`, `kill`, `step`, `parts`,
+`should_get_up`), each refusing while Delirium is locked. 8 more packages (rayon, serde_json and
+theirs) in the notices. `Rig::parts_at` reads Delirium's parts from FNV's bones (tested both ways).
+Next: the host's side, behind `running()` and `profile::takes`: on a hit the actor's Delirium agent
+made from its drawn pose (in place of New Physics' controller), the meshes of what New Physics
+found around it set as its world, the shot (or blast) given, each frame stepped and its parts posed
+onto FNV's bones through the rig into New Physics' drawn pose; a death as `kill`, the corpse kept.
+
 ### Claude, 2026-11-26 (Delirium: the world's surfaces as meshes; nothing of Delirium runs in CI)
 
 **Status: pushed.** `delirium_bridge::world` turns what New Physics finds around a body (floor

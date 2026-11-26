@@ -56,10 +56,10 @@ with pipeline libraries.
 ## Delirium Physics 0.9.3
 
 - Source: PVCPC's https://github.com/PVCPC/delirium-physics, commit
-  23aea85bc761c11b6d3798725ef42364e31ffeb4: the folders `crates/delirium` and
-  `crates/delirium-data`, with its `LICENSE` and `CREDITS.md`. Left out: the engine crate's
-  `examples`, and everything else of that repository (the SDK, the Playroom, its vendored Bevy
-  crates).
+  23aea85bc761c11b6d3798725ef42364e31ffeb4: the folders `crates/delirium`, `crates/delirium-data`
+  and `crates/delirium-sdk` (its `src` and `Cargo.toml`), with its `LICENSE` and `CREDITS.md`.
+  Left out: the engine crate's `examples`, the SDK's bindings, headers and examples, and
+  everything else of that repository (the Playroom, its vendored Bevy crates).
 - Licence: GPL-3.0-only (`delirium-physics/LICENSE`); `delirium-physics/NOTICE` says what it is
   and what changed.
 - Why: Delirium, the Euphoria active ragdoll as GTA IV has it, runs New Physics' reactions on a
@@ -72,7 +72,8 @@ with pipeline libraries.
   the published bytes back into `OUT_DIR` (checked byte for byte against the commit's files), and
   `src/kv.rs` includes them from there (its first line says so). `rustfmt.toml` here
   (`disable_all_formatting`) keeps `cargo fmt --all`, which reaches path dependencies, off its
-  code. No other code changed.
-- Updating: copy the two folders of a newer commit over these, write the fields out again, turn
+  code. The SDK's `Cargo.toml` builds an rlib only (it said `cdylib` and `rlib`: the bridge links
+  it as Rust, and no shared library is built or shipped). No other code changed.
+- Updating: copy the three folders of a newer commit over these (the SDK's `src` and manifest), write the fields out again, turn
   the maps into hex again (and remove the binary ones), re-apply `kv.rs`'s include lines, and move
   the commit in this section and the NOTICE.

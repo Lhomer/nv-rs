@@ -1,10 +1,10 @@
-This folder is Delirium Physics 0.9.3 (PVCPC), the engine crate (delirium) and its data crate
-(delirium-data), copied from https://github.com/PVCPC/delirium-physics, commit
+This folder is Delirium Physics 0.9.3 (PVCPC), the engine crate (delirium), its data crate
+(delirium-data) and its SDK crate (delirium-sdk: its source and manifest), copied from https://github.com/PVCPC/delirium-physics, commit
 23aea85bc761c11b6d3798725ef42364e31ffeb4. nv-rs's crates/delirium-bridge runs it behind New
 Physics. Changed: each Cargo.toml's workspace fields written out (version, edition, licence,
 publish), and a first line saying so; the engine crate's examples folder left out; the data
 crate's five maps kept as hex text and written back by a build.rs, which kv.rs includes (its
-first line says so). Nothing else.
+first line says so); the SDK built as an rlib only. Nothing else.
 
 Credits: Delirium Physics is written by PVCPC, a Rust port of the Euphoria active ragdoll as
 GTA IV has it. Its own credits are in CREDITS.md beside this file (they name the assets of its
