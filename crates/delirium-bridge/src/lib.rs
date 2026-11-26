@@ -11,6 +11,7 @@
 //! The log lines never name the path: a report a player shares carries no folder of theirs.
 
 pub mod body;
+pub mod profile;
 pub mod rig;
 
 use std::path::{Path, PathBuf};

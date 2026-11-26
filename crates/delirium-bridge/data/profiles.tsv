@@ -1,0 +1,19 @@
+# Each NPC's Delirium settings (delirium_bridge::profile; docs/GUNPLAY.md has this table explained).
+# A row applies to an actor its match fits; the rows apply in order, each one's set columns over
+# the earlier ones' ("-": left as it is). Every value here is neutral until Patrick sets them:
+# Delirium's own body and tuning (GTA IV's man, fitted to the actor's own skeleton) for everyone.
+#
+# match           kg  scale strength stiffness reactions near_miss avoid  note
+default           -   1     1        1         default   on        on     Everyone: Delirium's own body (its weight), at the actor's own size, its own strength, stiffness and reactions.
+race:human        -   -     -        -         -         -         -      Humans (FNV's human races and their skeleton): the only ones Delirium has for now.
+race:ghoul        -   -     -        -         -         -         -      Ghouls (on FNV's human skeleton).
+actor:npc         -   -     -        -         -         -         -      NPCs (TESNPC).
+actor:creature    -   -     -        -         -         -         -      Creatures: not given to Delirium yet (their skeletons are later).
+armor:none        -   -     -        -         -         -         -      Wearing no body armor.
+armor:light       -   -     -        -         -         -         -      Light body armor.
+armor:medium      -   -     -        -         -         -         -      Medium body armor.
+armor:heavy       -   -     -        -         -         -         -      Heavy body armor.
+armor:power       -   -     -        -         -         -         -      Power armor.
+weight:thin       -   -     -        -         -         -         -      The NPC's weight slider under 33 (FNV's 0 to 100).
+weight:average    -   -     -        -         -         -         -      The weight slider 33 to 66.
+weight:heavy      -   -     -        -         -         -         -      The weight slider over 66.

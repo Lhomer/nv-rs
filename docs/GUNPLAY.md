@@ -1038,6 +1038,39 @@ Slice 2 (`delirium_bridge::rig`, `::body`): FNV's human skeleton on Delirium's b
   with its reason (`Delirium: its body from GTA IV's files: ...`). Without GTA IV (CI) only the
   refusal and FNV's joints are tested: the body itself is made only on a PC that has the game.
 
+#### Each NPC's Delirium settings (`crates/delirium-bridge/data/profiles.tsv`)
+
+Every NPC gets its own Delirium settings from the start, never one global body (Patrick,
+2026-11-26). Delirium has the settings but no idea of armor or personality, so a profile layer
+(`delirium_bridge::profile`) maps what FNV knows of an actor onto them. The table's rows apply in
+order, each row's set columns over the earlier ones' (`-` leaves a column as it is). **Every row
+is neutral for now**: the balance numbers (mass, armor, personality) wait for Patrick. Tuning is
+editing the table; a line the layer can't read is refused with its line number (a test reads the
+table).
+
+| Column | Delirium setting | Neutral | Range |
+| --- | --- | --- | --- |
+| `kg` | the body's weight (its SDK's `nm_build_set_weight`: the parts' mass, and their radius by its square root, within a third to three times) | `-` (Delirium's own body's) | 20 to 400 |
+| `scale` | the body's size over the actor's own skeleton (it is fitted to that first) | 1 | 0.5 to 2 |
+| `strength` | the agent's strength (`Agent::strength`, its SDK's `nm_agent_set_strength`) | 1 | 0.1 to 10 |
+| `stiffness` | the balance's stiffness over Delirium's own | 1 | 0.1 to 10 |
+| `reactions` | its extra reactions (the SDK's `NM_XR_*` bits: windmill 1, curl up 2, curl when shot 4, look at the hit 8, ledge 16, smart fall 32, dodge 64, wall 128, arms out 256) | `default` (Delirium's own set) | `default`, `-` or the bits |
+| `near_miss` | flinching from near misses | on | on, off |
+| `avoid` | stepping out of the way | on | on, off |
+
+| Match | Fits |
+| --- | --- |
+| `default` | everyone (the first row) |
+| `race:human`, `race:ghoul` | FNV's human races, ghouls (both on the human skeleton) |
+| `actor:npc`, `actor:creature` | NPCs, creatures (creatures aren't Delirium's yet) |
+| `armor:none`, `armor:light`, `armor:medium`, `armor:heavy`, `armor:power` | the body armor worn (its armor type; power armor by its flag) |
+| `weight:thin`, `weight:average`, `weight:heavy` | the NPC's weight slider: under 33, 33 to 66, over 66 |
+
+Only humans and ghouls go to Delirium for now (`profile::takes`); everyone else keeps New Physics
+as it is. Traits (personality) come later as more matches. Where each setting is applied comes
+with the slice that runs the agent (the reactions, near misses and avoiding are its SDK's, done
+there).
+
 ### bdf710a: the get-up hoisted upside down, the stagger's slide, the head's nod, the launch along the ground (Patrick, 2026-11-17, clip 1456)
 
 On FNV's skeleton (`tests-data/fnv_skeleton.txt`) the get-up fixture now runs knock state 6 as the
