@@ -1010,6 +1010,30 @@ folder, no GTAIV.exe in it, not a version Delirium reads its numbers from, no or
 character file), each ending `New Physics plays as before, without Delirium`. The lines never
 name the path. Nothing else uses Delirium yet: New Physics plays exactly as before either way.
 
+Slice 2 (`delirium_bridge::rig`, `::body`): FNV's human skeleton on Delirium's body.
+- The map (`rig::fnv_part`): Delirium's own rules for another game's skeleton (its SDK's
+  `nm_rig_part_for_name` and `nm_rig_joints`), written out for FNV's names. FNV has three spine
+  bones to Delirium's four, so `Bip01 Spine` is Spine0 (7), `Spine1` Spine2 (9) and `Spine2` the
+  chest, Spine3 (10), which the neck and clavicles hang from; Delirium's Spine1 (8) has no bone and
+  its joint lies along FNV's spine where Homer's arc puts it; both neck bones follow the neck.
+  Toes, fingers, twist bones, pauldrons, the weapon and the face's bones ride on their parents.
+  Tested on FNV's skeleton data: every part but Spine1 has its bone, the parts' bones stand as
+  Delirium's body does (head over chest over pelvis over knees over feet), the left parts all on
+  FNV's left (-x, the body facing +y) and the right on its right, the arms and legs in order out.
+- The pose (`rig::Rig`, the SDK's `NmRig`): each bone that follows a part takes the part's world
+  rotation times its bind offset from it; the others keep their bind pose under their parents;
+  the pelvis's bone its place from part 0. Only rotations (and the pelvis's place) are written, so
+  nothing stretches and each bone keeps its roll. Tested: the bind pose comes back exactly (each
+  bone within 0.006 degrees), and a turned forearm part turns the forearm (and its twist bone)
+  and nothing else.
+- The body (`body::homer`): made at the start from the player's files as Delirium's Playroom
+  makes its man: the ped `m_y_pmanhat_01` from `pc/models/cdimages/componentpeds.img`, opened
+  with the archive key found in their GTAIV.exe (by `playerped.rpf`'s header), its bones and
+  ragdoll parts read by Delirium's data crate, built on the character file's links; then fitted
+  to FNV's bind pose (`body::fnv_joints`, Delirium's `Build::fit`). Any step that fails falls back
+  with its reason (`Delirium: its body from GTA IV's files: ...`). Without GTA IV (CI) only the
+  refusal and FNV's joints are tested: the body itself is made only on a PC that has the game.
+
 ### bdf710a: the get-up hoisted upside down, the stagger's slide, the head's nod, the launch along the ground (Patrick, 2026-11-17, clip 1456)
 
 On FNV's skeleton (`tests-data/fnv_skeleton.txt`) the get-up fixture now runs knock state 6 as the

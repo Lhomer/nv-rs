@@ -7,6 +7,20 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-26 (Delirium, slice 2: FNV's skeleton on Delirium's body)
+
+**Status: pushed.** `delirium_bridge::rig` maps FNV's `Bip01` bones onto Delirium's 21 parts
+(Delirium's own rules for a three-spine skeleton: Spine 7, Spine1 9, Spine2 10, part 8 none) and
+holds FNV's bones to the parts' frames (the SDK's `NmRig`, ported); `delirium_bridge::body` makes
+Delirium's body from the player's PC files (`m_y_pmanhat_01` in `componentpeds.img`, as the
+Playroom does) and fits it to FNV's bind pose. `start` now makes and fits the body too, or falls
+back with `Delirium: its body from GTA IV's files: <why>`. Tests (11, without GTA IV): the map on
+FNV's skeleton data, its bind pose against Delirium's body's layout (no swapped side), the pose
+round trip and a turned part, FNV's joints up the spine, the body's refusal without the unlock.
+**Not verified without GTA IV:** the body read from the real files and its fit (Patrick's PC: the
+log line says whether it worked). Next: slice 3, a New Physics hit run on Delirium's agent (its
+floor, the shot), the pose written through the rig, behind `running()`.
+
 ### Claude, 2026-11-26 (Delirium, slice 1: vendored, the GTA IV setting, the start with its fallback)
 
 **Status: pushed.** Patrick's queued task: New Physics on Delirium Physics (PVCPC,

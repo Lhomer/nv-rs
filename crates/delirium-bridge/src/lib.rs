@@ -10,6 +10,9 @@
 //!
 //! The log lines never name the path: a report a player shares carries no folder of theirs.
 
+pub mod body;
+pub mod rig;
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -17,10 +20,22 @@ use std::sync::OnceLock;
 pub const OFF: &str = "none";
 
 /// What [`start`] found: Delirium's numbers open and the character loaded, with the game's
-/// hit tuning when it has one (`common/data/taskparams.txt`).
-#[derive(Debug)]
+/// hit tuning when it has one (`common/data/taskparams.txt`), and Delirium's body fitted to FNV's
+/// human skeleton with FNV's bones held to it ([`rig::Rig`]).
 pub struct Started {
     pub task_params: Option<delirium_data::taskparams::TaskParams>,
+    pub build: delirium::ragdoll::Build,
+    pub frames: Vec<delirium::prelude::Transform>,
+    pub rig: rig::Rig,
+}
+
+impl std::fmt::Debug for Started {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Started")
+            .field("task_params", &self.task_params.is_some())
+            .field("parts", &self.frames.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Why Delirium is not running: shown in the log as is, then the current New Physics plays.
@@ -34,6 +49,8 @@ pub enum Fallback {
     NotAVersion,
     /// The program's folder has no character file (or it is not one Delirium reads).
     NoCharacter(&'static str),
+    /// Delirium's body could not be made from the game's files or fitted to FNV's skeleton.
+    NoBody(&'static str),
 }
 
 impl Fallback {
@@ -50,6 +67,9 @@ impl Fallback {
             ),
             Fallback::NoCharacter(why) => {
                 format!("Delirium: GTA IV's character file (pc/data/naturalmotion/Fred.art) {why}; {tail}")
+            }
+            Fallback::NoBody(why) => {
+                format!("Delirium: its body from GTA IV's files: {why}; {tail}")
             }
         }
     }
@@ -88,7 +108,7 @@ fn child(dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 /// `dir` joined with each of `parts`, each matched in any letter case.
-fn under(dir: &Path, parts: &[&str]) -> Option<PathBuf> {
+pub(crate) fn under(dir: &Path, parts: &[&str]) -> Option<PathBuf> {
     parts
         .iter()
         .try_fold(dir.to_path_buf(), |at, p| child(&at, p))
@@ -102,7 +122,6 @@ pub fn start(setting: &str) -> Result<Started, Fallback> {
     if !delirium_data::kv::unlock(&program) {
         return Err(Fallback::NotAVersion);
     }
-    drop(program);
     let character = under(&dir, &["pc", "data", "naturalmotion", "Fred.art"])
         .ok_or(Fallback::NoCharacter("isn't there"))?;
     let data = std::fs::read(character).map_err(|_| Fallback::NoCharacter("can't be read"))?;
@@ -113,7 +132,26 @@ pub fn start(setting: &str) -> Result<Started, Fallback> {
     let task_params = under(&dir, &["common", "data", "taskparams.txt"])
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|t| delirium_data::taskparams::read(&t));
-    Ok(Started { task_params })
+    // Delirium's body from the game's ped, fitted to FNV's human skeleton in its bind pose
+    // (metres), and FNV's bones held to its parts.
+    let (homer, homer_frames) = body::homer(&dir, &program).map_err(Fallback::NoBody)?;
+    drop(program);
+    let sk = ragdoll_core::np_skeleton::Skeleton::fnv();
+    let names: Vec<&str> = sk.nodes.iter().map(|n| n.name.as_str()).collect();
+    let parents: Vec<Option<usize>> = sk.nodes.iter().map(|n| n.parent).collect();
+    let rest = rig::fnv_bind(&sk);
+    let joints =
+        body::fnv_joints(&names, &rest).ok_or(Fallback::NoBody("FNV's skeleton has no spine"))?;
+    let (build, frames) =
+        std::panic::catch_unwind(|| body::fit_to_fnv(&homer, &homer_frames, &joints))
+            .map_err(|_| Fallback::NoBody("it won't fit FNV's skeleton"))?;
+    let rig = rig::Rig::new(&names, &parents, &rest, &frames).map_err(Fallback::NoBody)?;
+    Ok(Started {
+        task_params,
+        build,
+        frames,
+        rig,
+    })
 }
 
 static STARTED: OnceLock<Result<Started, Fallback>> = OnceLock::new();
@@ -122,7 +160,7 @@ static STARTED: OnceLock<Result<Started, Fallback>> = OnceLock::new();
 pub fn start_once(setting: &str) -> String {
     match STARTED.get_or_init(|| start(setting)) {
         Ok(s) => format!(
-            "Delirium: on, from the player's own GTA IV (its numbers unlocked, its character loaded{})",
+            "Delirium: on, from the player's own GTA IV (its numbers unlocked, its character loaded, its body fitted to FNV's skeleton{})",
             if s.task_params.is_some() {
                 ", its hit tuning read"
             } else {

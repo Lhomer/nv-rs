@@ -844,6 +844,7 @@ version = "0.1.0"
 dependencies = [
  "delirium",
  "delirium-data",
+ "ragdoll-core",
 ]
 
 [[package]]
