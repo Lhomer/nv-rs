@@ -706,7 +706,11 @@ that holds it threw bodies about at walls and slabs). A rise asked for widens th
 body that has lain unasked is inside the data's limits throughout (the full cycle asserts it from
 1.5 s), and a death or a given-up rise then hands it over with nothing to bring in. The delay keeps
 it out of the short wait between a given-up rise and the AI's next ask (at 0.3 s it changed the
-second rise's start by a wall, which then never stood in 12 s). **For Patrick to
+second rise's start by a wall, which then never stood in 12 s). While a body waits to be handed over (a
+death or a given-up rise, up to 45 frames for its joints to come in), its targets are brought
+inside the data's limits the same way, so the muscles bring the limbs in rather than hold them out
+against the floor: a death mid-rise is handed over in about 6 frames, within 2 degrees, without a
+snap (Patrick's choice: the wait kept). **For Patrick to
 confirm:** the reach goes past his skeleton data on purpose; it is in one place
 (`np_down::REACH_FOLD`, `REACH_CURL`).
 

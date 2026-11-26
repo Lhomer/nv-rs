@@ -1755,8 +1755,10 @@ impl Np {
         }
         // Settled, the targets inside the skeleton's own limits too: the animation's pose lies
         // out of them (the forearms 25 degrees), and muscles pulling a joint against the limit
-        // that holds it put energy into the body each substep.
-        if settled {
+        // that holds it put energy into the body each substep. Being handed over (a death, a
+        // given-up rise: the wait for the joints to come in), the same: the muscles then help the
+        // limits bring the limbs in instead of holding them out against the floor.
+        if settled || self.to_limits {
             for (j, t) in targets.iter_mut().enumerate() {
                 *t = self.model.into_data_limit(&self.states, j, *t);
             }

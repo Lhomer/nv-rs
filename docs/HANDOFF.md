@@ -7,6 +7,48 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-26 (Delirium: can it own the bodies on its own? Yes. And the mid-rise death)
+
+**Delirium's solver, checked in `vendor/delirium-physics/delirium/src` (commit 23aea85b):** it
+is a complete rigid-body and contact solver of its own and needs nothing of GTA IV's physics
+(Rage/Bullet) to run; only its numbers come from GTA IV (the unlock). What it has:
+- An articulated body per character (`artic.rs`, `rigid.rs`: the 21 parts as links, solved
+  together each step), joint limits as solver rows (`Ragdoll::limit_rows`), self-collision
+  between parts (`Ragdoll::overlapping`, the character file's pairs).
+- Its own collision world (`collision.rs`: `Collision` of triangle meshes in chunks that can be
+  added and removed as the world streams, a BVH (`bvh.rs`), GJK (`gjk.rs`), spheres and capsules
+  (`sphere.rs`), floors, casts); contacts with friction and restitution solved by projected
+  Gauss-Seidel (`impulses_g`, SOR), a position pass, push-out of penetration.
+- Moving props as `Obstacle`s (a box or parts, with velocity and spin, given each step by the
+  host) and other characters as capsules; what the body pushed onto each obstacle comes back as
+  `Ragdoll::ob_push` (obstacle id, linear and angular impulse): the link to push Havok's props.
+- Sleeping (`still`, `SLEEP_STOP`/`SLEEP_SLEEP`), so a corpse at rest costs little.
+- Behaviours on top (`nm.rs` `Agent`): balance, shot, falls, brace, relax; "Kill" goes limp and
+  stays down (muscles off, the same solver), so a corpse is Delirium with the muscles off.
+- Limits: most of its tuning numbers are `kv!` slots, zero until the unlock, so none of it can run
+  in CI (no GTA IV there); only the code around it (maps, rigs, the world link, the profiles) can
+  be tested without the game.
+**So, per Patrick's plan:** full Delirium bodies for humans behind `bNewPhysics` (when it started):
+Delirium owns a human from the hit through death and as a corpse; no hand-over to Havok's
+ragdoll. Havok keeps the world: its static shapes near the body fed to Delirium's `Collision` as
+triangle chunks (added and dropped as the actor moves and cells load), dynamic props as
+obstacles, and `ob_push` applied back to their Havok bodies. The game's own ragdoll bodies stay,
+keyframed to Delirium's pose each frame, so what reads them (looting, VATS hit spots, mods that
+expect a Havok body, `GetRigidBodyMass` and the like) still finds them where the body is; what
+pushes them (explosions with falloff and lift, a grab's drag, `PushActorAway`) is taken from them
+and given to Delirium's parts. A save writes the corpse's pose as the game does (from those
+bodies), and a load puts Delirium's corpse there, at rest. Slices: the per-NPC profiles (below,
+testable), the world link (Havok shapes as triangles, testable on the fixture), the agent run
+for a hit, death as Kill, the corpse's keyframed Havok bodies and forces, saving and loading.
+
+**Task #8, the mid-rise death (Patrick: keep the wait, bring the limbs in during it):** done.
+Being handed over (`Np::to_limits`), the drive targets are brought inside the skeleton's limits
+too, as a settled body's are (`into_data_limit`): the muscles help the limits instead of holding
+the limbs out against the floor. `np_dies_while_downed_on_fnvs_skeleton` (dying 2.5 s in, mid
+rise) now asserts the wait ends within 20 frames and the pose is handed within 3 degrees: it was
+all 45 frames and 15.5 degrees before (the test fails on the old code); now 6 frames, 1.8
+degrees, 0.4 units at the hand-over. No snap, the wait kept.
+
 ### Claude, 2026-11-26 (Delirium, slice 2: FNV's skeleton on Delirium's body)
 
 **Status: pushed.** `delirium_bridge::rig` maps FNV's `Bip01` bones onto Delirium's 21 parts

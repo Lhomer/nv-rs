@@ -646,6 +646,10 @@ struct Downed {
     lowest: f32,
     death: Option<(usize, usize)>,
     death_off: f32,
+    /// The death's hand-over: how many frames it waited for the joints to come in, and the most a
+    /// joint lay out of the skeleton's limits as handed (degrees).
+    death_frames: Option<u32>,
+    death_handed: Option<f32>,
 }
 
 /// A 4.35 m/s chest hit on FNV's skeleton with New Physics on and the fall kept (M6): the run
@@ -725,7 +729,12 @@ fn down_run(seconds: f32, die_at: Option<f32>) -> Downed {
         lowest: f32::INFINITY,
         death: None,
         death_off: 0.0,
+        death_frames: None,
+        death_handed: None,
     };
+    // The log's lines, for the death's hand-over.
+    room_events::set_on(true);
+    let _ = room_events::take();
     let clock = SimClock::default();
     let start = clock.now();
     let mut hit_done = false;
@@ -866,6 +875,21 @@ fn down_run(seconds: f32, die_at: Option<f32>) -> Downed {
         }
     }
     run.knock_state = f.e.mem.u8(rig_fixture::PROCESS_AT + 0x13c);
+    for l in room_events::take() {
+        let number_after = |key: &str| -> Option<f32> {
+            let at = l.find(key)? + key.len();
+            l[at..].split([' ', ')']).next()?.parse().ok()
+        };
+        if l.contains("[np hand-over] death:") {
+            run.death_frames = l
+                .rfind(" frames after it was asked")
+                .and_then(|end| l[..end].rsplit(['(', ' ']).next()?.parse().ok());
+        }
+        if l.contains("[np joints] at the hand-over (death)") {
+            run.death_handed = number_after("(at most ");
+        }
+    }
+    room_events::set_on(false);
     crate::active_ragdoll::clear();
     crate::knockdown::clear();
     crate::gunplay::set_tuning(was);
@@ -938,6 +962,19 @@ fn np_dies_while_downed_on_fnvs_skeleton() {
     );
     assert!(r.death_off < 1.5, "{:.2}", r.death_off);
     assert!(!owns(ACTOR));
+    // Dying mid-rise (Patrick's choice: the wait kept, the limbs brought in during it, no snap):
+    // the joints come in well inside the 45-frame wait and are handed within 3 degrees of the
+    // skeleton's limits (before, all 45 frames and still 15.5 degrees out).
+    assert!(
+        r.death_frames.is_some_and(|n| n <= 20),
+        "waited {:?} frames",
+        r.death_frames
+    );
+    assert!(
+        r.death_handed.is_some_and(|d| d <= 3.0),
+        "handed {:?} degrees out",
+        r.death_handed
+    );
 }
 
 // --- The in-game path (Patrick's clip 2026-11-17_18-59-52_7825515). -----------------------------
