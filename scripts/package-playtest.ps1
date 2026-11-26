@@ -11,6 +11,12 @@
 #                        flag the script refuses unless HEAD is on origin's main (BUILD.txt links to it).
 #       [-UseBuilt]      use programs built before (with the flags below), under -Target
 #       [-Target DIR]    the Cargo target folder (default: target)
+#       [-CargoProfile release|play-opt]   the Cargo profile of the game program and the
+#                        launcher (default release; play-opt has the same settings under the name
+#                        of the build the project plays and measures, in target\play-opt). The
+#                        tools are always release.
+#       [-Source DIR]    the checkout to package (default: this script's own), so the script of one
+#                        commit can package another
 #       [-Toolchain32 stable]   the Rust toolchain that has i686-pc-windows-msvc, for the 32-bit tools
 #
 # The 32-bit tools need `rustup target add i686-pc-windows-msvc` on that toolchain once.
@@ -21,11 +27,16 @@ param(
     [switch]$TestBuild,
     [switch]$UseBuilt,
     [string]$Target,
+    [ValidateSet('release', 'play-opt')][string]$CargoProfile = 'release',
+    [string]$Source,
     [string]$Toolchain32 = 'stable',
     [string]$Out
 )
 $ErrorActionPreference = 'Stop'
-$root = Split-Path $PSScriptRoot
+$root = if ($Source) {
+    if (!(Test-Path -LiteralPath $Source -PathType Container)) { throw "-Source must be a checkout's folder, and this one is not there: $Source" }
+    (Resolve-Path -LiteralPath $Source).Path
+} else { Split-Path $PSScriptRoot }
 if (!$Target) { $Target = Join-Path $root 'target' }
 if (!$Out) { $Out = Join-Path $root 'dist' }
 Push-Location $root
@@ -56,6 +67,8 @@ try {
     $notice = Join-Path $root 'distribution/THIRD-PARTY-NOTICES.txt'
     if (!(Test-Path -LiteralPath $notice)) { throw 'Dependency notices must be assembled before packaging.' }
 
+    # The game program and the launcher in the profile's folder; the tools in release.
+    $programs = Join-Path $Target $CargoProfile
     $x64 = Join-Path $Target 'release'
     $x86 = Join-Path $Target 'i686-pc-windows-msvc/release'
     $tool = Join-Path $x64 'package-check.exe'
@@ -66,7 +79,7 @@ try {
         $rustup = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
         $env:CARGO_ENCODED_RUSTFLAGS = @('-C', 'target-feature=+crt-static', "--remap-path-prefix=$root=nv-rs", "--remap-path-prefix=$registry=cargo", "--remap-path-prefix=$rustup=rustup") -join [char]0x1f
         $env:CARGO_TARGET_DIR = $Target
-        cargo build --release --locked -p nv-viewer -p nv-launcher
+        cargo build --profile $CargoProfile --locked -p nv-viewer -p nv-launcher
         if ($LASTEXITCODE) { throw 'The game program or the launcher did not build.' }
         foreach ($manifest in @('updater', 'd3d9-capture', 'package-check')) {
             cargo build --release --locked --manifest-path "scripts/$manifest/Cargo.toml"
@@ -88,11 +101,11 @@ try {
     # Our own programs. app\FalloutNV.exe is nv-viewer under that name: NVIDIA's driver fixes and
     # Windows' per-program sound go by the name (docs/SOUND.md), and no link is needed.
     # Play.exe is the launcher's nv-rs program under the name the package has always had.
-    Copy-Item -LiteralPath (Join-Path $x64 'nv-rs.exe') -Destination (Join-Path $stage 'Play.exe')
+    Copy-Item -LiteralPath (Join-Path $programs 'nv-rs.exe') -Destination (Join-Path $stage 'Play.exe')
     # Launcher.exe keeps the install up to date from the package's GitHub Release, then starts
     # Play.exe (scripts/updater); it never touches userdata.
     Copy-Item -LiteralPath (Join-Path $x64 'Launcher.exe') -Destination (Join-Path $stage 'Launcher.exe')
-    Copy-Item -LiteralPath (Join-Path $x64 'nv-viewer.exe') -Destination (Join-Path $stage 'app/FalloutNV.exe')
+    Copy-Item -LiteralPath (Join-Path $programs 'nv-viewer.exe') -Destination (Join-Path $stage 'app/FalloutNV.exe')
     Copy-Item -LiteralPath (Join-Path $x64 'd3d9-capture.exe') -Destination (Join-Path $stage 'app/tools/d3d9-capture.exe')
     Copy-Item -LiteralPath (Join-Path $x86 'nvapi-capture.exe') -Destination (Join-Path $stage 'app/tools/nvapi-capture.exe')
     Copy-Item -LiteralPath (Join-Path $x86 'dsound-capture.exe') -Destination (Join-Path $stage 'app/tools/dsound-capture.exe')
@@ -131,7 +144,7 @@ try {
     }
     $sha = (Get-FileHash -LiteralPath (Join-Path $stage 'app/FalloutNV.exe') -Algorithm SHA256).Hash
     $source = if ($TestBuild) { 'test build, not for release' } else { "Source: https://github.com/slaterain/nv-rs/tree/$commit" }
-    $buildLines = @("nv-rs Windows preview $Version", "Source commit: $commit", "app\FalloutNV.exe SHA256: $sha", 'Platform: Windows x64', $source)
+    $buildLines = @("nv-rs Windows preview $Version", "Source commit: $commit", "app\FalloutNV.exe SHA256: $sha", "Platform: Windows x64, Cargo profile $CargoProfile", $source)
     if (!$Game) { $buildLines += 'Not checked for the game program''s bytes (built without FalloutNV.exe)' }
     $buildLines |
         Set-Content -LiteralPath (Join-Path $stage 'BUILD.txt') -Encoding ascii
@@ -151,7 +164,7 @@ try {
     if ($shared.Count -eq 0) { throw 'scripts/package-needles.txt lists no needle.' }
     $needles += $shared
     # FUN_, DAT_ and LAB_ are the names a disassembler gives code and data nobody has named.
-    $programNeedles = @('fnv_decomp', '\target\release', 'FUN_', 'DAT_', 'LAB_')
+    $programNeedles = @('fnv_decomp', '\target\release', "\target\$CargoProfile", 'FUN_', 'DAT_', 'LAB_') | Select-Object -Unique
     $checkArguments = @($stage) + ($needles | ForEach-Object { '--needle'; $_ }) + ($programNeedles | ForEach-Object { '--program-needle'; $_ })
     # Required: no run of the game's bytes longer than the C runtime's own tables (the longest seen
     # is about 2 KB) in any program.

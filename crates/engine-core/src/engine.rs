@@ -1544,7 +1544,8 @@ impl Engine {
         at: &'static std::panic::Location<'static>,
     ) -> Ret {
         const LONG: usize = 63;
-        let full = move |e: &mut Self, addr: u32, words: &[u32]| e.vcall_full(addr, words, slot, at);
+        let full =
+            move |e: &mut Self, addr: u32, words: &[u32]| e.vcall_full(addr, words, slot, at);
         if args.len() <= LONG {
             let mut words = [0u32; LONG + 1];
             words[0] = this;
@@ -3024,7 +3025,12 @@ mod tests {
             .unwrap_or_default();
             (message, line)
         };
-        for args in [vec![], vec![1, 2], (1..=7).collect::<Vec<u32>>(), (1..=20).collect()] {
+        for args in [
+            vec![],
+            vec![1, 2],
+            (1..=7).collect::<Vec<u32>>(),
+            (1..=20).collect(),
+        ] {
             let (message, line) = stop(&mut e, 4, &args);
             assert_eq!(
                 message,

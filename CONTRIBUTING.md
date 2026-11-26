@@ -119,7 +119,10 @@ cargo test -p nvinspect --test repo_hygiene
 ## Rules for game code
 
 **Provenance.** Every behaviour comes from the original game: translated from `FalloutNV.exe`
-1.4.0.525, read from the game's data, or measured in the original game.
+1.4.0.525, read from the game's data, or measured in the original game. A built-in mod's
+behaviour comes from its source, or, for compatibility with mods that expect lStewieAl's Tweaks,
+from those mods' files and observed behaviour (see
+[What can and can't be accepted](#what-can-and-cant-be-accepted)).
 
 - Mark each translated function with its address:
   `// Translated from 007b5400 (decompiled, FalloutNV.exe 1.4.0.525)`.
@@ -162,7 +165,7 @@ The translation runs every function of the game through `engine-core`'s model of
 program: its memory, its calls by address, its x87 floating point. That is exact but slow. A
 native rewrite is plain Rust registered at the function's address, so every caller that calls that
 address gets it, and it is checked against the translation before it is turned on. The goal is the
-whole game native. About 48,000 functions are translated, and about 1,100 of them have a native
+whole game native. About 48,000 functions are translated, and about 2,100 of them have a native
 rewrite so far (the translation stays, as the reference the native code is tested against).
 
 ### Where to help
@@ -203,9 +206,10 @@ your file already have a native version: `git grep "Typed from <address>" -- cra
    Set `threads` to the threads that run its code (`Main`, `Other` or `Both`): the differential
    test runs under those threads' float precision. Its `mod.rs` starts with a `//!` comment saying
    what it covers, which threads run it and how its floats are done. In
-   `crates/engine-typed/src/lib.rs`, add `pub mod <family>;` and a
-   `provide(&crate::<family>::NAME)` line in `units::funcs`. In that file's tests, update the
-   `families()` list and its length, the `past` list, the two `count() == N` checks (families
+   `crates/engine-typed/src/lib.rs`, add `pub mod <family>;` and
+   `&crate::<family>::NAME` at the end of `FAMILIES` (and its length; `units::funcs` provides
+   that list, and the tests read it). In that file's tests, update the length `families()`
+   returns, the `past` list, the two `count() == N` checks (families
    minus one), and the comment saying when each family went on.
 2. **Write each function in plain Rust.** Read the translation and the executable (Ghidra or
    another disassembler) together. Mark it `// Typed from 00a6db50` directly above the function.
@@ -266,10 +270,16 @@ Welcome:
   licence notice kept (a `NOTICE` in the crate, `LEGAL.md`, `distribution/THIRD-PARTY-NOTICES.txt`
   and `distribution/notices.txt`).
 - Fixes taken from data mods, credited.
+- Compatibility with mods that expect lStewieAl's Tweaks, as fix rows: reading their drop-in files
+  (`Data\NVSE\Plugins\Tweaks\INIs`, `Data\NVSE\Plugins\Tweaks\GameSettings`), doing the behaviours
+  those files name, and answering the commands and checks such mods use (`StewieGetValue`,
+  `GetPluginVersion "lStewieAl's Tweaks"`). It is built only from those mods' own files and
+  download pages and from behaviour observed in the original game with those mods and Tweaks
+  installed, never from any of Tweaks' own files (its code, DLL, readme or its own INI).
 
 Not accepted:
 
-- lStewieAl's Tweaks, or code written from it.
+- Code written from lStewieAl's Tweaks itself (its code, DLL, readme or its own INI).
 - Code written from a closed-source plugin (its DLL's disassembly) or from source published without
   an open-source licence.
 - Behaviour that wasn't traced, however good it looks.
@@ -298,8 +308,9 @@ Not accepted:
 Follow everything above. These rules matter most:
 
 1. Work only on what the task asks. Don't reformat, rename or "tidy" unrelated code.
-2. Never invent game behaviour. Translate from the executable at a named address, or leave the
-   part out and say so.
+2. Never invent game behaviour. Translate from the executable at a named address (a mod's
+   behaviour: from the sources [What can and can't be accepted](#what-can-and-cant-be-accepted)
+   names), or leave the part out and say so.
 3. Mark every translated function with its address and `FalloutNV.exe 1.4.0.525`. Never write
    Ghidra's automatic names (`FUN_…`, `DAT_…`, `LAB_…`).
 4. Never commit game files, executable bytes, decompiler output, fnv_decomp's C++, saves, logs,
@@ -309,8 +320,10 @@ Follow everything above. These rules matter most:
    unless you ran it and saw it pass; say what you could not run.
 7. Keep code working on Windows, Linux and macOS. No Windows-only code without the other systems'
    path in the same change.
-8. Don't add external crates. Don't port lStewieAl's Tweaks, closed-source plugins or unlicensed
-   code.
+8. Don't add external crates. Don't write code from lStewieAl's Tweaks itself (its code, DLL,
+   readme or its own INI), closed-source plugins or unlicensed code. Compatibility with mods that
+   expect Tweaks is fine when it is built only from those mods' own files and from behaviour
+   observed in the game.
 9. Say in the pull request that an AI agent helped and with what. A person reviews it and owns it.
 
 ## Licence

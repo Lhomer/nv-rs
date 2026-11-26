@@ -15,6 +15,7 @@
 // also stops `u32 as u8` and `f64 as f32`: those go through a named helper with a local `allow`.
 #![deny(clippy::cast_possible_truncation)]
 
+pub mod ai;
 pub mod ai_queries;
 pub mod anim_keys;
 pub mod animation;
@@ -26,9 +27,12 @@ pub mod culling;
 pub mod dispatch;
 pub mod draw;
 pub mod draw_f;
+pub mod extra_data;
 pub mod facegen;
+pub mod forms;
 pub mod geometry;
 pub mod hud;
+pub mod interface;
 pub mod lights;
 pub mod lockfree;
 pub mod multibound;
@@ -40,6 +44,7 @@ pub mod process;
 pub mod render;
 pub mod save;
 pub mod scene;
+pub mod scene_node;
 pub mod script_lines;
 pub mod scripts;
 pub mod setup;
@@ -100,39 +105,54 @@ macro_rules! image {
     )*};
 }
 
+/// This crate's families, in the order [`units::funcs`] provides them: the one list the engine and
+/// its tests read (a family left out here is never registered; the repository hygiene test
+/// `every_declared_family_is_provided` finds a `pub static .. : Family` of any crate that no list
+/// or `provide` call names).
+pub static FAMILIES: [&engine_core::typed::Family; 33] = [
+    &crate::lockfree::LOCKFREE,
+    &crate::culling::CULLING,
+    &crate::pathing::PATHING,
+    &crate::shader::SHADER,
+    &crate::crt::CRT,
+    &crate::dispatch::DISPATCH,
+    &crate::render::RENDER,
+    &crate::draw::DRAW,
+    &crate::scene::SCENE,
+    &crate::particles::PARTICLES,
+    &crate::collision::COLLISION,
+    &crate::multibound::MULTIBOUND,
+    &crate::geometry::GEOMETRY,
+    &crate::animation::ANIMATION,
+    &crate::draw_f::DRAW_F,
+    &crate::anim_keys::ANIM_KEYS,
+    &crate::process::PROCESS,
+    &crate::lights::LIGHTS,
+    &crate::scripts::SCRIPTS,
+    &crate::hud::HUD,
+    &crate::interface::INTERFACE,
+    &crate::script_lines::SCRIPT_LINES,
+    &crate::facegen::FACEGEN,
+    &crate::save::SAVE,
+    &crate::setup::SETUP,
+    &crate::archives::ARCHIVES,
+    &crate::ai_queries::AI_QUERIES,
+    &crate::cell_refs::CELL_REFS,
+    &crate::navmesh_edges::NAVMESH_EDGES,
+    &crate::ai::AI,
+    &crate::forms::FORMS,
+    &crate::extra_data::EXTRA_DATA,
+    &crate::scene_node::SCENE_NODE,
+];
+
 /// This crate's part in `Engine::new`, as the `engine` facade takes each engine crate's: it
 /// registers nothing at an address itself, and hands its families to the core's seam, which
 /// registers the ones `NV_TYPED` has on after every translation.
 pub mod units {
     pub fn funcs(_out: &mut Vec<(u32, engine_core::AbiFn)>) {
-        engine_core::typed::provide(&crate::lockfree::LOCKFREE);
-        engine_core::typed::provide(&crate::culling::CULLING);
-        engine_core::typed::provide(&crate::pathing::PATHING);
-        engine_core::typed::provide(&crate::shader::SHADER);
-        engine_core::typed::provide(&crate::crt::CRT);
-        engine_core::typed::provide(&crate::dispatch::DISPATCH);
-        engine_core::typed::provide(&crate::render::RENDER);
-        engine_core::typed::provide(&crate::draw::DRAW);
-        engine_core::typed::provide(&crate::scene::SCENE);
-        engine_core::typed::provide(&crate::particles::PARTICLES);
-        engine_core::typed::provide(&crate::collision::COLLISION);
-        engine_core::typed::provide(&crate::multibound::MULTIBOUND);
-        engine_core::typed::provide(&crate::geometry::GEOMETRY);
-        engine_core::typed::provide(&crate::animation::ANIMATION);
-        engine_core::typed::provide(&crate::draw_f::DRAW_F);
-        engine_core::typed::provide(&crate::anim_keys::ANIM_KEYS);
-        engine_core::typed::provide(&crate::process::PROCESS);
-        engine_core::typed::provide(&crate::lights::LIGHTS);
-        engine_core::typed::provide(&crate::scripts::SCRIPTS);
-        engine_core::typed::provide(&crate::hud::HUD);
-        engine_core::typed::provide(&crate::script_lines::SCRIPT_LINES);
-        engine_core::typed::provide(&crate::facegen::FACEGEN);
-        engine_core::typed::provide(&crate::save::SAVE);
-        engine_core::typed::provide(&crate::setup::SETUP);
-        engine_core::typed::provide(&crate::archives::ARCHIVES);
-        engine_core::typed::provide(&crate::ai_queries::AI_QUERIES);
-        engine_core::typed::provide(&crate::cell_refs::CELL_REFS);
-        engine_core::typed::provide(&crate::navmesh_edges::NAVMESH_EDGES);
+        for family in crate::FAMILIES {
+            engine_core::typed::provide(family);
+        }
         crate::render::stream::note_head_check();
     }
 }
@@ -146,37 +166,8 @@ mod tests {
     use engine_core::typed::{parse_switch, Family, Mode};
 
     /// This crate's families, in the order `units::funcs` provides them.
-    fn families() -> [&'static Family; 28] {
-        [
-            &crate::lockfree::LOCKFREE,
-            &crate::culling::CULLING,
-            &crate::pathing::PATHING,
-            &crate::shader::SHADER,
-            &crate::crt::CRT,
-            &crate::dispatch::DISPATCH,
-            &crate::render::RENDER,
-            &crate::draw::DRAW,
-            &crate::scene::SCENE,
-            &crate::particles::PARTICLES,
-            &crate::collision::COLLISION,
-            &crate::multibound::MULTIBOUND,
-            &crate::geometry::GEOMETRY,
-            &crate::animation::ANIMATION,
-            &crate::draw_f::DRAW_F,
-            &crate::anim_keys::ANIM_KEYS,
-            &crate::process::PROCESS,
-            &crate::lights::LIGHTS,
-            &crate::scripts::SCRIPTS,
-            &crate::hud::HUD,
-            &crate::script_lines::SCRIPT_LINES,
-            &crate::facegen::FACEGEN,
-            &crate::save::SAVE,
-            &crate::setup::SETUP,
-            &crate::archives::ARCHIVES,
-            &crate::ai_queries::AI_QUERIES,
-            &crate::cell_refs::CELL_REFS,
-            &crate::navmesh_edges::NAVMESH_EDGES,
-        ]
+    fn families() -> [&'static Family; 33] {
+        crate::FAMILIES
     }
 
     /// Which of this crate's families are past their gate, and so on with no switch: all of them, the first
@@ -185,7 +176,8 @@ mod tests {
     /// anim_keys on their tests and reviews (2026-11-11: no comparison runs for native code), process and
     /// lights on their own (2026-11-13), geometry since its recorded-run gate (2026-11-16), facegen and
     /// hud on their tests and reviews (2026-11-21), setup on its tests (2026-11-21), archives on its tests
-    /// (2026-11-23), ai_queries, cell_refs and navmesh_edges on their tests (2026-11-25);
+    /// (2026-11-23), ai_queries, cell_refs and navmesh_edges on their tests (2026-11-25), interface, ai,
+    /// forms, extra_data and scene_node on their tests (2026-11-25);
     /// `NV_TYPED=off` or `<family>:off` turns one off.
     #[test]
     fn families_past_their_gate_are_on_by_default() {
@@ -218,6 +210,7 @@ mod tests {
                 "lights",
                 "scripts",
                 "hud",
+                "interface",
                 "script_lines",
                 "facegen",
                 "save",
@@ -225,7 +218,11 @@ mod tests {
                 "archives",
                 "ai_queries",
                 "cell_refs",
-                "navmesh_edges"
+                "navmesh_edges",
+                "ai",
+                "forms",
+                "extra_data",
+                "scene_node"
             ]
         );
         let defaults = parse_switch(None, &families).unwrap();
@@ -236,11 +233,11 @@ mod tests {
         assert!(off.iter().all(|m| *m == Mode::Off));
         let one_off = parse_switch(Some("shader:off"), &families).unwrap();
         assert_eq!(one_off[3], Mode::Off);
-        assert!(one_off.iter().filter(|m| **m == Mode::On).count() == 27);
+        assert!(one_off.iter().filter(|m| **m == Mode::On).count() == 32);
         // `NV_TYPED=geometry:off` still turns the geometry family (index 12) off, and only it.
         let geometry_off = parse_switch(Some("geometry:off"), &families).unwrap();
         assert_eq!(geometry_off[12], Mode::Off);
-        assert!(geometry_off.iter().filter(|m| **m == Mode::On).count() == 27);
+        assert!(geometry_off.iter().filter(|m| **m == Mode::On).count() == 32);
     }
 
     /// No two of this crate's families (with the core's) hold the same address, past their gate or not:

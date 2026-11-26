@@ -7,6 +7,45 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-26 (the twelfth upstream merge: 9bf5ba1d..c4e019b5, 40 commits)
+
+**Status: merged, checks below.** #1073 to #1114: more families native (interface, menu manager,
+item list box, stats menu, forms, AI, extra data, scene node, lights), #1087's fix for the
+startup panic (00717e50 in two families), #1097's Settings lists, #1099's Shift+F11 lighting
+switch, #1110's Linux/macOS release packages and crash reporter in every release package, the
+README rewrite. Conflicts and how each went:
+- `host/src/lib.rs`: the fork's Record button line kept; the old lighting block gives way to
+  upstream's `want_new_lighting` (Shift+F11 starts from it).
+- `d3d9-wgpu/src/device.rs`: both kept (the fork's `draw_touch` and upstream's `notes_ready` /
+  `draw_note`); the touch overlay is still drawn last in the present, after the start screen.
+- `game_ini.tsv` / `nv-rs-sections.ini`: the fork's `bRecordButton` row and upstream's
+  Shift+F11 lighting texts. `game-profile/src/game_ini.rs`: one doc comment with both sides.
+- Launcher (#1097): `Row::apply` keeps the fork's one-number field of view (a profile whose two
+  FOVs differ is saved even unchanged) and upstream's hand-back of a fix chosen at the preset's
+  value. The fork's Testing list is gone: upstream's two lists, New lighting and more and Fixes
+  one by one, hold every table row (JIP, JG, MCM, the Tweaks, UIO among the fixes). Settings
+  now has 18 entries: the fork's 13 rows, sounds 13, crash reports 14, the two lists 15 and 16,
+  Back 17.
+- `package-playtest.ps1`: upstream's `-CargoProfile` (Play.exe and FalloutNV.exe from
+  `$programs`), the fork's Launcher.exe (built `--release` by the updater manifest, so from
+  `$x64`) and its BUILD.txt line for a package built without the game. Still no saves, no
+  inis, no reports in a package.
+- READ ME.txt: upstream's Shift+F11 paragraph after F11's, then the fork's sections. README.md:
+  upstream's page and table, the GOG note kept, MCM and lStewieAl's Tweaks named as built in.
+Checked: Shift+F11 is the counter's key with Shift (`input::shift_held`); the fork's F9 (record,
+DIK 0x43) and F11 (counter) are unchanged and nothing of the fork uses Shift. Crash reports stay
+ask-first (`Consent::Unanswered` sends nothing; #1110 only adds the service file to release
+packages). Lock files all resolve `--locked`; DEPENDENCY-LOCK unchanged.
+Found by the checks and fixed:
+- Upstream's interface family (#1073/#1083) holds `00707e30` (`PopulateItemStatsDisplay`), which
+  the fork's equipment stats register over (on in the fixes preset): `typed_interface`'s
+  `no_family_past_its_gate_holds_an_overridable_address` failed, since a registration over a
+  member turns the whole family's direct calls off for the run. `00707e30` is left out of the
+  family on the fork (as #1087 left 00717e50 out of the AI family); its typed body keeps its Diff.
+  No other fork registration or seam is inside a family on by default (the seam guard passes).
+- The fork's `bRecordButton` row showed in the new New lighting and more list on Linux too; it
+  is Windows-only (`WINDOWS_ONLY`), as `room_record` is.
+
 ### Claude, 2026-11-25 (the eleventh upstream merge: 7d700255..9bf5ba1d, 55 commits)
 
 **Status: pushed.** Upstream took out the built-in MCM plugin (#1022), lStewieAl's Tweaks
