@@ -13,6 +13,7 @@
 pub mod body;
 pub mod profile;
 pub mod rig;
+pub mod world;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

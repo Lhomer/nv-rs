@@ -7,6 +7,18 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-26 (Delirium: the world's surfaces as meshes; nothing of Delirium runs in CI)
+
+**Status: pushed.** `delirium_bridge::world` turns what New Physics finds around a body (floor
+and wall planes, step edges, crates as boxes) into triangle meshes for Delirium's `Collision`,
+each triangle facing out of its surface; 4 tests. **Found:** without the unlock nothing of
+Delirium's runs at all, not even its collision: a probe adding two triangles and casting at them
+did not end in 10 minutes (its numbers, all `kv!` slots, are zero until GTA IV unlocks them). So
+every call into Delirium is checked only on Patrick's PC; CI tests the code around it (the map,
+the rig, the body's fit inputs, the profiles, these meshes), and each Delirium step will log what
+it did. Next: the agent's run for a hit (the actor's facts read for its profile, the meshes as its
+chunk, the shot), behind `running()`.
+
 ### Claude, 2026-11-26 (Delirium: can it own the bodies on its own? Yes. And the mid-rise death)
 
 **Delirium's solver, checked in `vendor/delirium-physics/delirium/src` (commit 23aea85b):** it

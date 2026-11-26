@@ -1038,6 +1038,13 @@ Slice 2 (`delirium_bridge::rig`, `::body`): FNV's human skeleton on Delirium's b
   with its reason (`Delirium: its body from GTA IV's files: ...`). Without GTA IV (CI) only the
   refusal and FNV's joints are tested: the body itself is made only on a PC that has the game.
 
+The world link, first part (`delirium_bridge::world`): Havok keeps the world, and Delirium's
+collision gets what New Physics already finds by casting into it around each body: each body's
+floor plane as a square around where the cast met it, the walls beside it the same, a step's edge
+as its top and the face under it, a crate as its top and four sides down to the floor. Metres, Z
+up, every triangle facing out of its surface (tested). Putting them into Delirium's `Collision`
+as one chunk an actor, and the props as its obstacles, comes with the agent's run.
+
 #### Each NPC's Delirium settings (`crates/delirium-bridge/data/profiles.tsv`)
 
 Every NPC gets its own Delirium settings from the start, never one global body (Patrick,
