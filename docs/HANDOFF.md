@@ -9,7 +9,12 @@ machinery runs.
 
 ### Claude, 2026-11-26 (the twelfth upstream merge: 9bf5ba1d..c4e019b5, 40 commits)
 
-**Status: merged, checks below.** #1073 to #1114: more families native (interface, menu manager,
+**Status: pushed (e3473f61); Play package green, latest.txt points at it; Linux test room and
+Android green.** Tests before the push: launcher 184, typed_interface 540 (the family guards,
+the engine starting with every family on), stewie_fixes 16, jip_call_arity 9, stewie 36, mcm 18,
+game-profile 28, engine-core 1210, engine-platform 620, host lib 502, d3d9-wgpu 169, repo
+hygiene 89, Ragdoll lab 54 + ragdoll-core 104; the only ignored tests are the ones ignored
+before. #1073 to #1114: more families native (interface, menu manager,
 item list box, stats menu, forms, AI, extra data, scene node, lights), #1087's fix for the
 startup panic (00717e50 in two families), #1097's Settings lists, #1099's Shift+F11 lighting
 switch, #1110's Linux/macOS release packages and crash reporter in every release package, the
@@ -41,7 +46,8 @@ Found by the checks and fixed:
   the fork's equipment stats register over (on in the fixes preset): `typed_interface`'s
   `no_family_past_its_gate_holds_an_overridable_address` failed, since a registration over a
   member turns the whole family's direct calls off for the run. `00707e30` is left out of the
-  family on the fork (as #1087 left 00717e50 out of the AI family); its typed body keeps its Diff.
+  family on the fork (as #1087 left 00717e50 out of the AI family); its typed body keeps its Diff
+  (its `Typed from` marker goes, since repo hygiene requires a marked function to be registered).
   No other fork registration or seam is inside a family on by default (the seam guard passes).
 - The fork's `bRecordButton` row showed in the new New lighting and more list on Linux too; it
   is Windows-only (`WINDOWS_ONLY`), as `room_record` is.
