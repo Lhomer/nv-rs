@@ -175,6 +175,9 @@ pub const HAND_HOLD: f32 = 20000.0;
 pub const HAND_PUSH: (f32, f32) = (2.0, 1.0);
 /// How long the limits stay soft after a fall (s).
 pub const LIMITS_SETTLE: f32 = 0.3;
+/// A downed body lying on something with no rise wished this long takes the skeleton's own
+/// limits (s; `np_body::Tracking::settled_limits`), eased in; a rise widens them again.
+pub const SETTLED_AFTER: f32 = 1.0;
 /// Standing again, the balance's joint targets and the pelvis's turn ease from the pose the body
 /// stood up in to the animation's over this long (s): switched at once, the legs and spine driven
 /// to the animation's stance pushed a still body to 0.3 to 0.4 m/s in its first frames.
@@ -456,6 +459,9 @@ pub struct Down {
     pub front_side: usize,
     pub front_done: bool,
     pub front_for: f32,
+    /// How long it has lain on something with no rise wished (s; 0 while rising or in the air):
+    /// past [`SETTLED_AFTER`] the skeleton's own limits.
+    pub settled_for: f32,
     /// Upright, the foot going to its place in the animation's stance ([`STANCE_KEPT`]).
     pub stance_fixing: Option<usize>,
     /// The stance's least gap while a foot goes to it (m) and the time since it last closed (s).
@@ -759,6 +765,7 @@ impl Np {
                 front_side: 0,
                 front_done: false,
                 front_for: 0.0,
+                settled_for: 0.0,
             });
             return self.down_frame(anim, floor, dt);
         }
@@ -907,6 +914,7 @@ impl Np {
             end_floors: self.end_floors.clone(),
             edges: self.edges.clone(),
             data_limits: self.to_limits,
+            settled_limits: false,
             body_walls: self.body_walls.clone(),
             body_wall_tops: self.body_wall_tops.clone(),
             pushes: Vec::new(),
@@ -931,7 +939,7 @@ impl Np {
     fn with_allowance(&mut self, mut tracking: Tracking) -> Tracking {
         let now = (
             tracking.soft_limits,
-            tracking.data_limits,
+            tracking.data_limits || tracking.settled_limits,
             tracking.reach.is_empty(),
         );
         if tracking.soft_limits && self.soft_was == now {
@@ -996,6 +1004,7 @@ impl Np {
             front_side: 0,
             front_done: false,
             front_for: 0.0,
+            settled_for: 0.0,
         });
         down.since += dt;
         down.reading = reading;
@@ -1012,6 +1021,12 @@ impl Np {
             down.changes.push((down.since, l));
         }
         let airborne = reading.total < 0.15 * reading.weight;
+        if rising_wish || airborne {
+            down.settled_for = 0.0;
+        } else {
+            down.settled_for += dt;
+        }
+        let settled = down.settled_for >= SETTLED_AFTER;
         // The joints' targets: the animation's; rising, the legs onto goals under the hips.
         let mut targets = relative_of(&self.model, anim);
         let anim_rel = targets.clone();
@@ -1738,6 +1753,14 @@ impl Np {
                 }
             }
         }
+        // Settled, the targets inside the skeleton's own limits too: the animation's pose lies
+        // out of them (the forearms 25 degrees), and muscles pulling a joint against the limit
+        // that holds it put energy into the body each substep.
+        if settled {
+            for (j, t) in targets.iter_mut().enumerate() {
+                *t = self.model.into_data_limit(&self.states, j, *t);
+            }
+        }
         let drives: Vec<Drive> = targets
             .iter()
             .zip(gains)
@@ -1773,12 +1796,14 @@ impl Np {
             // Soft only just downed, while the limits change from the standing ones (widened by
             // the legs' footing) to the downed ones (the animation's and the reach, which stay);
             // hard otherwise.
-            soft_limits: down.since < LIMITS_SETTLE || self.to_limits,
+            // Settled, soft too: the skeleton's own limits eased in, and hard once inside.
+            soft_limits: down.since < LIMITS_SETTLE || self.to_limits || settled,
             allow: Vec::new(),
             floors: self.floors.clone(),
             end_floors: self.end_floors.clone(),
             edges: self.edges.clone(),
             data_limits: self.to_limits,
+            settled_limits: settled,
             body_walls: self.body_walls.clone(),
             body_wall_tops: self.body_wall_tops.clone(),
             pushes,

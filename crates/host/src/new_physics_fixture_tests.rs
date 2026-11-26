@@ -2785,6 +2785,10 @@ struct CycleRun {
     /// skeleton's limits as handed (degrees).
     joints_logged: u32,
     joints_handed: Vec<f32>,
+    /// The `[np joints]` lines of a body lying with no rise asked for at least 1.5 s
+    /// (`SETTLED_AFTER` and the limits' ease in): each the figure it says (the joints out by
+    /// more than a degree, or "every joint inside").
+    joints_unasked: Vec<String>,
     notes: Vec<String>,
     /// Every frame New Physics had it: the deepest any body's capsule lay inside a box (units),
     /// which body and when (s after the last hit, downed).
@@ -3590,6 +3594,19 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
         .iter()
         .filter(|n| n.contains("[np joints]") && !n.contains("at the hand-over"))
         .count() as u32;
+    run.joints_unasked = run
+        .notes
+        .iter()
+        .filter(|n| n.contains("[np joints]") && !n.contains("at the hand-over"))
+        .filter(|n| {
+            n.split("(no rise asked for ")
+                .nth(1)
+                .and_then(|t| t.split(' ').next())
+                .and_then(|t| t.parse::<f32>().ok())
+                .is_some_and(|t| t >= 1.5)
+        })
+        .map(|n| n.split("limits: ").last().unwrap_or_default().to_string())
+        .collect();
     run.joints_handed = run
         .notes
         .iter()
@@ -3689,6 +3706,13 @@ fn np_full_cycle_with_a_racing_animation() {
         !r.joints_handed.is_empty() && r.joints_handed.iter().all(|&d| d <= 5.0),
         "handed {:?} degrees out",
         r.joints_handed
+    );
+    // Lying with no rise asked for (1.5 s and more, both falls), every joint inside the
+    // skeleton's own limits: a death or a given-up rise has nothing to bring in.
+    assert!(
+        r.joints_unasked.len() >= 2 && r.joints_unasked.iter().all(|l| l == "every joint inside"),
+        "lying unasked: {:?}",
+        r.joints_unasked
     );
     assert_eq!(
         r.snaps, 0,

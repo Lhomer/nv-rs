@@ -7,6 +7,23 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-26 (task C, first part: a body lying unasked inside the skeleton's limits)
+
+**Status: pushed.** A downed body on something with no rise asked for 1 s (`np::SETTLED_AFTER`)
+takes the skeleton's own limits (`Tracking::settled_limits`: the data's, eased in at
+`LIMIT_STEP`, not the hand-over's fast pull), and its drive targets are brought inside them too
+(`Model::into_data_limit`). Without the targets' clamp the muscles pulled the joints against the
+limits (the animation holds the forearms 25 degrees past the data's elbow): a body at 7.9 m/s at
+the slab, the floor 6.75 body weights. At 0.3 s the settle fell in the wait between a given-up
+rise and the AI's next ask, and the wall run's second rise never stood in 12 s; at 1 s every New
+Physics test passes (53), the host library 502, the lab 54, ragdoll-core 104. The host's
+`[np joints]` lines now say how long no rise has been asked for; the full cycle asserts every
+joint inside from 1.5 s unasked (it failed before: the forearms 24 to 27 degrees out).
+Still open in task C: the first second after a landing and the rises keep the widened limits
+(the reach, by design: the data's limits are a dead ragdoll's), so a death in that second still
+waits for the hand-over's pull (`HAND_WAIT_FRAMES`); the light-hit falls. `docs/GUNPLAY.md` says
+how it works.
+
 ### Claude, 2026-11-26 (the twelfth upstream merge: 9bf5ba1d..c4e019b5, 40 commits)
 
 **Status: pushed (e3473f61); Play package green, latest.txt points at it; Linux and Windows

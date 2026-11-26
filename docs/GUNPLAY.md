@@ -697,7 +697,16 @@ the legs' IK into a deep squat and each spine joint curled 26 degrees). The dead
 and the standing balance keep the data's limits as before. The limits never widen to a rise's own
 goals: widening by each frame's target let the goals ratchet the joints 120 degrees past them.
 For 0.3 s after a fall, and after standing up, a joint outside the limits is brought back at most
-0.01 rad a substep, never snapped (`LIMIT_STEP`); otherwise the limits are hard. **For Patrick to
+0.01 rad a substep, never snapped (`LIMIT_STEP`); otherwise the limits are hard.
+A downed body that has lain on something with no rise asked for 1 s (`np::SETTLED_AFTER`) takes
+the skeleton's own limits, as the dead ragdoll's, eased in at the same 0.01 rad a substep, and
+its joints' targets are brought inside them too (`Model::into_data_limit`: the animation's own pose
+holds the forearms 25 degrees past the data's elbow, and muscles pulling a joint against the limit
+that holds it threw bodies about at walls and slabs). A rise asked for widens them again. So a
+body that has lain unasked is inside the data's limits throughout (the full cycle asserts it from
+1.5 s), and a death or a given-up rise then hands it over with nothing to bring in. The delay keeps
+it out of the short wait between a given-up rise and the AI's next ask (at 0.3 s it changed the
+second rise's start by a wall, which then never stood in 12 s). **For Patrick to
 confirm:** the reach goes past his skeleton data on purpose; it is in one place
 (`np_down::REACH_FOLD`, `REACH_CURL`).
 

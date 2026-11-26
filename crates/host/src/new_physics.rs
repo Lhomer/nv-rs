@@ -178,6 +178,9 @@ struct NpActor {
     /// Seconds since its joints' figure out of the skeleton's limits was last logged (downed,
     /// every [`JOINTS_EVERY`]).
     joints_said: f32,
+    /// Downed, how long the AI has wished no rise (s; 0 while it wishes one): said with the
+    /// joints' figure, which a body lying unasked keeps inside the skeleton's limits.
+    unasked: f32,
     /// Each body's walls found beside it (world, metres; where the cast met it, game units; its
     /// top, metres, infinite: none; how far behind the face its top reaches and along the face
     /// each way from the hit, metres, [`top_extent`]): kept while the body stays within
@@ -800,6 +803,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             history: std::collections::VecDeque::new(),
             jumps_said: 0,
             joints_said: JOINTS_EVERY,
+            unasked: 0.0,
             walls: Vec::new(),
             step_edges: Vec::new(),
             boxes: Vec::new(),
@@ -1378,18 +1382,22 @@ pub fn apply(e: &mut Engine) {
         // Downed: how far each joint lies out of the skeleton's own limits, every
         // [`JOINTS_EVERY`] (Patrick's 19:14 clip: the logs had no joint angles).
         if np.down.is_some() {
+            a.unasked = if np.rise { 0.0 } else { a.unasked + dt };
             a.joints_said += dt;
             if a.joints_said >= JOINTS_EVERY {
                 a.joints_said = 0.0;
                 let (line, _) = joints_line(np);
                 note(format!(
-                    "{:08X}: [np joints] {}: out of the skeleton's limits: {line}",
+                    "{:08X}: [np joints] {} (no rise asked for {:.2} s): out of the skeleton's \
+                     limits: {line}",
                     a.id,
-                    a.label.unwrap_or("downed")
+                    a.label.unwrap_or("downed"),
+                    a.unasked
                 ));
             }
         } else {
             a.joints_said = JOINTS_EVERY;
+            a.unasked = 0.0;
         }
         a.frames += 1;
         // Nothing written to the nodes here: the bodies' worlds are set at the world pass

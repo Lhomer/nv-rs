@@ -183,6 +183,11 @@ pub struct Tracking {
     /// the game's ragdoll (whose constraints snapped a pose far outside them: the tester's 08:13
     /// clip, 79 to 183 degrees out).
     pub data_limits: bool,
+    /// The skeleton's own limits as [`Tracking::data_limits`] has them, eased in at
+    /// [`LIMIT_STEP`] (with `soft_limits`), not at the hand-over's pace: a downed body lying with
+    /// no rise wished (`np::SETTLED_AFTER`), so that a death or a given-up rise finds it inside
+    /// them already.
+    pub settled_limits: bool,
     /// Each body's own walls (world, metres; empty: none): the sides of walls, crates and ledges
     /// found near it (a plane holds only the body it was found for, so a crate's face never
     /// reaches a body beyond the crate).
@@ -391,6 +396,27 @@ impl Model {
         most
     }
 
+    /// `rel` (joint `j`'s relative rotation, `parent⁻¹ child`) brought inside the skeleton's own
+    /// limits (the bind pose's taken in), as [`Model::into_data_limits`] brings a pose: a settled
+    /// body's drive targets, so its muscles never pull a joint against the limits that hold it.
+    pub fn into_data_limit(&self, states: &[State], j: usize, rel: Q) -> Q {
+        let Some(def) = self.joints.get(j) else {
+            return rel;
+        };
+        let bind = self.bind_rel.get(j).copied().unwrap_or(Q_ID);
+        let lim = widen(def.limit, self.measure(j, bind), axle_apart(def, bind));
+        let mut copy = states.to_vec();
+        copy[def.parent].q = Q_ID;
+        copy[def.child].q = rel;
+        for _ in 0..4 {
+            let mut none = f32::INFINITY;
+            if self.limit(&mut copy, def, &lim, false, LIMIT_STEP, &mut none) <= 1e-4 {
+                break;
+            }
+        }
+        qnorm(qmul(qconj(copy[def.parent].q), copy[def.child].q))
+    }
+
     /// How far each joint lies out of the skeleton's own limits (rad; the game's ragdoll's:
     /// cone, plane, twist or hinge, widened only by the bind pose), measured on a copy.
     pub fn data_limits_out(&self, states: &[State]) -> Vec<f32> {
@@ -579,7 +605,7 @@ impl Model {
             .iter()
             .enumerate()
             .map(|(j, def)| {
-                if tracking.is_some_and(|t| t.data_limits) {
+                if tracking.is_some_and(|t| t.data_limits || t.settled_limits) {
                     // The skeleton's own, taking in its bind pose (the neck's lies 17 degrees out
                     // of its cone in the data: the game's ragdoll rests there).
                     let bind = self.bind_rel.get(j).copied().unwrap_or(Q_ID);
