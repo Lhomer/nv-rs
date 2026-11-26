@@ -9,8 +9,8 @@ machinery runs.
 
 ### Claude, 2026-11-26 (the twelfth upstream merge: 9bf5ba1d..c4e019b5, 40 commits)
 
-**Status: pushed (e3473f61); Play package green, latest.txt points at it; Linux test room and
-Android green.** Tests before the push: launcher 184, typed_interface 540 (the family guards,
+**Status: pushed (e3473f61); Play package green, latest.txt points at it; Linux and Windows
+test rooms and Android green.** Tests before the push: launcher 184, typed_interface 540 (the family guards,
 the engine starting with every family on), stewie_fixes 16, jip_call_arity 9, stewie 36, mcm 18,
 game-profile 28, engine-core 1210, engine-platform 620, host lib 502, d3d9-wgpu 169, repo
 hygiene 89, Ragdoll lab 54 + ragdoll-core 104; the only ignored tests are the ones ignored
