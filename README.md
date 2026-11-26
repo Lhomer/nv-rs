@@ -120,6 +120,12 @@ included unchanged.
   contributors: its editor ids and its corrections to JIP LN's co-save.
 - The fixes preset's "No LOD Water" flag on The Strip, found by Aqua Performa's author.
 
+New Physics can run its reactions on **[Delirium Physics](https://github.com/PVCPC/delirium-physics)**
+by PVCPC, the Euphoria active ragdoll as GTA IV has it, ported to Rust (GPL-3.0; its own credits
+are in [vendor/delirium-physics/CREDITS.md](vendor/delirium-physics/CREDITS.md)). It is included
+as published (`vendor/delirium-physics`). It reads its numbers from your own copy of GTA IV, so it
+runs only where `sDeliriumGame` names one; nv-rs carries no GTA IV file.
+
 The community decompilation [fnv_decomp](https://github.com/momusdigital/fnv_decomp) is read
 alongside the game's program as a reference for names, types and logic.
 

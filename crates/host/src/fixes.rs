@@ -912,6 +912,10 @@ pub struct Choice {
     /// else the start stops); else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Gunplay]
     /// sTestRangeCell`; else `auto` (the best interior of the player's FalloutNV.esm).
     pub test_range_cell: String,
+    /// The player's own GTA IV for Delirium ([`delirium_bridge`]): `NV_DELIRIUM_GAME` when set;
+    /// else, in a launcher's play run, `Fallout.ini`'s `[nv-rs Gunplay] sDeliriumGame`; else
+    /// `none` (New Physics as it is). Read only with New Physics on.
+    pub delirium_game: String,
     /// Perks per level in halves ([`crate::perk_every_level`]): `NV_PERKS_PER_LEVEL` when set (0.5
     /// to 3, else the start stops); else, in a launcher's play run, `Fallout.ini`'s `[nv-rs
     /// Gameplay] sPerksPerLevel`; else 2. Read by the perk row only.
@@ -995,6 +999,7 @@ impl Choice {
             gunplay: crate::gunplay::Tuning::PLAY,
             movement: crate::movement::Tuning::PLAY,
             test_range_cell: crate::test_range::DEFAULT_CELL.to_string(),
+            delirium_game: delirium_bridge::OFF.to_string(),
             perks_per_level: crate::perk_every_level::DEFAULT_HALVES,
             ambient_occlusion: PLAY_AMBIENT_OCCLUSION,
             sun_shadows: PLAY_SUN_SHADOWS,
@@ -1176,6 +1181,10 @@ impl Choice {
                     .clone()
                     .unwrap_or_else(|| crate::test_range::DEFAULT_CELL.to_string()),
             },
+            delirium_game: env("NV_DELIRIUM_GAME")
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| ini.delirium_game.clone())
+                .unwrap_or_else(|| delirium_bridge::OFF.to_string()),
             perks_per_level: match env("NV_PERKS_PER_LEVEL").filter(|v| !v.trim().is_empty()) {
                 Some(raw) => match crate::perk_every_level::parse_rate(&raw) {
                     Some(halves) => halves,
@@ -1566,6 +1575,11 @@ pub fn install(e: &mut Engine, choice: &Choice) {
     crate::gunplay::set_tuning(choice.gunplay);
     crate::movement::set_tuning(choice.movement);
     crate::test_range::set_cell(&choice.test_range_cell);
+    // Delirium behind New Physics, from the player's own GTA IV: started once, its outcome in the
+    // log; anything wrong leaves New Physics as it is.
+    if choice.gunplay.new_physics {
+        eprintln!("{}", delirium_bridge::start_once(&choice.delirium_game));
+    }
     crate::perk_every_level::set_rate(choice.perks_per_level);
     for fix in FIXES.iter().filter(|f| choice.is_on(f)) {
         (fix.install)(e);

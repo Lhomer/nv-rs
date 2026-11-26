@@ -985,6 +985,31 @@ weapon as drawn (the game aims its NPC shots from the weapon node as animated, `
 downed actor's shot leaves from where its weapon would be standing; only the spread follows the
 pose); a creature's downed body (New Physics takes human skeletons only). Not run in the game.
 
+### New Physics on Delirium (Patrick approved 2026-11-26; being built in slices)
+
+New Physics' reactions are to run on **Delirium Physics** (PVCPC, the Euphoria active ragdoll as
+GTA IV has it, in Rust; `vendor/delirium-physics`, GPL-3.0-only) where the player has their own
+GTA IV. Delirium reads its numbers from the player's `GTAIV.exe` (the Steam PC one: its bytes
+unlock them, `delirium_data::kv::unlock`) and its body's muscles and reactions from their
+`pc/data/naturalmotion/Fred.art`; GTA IV's own hit tuning (`common/data/taskparams.txt`) when
+there. So nothing of GTA IV is in the repository, CI or a package: `[nv-rs Gunplay]
+sDeliriumGame` names the player's copy (the exe or its folder) on their own PC, `none` by default.
+
+The rules stay New Physics' own: all of it behind `bNewPhysics` (off by default; off, hits are
+vanilla), no original staggers (Delirium's stagger and stumble are not used to bring back the
+vanilla reactions; only its active-ragdoll reactions after hits, knockdowns, falls, blasts and
+get-ups), and everything New Physics keeps (blast force with falloff and lift, no cap on pellets
+or full-auto, get-ups pushing off with the arms through planted hands, settle then rise and end
+still, the slope timings, the joint limits while downed, kill cams off, no hit-stop). Humans
+first: FNV's human skeleton mapped onto Delirium's 21 parts; other skeletons later.
+
+Slice 1 (`crates/delirium-bridge`): the engine vendored, the setting, and the start. With New
+Physics on, the game's start runs `delirium_bridge::start_once` once and logs one line: `Delirium:
+on, from the player's own GTA IV ...`, or why not (`off (sDeliriumGame=none)`, no such file or
+folder, no GTAIV.exe in it, not a version Delirium reads its numbers from, no or an unreadable
+character file), each ending `New Physics plays as before, without Delirium`. The lines never
+name the path. Nothing else uses Delirium yet: New Physics plays exactly as before either way.
+
 ### bdf710a: the get-up hoisted upside down, the stagger's slide, the head's nod, the launch along the ground (Patrick, 2026-11-17, clip 1456)
 
 On FNV's skeleton (`tests-data/fnv_skeleton.txt`) the get-up fixture now runs knock state 6 as the

@@ -20,3 +20,6 @@ crates/mcm/NOTICE	NOTICE-mcm
 crates/stewie/NOTICE	NOTICE-stewie
 crates/johnnyguitar/NOTICE	NOTICE-johnnyguitar
 crates/engine-platform/data/LICENSE-SDL_GameControllerDB	LICENSE-SDL_GameControllerDB
+vendor/delirium-physics/LICENSE	LICENSE-delirium-physics
+vendor/delirium-physics/NOTICE	NOTICE-delirium-physics
+vendor/delirium-physics/CREDITS.md	CREDITS-delirium-physics.md

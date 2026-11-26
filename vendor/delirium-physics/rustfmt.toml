@@ -1,0 +1,2 @@
+# nv-rs: Delirium is kept as published (vendor/README.md), so `cargo fmt --all` leaves it be.
+disable_all_formatting = true

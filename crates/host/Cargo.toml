@@ -33,6 +33,7 @@ johnnyguitar = { path = "../johnnyguitar" }
 # The living-body physics' pure parts (flinch, balance, knockdown momentum, calibres), shared
 # with tools/ragdoll-lab.
 ragdoll-core = { path = "../ragdoll-core" }
+delirium-bridge = { path = "../delirium-bridge" }
 # lStewieAl's Tweaks built in, when its row is on: after JIP and MCM, before UIO (crates/stewie).
 stewie = { path = "../stewie" }
 uio = { path = "../uio" }

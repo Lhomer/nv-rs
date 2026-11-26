@@ -1,0 +1,12 @@
+# Vendored from PVCPC/delirium-physics 23aea85b (vendor/README.md): the workspace fields written out.
+[package]
+name = "delirium-data"
+version = "0.9.3"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+blake3 = "1"
+aes = "0.8"
+miniz_oxide = "0.8"

@@ -103,6 +103,8 @@ pub struct Keys {
     pub movement: Vec<(&'static str, i32)>,
     /// `sTestRangeCell`: the Test Range's cell (`crate::test_range`).
     pub test_range_cell: Option<String>,
+    /// `sDeliriumGame`: the player's own GTA IV for Delirium (`delirium_bridge`), or `none`.
+    pub delirium_game: Option<String>,
     /// `sPerksPerLevel`: perks per level, in halves (`crate::perk_every_level`).
     pub perks_per_level: Option<u32>,
     /// The lines whose value can't be used (`key=value`): the default stands for each.
@@ -187,6 +189,10 @@ impl Keys {
                 "sPerksPerLevel" => {
                     keys.perks_per_level = crate::perk_every_level::parse_rate(raw);
                     keys.perks_per_level.is_some()
+                }
+                "sDeliriumGame" => {
+                    keys.delirium_game = (!raw.trim().is_empty()).then(|| raw.trim().to_string());
+                    keys.delirium_game.is_some()
                 }
                 "sTestRangeCell" => {
                     keys.test_range_cell =
@@ -605,6 +611,7 @@ mod tests {
                 "iBalance",
                 "iReactionDraw",
                 "bNewPhysics",
+                "sDeliriumGame",
                 "sTestRangeCell",
                 "bSnappyMovement",
                 "iAccelerate",
@@ -678,6 +685,7 @@ mod tests {
             keys.test_range_cell.as_deref(),
             Some(crate::test_range::DEFAULT_CELL)
         );
+        assert_eq!(keys.delirium_game.as_deref(), Some(delirium_bridge::OFF));
         assert_eq!(
             keys.perks_per_level,
             Some(crate::perk_every_level::DEFAULT_HALVES)

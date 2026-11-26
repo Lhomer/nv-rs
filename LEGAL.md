@@ -28,6 +28,10 @@ To run nv-rs you need your own legally obtained copy of Fallout: New Vegas.
 nv-rs reads that copy's `Data` folder at runtime and never modifies the
 installation.
 
+New Physics' Delirium (below) reads its numbers and its character from the player's own copy
+of GTA IV, which the player names on their own PC (`sDeliriumGame`); no GTA IV file, number read
+from one or path to one is in the repository, its tests or CI, or any package.
+
 In a Windows package, `app\FalloutNV.exe` is nv-rs's own program under that name
 (graphics drivers' game fixes and Windows' per-program sound go by the name), not
 the game's; the game's own program is read from the player's installation.
@@ -141,6 +145,11 @@ terms, whose notice must be kept:
   (Philip Rebohle, Joshua Ashton, Robin Kertels, Jeffrey Ellison; zlib/libpng licence) and
   altered to make wgpu-hal's pipelines; DXVK's copyright and licence notice is at the top of
   the file, and the file says it is an altered version.
+- `vendor/delirium-physics` is Delirium Physics 0.9.3 (PVCPC; GPL-3.0-only), the Euphoria
+  active ragdoll as GTA IV has it, ported to Rust, kept in the repository as published but for
+  its manifests' workspace fields ([vendor/README.md](vendor/README.md)); its licence, its
+  NOTICE and its CREDITS are beside it and in every package's licenses folder. nv-rs (GPL-3.0 or
+  later) is distributed with it under version 3.
 - `crates/engine-platform/data/gamecontrollerdb-windows.txt` comes from SDL_GameControllerDB
   (zlib licence; its notice is in
   [crates/engine-platform/data/LICENSE-SDL_GameControllerDB](crates/engine-platform/data/LICENSE-SDL_GameControllerDB)).

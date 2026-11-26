@@ -7,6 +7,37 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-26 (Delirium, slice 1: vendored, the GTA IV setting, the start with its fallback)
+
+**Status: pushed.** Patrick's queued task: New Physics on Delirium Physics (PVCPC,
+https://github.com/PVCPC/delirium-physics, GPL-3.0-only; compatible with nv-rs's GPL-3.0-or-later).
+- `vendor/delirium-physics`: the engine (`delirium`) and data (`delirium-data`) crates of commit
+  23aea85b, with Delirium's LICENSE, CREDITS and a NOTICE; `vendor/README.md` says what changed
+  (manifests' workspace fields; the five offset maps kept as hex text and written back byte for
+  byte by a `build.rs`, since the hygiene test allows no binary; a `rustfmt.toml` so `cargo fmt
+  --all` leaves it be). The maps hold where in GTAIV.exe each number is and Delirium's own
+  constants; no GTA IV number is in them (Delirium's own note in `kv.rs`).
+- `crates/delirium-bridge`: `start(setting)` finds GTAIV.exe (the exe or its folder, any letter
+  case), unlocks (`kv::unlock`), loads `pc/data/naturalmotion/Fred.art` (a panic in Delirium's
+  reader caught), reads `common/data/taskparams.txt` when there; each failure a `Fallback` whose
+  log line ends "New Physics plays as before, without Delirium" and never names the path.
+  Its tests run without GTA IV (none, a missing path, a folder without the exe, an exe that isn't
+  GTA IV, the letter cases).
+- `[nv-rs Gunplay] sDeliriumGame` (`NV_DELIRIUM_GAME`), default `none`; with `bNewPhysics=1` the
+  host's install logs `delirium_bridge::start_once`'s line. Nothing uses Delirium yet: New Physics
+  plays as before either way. The launcher lists the row in New lighting and more.
+- 66 crates.io packages came with it (bevy_math, bevy_transform, bevy_tasks 0.20 and what they
+  use, blake3, aes, miniz_oxide): THIRD-PARTY-NOTICES (346 packages) and their licence folders
+  from the registry; `notices.txt` carries Delirium's LICENSE, NOTICE and CREDITS; the android
+  and linux locks updated (only additions), DEPENDENCY-LOCK recomputed. README Credits and LEGAL
+  name Delirium.
+- Next: slice 2, FNV's human skeleton onto Delirium's 21 parts (the SDK's `rig.rs` names, a
+  `Build` fitted to FNV's bind pose), then the reactions through it.
+- Task #8's last item waits on Patrick: a death mid-rise handed over at once inside the limits
+  (the full projection works: `as handed: every joint inside`, but the pose jumps 8.9 units at
+  the death, which `np_dies_while_downed_on_fnvs_skeleton`'s 1.5 units refuses), or the 45-frame
+  wait kept (as now).
+
 ### Claude, 2026-11-26 (task C, first part: a body lying unasked inside the skeleton's limits)
 
 **Status: pushed.** A downed body on something with no rise asked for 1 s (`np::SETTLED_AFTER`)
