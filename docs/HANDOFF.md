@@ -7,6 +7,24 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-27 (Delirium keeps the downed body and does the get-up: no Havok at all)
+
+**Status: pushed; not run with GTA IV (for Patrick to try).** Patrick's addendum: a living downed
+human stays on Delirium too. `delirium_np::frame_for` no longer hands a downed body down: `Own`
+(hit, down, rise, up) says who drives it; down, Delirium's own fall then relax while New Physics'
+downed controller reads the body as it lies (its settle timings on the real body); rising and
+standing, Delirium's muscle rise follows New Physics' own rise (`Agent::rise`/`follow`, the parts
+by `parts_from_bodies`); upright and still, back to the animation (`dl_back`: taken again only by
+a new hit). The host never hands a Delirium body (or one handed back) to the game's ragdoll: rises
+given up settle and try again, a fall makes New Physics' downed state. Death at any point is the
+Delirium corpse. Refusals fall back to New Physics as it is, said. Every ownership change is a
+`note_event` line (GUNPLAY.md lists them). Also fixed: `bones_from_parts` left `Bip01 NonAccum`
+at its bind turn (a lying body's root upright, the spine 9.5 units off). Tests:
+`new_physics_bodies_give_delirium_the_pose_to_follow`,
+`the_get_up_on_delirium_settles_rises_and_ends_upright_and_still`, `upright_is_tall_and_straight`.
+Unknowns until Patrick's log: whether Delirium's own pelvis help (half the body's weight) lifts
+the body on the rise, and how its relax lies; both are Delirium's own numbers, nothing tuned.
+
 ### Claude, 2026-11-27 (Delirium: the 23:11 log, the downed hand-off going to the game's ragdoll)
 
 **Status: pushed; for Patrick to try again.** His 99f6bc3 run (before 1f0e33f): `downed after 134

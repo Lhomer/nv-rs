@@ -1110,8 +1110,37 @@ state is made only inside its own frame (when its balance's update reads a fall)
 check later in the frame read "falling, not yet down", the fall from standing that goes to the
 game's ragdoll. Now `Np::fall_now` makes the downed state at the hand-off, as a fall past any step
 does, and New Physics' own controller has the body from that frame (tested: handed down lying at
--72152, 8282, it is downed at once and stays downed and on the floor through its next frames). Dying (or a rise given up) hands it to New Physics at
-once, which hands it to the game as it does now (the wait kept, the limbs brought in). Slice 3b,
+-72152, 8282, it is downed at once and stays downed and on the floor through its next frames).
+**Downed and the get-up stay Delirium's (Patrick's addendum after the 23:11 log: no Havok for a
+living downed body either):** the hand-down above is gone. A human Delirium has is Delirium's for
+the whole fall, alive, downed, rising or dead; the game's ragdoll (`hkp`) never takes it, and
+Havok keeps only the world. Who has it (`delirium_np::Own`): hit, Delirium's own reactions; down
+(the posture reads down, or it lies settled), Delirium's own fall goes on and then its own relax,
+New Physics' downed controller is made at once (`Np::fall_now`) and reads the body as it lies
+each frame (New Physics' bodies on Delirium's pose, its frame run from there and not drawn), so
+its settle is timed on the real body with its rules as before (settled before it rises, 3 s on a
+slope); rising (New Physics' rise begins), Delirium's muscles follow New Physics' rise (its own
+bodies, simulated free from the pose it lay in: the arms pushing off through planted hands, up to
+5 s, the 15-unit cap once upright, its joint limits while downed) through Delirium's muscle rise
+(stiff muscles on every joint toward the pose, the pelvis helped toward New Physics' at most
+Delirium's own share of its weight: `Agent::rise`, `Agent::follow`, the parts from New Physics'
+bodies by `parts_from_bodies`); the rise stopped (given up or waiting), down again, relaxed; New
+Physics standing, its standing pose held until Delirium's body is upright (the pelvis at 85% of its
+standing height, the torso within 20 degrees) and still (under 0.15 m/s for 0.3 s), then back to
+the game's animation (New Physics' standing balance from Delirium's pose lets it go). Rises given
+up on Delirium settle again and try again; a fall New Physics' balance reads while Delirium has
+the body (or after it handed it back) makes New Physics' downed controller at once, never the
+game's ragdoll. A death at any point is Delirium's corpse below (its muscles and the pose it
+followed off at once; no hand-over, so no wait). Every change is said (`[np delirium] taken`,
+`downed on Delirium`, `rising on Delirium`, `back down on Delirium`, `New Physics stands`,
+`upright and still: back to the game's animation`, `dead on Delirium (downed | mid-rise | ...)`,
+`its rises given up`, `fell ... never the game's ragdoll`, `refused while <hit | downed | rising |
+standing> (why): New Physics has it as it is now`). Refused (a Delirium error, a pose gone bad or
+flung, not upright 3 s after New Physics stood) New Physics has it as it is (its downed
+controller, its rise). Found on the way: Delirium's pose made into New Physics' bodies left the
+root body (`Bip01 NonAccum`, the pelvis's parent, no part of Delirium's) at its bind turn, so a
+lying body's root stood upright over its hips and the spine under it was placed as if standing
+(9.5 units off in the test); now it turns with the pelvis (`bones_from_parts`). Slice 3b,
 the corpse: an actor that dies while Delirium has it stays Delirium's, its muscles off for good
 (`Agent::kill`), kept by New Physics and drawn as Delirium has it (shots and blasts still push
 it). The game's death (`Actor::Kill`) would turn its ragdoll loose with

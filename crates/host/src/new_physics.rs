@@ -186,9 +186,13 @@ struct NpActor {
     dl: Option<crate::delirium_np::Dl>,
     dl_tried: bool,
     dl_queue: Vec<crate::delirium_np::DlHit>,
-    /// Handed down by Delirium (its downed controller has it), and its get-up begun.
+    /// Left by Delirium while downed (refused: New Physics' downed controller has it), and its
+    /// get-up begun.
     dl_down: bool,
     dl_rising: bool,
+    /// Handed back by Delirium upright and still (taken again by a new hit, and never the game's
+    /// ragdoll meanwhile).
+    dl_back: bool,
     /// Each body's walls found beside it (world, metres; where the cast met it, game units; its
     /// top, metres, infinite: none; how far behind the face its top reaches and along the face
     /// each way from the hit, metres, [`top_extent`]): kept while the body stays within
@@ -825,6 +829,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             dl_queue: Vec::new(),
             dl_down: false,
             dl_rising: false,
+            dl_back: false,
             walls: Vec::new(),
             step_edges: Vec::new(),
             boxes: Vec::new(),
@@ -1168,9 +1173,16 @@ pub fn apply(e: &mut Engine) {
                         corpse = true;
                         if !was {
                             note_event(format!(
-                                "{:08X}: [np delirium] died: Delirium keeps the body, its muscles \
-                                 off, its ragdoll on the pose drawn",
-                                a.id
+                                "{:08X}: [np delirium] dead on Delirium ({}): Delirium keeps the \
+                                 body, its muscles off, its ragdoll on the pose drawn (never the \
+                                 game's)",
+                                a.id,
+                                match d.own {
+                                    crate::delirium_np::Own::Hit => "hit",
+                                    crate::delirium_np::Own::Down => "downed",
+                                    crate::delirium_np::Own::Rise => "mid-rise",
+                                    crate::delirium_np::Own::Up { .. } => "standing",
+                                }
                             ));
                             came_out(&mut a.outcome, "died".to_string());
                         }
@@ -1435,13 +1447,19 @@ pub fn apply(e: &mut Engine) {
             }
         }
         np.edges.extend(a.boxes.iter().copied());
-        // Where Delirium runs, a human's frame is Delirium's until it lies settled or stands
-        // again (`crate::delirium_np`); New Physics' bodies are kept on its pose.
+        // Where Delirium runs, a human's frame is Delirium's for the whole fall, until it is back
+        // upright and still (`crate::delirium_np`).
         let via_delirium = if delirium_bridge::running() {
             crate::delirium_np::frame_for(
                 e,
-                (a.id, a.actor, &a.tree, a.snap.as_ref()),
-                (&mut a.dl, &mut a.dl_tried, &mut a.dl_queue, &mut a.dl_down),
+                (a.id, a.actor, &a.tree, a.snap.as_ref(), &anim),
+                (
+                    &mut a.dl,
+                    &mut a.dl_tried,
+                    &mut a.dl_queue,
+                    &mut a.dl_down,
+                    &mut a.dl_back,
+                ),
                 np,
                 (reference, a.take_v, floor, dt, a.handing.is_some()),
             )
@@ -1456,7 +1474,7 @@ pub fn apply(e: &mut Engine) {
         floor_load_said(&mut a, floor, dt);
         wall_load_said(&mut a);
         let Some(np) = a.np.as_mut() else { continue };
-        // A body Delirium handed down: its get-up (New Physics' own) said as it starts and ends.
+        // A downed body Delirium refused: its get-up (New Physics' own) said as it starts and ends.
         if a.dl_down {
             if np.rise && np.down.is_some() && !a.dl_rising {
                 a.dl_rising = true;
@@ -1629,7 +1647,8 @@ pub fn apply(e: &mut Engine) {
             ));
         }
         a.steps_logged = np.balance.taken.len();
-        if np.down.is_some() {
+        let dl_corpse = a.dl.as_ref().is_some_and(|d| d.dead());
+        if np.down.is_some() && !dl_corpse {
             let give_up = downed(e, &mut a, dt);
             if give_up {
                 a.choice = "give up";
@@ -1650,6 +1669,39 @@ pub fn apply(e: &mut Engine) {
         // Its movement held while New Physics has it (the mover's at its update too).
         crate::knockdown::hold_controller(e, a.actor);
         a.ref_after = Some(read3(e, a.actor + REFR_POSITION));
+        // Delirium's body (or one it handed back upright) never goes to the game's ragdoll: its
+        // rises given up, it lies and settles again before it tries again; a fall, New Physics'
+        // downed controller has it at once (Patrick's plan: Delirium's for the whole fall).
+        if a.handing.is_none() && (a.dl.is_some() || a.dl_back) {
+            if a.choice == "give up" {
+                note_event(format!(
+                    "{:08X}: [np delirium] its rises given up ({} tries): it stays down on \
+                     Delirium and settles again before it tries again (never the game's ragdoll)",
+                    a.id, a.fails
+                ));
+                a.choice = "settle";
+                a.fails = 0;
+                a.still_for = 0.0;
+                np.rise = false;
+            }
+            if np.phase() == Phase::Falling && np.down.is_none() {
+                note_event(format!(
+                    "{:08X}: [np delirium] fell ({}) {}: New Physics' downed controller has it at \
+                     once (never the game's ragdoll)",
+                    a.id,
+                    match np.balance.fall_reason {
+                        "" => "steps",
+                        r => r,
+                    },
+                    if a.dl.is_some() {
+                        "on Delirium"
+                    } else {
+                        "after Delirium handed it back"
+                    }
+                ));
+                np.fall_now("kept from the game's ragdoll");
+            }
+        }
         if a.handing.is_none()
             && ((np.phase() == Phase::Falling && np.down.is_none()) || a.choice == "give up")
         {

@@ -216,12 +216,44 @@ impl Agent {
 
     /// Dead: the muscles off for good (a corpse is Delirium with its muscles off).
     pub fn kill(&mut self) -> Result<(), String> {
+        // Nothing followed any more (a rise's muscles and its help on the pelvis end with it).
+        self.follow(&[])?;
         ok(unsafe { sdk::nm_agent_set_dead(self.0, 1) }).map(|_| ())
     }
 
     /// One step of `dt` seconds in `world`.
     pub fn step(&mut self, world: &World, dt: f32) -> Result<(), String> {
         ok(unsafe { sdk::nm_agent_step(self.0, world.0, dt) }).map(|_| ())
+    }
+
+    /// Lying relaxed as Delirium's own relax has it (its own stiffness and damping): a downed
+    /// body's settle.
+    pub fn relax(&mut self) -> Result<(), String> {
+        ok(unsafe { sdk::nm_agent_task_relax(self.0, -1.0, -1.0) }).map(|_| ())
+    }
+
+    /// Its muscles on the pose given by [`Agent::follow`] (Delirium's muscle rise: stiff muscles
+    /// on every joint, the pelvis helped toward the pose's at most Delirium's own share of its
+    /// weight), or off (`on` false: its own balance again).
+    pub fn rise(&mut self, world: &World, on: bool) -> Result<(), String> {
+        ok(unsafe { sdk::nm_agent_muscle_rise(self.0, world.0, on as i32, -1.0) }).map(|_| ())
+    }
+
+    /// The pose its muscles follow: every part's world frame (`parts`, all 21), or none (empty:
+    /// nothing followed).
+    pub fn follow(&mut self, parts: &[Transform]) -> Result<(), String> {
+        let mut flat = Vec::with_capacity(parts.len() * 7);
+        for p in parts {
+            flat.extend_from_slice(&p.translation.to_array());
+            flat.extend_from_slice(&p.rotation.to_array());
+        }
+        let ptr = if flat.is_empty() {
+            std::ptr::null()
+        } else {
+            flat.as_ptr()
+        };
+        ok(unsafe { sdk::nm_agent_set_incoming_transforms(self.0, ptr, parts.len() as i32) })
+            .map(|_| ())
     }
 
     /// The parts' world frames now.

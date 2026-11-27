@@ -1,11 +1,13 @@
 //! New Physics' actors on Delirium (`delirium_bridge`), where it runs (the player's own GTA IV
 //! named in `sDeliriumGame`, its start logged): a human New Physics takes on a hit is given to a
 //! Delirium agent made from its pose, with its own profile, the shot given to it, and each frame
-//! its parts posed onto FNV's bones (`delirium_bridge::rig`) become the bodies New Physics draws;
-//! New Physics' own bodies are kept on that pose, so what reads them sees the real body, and once
-//! the agent lies settled (or has stood balanced a while) New Physics' own controller goes on from
-//! that pose: its settle and rise (the arms pushing through planted hands), its death hand-over.
-//! Anything Delirium refuses lets New Physics take the actor at once, said in the log.
+//! its parts posed onto FNV's bones (`delirium_bridge::rig`) become the bodies New Physics draws.
+//! Delirium keeps the body for the whole fall (Patrick's plan; never the game's ragdoll, alive,
+//! downed, rising or dead): downed, it lies as Delirium has it while New Physics' downed controller
+//! reads it and times its settle; rising, Delirium's muscles follow New Physics' rise (the arms
+//! pushing off through planted hands) until it is upright and still, and then the game's animation
+//! has it again; dead, it is Delirium's corpse. Anything Delirium refuses lets New Physics take the
+//! actor as it is, said in the log; every change of who has it is said too.
 //!
 //! Nothing of this runs where Delirium doesn't (CI, every PC without GTA IV): there New Physics
 //! is exactly as before. The conversions between FNV's bones and Delirium's parts are tested here.
@@ -74,15 +76,33 @@ pub(crate) fn bones_from_parts(rig: &Rig, parts: &[Transform]) -> Vec<Transform>
     let s = skel();
     let (local, hips) = rig.pose(parts);
     let n = s.names.len();
-    let mut w = vec![Transform::IDENTITY; n];
+    // Each bone's turn in the world first.
+    let mut turn = vec![Quat::IDENTITY; n];
     for b in 0..n {
-        w[b] = match s.parents[b] {
-            None => Transform::from_translation(s.local_t[b]).with_rotation(local[b]),
-            Some(p) => Transform::from_translation(w[p].translation + w[p].rotation * s.local_t[b])
-                .with_rotation((w[p].rotation * local[b]).normalize()),
+        turn[b] = match s.parents[b] {
+            None => local[b],
+            Some(p) => (turn[p] * local[b]).normalize(),
         };
     }
-    let shift = hips - w[rig.hips()].translation;
+    // The pelvis's parent (New Physics' root body, `Bip01 NonAccum`) is no part of Delirium's: it
+    // turns with the pelvis, as it lies over it in the bind pose. Left at its bind turn, a lying
+    // body's root body stood upright over its hips and the spine under it was placed as if the
+    // body stood (up to 9.5 units off).
+    let h = rig.hips();
+    if let Some(p) = s.parents[h] {
+        let under = s.rest[p].rotation.inverse() * s.rest[h].rotation;
+        turn[p] = (turn[h] * under.inverse()).normalize();
+    }
+    // Then each bone's place under its parent's turn.
+    let mut w = vec![Transform::IDENTITY; n];
+    for b in 0..n {
+        let at = match s.parents[b] {
+            None => s.local_t[b],
+            Some(p) => w[p].translation + turn[p] * s.local_t[b],
+        };
+        w[b] = Transform::from_translation(at).with_rotation(turn[b]);
+    }
+    let shift = hips - w[h].translation;
     for t in &mut w {
         t.translation += shift;
     }
@@ -248,6 +268,130 @@ pub(crate) struct Dl {
     steps: (Vec<Transform>, Vec<Transform>),
     /// Dead: its muscles off for good, its ragdoll held to the pose drawn while this lives.
     corpse: Option<CorpseHold>,
+    /// What has its frame: Delirium's own reactions, or its muscles on New Physics' get-up.
+    pub own: Own,
+}
+
+/// What a Delirium-owned body is doing (Patrick's plan: Delirium has a human's body for the whole
+/// fall, never the game's ragdoll). New Physics' downed controller decides the settle and the rise
+/// (its timings: settled before it rises, 3 s on a slope, then up to 5 s to get up, the 15-unit
+/// cap once upright) and gives the pose; the body is Delirium's throughout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Own {
+    /// Hit: Delirium's own reactions (its shot, its blast, its fall).
+    Hit,
+    /// Down on Delirium: lying as Delirium has it (its fall, then its own relax); New Physics'
+    /// downed controller reads the body as it lies, its settle timed on it.
+    Down,
+    /// Rising on Delirium: its muscles on New Physics' rise (the arms pushing off through planted
+    /// hands), the pelvis helped toward New Physics'.
+    Rise,
+    /// New Physics stood: its muscles on New Physics' standing pose until it is upright and still
+    /// (seconds since it stood, seconds upright and still).
+    Up { since: f32, still: f32 },
+}
+
+/// A change of [`Own`]'s, each said in the log.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Change {
+    /// New Physics' rise began: Delirium's muscles on it.
+    Rising,
+    /// The rise stopped (given up, or waiting): down on Delirium again, relaxed.
+    BackDown,
+    /// New Physics stands: Delirium held on its standing pose.
+    Standing,
+    /// Upright and still: back to the game's animation.
+    Upright,
+    /// Not upright [`UP_MOST`] seconds after New Physics stood: New Physics has it.
+    Stuck,
+}
+
+/// Still enough to hand back (m/s, the centre of mass), for [`UP_STILL_FOR`] seconds.
+pub(crate) const UP_STILL: f32 = 0.15;
+pub(crate) const UP_STILL_FOR: f32 = 0.3;
+/// The longest Delirium's body may take to come upright after New Physics stood (s).
+pub(crate) const UP_MOST: f32 = 3.0;
+
+/// The next [`Own`] of a body on Delirium's muscles or lying (not [`Own::Hit`]): from whether New
+/// Physics' controller has it downed and rising, and whether Delirium's body is upright and how
+/// fast it moves (m/s), `dt` seconds on.
+pub(crate) fn next_own(
+    own: Own,
+    np_down: bool,
+    np_rise: bool,
+    upright: bool,
+    speed: f32,
+    dt: f32,
+) -> (Own, Option<Change>) {
+    let stood = Own::Up {
+        since: 0.0,
+        still: 0.0,
+    };
+    match own {
+        Own::Hit => (own, None),
+        Own::Down if !np_down => (stood, Some(Change::Standing)),
+        Own::Down if np_rise => (Own::Rise, Some(Change::Rising)),
+        Own::Down => (own, None),
+        Own::Rise if !np_down => (stood, Some(Change::Standing)),
+        Own::Rise if !np_rise => (Own::Down, Some(Change::BackDown)),
+        Own::Rise => (own, None),
+        Own::Up { .. } if np_down && np_rise => (Own::Rise, Some(Change::Rising)),
+        Own::Up { .. } if np_down => (Own::Down, Some(Change::BackDown)),
+        Own::Up { since, still } => {
+            let since = since + dt;
+            let still = if upright && speed < UP_STILL {
+                still + dt
+            } else {
+                0.0
+            };
+            let next = Own::Up { since, still };
+            if still >= UP_STILL_FOR {
+                (next, Some(Change::Upright))
+            } else if since >= UP_MOST {
+                (next, Some(Change::Stuck))
+            } else {
+                (next, None)
+            }
+        }
+    }
+}
+
+/// FNV's whole skeleton's worlds (metres from `origin`, game units) for New Physics' bodies at
+/// `bodies` (each body's node's world, game units): each body's node where its body is, every
+/// other bone (the pelvis, the clavicles, the neck) under its parent as in the bind pose.
+pub(crate) fn skeleton_from_bodies(bodies: &[(M3, V3)], origin: V3) -> Vec<Transform> {
+    let s = skel();
+    let m = crate::new_physics::model();
+    let n = s.names.len();
+    let mut w: Vec<Option<Transform>> = vec![None; n];
+    for (b, def) in m.bodies.iter().enumerate() {
+        if let (Some(i), Some((r, t))) =
+            (s.names.iter().position(|x| *x == def.node), bodies.get(b))
+        {
+            w[i] = Some(to_tf(r, *t, origin));
+        }
+    }
+    let mut out = Vec::with_capacity(n);
+    for b in 0..n {
+        let t = match (w[b], s.parents[b]) {
+            (Some(t), _) => t,
+            (None, Some(p)) => {
+                let pw: Transform = out[p];
+                let local = s.rest[p].rotation.inverse() * s.rest[b].rotation;
+                Transform::from_translation(pw.translation + pw.rotation * s.local_t[b])
+                    .with_rotation((pw.rotation * local).normalize())
+            }
+            (None, None) => s.rest[b],
+        };
+        out.push(t);
+    }
+    out
+}
+
+/// Delirium's parts' worlds (metres from `origin`) for New Physics' bodies at `bodies`: the pose
+/// Delirium's muscles follow.
+pub(crate) fn parts_from_bodies(rig: &Rig, bodies: &[(M3, V3)], origin: V3) -> Vec<Transform> {
+    rig.parts_at(&skeleton_from_bodies(bodies, origin))
 }
 
 /// What a frame of Delirium came to.
@@ -321,6 +465,7 @@ impl Dl {
             pending: 0.0,
             steps: (Vec::new(), Vec::new()),
             corpse: None,
+            own: Own::Hit,
         })
     }
 
@@ -333,6 +478,27 @@ impl Dl {
             self.corpse = CorpseHold::of(e, actor);
         }
         Ok(self.corpse.is_some())
+    }
+
+    /// Its drive for `own`: down again after its muscles followed (relaxed, as Delirium's own
+    /// relax has it, nothing followed), or its muscles on New Physics' pose (rising, standing).
+    /// Down from a hit leaves Delirium's own fall going on.
+    fn drive(&mut self, own: Own) -> Result<(), String> {
+        match own {
+            Own::Hit => Ok(()),
+            Own::Down => {
+                self.agent.follow(&[])?;
+                self.agent.rise(&self.world, false)?;
+                self.agent.relax()
+            }
+            Own::Rise | Own::Up { .. } => self.agent.rise(&self.world, true),
+        }
+    }
+
+    /// Its muscles on New Physics' bodies at `bodies` (game units).
+    fn follow(&mut self, rig: &Rig, bodies: &[(M3, V3)]) -> Result<(), String> {
+        self.agent
+            .follow(&parts_from_bodies(rig, bodies, self.origin))
     }
 
     /// Whether its agent keeps its balance on its feet now.
@@ -413,6 +579,10 @@ impl Dl {
             (self.pending / STEP).clamp(0.0, 1.0),
         );
         let drawn = bodies_from_parts(&st.rig, &parts, self.origin);
+        // Once down, New Physics' downed controller says when it is done (`next_own`).
+        if self.own != Own::Hit {
+            return Ok(Step::Drawn(drawn));
+        }
         if self.agent.should_get_up(0.5) {
             return Ok(Step::Done(drawn, "it lies settled"));
         }
@@ -501,6 +671,12 @@ impl Posture {
     /// upright (fallen over, lying, seated on the ground).
     pub(crate) fn downed(&self, standing: f32) -> bool {
         self.pelvis_up < 0.55 * standing || self.lean > 60.0
+    }
+
+    /// Upright: the pelvis at 85% of its standing height or more, the torso within 20 degrees of
+    /// upright.
+    pub(crate) fn upright(&self, standing: f32) -> bool {
+        self.pelvis_up >= 0.85 * standing && self.lean < 20.0
     }
 }
 
@@ -709,21 +885,32 @@ pub(crate) fn queue_blast(queue: &mut Vec<DlHit>, centre: V3, radius: f32, speed
 }
 
 /// The actor's frame on Delirium, where it runs: its Delirium made at its first frame (once a
-/// take: its bones read from the animation's snapshot), the queued hits given, the world New
-/// Physics found around it set, a step; New Physics' bodies (`np`) put on its pose, which is
-/// answered as the frame's drawn bodies. None: New Physics' own frame (never taken, refused, or
-/// done: New Physics goes on from the pose Delirium left; dying: New Physics hands it over, its
-/// wait kept and the limbs brought in).
+/// take: its bones read from the animation's snapshot; taken again after it was handed back
+/// upright, on a new hit, from New Physics' bodies), the queued hits given, the world New Physics
+/// found around it set, a step; the drawn bodies are Delirium's, for the whole fall (Patrick's
+/// plan: never the game's ragdoll, alive, downed, rising or dead). Hit, its reactions are
+/// Delirium's own and New Physics' bodies are kept on its pose; downed, it lies as Delirium has it
+/// while New Physics' downed controller reads it and times its settle; rising and standing, its
+/// muscles follow New Physics' rise (the arms pushing off through planted hands) until it is
+/// upright and still, then the game's animation has it again. None: New Physics' own frame (never
+/// taken, refused while hit, or handed back).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn frame_for(
     e: &mut engine::prelude::Engine,
-    (id, actor, tree, snap): (
+    (id, actor, tree, snap, anim): (
         u32,
         u32,
         &[(u32, u32)],
         Option<&crate::new_physics::Snapshot>,
+        &[(M3, V3)],
     ),
-    (dl, tried, queue, down): (&mut Option<Dl>, &mut bool, &mut Vec<DlHit>, &mut bool),
+    (dl, tried, queue, down, back): (
+        &mut Option<Dl>,
+        &mut bool,
+        &mut Vec<DlHit>,
+        &mut bool,
+        &mut bool,
+    ),
     np: &mut ragdoll_core::np::Np,
     (reference, take_v, floor, dt, handing): (V3, V3, f32, f32, bool),
 ) -> Option<Vec<(M3, V3)>> {
@@ -739,13 +926,27 @@ pub(crate) fn frame_for(
         queue.clear();
         return None;
     }
-    if dl.is_none() && !*tried {
+    // Handed back upright: taken again only by a new hit, from where New Physics has the body.
+    if dl.is_none() && !*tried && (!*back || !queue.is_empty()) {
         *tried = true;
         let names: Vec<(Vec<u8>, u32)> = tree
             .iter()
             .map(|&(n, _)| (crate::active_ragdoll::node_name(e, n), n))
             .collect();
+        let again = back.then(|| {
+            let bodies: Vec<(M3, V3)> = m
+                .node_worlds(&np.states)
+                .iter()
+                .map(|(r, t)| (*r, ragdoll_core::flinch::add(*t, np.origin)))
+                .collect();
+            skeleton_from_bodies(&bodies, reference)
+        });
+        let s = skel();
         let bone = |name: &str| -> Option<(M3, V3)> {
+            if let Some(w) = again.as_ref() {
+                let i = s.names.iter().position(|n| n == name)?;
+                return Some(from_tf(&w[i], reference));
+            }
             let addr = names
                 .iter()
                 .find(|(n, _)| n.as_slice() == name.as_bytes())?
@@ -770,10 +971,12 @@ pub(crate) fn frame_for(
         ) {
             Ok(d) => {
                 note_event(format!(
-                    "{id:08X}: [np delirium] taken: Delirium has it from its pose (its own body; \
-                     its facts {facts:?})"
+                    "{id:08X}: [np delirium] taken{}: Delirium has it from its pose (its own body; \
+                     its facts {facts:?})",
+                    if *back { " again by a new hit" } else { "" }
                 ));
                 *dl = Some(d);
+                *back = false;
             }
             Err(why) => {
                 note_event(format!(
@@ -784,6 +987,7 @@ pub(crate) fn frame_for(
             }
         }
     }
+    let st = delirium_bridge::started()?;
     let Some(d) = dl.as_mut() else {
         queue.clear();
         return None;
@@ -839,6 +1043,18 @@ pub(crate) fn frame_for(
     if d.frames == 0 {
         d.standing = centres.get(m.root).map_or(0.0, |c| c[2] - floor).max(1.0);
     }
+    // Down, rising or standing (alive): New Physics' downed controller's frame. Down, it ran from
+    // Delirium's body as it lies (its settle timed on the real body; what it drew is not drawn);
+    // rising and standing, its bodies are the pose Delirium's muscles follow: its rise as it has
+    // it, the arms pushing off through planted hands, its joint limits while downed.
+    let alive = !d.dead();
+    let follows = alive && matches!(d.own, Own::Rise | Own::Up { .. });
+    let target = (alive && d.own != Own::Hit).then(|| np.frame(anim, floor, dt));
+    if let (true, Some(t)) = (follows, target.as_ref()) {
+        if let Err(why) = d.follow(&st.rig, t) {
+            failed.get_or_insert(why);
+        }
+    }
     let step = match failed {
         Some(why) => Err(why),
         None => d.frame(&mesh, dt),
@@ -846,32 +1062,18 @@ pub(crate) fn frame_for(
     let (drawn, done) = match step {
         Ok(Step::Drawn(drawn)) => (drawn, None),
         Ok(Step::Done(drawn, why)) => (drawn, Some(why)),
-        Err(why) => {
-            note_event(format!(
-                "{id:08X}: [np delirium] refused ({why}): New Physics has it from the pose it had"
-            ));
-            *dl = None;
-            return None;
-        }
+        Err(why) => return refused(id, &why, dl, down, np, target),
     };
     if !drawn
         .iter()
         .all(|(r, t)| r.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite()))
     {
-        note_event(format!(
-            "{id:08X}: [np delirium] its pose went bad: New Physics has it from the pose it had"
-        ));
-        *dl = None;
-        return None;
+        return refused(id, "its pose went bad", dl, down, np, target);
     }
     // Never a body flung away: New Physics takes it from the last pose that was right.
     if let Some(why) = pose_wrong(&drawn, &d.last, d.origin) {
-        note_event(format!(
-            "{id:08X}: [np delirium] refused (its pose went wrong: {why}): New Physics has it \
-             from the last right pose"
-        ));
-        *dl = None;
-        return None;
+        let why = format!("its pose went wrong: {why}");
+        return refused(id, &why, dl, down, np, target);
     }
     // Its posture and balance from Delirium's body (New Physics' own balance never runs while
     // Delirium has it: its readings would be its defaults).
@@ -890,46 +1092,153 @@ pub(crate) fn frame_for(
             d.agent_balancing()
         ));
     }
-    // New Physics' bodies on Delirium's pose (what reads them sees the real body), moving as it
-    // moves.
+    // New Physics' bodies on Delirium's pose while Delirium's own reactions have it (hit, lying,
+    // dead: what reads them sees the real body), moving as it moves; while its muscles follow New
+    // Physics' rise, New Physics' bodies are the pose followed and stay its own.
     let moving = velocities(&drawn, &d.last, dt);
-    put_on(np, &drawn, &moving);
+    if !follows {
+        put_on(np, &drawn, &moving);
+    }
     d.last = drawn.clone();
-    // Down (fallen over, on the ground): New Physics' downed controller has it from here, moving
-    // as Delirium had it: its ground, its hits on a limp body, its settle and its get-up (the arms
-    // pushing off through planted hands; Patrick's choice: never GTA IV's get-ups). Not a corpse.
-    let done = match done {
-        None if !d.dead() && pose.downed(d.standing) => Some("downed"),
-        other => other,
-    };
-    if done == Some("downed") {
-        note_event(format!(
-            "{id:08X}: [np delirium] downed after {} frames (the pelvis {:.0} u over the floor of \
-             {:.0} standing, the torso {:.0} degrees from upright, {:.2} m/s): New Physics' downed \
-             controller has it from Delirium's pose, its settle and get-up",
+    let said = |what: &str, pose: &Posture, d: &Dl| {
+        format!(
+            "{id:08X}: [np delirium] {what} after {} frames (the pelvis {:.0} u over the floor of \
+             {:.0} standing, the torso {:.0} degrees from upright, {:.2} m/s)",
             d.frames, pose.pelvis_up, d.standing, pose.lean, pose.speed
-        ));
-        // Down in New Physics' own controller at once: its downed state made now, so its
-        // hand-over check never reads "falling, not yet down" and gives the body to the game's
-        // ragdoll (Patrick's 23:11 log: "[np fall] downed on Delirium ... to the game's ragdoll").
-        np.fall_now("downed on Delirium");
-        *dl = None;
-        *down = true;
+        )
+    };
+    if !alive {
         return Some(drawn);
     }
-    if let Some(why) = done {
-        note_event(format!(
-            "{id:08X}: [np delirium] done after {} frames ({why}): New Physics goes on from its pose",
-            d.frames
-        ));
-        if why == "it lies settled" {
-            // Down as a fall leaves it: New Physics' downed controller settles and rises.
-            np.fall_now("Delirium's fall");
-            *down = true;
+    if d.own == Own::Hit {
+        // Down (fallen over, on the ground, or lying settled): Delirium keeps it; New Physics'
+        // downed controller is made at once (never "falling, not yet down", which the host hands
+        // to the game's ragdoll: Patrick's 23:11 log) and reads the body as it lies.
+        if done == Some("it lies settled") || pose.downed(d.standing) {
+            note_event(format!(
+                "{}: downed on Delirium (Delirium keeps the body; New Physics' downed controller \
+                 reads it as it lies, its settle, then its rise on Delirium's muscles)",
+                said("downed", &pose, d)
+            ));
+            np.fall_now("downed on Delirium");
+            d.own = Own::Down;
+        } else if done.is_some() {
+            // It stood balanced again two seconds: upright, still, its animation's again.
+            note_event(format!(
+                "{}: upright and back to the game's animation (it stood balanced again)",
+                said("upright", &pose, d)
+            ));
+            *dl = None;
+            *tried = false;
+            *back = true;
         }
-        *dl = None;
+        return Some(drawn);
+    }
+    let (next, change) = next_own(
+        d.own,
+        np.down.is_some(),
+        np.rise,
+        pose.upright(d.standing),
+        pose.speed,
+        dt,
+    );
+    let was = d.own;
+    d.own = next;
+    let Some(change) = change else {
+        return Some(drawn);
+    };
+    let driven = match change {
+        Change::Rising => {
+            note_event(format!(
+                "{}: rising on Delirium (its muscles on New Physics' rise, the arms pushing off \
+                 through planted hands)",
+                said("rising", &pose, d)
+            ));
+            if was == Own::Down {
+                d.drive(Own::Rise)
+            } else {
+                Ok(())
+            }
+        }
+        Change::BackDown => {
+            note_event(format!(
+                "{}: back down on Delirium (New Physics' rise stopped; lying relaxed until it \
+                 rises again)",
+                said("down again", &pose, d)
+            ));
+            // New Physics' bodies on the body as it lies again.
+            put_on(np, &drawn, &moving);
+            d.drive(Own::Down)
+        }
+        Change::Standing => {
+            note_event(format!(
+                "{}: New Physics stands; Delirium's muscles hold its standing pose until it is \
+                 upright and still",
+                said("standing", &pose, d)
+            ));
+            if was == Own::Down {
+                d.drive(next)
+            } else {
+                Ok(())
+            }
+        }
+        Change::Upright => {
+            note_event(format!(
+                "{}: upright and still: back to the game's animation (New Physics' standing \
+                 balance from Delirium's pose lets it go)",
+                said("upright", &pose, d)
+            ));
+            put_on(np, &drawn, &moving);
+            *dl = None;
+            *tried = false;
+            *back = true;
+            return Some(drawn);
+        }
+        Change::Stuck => {
+            let why = format!(
+                "not upright {UP_MOST:.0} s after New Physics stood: the pelvis {:.0} u up of \
+                 {:.0}, the torso {:.0} degrees from upright",
+                pose.pelvis_up, d.standing, pose.lean
+            );
+            put_on(np, &drawn, &moving);
+            if pose.downed(d.standing) {
+                np.fall_now("Delirium's body didn't stand");
+            }
+            return refused(id, &why, dl, down, np, Some(drawn));
+        }
+    };
+    if let Err(why) = driven {
+        return refused(id, &why, dl, down, np, target);
     }
     Some(drawn)
+}
+
+/// Delirium refused or failed the actor (`why`, said in the log): the current New Physics has it
+/// as it is now. Hit: New Physics' own frame from the pose it had (None). Downed, rising or
+/// standing: New Physics' downed controller goes on as it is (its frame this frame `target`,
+/// drawn), its get-up said by the host.
+fn refused(
+    id: u32,
+    why: &str,
+    dl: &mut Option<Dl>,
+    down: &mut bool,
+    np: &ragdoll_core::np::Np,
+    target: Option<Vec<(M3, V3)>>,
+) -> Option<Vec<(M3, V3)>> {
+    let own = dl.take().map(|d| (d.own, d.dead()));
+    let had = match own {
+        Some((_, true)) => "dead",
+        Some((Own::Hit, _)) | None => "hit",
+        Some((Own::Down, _)) => "downed",
+        Some((Own::Rise, _)) => "rising",
+        Some((Own::Up { .. }, _)) => "standing",
+    };
+    crate::new_physics::note_event(format!(
+        "{id:08X}: [np delirium] refused while {had} ({why}): New Physics has it as it is now \
+         (fallback)"
+    ));
+    *down = np.down.is_some();
+    target
 }
 
 #[cfg(test)]
@@ -1218,6 +1527,142 @@ mod tests {
             );
             last = p;
         }
+    }
+
+    /// The pose Delirium's muscles follow on the get-up: New Physics' bodies made into
+    /// Delirium's parts give the parts back (the bones that are not New Physics' bodies, the
+    /// pelvis, the clavicles and the neck, under their parents as in the bind pose), within a
+    /// hundredth of a unit and a tenth of a degree, the body anywhere, turned anyhow.
+    #[test]
+    fn new_physics_bodies_give_delirium_the_pose_to_follow() {
+        let s = skel();
+        let names: Vec<&str> = s.names.iter().map(String::as_str).collect();
+        let bones = delirium_bridge::rig::part_bones(&names);
+        let bind: Vec<Transform> = (0..21)
+            .map(|p| s.rest[bones[p].or(bones[7]).unwrap()])
+            .collect();
+        let rig = Rig::new(&names, &s.parents, &s.rest, &bind).unwrap();
+        let origin = [-72152.0, 8282.0, 223.0];
+        let turn = Quat::from_euler(
+            delirium_bridge::delirium::prelude::EulerRot::XYZ,
+            1.2,
+            -0.4,
+            2.5,
+        );
+        let moved = Transform::from_translation(Vec3::new(1.5, -0.7, 0.3)).with_rotation(turn);
+        for parts in [
+            bind.clone(),
+            bind.iter().map(|p| moved * *p).collect::<Vec<_>>(),
+        ] {
+            let bodies = bodies_from_parts(&rig, &parts, origin);
+            let back = parts_from_bodies(&rig, &bodies, origin);
+            assert_eq!(back.len(), 21);
+            for (k, (a, b)) in parts.iter().zip(&back).enumerate() {
+                let d = (a.translation - b.translation).length() * UNITS;
+                assert!(d < 0.01, "part {k}: {d} units off");
+                let deg = a.rotation.angle_between(b.rotation).to_degrees();
+                assert!(deg < 0.1, "part {k}: {deg} degrees off");
+            }
+        }
+    }
+
+    /// The get-up on Delirium (Patrick's plan, never the game's ragdoll): down while New Physics'
+    /// controller settles; rising once it rises; down again when the rise stops; once New
+    /// Physics stands, held until Delirium's body is upright and still for UP_STILL_FOR, then back
+    /// to the animation; not upright UP_MOST seconds after, New Physics has it; falling again
+    /// while held, down or rising again. A hit body stays Delirium's own.
+    #[test]
+    fn the_get_up_on_delirium_settles_rises_and_ends_upright_and_still() {
+        let dt = 1.0 / 60.0;
+        assert_eq!(
+            next_own(Own::Hit, true, true, false, 1.0, dt),
+            (Own::Hit, None)
+        );
+        assert_eq!(
+            next_own(Own::Down, true, false, false, 0.0, dt),
+            (Own::Down, None)
+        );
+        assert_eq!(
+            next_own(Own::Down, true, true, false, 0.0, dt),
+            (Own::Rise, Some(Change::Rising))
+        );
+        assert_eq!(
+            next_own(Own::Rise, true, true, false, 0.5, dt),
+            (Own::Rise, None)
+        );
+        assert_eq!(
+            next_own(Own::Rise, true, false, false, 0.5, dt),
+            (Own::Down, Some(Change::BackDown))
+        );
+        let (mut own, c) = next_own(Own::Rise, false, false, true, 0.5, dt);
+        assert_eq!(c, Some(Change::Standing));
+        // Upright but still moving: held; still (and upright) long enough: back to the animation.
+        let mut t = 0.0;
+        for _ in 0..30 {
+            let (n, c) = next_own(own, false, false, true, 0.4, dt);
+            assert_eq!(c, None);
+            own = n;
+            t += dt;
+        }
+        let mut upright_at = None;
+        for i in 0..60 {
+            let (n, c) = next_own(own, false, false, true, 0.05, dt);
+            own = n;
+            t += dt;
+            if c == Some(Change::Upright) {
+                upright_at = Some(i);
+                break;
+            }
+            assert_eq!(c, None);
+        }
+        let i = upright_at.expect("never back to the animation");
+        assert!((i as f32 + 1.0) * dt >= UP_STILL_FOR - 1e-4 && t < UP_MOST);
+        // Never upright: New Physics has it UP_MOST seconds after it stood.
+        let mut own = Own::Up {
+            since: 0.0,
+            still: 0.0,
+        };
+        let mut stuck = None;
+        for i in 0..400 {
+            let (n, c) = next_own(own, false, false, false, 0.0, dt);
+            own = n;
+            if c.is_some() {
+                stuck = Some((i, c));
+                break;
+            }
+        }
+        let (i, c) = stuck.unwrap();
+        assert_eq!(c, Some(Change::Stuck));
+        assert!(((i + 1) as f32 * dt - UP_MOST).abs() < 2.0 * dt);
+        // Fallen again while held.
+        let up = Own::Up {
+            since: 1.0,
+            still: 0.1,
+        };
+        assert_eq!(
+            next_own(up, true, false, false, 1.0, dt),
+            (Own::Down, Some(Change::BackDown))
+        );
+        assert_eq!(
+            next_own(up, true, true, false, 1.0, dt),
+            (Own::Rise, Some(Change::Rising))
+        );
+    }
+
+    /// Upright is stricter than not downed: a body crouched at 70% of its height, or leaning 30
+    /// degrees, is neither down nor upright.
+    #[test]
+    fn upright_is_tall_and_straight() {
+        let p = |up: f32, lean: f32| Posture {
+            pelvis_up: up,
+            lean,
+            speed: 0.0,
+            outside: 0.0,
+        };
+        assert!(p(64.0, 5.0).upright(67.0));
+        assert!(!p(47.0, 5.0).upright(67.0) && !p(47.0, 5.0).downed(67.0));
+        assert!(!p(64.0, 30.0).upright(67.0) && !p(64.0, 30.0).downed(67.0));
+        assert!(p(20.0, 80.0).downed(67.0) && !p(20.0, 80.0).upright(67.0));
     }
 
     /// A 9mm's 25 N s gets under half of Delirium's own shot force, a 60 N s hit all of it, and
