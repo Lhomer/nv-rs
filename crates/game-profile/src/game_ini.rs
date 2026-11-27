@@ -715,6 +715,13 @@ pub fn switches(
             "bSunShadows" => Some(flag.unwrap_or(default).to_string()),
             "bSunLightFromSky" => Some(flag.unwrap_or(default).to_string()),
             "bSunShadowsCharacters" => Some(flag.unwrap_or(default).to_string()),
+            // How the world's still lit objects are drawn, in `NV_DRAW_ITEMS`' words; another word is the default.
+            "sDrawItems" => Some(
+                value
+                    .filter(|v| matches!(*v, "0" | "1" | "check"))
+                    .unwrap_or(default)
+                    .to_string(),
+            ),
             // A fix line: only one that is there and not commented out.
             _ => flag.map(str::to_string),
         };
@@ -867,7 +874,7 @@ mod tests {
         // The section's own missing keys under it, each with its note, then the other sections
         // as the block has them, an empty line before each.
         let display_rest = format!(
-            "{}{}{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}{}{}",
             with_note("bBorderless"),
             with_note("sRenderer"),
             with_note("iMenuFrameLimit"),
@@ -877,7 +884,8 @@ mod tests {
             with_note("fAmbientOcclusionStrength"),
             with_note("bSunShadows"),
             with_note("bSunLightFromSky"),
-            with_note("bSunShadowsCharacters")
+            with_note("bSunShadowsCharacters"),
+            with_note("sDrawItems")
         );
         assert!(
             display_rest.starts_with("; 1 = the game's window")
@@ -1286,6 +1294,7 @@ mod tests {
                     ("NV_SUN_SHADOWS", "0"),
                     ("NV_SUN_LIGHT_FROM_SKY", "1"),
                     ("NV_SUN_SHADOWS_CHARACTERS", "1"),
+                    ("NV_DRAW_ITEMS", "0"),
                     ("NV_THREADS", "stepped"),
                     ("NV_RENDER_THREAD", "1"),
                     ("NV_NOT_BACKGROUND", "1"),
@@ -1310,6 +1319,7 @@ mod tests {
                 ("NV_SUN_SHADOWS", "0"),
                 ("NV_SUN_LIGHT_FROM_SKY", "1"),
                 ("NV_SUN_SHADOWS_CHARACTERS", "1"),
+                ("NV_DRAW_ITEMS", "0"),
                 ("NV_THREADS", "real"),
                 ("NV_RENDER_THREAD", "1"),
                 ("NV_NOT_BACKGROUND", "1"),
@@ -1404,6 +1414,7 @@ mod tests {
             "NV_SUN_SHADOWS",
             "NV_SUN_LIGHT_FROM_SKY",
             "NV_SUN_SHADOWS_CHARACTERS",
+            "NV_DRAW_ITEMS",
             "NV_THREADS",
             "NV_RENDER_THREAD",
             "NV_NOT_BACKGROUND",
@@ -1452,6 +1463,7 @@ mod tests {
                 ("NV_SUN_SHADOWS", "0"),
                 ("NV_SUN_LIGHT_FROM_SKY", "1"),
                 ("NV_SUN_SHADOWS_CHARACTERS", "1"),
+                ("NV_DRAW_ITEMS", "0"),
                 ("NV_THREADS", "stepped"),
                 ("NV_RENDER_THREAD", "1"),
                 ("NV_NOT_BACKGROUND", "1"),
@@ -1475,6 +1487,7 @@ mod tests {
                 ("NV_SUN_SHADOWS", "0"),
                 ("NV_SUN_LIGHT_FROM_SKY", "1"),
                 ("NV_SUN_SHADOWS_CHARACTERS", "1"),
+                ("NV_DRAW_ITEMS", "0"),
                 ("NV_THREADS", "real"),
                 ("NV_RENDER_THREAD", "1"),
                 ("NV_NOT_BACKGROUND", "1"),
@@ -1501,6 +1514,7 @@ mod tests {
                 ("NV_SUN_SHADOWS", "0"),
                 ("NV_SUN_LIGHT_FROM_SKY", "1"),
                 ("NV_SUN_SHADOWS_CHARACTERS", "1"),
+                ("NV_DRAW_ITEMS", "0"),
                 ("NV_RENDER_THREAD", "1"),
                 ("NV_NOT_BACKGROUND", "1"),
             ])

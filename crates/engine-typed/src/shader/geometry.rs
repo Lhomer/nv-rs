@@ -109,7 +109,20 @@ const ANGLE: u32 = 0x011f_d868;
 /// with an integer at +0xe4. With vertex entry 15 enabled: `011fd868` = game time (`011f940c`)
 /// / 3600.0 * 6.28318 * the integer (in the exe's order, each step rounded to a float).
 /// `this` (`ECX`) is not read, but `SetupGeometryConstants` (`00b7dab0`) calls it with `ECX` set.
-pub fn vertex_entry_15(e: &mut Engine, _this: Ptr, object: Ptr) {
+pub fn vertex_entry_15(e: &mut Engine, this: Ptr, object: Ptr) {
+    if crate::draw::keep::building() {
+        let call = crate::draw::keep::Leaf::Entry15 {
+            this: this.addr(),
+            object: object.addr(),
+        };
+        return crate::draw::keep::leaf(e, call, |e| entry_15_now(e, object));
+    }
+    entry_15_now(e, object);
+}
+
+/// [`vertex_entry_15`]'s work (a kept draw record makes the call again with the frame's time).
+#[inline(always)]
+fn entry_15_now(e: &mut Engine, object: Ptr) {
     if !entry_enabled(e, VERTEX_ENTRIES + 4 * 15) {
         return;
     }
@@ -133,7 +146,20 @@ const TARGET: u32 = 0x011f_a2e0;
 /// read. With vertex entry 16 enabled: the four floats at `011fa2e0` become those at
 /// `011f95f4` less the camera's x and y (`011f474c`) and less 15.0 twice (the last as `FSUBR`).
 /// `this` (`ECX`) is not read, but `SetupGeometryConstants` (`00b7dab0`) calls it with `ECX` set.
-pub fn vertex_entry_16(e: &mut Engine, _this: Ptr, _unused_0: u32) {
+pub fn vertex_entry_16(e: &mut Engine, this: Ptr, unused: u32) {
+    if crate::draw::keep::building() {
+        let call = crate::draw::keep::Leaf::Entry16 {
+            this: this.addr(),
+            unused,
+        };
+        return crate::draw::keep::leaf(e, call, entry_16_now);
+    }
+    entry_16_now(e);
+}
+
+/// [`vertex_entry_16`]'s work (a kept draw record makes the call again with the frame's camera).
+#[inline(always)]
+fn entry_16_now(e: &mut Engine) {
     if !entry_enabled(e, VERTEX_ENTRIES + 4 * 16) {
         return;
     }
@@ -158,7 +184,20 @@ const OFFSET: u32 = 0x011f_d8b4;
 /// position less the camera (`011f474c`), each rounded to a float on the stack and copied to
 /// `011fd8b4`.
 /// `this` (`ECX`) is not read, but `SetupGeometryConstants` (`00b7dab0`) calls it with `ECX` set.
-pub fn vertex_entry_17(e: &mut Engine, _this: Ptr, object: Ptr) {
+pub fn vertex_entry_17(e: &mut Engine, this: Ptr, object: Ptr) {
+    if crate::draw::keep::building() {
+        let call = crate::draw::keep::Leaf::Entry17 {
+            this: this.addr(),
+            object: object.addr(),
+        };
+        return crate::draw::keep::leaf(e, call, |e| entry_17_now(e, object));
+    }
+    entry_17_now(e, object);
+}
+
+/// [`vertex_entry_17`]'s work (a kept draw record makes the call again with the frame's camera).
+#[inline(always)]
+fn entry_17_now(e: &mut Engine, object: Ptr) {
     if !entry_enabled(e, VERTEX_ENTRIES + 4 * 17) {
         return;
     }
@@ -202,7 +241,22 @@ const RUNNING: u32 = 0x011f_94aa;
 /// `011f94ac`) / (`011ad838` * 5))) less the second object's +0x8c and +0x90 (the factor 1.0
 /// clears `011f94aa`). Every step and copy is in the exe's order.
 /// `this` (`ECX`) is not read, but `SetupGeometryConstants` (`00b7dab0`) calls it with `ECX` set.
-pub fn vertex_entry_21(e: &mut Engine, _this: Ptr, pass_type: u32, first: Ptr, second: Ptr) {
+pub fn vertex_entry_21(e: &mut Engine, this: Ptr, pass_type: u32, first: Ptr, second: Ptr) {
+    if crate::draw::keep::building() {
+        let call = crate::draw::keep::Leaf::Entry21 {
+            this: this.addr(),
+            pass_type,
+            first: first.addr(),
+            second: second.addr(),
+        };
+        return crate::draw::keep::leaf(e, call, |e| entry_21_now(e, pass_type, first, second));
+    }
+    entry_21_now(e, pass_type, first, second);
+}
+
+/// [`vertex_entry_21`]'s work (a kept draw record makes the call again with the frame's time).
+#[inline(always)]
+fn entry_21_now(e: &mut Engine, pass_type: u32, first: Ptr, second: Ptr) {
     if !entry_enabled(e, VERTEX_ENTRIES + 4 * 21) {
         return;
     }
@@ -466,6 +520,16 @@ const RANGE: u32 = 0x011f_d8c4;
 /// `011fd8c4` becomes (0, 0, -1.0, 0) when both distances (`011f9618`, `011f9614`) are 0, else
 /// (far, far - near, 1.0, 1.0).
 pub fn pixel_entry_19(e: &mut Engine) {
+    if crate::draw::keep::building() {
+        // It follows the camera (the eye, the frame's plane and distances): a kept draw record makes the call again.
+        return crate::draw::keep::leaf(e, crate::draw::keep::Leaf::Entry19, entry_19_now);
+    }
+    entry_19_now(e);
+}
+
+/// [`pixel_entry_19`]'s work.
+#[inline(always)]
+fn entry_19_now(e: &mut Engine) {
     if !entry_enabled(e, PIXEL_ENTRIES + 4 * 19) {
         return;
     }
@@ -542,6 +606,20 @@ pub fn eye_pos_words(e: &mut Engine, words: &[u32]) -> Ret {
 /// transformed by the matrix (`D3DXVec3TransformCoord`) goes to `011fd894` with the object's
 /// +0x30.
 pub fn eye_pos(e: &mut Engine, pass_type: u32, object: Ptr, matrix: [u32; 16]) {
+    if crate::draw::keep::building() {
+        let call = crate::draw::keep::Leaf::EyePos {
+            pass_type,
+            object: object.addr(),
+            matrix,
+        };
+        return crate::draw::keep::leaf(e, call, |e| eye_pos_now(e, pass_type, object, matrix));
+    }
+    eye_pos_now(e, pass_type, object, matrix);
+}
+
+/// [`eye_pos`]'s work (a kept draw record makes the call again with the frame's eye).
+#[inline(always)]
+fn eye_pos_now(e: &mut Engine, pass_type: u32, object: Ptr, matrix: [u32; 16]) {
     if !entry_enabled(e, VERTEX_ENTRIES + 4 * 9) && !entry_enabled(e, PIXEL_ENTRIES + 4 * 5) {
         return;
     }
@@ -671,6 +749,32 @@ pub fn obj_to_cube(
     flag: u32,
     transform: u32,
 ) {
+    if crate::draw::keep::building() {
+        let call = crate::draw::keep::Leaf::ObjToCube {
+            this: this.addr(),
+            block: block.addr(),
+            pass_type,
+            flag,
+            transform,
+        };
+        return crate::draw::keep::leaf(e, call, |e| {
+            obj_to_cube_now(e, this, block, pass_type, flag, transform);
+        });
+    }
+    obj_to_cube_now(e, this, block, pass_type, flag, transform);
+}
+
+/// [`obj_to_cube`]'s work (a kept draw record makes the call again with the frame's camera and the renderer's
+/// matrix of the frame).
+#[inline(always)]
+fn obj_to_cube_now(
+    e: &mut Engine,
+    this: Ptr,
+    block: Ptr,
+    pass_type: u32,
+    flag: u32,
+    transform: u32,
+) {
     if !entry_enabled(e, VERTEX_ENTRIES + 4) {
         return;
     }
@@ -770,6 +874,20 @@ pub fn simple_shadow_clip_planes(e: &mut Engine, this: Ptr, pass_type: u32) {
     if pass_type.wrapping_sub(0x231) > 3 {
         return;
     }
+    if crate::draw::keep::building() {
+        let call = crate::draw::keep::Leaf::ClipPlanes {
+            this: this.addr(),
+            pass_type,
+        };
+        return crate::draw::keep::leaf(e, call, |e| clip_planes_now(e, this));
+    }
+    clip_planes_now(e, this);
+}
+
+/// [`simple_shadow_clip_planes`]'s work for the types 0x231 to 0x234 (a kept draw record makes the call again with
+/// the frame's camera and view, and the light's cache of the moment).
+#[inline(always)]
+fn clip_planes_now(e: &mut Engine, this: Ptr) {
     let light = rendering_object(e);
     // The light's clip-plane cache (+0x1a8, made +0x208), draw-written in main's light: the draw's own state (the cut
     // owns it per pass light), the device handed an image of the planes.
@@ -889,6 +1007,49 @@ pub fn lights_words(e: &mut Engine, words: &[u32]) -> Ret {
 /// active point light (`GetFirstActiveLight`) row 1 becomes (0.5, 0.5, 0.5, 1.0) in shader mode 10,
 /// else a copy of row 0.
 pub fn lights(
+    e: &mut Engine,
+    property: Ptr,
+    rendering: Ptr,
+    matrix: [u32; 16],
+    scale_object: Ptr,
+    pass_type: u32,
+    flag: u32,
+) {
+    if crate::draw::keep::building() {
+        let call = crate::draw::keep::Leaf::Lights {
+            property: property.addr(),
+            rendering: rendering.addr(),
+            matrix,
+            scale_object: scale_object.addr(),
+            pass_type,
+            flag,
+        };
+        return crate::draw::keep::leaf(e, call, |e| {
+            lights_now(
+                e,
+                property,
+                rendering,
+                matrix,
+                scale_object,
+                pass_type,
+                flag,
+            );
+        });
+    }
+    lights_now(
+        e,
+        property,
+        rendering,
+        matrix,
+        scale_object,
+        pass_type,
+        flag,
+    );
+}
+
+/// [`lights`]'s work (a kept draw record makes the call again with the frame's camera and lights).
+#[inline(always)]
+fn lights_now(
     e: &mut Engine,
     property: Ptr,
     rendering: Ptr,
@@ -1109,12 +1270,30 @@ const COLOUR_LUMINANCE: u32 = 0x00b7_19e0;
 /// `this` (`ECX`) is not read, but `SetupGeometryConstants` (`00b7dab0`) calls it with `ECX` set.
 pub fn ambient_emittance(
     e: &mut Engine,
-    _this: Ptr,
+    this: Ptr,
     property: Ptr,
     rendering: Ptr,
     block: Ptr,
     word: u32,
 ) {
+    if crate::draw::keep::building() {
+        let call = crate::draw::keep::Leaf::Ambient {
+            this: this.addr(),
+            property: property.addr(),
+            rendering: rendering.addr(),
+            block: block.addr(),
+            word,
+        };
+        return crate::draw::keep::leaf(e, call, |e| {
+            ambient_emittance_now(e, property, rendering, block, word);
+        });
+    }
+    ambient_emittance_now(e, property, rendering, block, word);
+}
+
+/// [`ambient_emittance`]'s work (a kept draw record makes the call again with the frame's lights and HDR scale).
+#[inline(always)]
+fn ambient_emittance_now(e: &mut Engine, property: Ptr, rendering: Ptr, block: Ptr, word: u32) {
     let property = property.addr();
     let rendering = rendering.addr();
     let current = capture::own_at::<u32>(e, RENDERING_PASS);

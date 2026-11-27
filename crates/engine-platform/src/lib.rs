@@ -90,6 +90,7 @@ pub mod d3d9;
 pub mod d3d9backend;
 pub mod d3d9device;
 pub mod d3d9draw;
+mod d3d9items;
 pub mod d3d9query;
 // On Android the real Direct3D 9's diagnostics (the face check, the borderless window's bookkeeping)
 // have no caller: wgpu draws alone, in the activity's window.
@@ -123,6 +124,7 @@ pub use ds_mix::speakers;
 pub mod time;
 pub mod vorbisfile;
 pub mod window;
+pub mod winsock;
 pub mod xinput;
 pub mod zone;
 
@@ -324,6 +326,7 @@ pub fn device_held(e: &Engine) -> bool {
 /// The [`d3d9::DeviceState`] in an engine's `Engine::device`; `held` is [`device_held`].
 #[inline]
 pub fn device(slot: &DeviceRef, held: bool) -> &d3d9::DeviceState {
+    engine_core::real_threads::note_device_state();
     debug_assert!(held, "the Direct3D 9 state reached without the device lock");
     let any = slot
         .get()
@@ -339,6 +342,7 @@ pub fn device(slot: &DeviceRef, held: bool) -> &d3d9::DeviceState {
 /// [`device_held`].
 #[inline]
 pub fn device_mut(slot: &mut DeviceRef, held: bool) -> &mut d3d9::DeviceState {
+    engine_core::real_threads::note_device_state();
     debug_assert!(held, "the Direct3D 9 state reached without the device lock");
     let any = slot
         .get_mut()
@@ -424,6 +428,68 @@ fn layer_imports() -> Vec<(&'static str, &'static str, AbiFn)> {
             "XINPUT1_3.dll",
             "#3",
             entry!(0, xinput::xinput_set_state(u32, Ptr) -> u32).1,
+        ),
+        // The game imports Winsock by ordinal, for Havok's Visual Debugger only: the answers of a
+        // PC without a network (`winsock`).
+        (
+            "WSOCK32.dll",
+            "#115",
+            entry!(0, winsock::wsa_startup(u32, Ptr) -> u32).1,
+        ),
+        (
+            "WSOCK32.dll",
+            "#111",
+            entry!(0, winsock::wsa_get_last_error() -> u32).1,
+        ),
+        (
+            "WSOCK32.dll",
+            "#23",
+            entry!(0, winsock::socket(u32, u32, u32) -> u32).1,
+        ),
+        (
+            "WSOCK32.dll",
+            "#1",
+            entry!(0, winsock::accept(u32, Ptr, Ptr) -> u32).1,
+        ),
+        (
+            "WSOCK32.dll",
+            "#3",
+            entry!(0, winsock::close_socket(u32) -> u32).1,
+        ),
+        (
+            "WSOCK32.dll",
+            "#21",
+            entry!(0, winsock::set_socket_option(u32, u32, u32, Ptr, u32) -> u32).1,
+        ),
+        (
+            "WSOCK32.dll",
+            "#2",
+            entry!(0, winsock::bind(u32, Ptr, u32) -> u32).1,
+        ),
+        (
+            "WSOCK32.dll",
+            "#13",
+            entry!(0, winsock::listen(u32, u32) -> u32).1,
+        ),
+        (
+            "WSOCK32.dll",
+            "#57",
+            entry!(0, winsock::get_host_name(Ptr, u32) -> u32).1,
+        ),
+        (
+            "WSOCK32.dll",
+            "#18",
+            entry!(0, winsock::select(u32, Ptr, Ptr, Ptr, Ptr) -> u32).1,
+        ),
+        (
+            "WSOCK32.dll",
+            "#9",
+            entry!(0, winsock::host_to_net_short(u32) -> u32).1,
+        ),
+        (
+            "WSOCK32.dll",
+            "#15",
+            entry!(0, winsock::net_to_host_short(u32) -> u32).1,
         ),
         (
             "USER32.dll",
@@ -1070,8 +1136,9 @@ mod tests {
         // `GlobalMemoryStatus(Ex)`, `MultiByteToWideChar` and `LCMapStringW`, and `DefWindowProcA`
         // (the game's `WM_MOUSEMOVE`, `window::post_mouse_move`), and `SetThreadIdealProcessor`
         // (Havok's worker threads, `engine-core`'s table).
+        // The twelve `WSOCK32.dll` ordinals of the Visual Debugger's server (`winsock`).
         // Off Windows also the two shader profile getters (`d3dx::profiles`).
-        assert_eq!(table.len(), if cfg!(windows) { 212 } else { 208 });
+        assert_eq!(table.len(), if cfg!(windows) { 224 } else { 220 });
     }
 
     /// The owned GOG executable's actual wrapper imports all resolve. No

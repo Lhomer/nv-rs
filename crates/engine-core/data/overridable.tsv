@@ -39,6 +39,7 @@
 00525980	0	JIP
 00525a90	0	JIP
 00525b20	3	yUI
+005282d0	0	nv-rs grid shift waits only for running cell loads
 005702e0	0	ITR
 00573170	2	nv-rs quick loot
 00583560	2	nv-rs cell offsets for every plugin, nv-rs no distant water under the Strip
@@ -141,6 +142,7 @@
 0092f260	1	nv-rs weighty combat
 00932a00	1	nv-rs half-loaded actor's level change
 00932b70	1	nv-rs half-loaded actor's level change
+009334b0	4	nv-rs the player keeps the high process
 009445b0	2	nv-rs weighty combat
 009526b0	1	nv-rs weighty combat
 0095de30	1	nv-rs field of view slider

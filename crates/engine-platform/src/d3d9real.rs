@@ -406,6 +406,8 @@ pub(crate) fn test_stream(e: &mut Engine, device: u32, stream: Stream) {
     let r = real(e);
     r.stream = Some(stream);
     r.devices.push((device, None));
+    // A device made: the records' epoch moves on, as at a real `CreateDevice`.
+    super::d3d9items::bump_epoch();
 }
 
 /// Tests: the modelled object `object` as one the backend was asked for (its calls are recorded;
@@ -444,18 +446,40 @@ fn words<const N: usize>(e: &Engine, at: u32) -> [u32; N] {
 /// one: one compare).
 /// Where a call's commands go: main's stream, or the open cut's slot for a call from the drawing
 /// side (`super::d3d9draw`).
-enum Sink<'a> {
+pub(super) enum Sink<'a> {
     Main(&'a mut Stream),
     Slot(&'a mut Slot),
 }
 
 impl Sink<'_> {
+    #[inline]
     fn submit(&mut self, cmd: Cmd<Data<'_>>) -> Reply {
+        // Kept draw records (`super::d3d9items`): a draw's own commands may be held. Off, one
+        // thread-local test.
+        if super::d3d9items::HOLDING.with(std::cell::Cell::get) {
+            return super::d3d9items::submit(self, cmd);
+        }
+        self.submit_now(cmd)
+    }
+
+    #[inline]
+    pub(super) fn submit_now(&mut self, cmd: Cmd<Data<'_>>) -> Reply {
         match self {
             Sink::Main(s) => s.submit(cmd),
             Sink::Slot(s) => s.submit(cmd),
         }
     }
+}
+
+/// The modelled device the backend has (the game makes one), if any: what the kept draw records'
+/// commands are sent for (`super::d3d9items`).
+pub(super) fn first_device(e: &mut Engine) -> Option<u32> {
+    real(e).devices.first().map(|(d, _)| *d)
+}
+
+/// The sink a call made now records into ([`sink`]).
+pub(super) fn sink_of(e: &mut Engine) -> Option<Sink<'_>> {
+    sink(real(e))
 }
 
 /// This call's sink: the slot for the drawing side while it is open, main's stream otherwise.
@@ -584,6 +608,8 @@ pub fn forget(e: &mut Engine, object: u32) {
     let device = match r.devices.iter().position(|(d, _)| *d == object) {
         Some(at) => {
             r.devices.remove(at);
+            // The records' epoch moves on, so a kept draw's cached device goes with it (`d3d9items`; review of #1145).
+            super::d3d9items::bump_epoch();
             true
         }
         None => false,
@@ -1392,7 +1418,7 @@ fn backend_of(
         }
         no_real_direct3d9()
     };
-    match which {
+    let backend: Box<dyn d3d9_stream::Backend> = match which {
         Backends::Real => real(),
         Backends::Wgpu => Box::new(WgpuWithReport {
             wgpu: match answers {
@@ -1405,6 +1431,14 @@ fn backend_of(
             real(),
             Box::new(wgpu(d3d9_wgpu::Output::Offscreen)),
         )),
+    };
+    // Kept draw records (`NV_DRAW_ITEMS`, `super::d3d9items`): the backend keeps and draws them
+    // again. Off (the default) the backend is as it was.
+    if engine_core::draw_items::mode() == engine_core::draw_items::Mode::Off {
+        backend
+    } else {
+        // Reporting: its counts in the log (an item it had no record for draws nothing).
+        Box::new(d3d9_stream::Kept::new(backend).reporting())
     }
 }
 
@@ -1664,6 +1698,7 @@ pub fn device_created(
     // game's own flags have that (0x54), and it is kept whatever flags a caller passes.
     let behavior = behavior | MULTITHREADED;
     let create = |e: &mut Engine| {
+        super::d3d9items::bump_epoch();
         call(
             e,
             Cmd::CreateDevice {
@@ -1763,6 +1798,7 @@ pub fn device_reset(
             None => return missing(e, "Reset with a window without a real one"),
         },
     };
+    super::d3d9items::bump_epoch();
     record(
         e,
         this,
