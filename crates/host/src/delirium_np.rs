@@ -240,6 +240,12 @@ pub(crate) struct Dl {
     standing: f32,
     /// The last frame's drawn bodies (for the speed and the hand-over's velocities).
     last: Vec<(M3, V3)>,
+    /// Time not yet stepped (s, under [`delirium_bridge::agent::STEP`]) and the parts of the last
+    /// two steps: each frame is drawn between them, so the body moves smoothly at any frame rate
+    /// and is stepped in Delirium's own whole steps (Patrick's 22:38 log: at his frame rate every
+    /// other frame repeated the last step's pose, its speed reading 0 and then twice its own).
+    pending: f32,
+    steps: (Vec<Transform>, Vec<Transform>),
     /// Dead: its muscles off for good, its ragdoll held to the pose drawn while this lives.
     corpse: Option<CorpseHold>,
 }
@@ -312,6 +318,8 @@ impl Dl {
             balanced_for: 0.0,
             standing: 0.0,
             last: Vec::new(),
+            pending: 0.0,
+            steps: (Vec::new(), Vec::new()),
             corpse: None,
         })
     }
@@ -351,8 +359,16 @@ impl Dl {
             (point[2] - self.origin[2]) / UNITS,
         );
         let d = Vec3::from_array(dir).normalize_or_zero();
-        self.agent
-            .shot(&self.world, part_of_body(body), at, d, health)
+        // `dir` is the hit's impulse (N s): its size sets the shot's force.
+        let p = ragdoll_core::flinch::length(dir);
+        self.agent.shot_force(
+            &self.world,
+            part_of_body(body),
+            at,
+            d,
+            health,
+            shot_force(p),
+        )
     }
 
     /// A blast at `centre` (game units), reaching `radius` (game units), `speed` m/s at its centre.
@@ -373,15 +389,29 @@ impl Dl {
         dt: f32,
     ) -> Result<Step, String> {
         let st = delirium_bridge::started().ok_or("Delirium isn't running")?;
+        use delirium_bridge::agent::STEP;
         self.world.set_mesh(1, mesh)?;
-        if dt > 0.0 {
-            self.agent.step(&self.world, dt.min(0.25))?;
+        if self.steps.1.is_empty() {
+            let now = self.agent.parts()?;
+            self.steps = (now.clone(), now);
+        }
+        // Whole steps of Delirium's own (at most four a frame: a long frame is not caught up).
+        self.pending += dt.clamp(0.0, 4.0 * STEP);
+        while self.pending >= STEP - 1e-6 {
+            self.agent.step(&self.world, STEP)?;
+            self.pending -= STEP;
+            let now = self.agent.parts()?;
+            self.steps.0 = std::mem::replace(&mut self.steps.1, now);
         }
         self.frames += 1;
-        let parts = self.agent.parts()?;
-        if parts.len() != 21 {
-            return Err(format!("{} parts back", parts.len()));
+        if self.steps.1.len() != 21 || self.steps.0.len() != 21 {
+            return Err(format!("{} parts back", self.steps.1.len()));
         }
+        let parts = between(
+            &self.steps.0,
+            &self.steps.1,
+            (self.pending / STEP).clamp(0.0, 1.0),
+        );
         let drawn = bodies_from_parts(&st.rig, &parts, self.origin);
         if self.agent.should_get_up(0.5) {
             return Ok(Step::Done(drawn, "it lies settled"));
@@ -564,6 +594,68 @@ pub(crate) fn velocities(drawn: &[(M3, V3)], before: &[(M3, V3)], dt: f32) -> Ve
         .collect()
 }
 
+/// The impulse (N s) Delirium's shot force is scaled from: a hit this strong gets Delirium's own
+/// force ([`delirium_bridge::agent::SHOT_FORCE`]), a lighter one less, a heavier more (a 9mm's
+/// 25 N s a flinch or a small step, not GTA IV's pistol lurch: Patrick's 22:38 clip).
+pub(crate) const SHOT_IMPULSE_REF: f32 = 60.0;
+
+/// Delirium's shot force for a hit of `impulse` N s: [`SHOT_IMPULSE_REF`]'s share of its own,
+/// from a tenth to three times it.
+pub(crate) fn shot_force(impulse: f32) -> f32 {
+    let k = if impulse.is_finite() {
+        impulse / SHOT_IMPULSE_REF
+    } else {
+        1.0
+    };
+    delirium_bridge::agent::SHOT_FORCE * k.clamp(0.1, 3.0)
+}
+
+/// The parts `t` of the way from `a` to `b` (each part's place and turn).
+pub(crate) fn between(a: &[Transform], b: &[Transform], t: f32) -> Vec<Transform> {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| {
+            Transform::from_translation(x.translation.lerp(y.translation, t))
+                .with_rotation(x.rotation.slerp(y.rotation, t).normalize())
+        })
+        .collect()
+}
+
+/// Why a pose of Delirium's is not to be drawn (none: it may be): a body that moved more than
+/// 25 units since the last frame, one more than 3 m from the pelvis (a body flung apart), or the
+/// pelvis more than 10 m from where the take began (`origin`). Patrick's 22:38 clip: two bodies
+/// vanished a few frames after the take, as if flung out of the world.
+pub(crate) fn pose_wrong(drawn: &[(M3, V3)], last: &[(M3, V3)], origin: V3) -> Option<String> {
+    use ragdoll_core::flinch::{length, sub};
+    let m = crate::new_physics::model();
+    let pelvis = drawn.get(m.root)?.1;
+    if length(sub(pelvis, origin)) > 10.0 * UNITS {
+        return Some(format!(
+            "the pelvis {:.0} units from the take",
+            length(sub(pelvis, origin))
+        ));
+    }
+    for (b, (_, t)) in drawn.iter().enumerate() {
+        let apart = length(sub(*t, pelvis));
+        if apart > 3.0 * UNITS {
+            return Some(format!(
+                "{} {apart:.0} units from the pelvis",
+                m.bodies[b].node
+            ));
+        }
+        if let Some((_, t0)) = last.get(b) {
+            let moved = length(sub(*t, *t0));
+            if moved > 25.0 {
+                return Some(format!(
+                    "{} moved {moved:.0} units in a frame",
+                    m.bodies[b].node
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// A hit waiting for the actor's Delirium frame: a shot (New Physics' body, its point in game
 /// units, its impulse N s) or a blast (its centre and radius in game units, its speed m/s).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -744,6 +836,15 @@ pub(crate) fn frame_for(
     {
         note(format!(
             "{id:08X}: [np delirium] its pose went bad: New Physics has it from the pose it had"
+        ));
+        *dl = None;
+        return None;
+    }
+    // Never a body flung away: New Physics takes it from the last pose that was right.
+    if let Some(why) = pose_wrong(&drawn, &d.last, d.origin) {
+        note(format!(
+            "{id:08X}: [np delirium] refused (its pose went wrong: {why}): New Physics has it \
+             from the last right pose"
         ));
         *dl = None;
         return None;
@@ -1018,6 +1119,55 @@ mod tests {
         );
         let p = posture(&b, &a, 0.0, dt);
         assert!((p.speed - 6.0).abs() < 1e-3, "{p:?}");
+    }
+
+    /// A 9mm's 25 N s gets under half of Delirium's own shot force, a 60 N s hit all of it, and
+    /// the force stays within a tenth and three times Delirium's whatever the impulse.
+    #[test]
+    fn the_shot_force_follows_the_hit() {
+        use delirium_bridge::agent::SHOT_FORCE;
+        let nine = shot_force(25.0);
+        assert!(nine < 0.5 * SHOT_FORCE && nine > 0.3 * SHOT_FORCE, "{nine}");
+        assert_eq!(shot_force(SHOT_IMPULSE_REF), SHOT_FORCE);
+        assert_eq!(shot_force(0.0), 0.1 * SHOT_FORCE);
+        assert_eq!(shot_force(1.0e6), 3.0 * SHOT_FORCE);
+        assert_eq!(shot_force(f32::NAN), SHOT_FORCE);
+    }
+
+    /// Between two steps: at 0 the first, at 1 the second, half way half way (place and turn).
+    #[test]
+    fn a_frame_is_drawn_between_two_steps() {
+        let a = vec![Transform::from_translation(Vec3::ZERO); 21];
+        let b = vec![
+            Transform::from_translation(Vec3::new(1.0, 0.0, 0.0))
+                .with_rotation(Quat::from_rotation_z(1.0));
+            21
+        ];
+        assert_eq!(between(&a, &b, 0.0)[3].translation, Vec3::ZERO);
+        let half = between(&a, &b, 0.5);
+        assert!((half[3].translation.x - 0.5).abs() < 1e-6);
+        assert!((half[3].rotation.angle_between(Quat::from_rotation_z(0.5))) < 1e-3);
+        assert!(between(&a, &b, 1.0)[20].translation.distance(Vec3::X) < 1e-6);
+    }
+
+    /// A pose flung apart or away is refused (a body 25 units off in a frame, one 3 m from the
+    /// pelvis, the pelvis 10 m from the take); a pose that moved a little is drawn.
+    #[test]
+    fn a_flung_pose_is_refused() {
+        let origin = [0.0; 3];
+        let a = bodies_posed(ID, [0.0; 3]);
+        assert_eq!(pose_wrong(&a, &a, origin), None);
+        assert_eq!(
+            pose_wrong(&bodies_posed(ID, [3.0, 0.0, 0.0]), &a, origin),
+            None
+        );
+        assert!(pose_wrong(&bodies_posed(ID, [30.0, 0.0, 0.0]), &a, origin)
+            .is_some_and(|w| w.contains("in a frame")));
+        let mut apart = a.clone();
+        apart[5].1[2] += 4.0 * UNITS;
+        assert!(pose_wrong(&apart, &[], origin).is_some_and(|w| w.contains("from the pelvis")));
+        let far = bodies_posed(ID, [11.0 * UNITS, 0.0, 0.0]);
+        assert!(pose_wrong(&far, &[], origin).is_some_and(|w| w.contains("from the take")));
     }
 
     /// Each body's hit lands on its own part, or its nearest parent's that has one.

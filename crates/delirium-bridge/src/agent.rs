@@ -33,6 +33,12 @@ fn ok(r: i32) -> Result<i32, String> {
     }
 }
 
+/// Delirium's own shot force (its SDK's `SHOT_FORCE`), every shot's in its `nm_agent_task_shot`.
+pub const SHOT_FORCE: f32 = 400.0;
+
+/// Delirium steps its agents in whole 60ths of a second (its SDK banks a shorter frame).
+pub const STEP: f32 = 1.0 / 60.0;
+
 /// Refused while Delirium's numbers are locked.
 fn unlocked() -> Result<(), String> {
     if delirium_data::kv::open() {
@@ -165,9 +171,22 @@ impl Agent {
         dir: Vec3,
         health: f32,
     ) -> Result<(), String> {
+        self.shot_force(world, part, at, dir, health, SHOT_FORCE)
+    }
+
+    /// [`Agent::shot`] with its force (Delirium's shot task's: [`SHOT_FORCE`] its own).
+    pub fn shot_force(
+        &mut self,
+        world: &World,
+        part: usize,
+        at: Vec3,
+        dir: Vec3,
+        health: f32,
+        force: f32,
+    ) -> Result<(), String> {
         let set = CString::new("*").map_err(|_| "set")?;
         ok(unsafe {
-            sdk::nm_agent_task_shot(
+            sdk::nm_agent_task_shot_force(
                 self.0,
                 world.0,
                 set.as_ptr(),
@@ -175,6 +194,7 @@ impl Agent {
                 at.to_array().as_ptr(),
                 dir.to_array().as_ptr(),
                 health,
+                force.max(1.0),
             )
         })
         .map(|_| ())

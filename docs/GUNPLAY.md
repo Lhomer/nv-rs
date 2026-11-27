@@ -1073,7 +1073,22 @@ before (`[np delirium] downed after N frames`, then `get-up started` and `get-up
 standing` or `handed to the game (why)`). While Delirium has the body its ground is New Physics'
 floors where it has them, else the game's collision cast down under each body (rocks and slopes
 as they are), not one flat plane at the reference's height. The NPC's weight slider is read as the
-form keeps it, 0 to 1 (it read 0). Dying (or a rise given up) hands it to New Physics at
+form keeps it, 0 to 1 (it read 0).
+**Vanishing bodies and the stumble (Patrick's second live test, 8db74f0, 22:38):** two humans
+shot once with a 9mm made a wrong stumble and vanished a few frames after the take, with no line
+after `[np delirium] frame 6`. Found and fixed: (1) Delirium's SDK steps an agent only in whole
+60ths of a second and banks a shorter frame, so at his frame rate every other frame repeated the
+last step's pose (the speed read 0.00 and then 1.9 m/s, the capture point -0.07 then +0.44 m);
+now the bridge steps Delirium itself in its whole steps (at most four a frame) and draws each
+frame between the last two (`delirium_np::between`), smooth at any frame rate. (2) Every
+Delirium shot had its SDK's one force (400) whatever the weapon: now it follows the hit's impulse
+(`shot_force`: a 60 N s hit Delirium's own force, a 9mm's 25 N s 0.42 of it, a tenth to three
+times), a flinch or a small step for a 9mm. (3) A pose that flings the body is never drawn
+(`pose_wrong`: a body 25 units off in a frame, 3 m from the pelvis, or the pelvis 10 m from the
+take): `[np delirium] refused (its pose went wrong: ...)`, and New Physics takes the actor from the
+last right pose. (4) New Physics no longer lets an actor go without a word: one whose form is gone
+or whose 3D was made anew or unloaded is said (`[np lost] ... while Delirium had it`) and its
+outcome closed as `lost (why)`. Dying (or a rise given up) hands it to New Physics at
 once, which hands it to the game as it does now (the wait kept, the limbs brought in). Slice 3b,
 the corpse: an actor that dies while Delirium has it stays Delirium's, its muscles off for good
 (`Agent::kill`), kept by New Physics and drawn as Delirium has it (shots and blasts still push

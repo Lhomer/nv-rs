@@ -1122,10 +1122,28 @@ pub fn apply(e: &mut Engine) {
     let mut keep = Vec::new();
     let mut roots = Vec::new();
     for mut a in list {
-        if !(a.id != 0 && e.call(LOOKUP_FORM, &args![a.id]).u32() == a.actor) {
-            continue;
-        }
-        if e.call(ACTOR_3D, &args![a.actor]).u32() != a.root {
+        // Gone (its form no longer this actor, or its 3D made anew or unloaded): let go, said and
+        // its outcome closed (Patrick's 22:38 log: two Delirium bodies left New Physics with no
+        // line at all).
+        let lost = if !(a.id != 0 && e.call(LOOKUP_FORM, &args![a.id]).u32() == a.actor) {
+            Some("the actor is gone")
+        } else if e.call(ACTOR_3D, &args![a.actor]).u32() != a.root {
+            Some("its 3D was made anew or unloaded")
+        } else {
+            None
+        };
+        if let Some(why) = lost {
+            let now = outcome_now(&a);
+            close_outcome(a.id, &mut a.outcome, &format!("{now}, lost ({why})"));
+            note(format!(
+                "{:08X}: [np lost] {why}{}",
+                a.id,
+                if a.dl.is_some() {
+                    " while Delirium had it"
+                } else {
+                    ""
+                }
+            ));
             continue;
         }
         let process = e.mem.u32(a.actor + PROCESS);

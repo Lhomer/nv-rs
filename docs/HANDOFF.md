@@ -7,6 +7,22 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-27 (Delirium: vanishing bodies and the stumble, Patrick's 8db74f0 test)
+
+**Status: pushed; for Patrick to try again.** His 22:38 run: a Powder Ganger (25.9 N s, Spine2)
+and a Goodsprings settler (24.7 N s, L Thigh), each taken by Delirium, stumbled wrongly and
+vanished after ~6 `[np delirium] frame` lines, with no outcome. Found: the SDK banks frames
+shorter than 1/60 s, so every other frame repeated the last step (the alternating 0.00 / 1.9 m/s
+and capture point); every shot had the SDK's fixed force 400. Fixed: the bridge steps Delirium in
+its whole steps and draws between the last two; the shot force follows the hit's impulse
+(`SHOT_IMPULSE_REF` 60 N s); a flung pose is refused (`pose_wrong`) and New Physics takes the
+actor from the last right pose; an actor lost (its form gone, its 3D made anew or unloaded) is
+logged `[np lost]` with its outcome closed (`lost (why)`), where it was silently dropped before.
+**Not known yet:** what flung or unloaded those two bodies: the new lines will say (`refused (its
+pose went wrong: ...)` naming the body and how far, or `[np lost] its 3D was made anew or
+unloaded while Delirium had it`). Tests (11 in `delirium_np`): the shot force, the drawing between
+steps, the flung poses, and the earlier ones; host library unchanged otherwise.
+
 ### Claude, 2026-11-27 (Delirium: the downed-but-stuck bug from Patrick's first live test)
 
 **Status: pushed; for Patrick to try again.** His 5efbaf4 run (21:41, Powder Ganger FF001313,
