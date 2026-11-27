@@ -7,6 +7,23 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-26 (Delirium, slice 3a: hits on Delirium, behind `running()`)
+
+**Status: pushed; not run with GTA IV (nothing of Delirium runs here).** `crate::delirium_np`:
+on Patrick's PC, with `sDeliriumGame` set and the start logged `Delirium: on`, a human New
+Physics takes is Delirium's from its first frame until it lies settled half a second (then New
+Physics' downed controller, its rise and its rules, from that pose) or stands balanced two
+seconds (then New Physics' balance); dying hands it to New Physics' own death hand-over. Shots
+(strongest push, each pellet and round) and blasts (Delirium's own task) are queued per actor and
+given at its frame. Log lines to read in his clips: `[np delirium] taken`, `not taken (why)`,
+`refused (why)`, `done after N frames (it lies settled | it stands balanced again)`, `handed over`.
+Tested here (4): the bind pose through Delirium's parts back to New Physics' bodies (0.01 units,
+0.05 degrees: the conversions agree), a world there and back far from the centre, each body's hit
+on its part, the world mesh from the origin; the host library and the New Physics tests unchanged
+(nothing runs without Delirium). Next: FNV's facts for each actor's profile (its race, armor,
+weight), the actor's health for the shot, then the corpse staying Delirium's (the game's ragdoll
+bodies keyframed to it; dragging, explosions, looting, saves).
+
 ### Claude, 2026-11-26 (Delirium: its SDK vendored; the agent as safe handles)
 
 **Status: pushed.** Delirium's SDK (`delirium-sdk`, built as an rlib only) is vendored beside the

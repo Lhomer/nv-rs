@@ -218,6 +218,11 @@ impl Agent {
             .collect())
     }
 
+    /// Whether it is keeping its balance on its feet.
+    pub fn balancing(&self) -> bool {
+        unsafe { sdk::nm_agent_is_balancing(self.0) == 1 }
+    }
+
     /// Whether it lies settled and may get up after `after` seconds still (Delirium's own
     /// judgement: never a dead one).
     pub fn should_get_up(&self, after: f32) -> bool {

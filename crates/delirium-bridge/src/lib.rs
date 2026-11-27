@@ -10,6 +10,9 @@
 //!
 //! The log lines never name the path: a report a player shares carries no folder of theirs.
 
+/// Delirium's engine, for the host's conversions (its transforms and maths).
+pub use delirium;
+
 pub mod agent;
 pub mod body;
 pub mod profile;
@@ -177,6 +180,11 @@ pub fn start_once(setting: &str) -> String {
 /// Whether Delirium runs this time ([`start_once`] succeeded).
 pub fn running() -> bool {
     STARTED.get().is_some_and(Result::is_ok)
+}
+
+/// What [`start_once`] made, when Delirium runs.
+pub fn started() -> Option<&'static Started> {
+    STARTED.get().and_then(|r| r.as_ref().ok())
 }
 
 #[cfg(test)]

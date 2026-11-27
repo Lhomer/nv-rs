@@ -181,6 +181,11 @@ struct NpActor {
     /// Downed, how long the AI has wished no rise (s; 0 while it wishes one): said with the
     /// joints' figure, which a body lying unasked keeps inside the skeleton's limits.
     unasked: f32,
+    /// Its Delirium (`crate::delirium_np`), where Delirium runs: made at its first frame, the
+    /// hits queued for it, and whether it was tried (once a take).
+    dl: Option<crate::delirium_np::Dl>,
+    dl_tried: bool,
+    dl_queue: Vec<crate::delirium_np::DlHit>,
     /// Each body's walls found beside it (world, metres; where the cast met it, game units; its
     /// top, metres, infinite: none; how far behind the face its top reaches and along the face
     /// each way from the hit, metres, [`top_extent`]): kept while the body stays within
@@ -201,7 +206,7 @@ struct NpActor {
 /// The actor's animation as the game's update left it: its 3D root's world and each node's local
 /// of `NpActor::tree` (in its order).
 #[derive(Clone, Debug)]
-struct Snapshot {
+pub(crate) struct Snapshot {
     root: Xf,
     locals: Vec<Xf>,
 }
@@ -228,7 +233,7 @@ fn snapshot(e: &Engine, root: u32, tree: &[(u32, u32)]) -> Snapshot {
 }
 
 /// The bodies' nodes' worlds (rotation, game units) the snapshot makes.
-fn snapshot_worlds(s: &Snapshot, tree: &[(u32, u32)], bodies: &[u32]) -> Vec<(M3, V3)> {
+pub(crate) fn snapshot_worlds(s: &Snapshot, tree: &[(u32, u32)], bodies: &[u32]) -> Vec<(M3, V3)> {
     let mut worlds: Vec<(u32, Xf)> = Vec::with_capacity(tree.len() + 1);
     let root = tree.first().map(|t| t.1);
     if let Some(r) = root {
@@ -603,7 +608,7 @@ pub fn falls() -> Vec<Fall> {
     FALLS.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
-fn note(line: String) {
+pub(crate) fn note(line: String) {
     room_events::record("note", &format!("\"text\":{}", room_events::text(&line)));
     static N: Mutex<(Option<Instant>, u32)> = Mutex::new((None, 0));
     let mut n = N.lock().unwrap_or_else(|p| p.into_inner());
@@ -804,6 +809,9 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             jumps_said: 0,
             joints_said: JOINTS_EVERY,
             unasked: 0.0,
+            dl: None,
+            dl_tried: false,
+            dl_queue: Vec::new(),
             walls: Vec::new(),
             step_edges: Vec::new(),
             boxes: Vec::new(),
@@ -907,6 +915,8 @@ pub fn blast(e: &mut Engine, actor: u32, centre: V3, force: f32, radius: f32) {
         length(sub(worlds.get(body).map_or(centre, |w| w.1), centre))
     );
     strike(a, total, body, &against, pushes, false);
+    // Delirium takes it as its own blast (its falloff over the bodies), not as a shot.
+    crate::delirium_np::queue_blast(&mut a.dl_queue, centre, radius, force / m.mass);
 }
 
 /// For the tests (Patrick's answer 4: a body that starts lying face down, a fixture pose only):
@@ -1013,6 +1023,7 @@ fn strike(
                 "{:08X}: [np hit] {p:.1} N s on {} (pellet {} of a burst, {:.2} m/s in all); {against}",
                 a.id, m.bodies[body].node, o.pellets, o.speed
             ));
+            crate::delirium_np::queue_shot(&mut a.dl_queue, &pushes);
             for (b, point, impulse) in pushes {
                 match a.np.as_mut() {
                     Some(np) => np.hit(b, point, impulse),
@@ -1054,6 +1065,7 @@ fn strike(
         p / m.mass,
         m.mass
     ));
+    crate::delirium_np::queue_shot(&mut a.dl_queue, &pushes);
     for (b, point, impulse) in pushes {
         match a.np.as_mut() {
             Some(np) => np.hit(b, point, impulse),
@@ -1354,7 +1366,23 @@ pub fn apply(e: &mut Engine) {
             }
         }
         np.edges.extend(a.boxes.iter().copied());
-        let drawn = np.frame(&anim, floor, dt);
+        // Where Delirium runs, a human's frame is Delirium's until it lies settled or stands
+        // again (`crate::delirium_np`); New Physics' bodies are kept on its pose.
+        let via_delirium = if delirium_bridge::running() {
+            crate::delirium_np::frame_for(
+                e,
+                (a.id, &a.tree, a.snap.as_ref()),
+                (&mut a.dl, &mut a.dl_tried, &mut a.dl_queue),
+                np,
+                (reference, a.take_v, floor, dt, a.handing.is_some()),
+            )
+        } else {
+            None
+        };
+        let drawn = match via_delirium {
+            Some(d) => d,
+            None => np.frame(&anim, floor, dt),
+        };
         floor_load_said(&mut a, floor, dt);
         wall_load_said(&mut a);
         let Some(np) = a.np.as_mut() else { continue };

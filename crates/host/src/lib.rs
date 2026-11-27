@@ -49,6 +49,7 @@ pub mod mod_files;
 pub mod mod_fit_worn;
 pub mod movement;
 pub mod native_inflate;
+pub(crate) mod delirium_np;
 pub mod new_physics;
 pub mod one_hand;
 pub mod pad_when_used;

@@ -1045,6 +1045,25 @@ as its top and the face under it, a crate as its top and four sides down to the 
 up, every triangle facing out of its surface (tested). Putting them into Delirium's `Collision`
 as one chunk an actor, and the props as its obstacles, comes with the agent's run.
 
+Slice 3a (`crate::delirium_np` in the host): hits on Delirium. Where Delirium runs (and only
+there), a human New Physics takes is given to a Delirium agent at its first frame: its bones read
+from the animation's snapshot into Delirium's parts (`Rig::parts_at`), moving as the actor was, its
+own body and profile (neutral for now; FNV's facts for it come next). Each hit's strongest push is
+a Delirium shot (every pellet and round its own, no cap); a blast is Delirium's own blast task
+(its falloff over the body), from New Physics' blast's centre, radius and force. Each frame the
+world New Physics found around the body is set as one mesh, the agent steps, and its parts posed
+onto FNV's bones are the bodies drawn; New Physics' own bodies are put on that pose, so what reads
+them (the labels, the outcome, the reference's move, VATS) sees the real body. Delirium has the
+actor until it lies settled for half a second (`should_get_up`: never a dead one), then New
+Physics' downed controller goes on from that pose (its settle, the data's limits, the rise
+pushing off through planted hands, the slope timings); or until it has stood balanced for two
+seconds, then New Physics' balance does. Dying (or a rise given up) hands it to New Physics at
+once, which hands it to the game as it does now (the wait kept, the limbs brought in): the corpse
+staying Delirium's is a later slice. Anything Delirium refuses (`[np delirium] refused`, `not
+taken`, its pose gone bad) lets New Physics take the actor from the pose it had. The shot's
+health is the full one for now (the actor's own comes with the profiles' facts). No original
+stagger: Delirium's shot and balance are its active ragdoll, never the game's stagger animations.
+
 #### Each NPC's Delirium settings (`crates/delirium-bridge/data/profiles.tsv`)
 
 Every NPC gets its own Delirium settings from the start, never one global body (Patrick,

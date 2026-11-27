@@ -1097,7 +1097,7 @@ fn skin_bones(e: &mut Engine, root: u32) -> Vec<u32> {
 }
 
 /// A node's name (`m_kName`, `+0x08`), empty for none.
-fn node_name(e: &Engine, node: u32) -> Vec<u8> {
+pub(crate) fn node_name(e: &Engine, node: u32) -> Vec<u8> {
     let name = e.mem.u32(node + NODE_NAME);
     if name == 0 {
         Vec::new()
