@@ -36,6 +36,25 @@ fn ok(r: i32) -> Result<i32, String> {
 /// Delirium's own shot force (its SDK's `SHOT_FORCE`), every shot's in its `nm_agent_task_shot`.
 pub const SHOT_FORCE: f32 = 400.0;
 
+/// A GTA IV ped's health as Delirium's shot tasks read it: full at 200, dead under 50 (its SDK's
+/// `a.dead |= health < 50.0`; its own on-fire task passes 200 for a ped unhurt).
+pub const FULL_HEALTH: f32 = 200.0;
+pub const DEAD_UNDER: f32 = 50.0;
+
+/// The health Delirium's shot task is given for `left` (0 to 1 of the actor's most): never under
+/// its dead line while the game has the actor alive (the game's death is the corpse's own; Patrick's
+/// 17:34 log: the fraction itself was passed, under 50, so every shot made the agent dead, its
+/// muscles off: a light hit sat him down, and no rise ever lifted him).
+pub fn ped_health(left: f32) -> f32 {
+    let alive = DEAD_UNDER + 10.0;
+    let f = if left.is_finite() {
+        left.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    alive + (FULL_HEALTH - alive) * f
+}
+
 /// Delirium steps its agents in whole 60ths of a second (its SDK banks a shorter frame).
 pub const STEP: f32 = 1.0 / 60.0;
 
@@ -193,7 +212,7 @@ impl Agent {
                 part as i32,
                 at.to_array().as_ptr(),
                 dir.to_array().as_ptr(),
-                health,
+                ped_health(health),
                 force.max(1.0),
             )
         })
@@ -326,6 +345,17 @@ impl Drop for Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The health given to Delirium is a ped's: full at 200, never under its dead line for a
+    /// living actor, whatever share of its most is left.
+    #[test]
+    fn a_living_actors_health_is_never_delirium_s_dead() {
+        assert_eq!(ped_health(1.0), FULL_HEALTH);
+        for f in [0.0, 0.01, 0.3, 0.9, -1.0, f32::NAN] {
+            assert!(ped_health(f) >= DEAD_UNDER, "{f}: {}", ped_health(f));
+        }
+        assert!(ped_health(0.5) > ped_health(0.2));
+    }
 
     /// Without GTA IV nothing of Delirium is made: each handle says why.
     #[test]

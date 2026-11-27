@@ -1149,7 +1149,13 @@ cast from the game's collision around the body. Down and dead, each step's pose 
 skeleton's limits and put back on Delirium's body. The standing height is the animation's, kept
 through retakes. The rise has 1.2 body weights of pelvis help, New Physics' rise waits for a
 lagging body, and New Physics standing with the body still down is down again on Delirium to rise
-again (HANDOFF.md, 2026-11-27, has each piece). Every change is said (`[np delirium] taken`,
+again (HANDOFF.md, 2026-11-27, has each piece).
+**Patrick's 5:34 PM report (adbee09):** the shot's health went to Delirium as a share (0 to 1),
+which its shot task reads as a ped's health (full 200, dead under 50): every shot made the agent
+dead. Now it is a living ped's health (`agent::ped_health`), and under the knockdown threshold the
+shot says unhurt. A body taken again moves at most 2 m/s a part; a lagging rise is eased toward New
+Physics' pose; a body already up at the end of its rise is never cut off (no snap to the idle pose);
+joints are brought into the limits a bounded step at a time. Every change is said (`[np delirium] taken`,
 `downed on Delirium`, `rising on Delirium`, `back down on Delirium`, `New Physics stands`,
 `upright and still: back to the game's animation`, `dead on Delirium (downed | mid-rise | ...)`,
 `its rises given up`, `fell ... never the game's ragdoll`, `refused while <hit | downed | rising |

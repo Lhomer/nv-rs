@@ -7,6 +7,31 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-27 (Delirium: Patrick's 5:34 PM report on adbee09, every shot killed the agent)
+
+**Status: pushed; not run with GTA IV (for Patrick to try).** The cause of most of it: Delirium's
+shot task reads health as a GTA IV ped's (full at 200; its SDK sets the agent dead under 50:
+`a.dead |= health < 50.0`), and the bridge passed the share left (0 to 1). So every shot made the
+agent dead, its muscles off for good: a light hit's legs gave way (he sat down, the torso upright,
+the stagger aid too weak to hold a limp body), and no rise could work (only the pelvis help lifted
+a dead body: the pelvis up to 57 units, the torso hanging 101 to 135 degrees from upright). Now
+`agent::ped_health` maps the share to a living ped's health (60 to 200; never Delirium's dead line,
+the game's death is the corpse's own), and a hit under the knockdown threshold tells Delirium the
+actor is unhurt (its stagger, never its fall). Also:
+- The launch (a light hit on a prone body): the pose jumped, the body was refused and taken again
+  with New Physics' velocities from its step out of a pose deep in its walls (498543 N): a body
+  taken again now moves at most 2 m/s a part (`capped`, `RETAKE_MOST`), and the three retakes are
+  counted afresh after 5 s kept (`RETAKES_BACK_AFTER`), so one fall can't use them all.
+- The rise: while Delirium's pelvis lags New Physics', its parts are eased 12% of the way to New
+  Physics' rise pose each Delirium step (`RISE_GUIDE`, `Dl::guide`), its muscles on it as well; the
+  same while held on New Physics' standing pose. The lag line is said once a rise (it was 109).
+- The snap to the idle pose: the host's "rises given up" guard cut New Physics' rise off when the
+  body was already up at its end; held there, it snapped to the idle pose and never moved or fought
+  again. Up already, its rise now goes on (only a body still down settles again).
+- Joint limits: each step brings a joint in by a bounded amount (`LIMIT_PASSES`, 12 of New
+  Physics' small passes), never 100 degrees at once; the log names the joint that was farthest out.
+Tests: `a_living_actors_health_is_never_delirium_s_dead` (bridge), `a_body_taken_again_is_never_thrown`.
+
 ### Claude, 2026-11-27 (Delirium: Patrick's 3:30 PM report on c53f909, the 9mm stumble and the writhing)
 
 **Status: pushed; not run with GTA IV (for Patrick to try).** One 9mm (25.9 N s, 0.32 m/s) on a

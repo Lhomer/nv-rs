@@ -1661,15 +1661,32 @@ pub fn apply(e: &mut Engine) {
         // downed controller has it at once (Patrick's plan: Delirium's for the whole fall).
         if a.handing.is_none() && a.dl.had {
             if a.choice == "give up" {
+                // Up on its feet already (the rise at its end): it goes on standing, its rise
+                // never cut off there (Patrick's 17:34 clip: cut off half up, the body snapped to
+                // the idle pose and was held, never moving or fighting again). Down: it settles
+                // again before it tries again.
+                let up = matches!(a.label, Some("standing" | "rising"));
                 note_event(format!(
-                    "{:08X}: [np delirium] its rises given up ({} tries): it stays down on \
-                     Delirium and settles again before it tries again (never the game's ragdoll)",
-                    a.id, a.fails
+                    "{:08X}: [np delirium] its rises given up ({} tries): {} (never the game's \
+                     ragdoll)",
+                    a.id,
+                    a.fails,
+                    match (up, a.dl.body.is_some()) {
+                        (true, _) => "it is up already: its rise goes on",
+                        (false, true) =>
+                            "it stays down on Delirium and settles again before it \
+                                          tries again",
+                        (false, false) => "it stays down and settles again before it tries again",
+                    }
                 ));
-                a.choice = "settle";
                 a.fails = 0;
-                a.still_for = 0.0;
-                np.rise = false;
+                if up {
+                    a.choice = "stand";
+                } else {
+                    a.choice = "settle";
+                    a.still_for = 0.0;
+                    np.rise = false;
+                }
             }
             if np.phase() == Phase::Falling && np.down.is_none() {
                 note_event(format!(

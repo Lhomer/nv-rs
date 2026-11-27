@@ -294,6 +294,17 @@ pub(crate) struct Dl {
     /// it meanwhile with its last pose (`target`).
     lag: f32,
     target: Option<Vec<(M3, V3)>>,
+    /// The lag said this rise (once a rise, not each frame it lags: Patrick's 17:34 log had it
+    /// 109 times).
+    lag_said: bool,
+    /// While it lags New Physics' rise: the parts' pose its parts are eased toward each step
+    /// ([`RISE_GUIDE`] of the way), its muscles still on it.
+    guide: Option<Vec<Transform>>,
+    /// Seconds since this Delirium was made (after [`RETAKES_BACK_AFTER`] without a refusal the
+    /// retakes are counted from none again).
+    pub age: f32,
+    /// The joint that was farthest out of the skeleton's limits (for the log).
+    worst: &'static str,
 }
 
 /// The ground's height field: points a side, metres apart (3.5 m square around the pelvis).
@@ -313,6 +324,18 @@ pub(crate) const RISE_HELP: f32 = 1.2;
 /// for it, at most [`RISE_WAIT`] seconds, then goes on from the body as it is.
 pub(crate) const RISE_LAG: f32 = 18.0;
 pub(crate) const RISE_WAIT: f32 = 2.0;
+/// Lagging the rise: each Delirium step its parts eased this share of the way to New Physics'
+/// rise pose (a 60th of a second each), so the body is lifted with its muscles, never left lying.
+pub(crate) const RISE_GUIDE: f32 = 0.12;
+/// A body taken again moves at most this fast (m/s, each part): New Physics' step from a pose
+/// deep in its walls had parts at many metres a second (Patrick's 17:34 clip: a light hit on a
+/// prone body, refused, taken again and thrown yards).
+pub(crate) const RETAKE_MOST: f32 = 2.0;
+/// Delirium this long with a body (s) without a refusal: its retakes counted from none again.
+pub(crate) const RETAKES_BACK_AFTER: f32 = 5.0;
+/// The skeleton's limits each Delirium step: this many of New Physics' passes (each a small step
+/// in): a joint brought in steadily, never thrown 100 degrees in a step.
+pub(crate) const LIMIT_PASSES: usize = 12;
 /// Under the knockdown threshold, a hit's stagger aid: this long (s), at most this much of g
 /// (the whole body's velocity changed toward its feet, so its own steps catch it).
 pub(crate) const AID_FOR: f32 = 1.5;
@@ -522,6 +545,10 @@ impl Dl {
             limited: 0.0,
             lag: 0.0,
             target: None,
+            lag_said: false,
+            guide: None,
+            age: 0.0,
+            worst: "",
         })
     }
 
@@ -574,7 +601,10 @@ impl Dl {
             return Ok(parts);
         }
         let bodies = bodies_from_parts(rig, &parts, self.origin);
-        let (inside, out) = into_limits(&bodies);
+        let (inside, out, worst) = into_limits(&bodies, LIMIT_PASSES);
+        if out > self.limited {
+            self.worst = worst;
+        }
         self.limited = self.limited.max(out);
         if out <= LIMIT_HOLD {
             return Ok(parts);
@@ -668,6 +698,23 @@ impl Dl {
         // Whole steps of Delirium's own (at most four a frame: a long frame is not caught up).
         self.pending += dt.clamp(0.0, 4.0 * STEP);
         while self.pending >= STEP - 1e-6 {
+            if let Some(g) = self.guide.as_ref() {
+                let now = self.agent.parts()?;
+                if now.len() == 21 && g.len() == 21 {
+                    let eased = between(&now, g, RISE_GUIDE);
+                    let motions = self.agent.motions()?;
+                    for (k, (frame, (velocity, spin))) in eased.iter().zip(motions).enumerate() {
+                        self.agent.set_part(
+                            k,
+                            &PartState {
+                                frame: *frame,
+                                velocity,
+                                spin,
+                            },
+                        )?;
+                    }
+                }
+            }
             self.agent.step(&self.world, STEP)?;
             self.pending -= STEP;
             let mut now = self.agent.parts()?;
@@ -937,36 +984,41 @@ pub(crate) fn between(a: &[Transform], b: &[Transform], t: f32) -> Vec<Transform
 /// New Physics' bodies at `bodies` (each body's node's world, game units) brought inside the
 /// skeleton's limits (its data's, as New Physics brings a downed body's), and how far out the
 /// farthest joint was before (radians). Under [`LIMIT_HOLD`] the bodies as they are.
-pub(crate) fn into_limits(bodies: &[(M3, V3)]) -> (Vec<(M3, V3)>, f32) {
+pub(crate) fn into_limits(
+    bodies: &[(M3, V3)],
+    passes: usize,
+) -> (Vec<(M3, V3)>, f32, &'static str) {
     let m = crate::new_physics::model();
     let Some(o) = bodies.get(m.root).map(|b| b.1) else {
-        return (bodies.to_vec(), 0.0);
+        return (bodies.to_vec(), 0.0, "");
     };
     let local: Vec<(M3, V3)> = bodies
         .iter()
         .map(|(r, t)| (*r, ragdoll_core::flinch::sub(*t, o)))
         .collect();
     let mut st = m.states_from_nodes(&local);
-    let out = m
+    let (worst, out) = m
         .data_limits_out(&st)
         .into_iter()
-        .filter(|x| x.is_finite())
-        .fold(0.0f32, f32::max);
+        .enumerate()
+        .filter(|x| x.1.is_finite())
+        .fold((0, 0.0f32), |a, b| if b.1 > a.1 { b } else { a });
+    let name = m
+        .joints
+        .get(worst)
+        .and_then(|j| m.bodies.get(j.child))
+        .map_or("", |b| b.node.as_str());
     if out <= LIMIT_HOLD {
-        return (bodies.to_vec(), out);
+        return (bodies.to_vec(), out, name);
     }
-    // Each pass brings a joint in a step: passes until it is in (at most 96).
-    for _ in 0..8 {
-        if m.into_data_limits(&mut st, 12) <= LIMIT_HOLD * 0.5 {
-            break;
-        }
-    }
+    // Each pass brings a joint in a small step.
+    m.into_data_limits(&mut st, passes);
     let inside = m
         .node_worlds(&st)
         .into_iter()
         .map(|(r, t)| (r, ragdoll_core::flinch::add(t, o)))
         .collect();
-    (inside, out)
+    (inside, out, name)
 }
 
 /// The height of the floor `floors` has nearest (flat) to `at` (game units) at `at`, else
@@ -1209,13 +1261,15 @@ fn take_from_np(
     let part_bones = delirium_bridge::rig::part_bones(&names);
     let v_of = |k: usize| -> [f32; 3] {
         let mut b = part_bones.get(k).copied().flatten().or(part_bones[7]);
+        let mut v = np.states.get(m.root).map_or([0.0; 3], |st| st.v);
         while let Some(i) = b {
             if let Some(st) = m.body(&s.names[i]).and_then(|bi| np.states.get(bi)) {
-                return st.v;
+                v = st.v;
+                break;
             }
             b = s.parents[i];
         }
-        np.states.get(m.root).map_or([0.0; 3], |st| st.v)
+        capped(v, RETAKE_MOST)
     };
     Dl::take(
         &bone,
@@ -1223,6 +1277,18 @@ fn take_from_np(
         origin,
         &delirium_bridge::profile::profile(facts),
     )
+}
+
+/// `v` no longer than `most` (and nothing that isn't finite).
+pub(crate) fn capped(v: V3, most: f32) -> V3 {
+    let l = ragdoll_core::flinch::length(v);
+    if !l.is_finite() {
+        [0.0; 3]
+    } else if l > most {
+        ragdoll_core::flinch::scale(v, most / l)
+    } else {
+        v
+    }
 }
 
 /// Dead while New Physics has a human Delirium could have (refused, or never taken: Patrick's
@@ -1420,7 +1486,9 @@ pub(crate) fn frame_for(
                 slot.pain = pain;
                 shots += 1;
                 knocked |= knock;
-                d.shot(b, point, impulse, health)
+                // Under the threshold Delirium's shot task is told the actor is unhurt (its own
+                // stagger, never its fall); past it, the health the actor has left.
+                d.shot(b, point, impulse, if knock { health } else { 1.0 })
             }
             DlHit::Blast(c, r, speed) => {
                 knocked = true;
@@ -1437,8 +1505,11 @@ pub(crate) fn frame_for(
             slot.aid = 0.0;
             note_event(format!(
                 "{id:08X}: [np delirium] a hit past the knockdown threshold ({:.2} of {topple:.2} \
-                 m/s stacked): Delirium's own reaction, a fall allowed",
-                slot.pain
+                 m/s stacked, {:.0} of {:.0} health to Delirium): Delirium's own reaction, a fall \
+                 allowed",
+                slot.pain,
+                delirium_bridge::agent::ped_health(health),
+                delirium_bridge::agent::FULL_HEALTH
             ));
         } else {
             slot.aid = AID_FOR;
@@ -1528,10 +1599,12 @@ pub(crate) fn frame_for(
             (Some(t), Some(l)) => t.get(m.root).is_some_and(|tp| tp.1[2] - l.1[2] > RISE_LAG),
             _ => false,
         };
-    if lags && d.lag == 0.0 {
+    if lags && !d.lag_said {
+        d.lag_said = true;
         note_event(format!(
             "{id:08X}: [np delirium] rising: Delirium's body lags New Physics' rise: New Physics \
-             waits for it (at most {RISE_WAIT:.0} s)"
+             waits for it (at most {RISE_WAIT:.0} s), its parts eased toward the rise's pose \
+             (said once a rise)"
         ));
     }
     d.lag = if lags { d.lag + dt } else { 0.0 };
@@ -1557,6 +1630,20 @@ pub(crate) fn frame_for(
         }
     }
     d.target = if follows { target.clone() } else { None };
+    // Lagging the rise (or held on New Physics' standing pose): its parts eased toward that pose
+    // each step, its muscles on it too.
+    d.guide = match (
+        follows && (lags || matches!(d.own, Own::Up { .. })),
+        target.as_ref(),
+    ) {
+        (true, Some(t)) => Some(parts_from_bodies(&st.rig, t, d.origin)),
+        _ => None,
+    };
+    // Its retakes counted from none again once it has kept a body a while.
+    d.age += dt;
+    if d.age > RETAKES_BACK_AFTER && (1..=RETAKES).contains(&slot.retakes) {
+        slot.retakes = 0;
+    }
     // Down or dead: its joints held inside the skeleton's limits, each step (Patrick: joint limits
     // while downed must hold).
     d.limits = d.own == Own::Down || d.corpse.is_some();
@@ -1633,8 +1720,9 @@ pub(crate) fn frame_for(
     if d.limited > LIMIT_HOLD && d.frames % 30 == 0 {
         note(format!(
             "{id:08X}: [np delirium] joints held inside the skeleton's limits (the most out {:.1} \
-             degrees before)",
-            d.limited.to_degrees()
+             degrees before, {})",
+            d.limited.to_degrees(),
+            d.worst
         ));
         d.limited = 0.0;
     }
@@ -1716,6 +1804,7 @@ pub(crate) fn frame_for(
     };
     let driven = match change {
         Change::Rising => {
+            d.lag_said = false;
             note_event(format!(
                 "{}: rising on Delirium (its muscles on New Physics' rise, the arms pushing off \
                  through planted hands)",
@@ -2320,7 +2409,7 @@ mod tests {
         let m = crate::new_physics::model();
         let at = [-72152.0, 8282.0, 223.0];
         let bind = bodies_posed(ID, at);
-        let (same, out) = into_limits(&bind);
+        let (same, out, _) = into_limits(&bind, 96);
         assert!(out <= LIMIT_HOLD, "the bind pose {out} rad out");
         assert_eq!(same, bind);
         // The left calf turned 120 degrees about its own place.
@@ -2329,7 +2418,8 @@ mod tests {
         let turn: M3 = [1.0, 0.0, 0.0, 0.0, c, -s2, 0.0, s2, c];
         let mut bent = bind.clone();
         bent[calf].0 = ragdoll_core::flinch::mul(&turn, &bent[calf].0);
-        let (inside, out) = into_limits(&bent);
+        let (inside, out, worst) = into_limits(&bent, 96);
+        assert!(worst.contains("Calf") || worst.contains("Foot"), "{worst}");
         assert!(out > 0.5, "the bent knee only {out} rad out");
         let local: Vec<(M3, V3)> = inside
             .iter()
@@ -2475,6 +2565,17 @@ mod tests {
         let b = bodies_posed(ID, [30.0, 0.0, 0.0]);
         assert!(pose_wrong(&b, &a, origin, 1.0 / 60.0).is_some());
         assert!(pose_wrong(&b, &a, origin, 0.1).is_none());
+    }
+
+    /// A body taken again moves at most RETAKE_MOST a part, whatever New Physics' step left in it
+    /// (Patrick's 17:34 clip: a prone body thrown yards), and nothing that isn't finite.
+    #[test]
+    fn a_body_taken_again_is_never_thrown() {
+        assert_eq!(capped([0.5, 0.0, 0.0], RETAKE_MOST), [0.5, 0.0, 0.0]);
+        let fast = capped([30.0, 0.0, 40.0], RETAKE_MOST);
+        assert!((ragdoll_core::flinch::length(fast) - RETAKE_MOST).abs() < 1e-4);
+        assert!(fast[0] > 0.0 && fast[2] > fast[0]);
+        assert_eq!(capped([f32::NAN, 0.0, 0.0], RETAKE_MOST), [0.0; 3]);
     }
 
     /// A 9mm's 25 N s gets under half of Delirium's own shot force, a 60 N s hit all of it, and
