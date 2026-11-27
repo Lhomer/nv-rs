@@ -1371,7 +1371,7 @@ pub fn apply(e: &mut Engine) {
         let via_delirium = if delirium_bridge::running() {
             crate::delirium_np::frame_for(
                 e,
-                (a.id, &a.tree, a.snap.as_ref()),
+                (a.id, a.actor, &a.tree, a.snap.as_ref()),
                 (&mut a.dl, &mut a.dl_tried, &mut a.dl_queue),
                 np,
                 (reference, a.take_v, floor, dt, a.handing.is_some()),

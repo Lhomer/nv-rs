@@ -1061,7 +1061,11 @@ seconds, then New Physics' balance does. Dying (or a rise given up) hands it to 
 once, which hands it to the game as it does now (the wait kept, the limbs brought in): the corpse
 staying Delirium's is a later slice. Anything Delirium refuses (`[np delirium] refused`, `not
 taken`, its pose gone bad) lets New Physics take the actor from the pose it had. The shot's
-health is the full one for now (the actor's own comes with the profiles' facts). No original
+health is the share the actor has left (its current health over its base, 1 when unknown). The
+profile's facts are read from the actor at the take: NPC or creature (its base form's type: only
+NPCs go to Delirium), its weight slider (`TESNPC::fWeight`); its race counts as human (ghouls share
+the skeleton) and its body armor as none until those are read: every row is neutral, so neither
+changes a setting yet. No original
 stagger: Delirium's shot and balance are its active ragdoll, never the game's stagger animations.
 
 #### Each NPC's Delirium settings (`crates/delirium-bridge/data/profiles.tsv`)

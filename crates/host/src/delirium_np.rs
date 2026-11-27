@@ -308,6 +308,61 @@ impl Dl {
     }
 }
 
+/// An actor's base form (`TESObjectREFR::baseForm`), its form type (`+4`), an NPC's weight
+/// slider (`TESNPC::fWeight`), the actor-value owner and its base and current value slots, health.
+const BASE_FORM: u32 = 0x20;
+const FORM_TYPE: u32 = 0x04;
+const NPC_FORM: u8 = 0x2a;
+const NPC_WEIGHT: u32 = 0x1f8;
+const AV_OWNER: u32 = engine::actor_values::OWNER;
+const AV_BASE: u32 = 0x4;
+const AV_HEALTH: u32 = 0x10;
+
+/// What FNV knows of `actor` for its profile: NPC or creature, its weight slider. Its race is a
+/// human's (ghouls share the human skeleton) and its body armor none until those are read for it:
+/// every profile row is neutral for now, so neither changes a setting yet.
+pub(crate) fn facts_of(
+    e: &mut engine::prelude::Engine,
+    actor: u32,
+) -> delirium_bridge::profile::Facts {
+    use delirium_bridge::profile::{Actor, Armor, Facts, Race};
+    let base = e.mem.u32(actor + BASE_FORM);
+    let npc = base != 0 && e.mem.u8(base + FORM_TYPE) == NPC_FORM;
+    let weight = if npc {
+        let w = e.mem.f32(base + NPC_WEIGHT);
+        if w.is_finite() {
+            w.clamp(0.0, 100.0) as u8
+        } else {
+            50
+        }
+    } else {
+        50
+    };
+    Facts {
+        race: Race::Human,
+        actor: if npc { Actor::Npc } else { Actor::Creature },
+        armor: Armor::None,
+        weight,
+    }
+}
+
+/// The share of its health `actor` has left (0 to 1; 1 when unknown): Delirium's shot task takes
+/// it (a lot left staggers, little drops it).
+pub(crate) fn health_left(e: &mut engine::prelude::Engine, actor: u32) -> f32 {
+    let now = engine::actor_values::current(e, actor, AV_HEALTH);
+    let most = e
+        .vcall(
+            actor.wrapping_add(AV_OWNER),
+            AV_BASE,
+            &engine::prelude::args![AV_HEALTH],
+        )
+        .f64() as f32;
+    match now {
+        Some(now) if most.is_finite() && most > 0.0 => (now / most).clamp(0.0, 1.0),
+        _ => 1.0,
+    }
+}
+
 /// A hit waiting for the actor's Delirium frame: a shot (New Physics' body, its point in game
 /// units, its impulse N s) or a blast (its centre and radius in game units, its speed m/s).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -350,7 +405,12 @@ pub(crate) fn queue_blast(queue: &mut Vec<DlHit>, centre: V3, radius: f32, speed
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn frame_for(
     e: &mut engine::prelude::Engine,
-    (id, tree, snap): (u32, &[(u32, u32)], Option<&crate::new_physics::Snapshot>),
+    (id, actor, tree, snap): (
+        u32,
+        u32,
+        &[(u32, u32)],
+        Option<&crate::new_physics::Snapshot>,
+    ),
     (dl, tried, queue): (&mut Option<Dl>, &mut bool, &mut Vec<DlHit>),
     np: &mut ragdoll_core::np::Np,
     (reference, take_v, floor, dt, handing): (V3, V3, f32, f32, bool),
@@ -380,14 +440,15 @@ pub(crate) fn frame_for(
                 .1;
             snap.map(|s| crate::new_physics::snapshot_worlds(s, tree, &[addr])[0])
         };
-        // Each NPC its own settings (neutral for now: `delirium_bridge::profile`); its facts are
-        // a human NPC's until FNV's are read for it.
-        let facts = delirium_bridge::profile::Facts {
-            race: delirium_bridge::profile::Race::Human,
-            actor: delirium_bridge::profile::Actor::Npc,
-            armor: delirium_bridge::profile::Armor::None,
-            weight: 50,
-        };
+        // Each NPC its own settings (`delirium_bridge::profile`: neutral for now) from its facts.
+        let facts = facts_of(e, actor);
+        if !delirium_bridge::profile::takes(&facts) {
+            note(format!(
+                "{id:08X}: [np delirium] not taken (not a human NPC): New Physics has it as before"
+            ));
+            queue.clear();
+            return None;
+        }
         let v = [take_v[0] / UNITS, take_v[1] / UNITS, take_v[2] / UNITS];
         match Dl::take(
             &bone,
@@ -397,8 +458,8 @@ pub(crate) fn frame_for(
         ) {
             Ok(d) => {
                 note(format!(
-                    "{id:08X}: [np delirium] taken: Delirium has it from its pose (its own body, \
-                     neutral profile)"
+                    "{id:08X}: [np delirium] taken: Delirium has it from its pose (its own body; \
+                     its facts {facts:?})"
                 ));
                 *dl = Some(d);
             }
@@ -413,9 +474,14 @@ pub(crate) fn frame_for(
     }
     let d = dl.as_mut()?;
     let mut failed = None;
+    let health = if queue.is_empty() {
+        1.0
+    } else {
+        health_left(e, actor)
+    };
     for h in queue.drain(..) {
         let r = match h {
-            DlHit::Shot(b, point, impulse) => d.shot(b, point, impulse, 1.0),
+            DlHit::Shot(b, point, impulse) => d.shot(b, point, impulse, health),
             DlHit::Blast(c, r, speed) => d.blast(c, r, speed),
         };
         if let Err(why) = r {
@@ -528,6 +594,40 @@ mod tests {
         let (r2, t2) = from_tf(&tf, origin);
         assert!(ragdoll_core::flinch::length(ragdoll_core::flinch::sub(t, t2)) < 0.01);
         assert!(ragdoll_core::np_skeleton::angle_between(&r, &r2).to_degrees() < 0.01);
+    }
+
+    /// The actor's facts: an NPC's base form with its weight slider, or a creature's; its health
+    /// left from its owner's current and base values (1 when it has no base).
+    #[test]
+    fn an_actors_facts_and_health_left() {
+        use delirium_bridge::profile::Actor;
+        use engine::prelude::*;
+        const AREA: u32 = 0x7600_0000;
+        const ACTOR: u32 = AREA;
+        const BASE: u32 = AREA + 0x1000;
+        const OWNER_VT: u32 = AREA + 0x2000;
+        const CURRENT_FN: u32 = AREA + 0x3000;
+        const BASE_FN: u32 = AREA + 0x3004;
+        let mut e = Engine::new();
+        e.mem.map(AREA, 0x4000);
+        e.mem.set_u32(ACTOR + BASE_FORM, BASE);
+        e.mem.set_u8(BASE + FORM_TYPE, NPC_FORM);
+        e.mem.set_f32(BASE + NPC_WEIGHT, 80.0);
+        let f = facts_of(&mut e, ACTOR);
+        assert_eq!((f.actor, f.weight), (Actor::Npc, 80));
+        e.mem.set_u8(BASE + FORM_TYPE, 0x2b);
+        assert_eq!(facts_of(&mut e, ACTOR).actor, Actor::Creature);
+        assert!(!delirium_bridge::profile::takes(&facts_of(&mut e, ACTOR)));
+        // Its actor values: current 30 of a base 120.
+        e.mem.set_u32(ACTOR + AV_OWNER, OWNER_VT);
+        e.mem
+            .set_u32(OWNER_VT + engine::actor_values::CURRENT, CURRENT_FN);
+        e.mem.set_u32(OWNER_VT + AV_BASE, BASE_FN);
+        e.register(CURRENT_FN, |_, _| 30.0f32.into_ret());
+        e.register(BASE_FN, |_, _| 120.0f32.into_ret());
+        assert!((health_left(&mut e, ACTOR) - 0.25).abs() < 1e-6);
+        e.register(BASE_FN, |_, _| 0.0f32.into_ret());
+        assert_eq!(health_left(&mut e, ACTOR), 1.0);
     }
 
     /// Each body's hit lands on its own part, or its nearest parent's that has one.
