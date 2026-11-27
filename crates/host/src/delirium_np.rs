@@ -909,9 +909,10 @@ pub(crate) fn frame_for(
              controller has it from Delirium's pose, its settle and get-up",
             d.frames, pose.pelvis_up, d.standing, pose.lean, pose.speed
         ));
-        np.balance.phase = ragdoll_core::np_balance::Phase::Falling;
-        np.balance.since = 0.0;
-        np.balance.fall_reason = "downed on Delirium";
+        // Down in New Physics' own controller at once: its downed state made now, so its
+        // hand-over check never reads "falling, not yet down" and gives the body to the game's
+        // ragdoll (Patrick's 23:11 log: "[np fall] downed on Delirium ... to the game's ragdoll").
+        np.fall_now("downed on Delirium");
         *dl = None;
         *down = true;
         return Some(drawn);
@@ -923,9 +924,7 @@ pub(crate) fn frame_for(
         ));
         if why == "it lies settled" {
             // Down as a fall leaves it: New Physics' downed controller settles and rises.
-            np.balance.phase = ragdoll_core::np_balance::Phase::Falling;
-            np.balance.since = 0.0;
-            np.balance.fall_reason = "Delirium's fall";
+            np.fall_now("Delirium's fall");
             *down = true;
         }
         *dl = None;
@@ -1183,6 +1182,42 @@ mod tests {
             off < 5.0,
             "the pelvis {off} units off after New Physics' frame"
         );
+    }
+
+    /// Handed down from Delirium far from the world's centre: New Physics' own controller has the
+    /// body downed at once (never "falling, not yet down", which the host hands to the game's
+    /// ragdoll), and keeps it downed, where it was put, through its next frames.
+    #[test]
+    fn a_body_handed_down_is_new_physics_downed() {
+        let at = [-72152.0, 8282.0, 6440.0];
+        let anim = bodies_posed(ID, at);
+        let mut np = ragdoll_core::np::Np::new(crate::new_physics::model().clone(), &anim, 1.0);
+        np.keep_down = true;
+        let lie: M3 = [1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0];
+        let m = crate::new_physics::model();
+        let floor = at[2] - 60.0;
+        // Lying at the actor's place, the pelvis 10 units over the floor (the bind pose's pelvis
+        // is `anim`'s less `at`).
+        let bind_pelvis_z = anim[m.root].1[2] - at[2];
+        let drawn = bodies_posed(lie, [at[0], at[1], floor + 10.0 - bind_pelvis_z]);
+        put_on(&mut np, &drawn, &vec![([0.0; 3], [0.0; 3]); drawn.len()]);
+        np.fall_now("downed on Delirium");
+        assert!(np.down.is_some());
+        assert_eq!(np.phase(), ragdoll_core::np_balance::Phase::Falling);
+        let mut last = drawn[m.root].1;
+        for _ in 0..30 {
+            let out = np.frame(&anim, floor, 1.0 / 60.0);
+            assert!(np.down.is_some(), "no longer downed");
+            let p = out[m.root].1;
+            let moved = ragdoll_core::flinch::length(ragdoll_core::flinch::sub(p, last));
+            assert!(moved < 10.0, "the pelvis moved {moved} units in a frame");
+            assert!(
+                p[2] > floor - 5.0,
+                "the pelvis {} under the floor",
+                floor - p[2]
+            );
+            last = p;
+        }
     }
 
     /// A 9mm's 25 N s gets under half of Delirium's own shot force, a 60 N s hit all of it, and

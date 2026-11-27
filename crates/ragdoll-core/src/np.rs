@@ -469,6 +469,47 @@ pub struct Down {
     pub stance_since: f32,
 }
 
+impl Down {
+    /// Just down: kept, falling, then held on whatever it lands on (what a fall past any step
+    /// starts, and [`Np::fall_now`]).
+    fn fresh() -> Down {
+        Down {
+            since: 0.0,
+            labeler: Labeler::new(Label::Standing),
+            reading: Reading::default(),
+            rising: 0.0,
+            rise_best: 0.0,
+            rise_landed: false,
+            rise_mark: 0.0,
+            rise_stall: 0.0,
+            rise_failed: false,
+            push: 0.0,
+            lifting: false,
+            lifting_was: false,
+            arms: false,
+            stood: 0.0,
+            no_push: 0.0,
+            changes: Vec::new(),
+            hand_plants: [None, None],
+            hand_down_for: [0.0; 2],
+            hand_carried_for: [0.0; 2],
+            hand_landed: [false, false],
+            arms_off: false,
+            lift_lapse: 0.0,
+            still_wait: false,
+            still_up: false,
+            stance_fixing: None,
+            stance_best: f32::INFINITY,
+            stance_since: 0.0,
+            front_stage: 0,
+            front_side: 0,
+            front_done: false,
+            front_for: 0.0,
+            settled_for: 0.0,
+        }
+    }
+}
+
 /// Each joint's relative rotation (`parent⁻¹ child`) in a pose of body-node worlds.
 pub fn relative_of(model: &Model, worlds: &[(M3, V3)]) -> Vec<Q> {
     model
@@ -733,40 +774,7 @@ impl Np {
             .collect();
         if ask.falling && self.keep_down {
             // Past any step: the body is kept, falling, and then held on whatever it lands on.
-            self.down = Some(Down {
-                since: 0.0,
-                labeler: Labeler::new(Label::Standing),
-                reading: Reading::default(),
-                rising: 0.0,
-                rise_best: 0.0,
-                rise_landed: false,
-                rise_mark: 0.0,
-                rise_stall: 0.0,
-                rise_failed: false,
-                push: 0.0,
-                lifting: false,
-                lifting_was: false,
-                arms: false,
-                stood: 0.0,
-                no_push: 0.0,
-                changes: Vec::new(),
-                hand_plants: [None, None],
-                hand_down_for: [0.0; 2],
-                hand_carried_for: [0.0; 2],
-                hand_landed: [false, false],
-                arms_off: false,
-                lift_lapse: 0.0,
-                still_wait: false,
-                still_up: false,
-                stance_fixing: None,
-                stance_best: f32::INFINITY,
-                stance_since: 0.0,
-                front_stage: 0,
-                front_side: 0,
-                front_done: false,
-                front_for: 0.0,
-                settled_for: 0.0,
-            });
+            self.down = Some(Down::fresh());
             return self.down_frame(anim, floor, dt);
         }
         let posed = self.legs_on_footing(&shifted, &ask);
@@ -2413,6 +2421,18 @@ impl Np {
     }
 
     /// What the balance is doing.
+    /// Down now, as a fall past any step leaves it (the downed controller has it from its next
+    /// frame: its settle, its rise): a body another controller had (Delirium) handed down to New
+    /// Physics' own. Nothing if it is down already.
+    pub fn fall_now(&mut self, reason: &'static str) {
+        if self.down.is_none() {
+            self.down = Some(Down::fresh());
+        }
+        self.balance.phase = Phase::Falling;
+        self.balance.since = 0.0;
+        self.balance.fall_reason = reason;
+    }
+
     pub fn phase(&self) -> Phase {
         self.balance.phase
     }

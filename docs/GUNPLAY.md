@@ -1101,7 +1101,16 @@ its own frame (`delirium_np::put_on`), and the world's places of its bodies (the
 world mesh) are read with its origin added. The line that would have said why New Physics took
 the body back was lost to the log's 20 lines a second; the lines that say who has a body
 (Delirium's taken, refused, downed, done, died, handed over, get-up, `[np lost]`) now always print
-(`new_physics::note_event`). Dying (or a rise given up) hands it to New Physics at
+(`new_physics::note_event`).
+**The 23:11 log (99f6bc3, before that fix):** the Powder Ganger was `downed after 134 frames`,
+but the hand-off went `[np fall] downed on Delirium ... to the game's ragdoll`, `72154 units off`,
+and the game's ragdoll's clamp fired at 7475 units/s: the same 72,000-unit offset (fixed in
+1f0e33f), and a second fault: the hand-off set New Physics' balance to falling, but its downed
+state is made only inside its own frame (when its balance's update reads a fall), so the host's
+check later in the frame read "falling, not yet down", the fall from standing that goes to the
+game's ragdoll. Now `Np::fall_now` makes the downed state at the hand-off, as a fall past any step
+does, and New Physics' own controller has the body from that frame (tested: handed down lying at
+-72152, 8282, it is downed at once and stays downed and on the floor through its next frames). Dying (or a rise given up) hands it to New Physics at
 once, which hands it to the game as it does now (the wait kept, the limbs brought in). Slice 3b,
 the corpse: an actor that dies while Delirium has it stays Delirium's, its muscles off for good
 (`Agent::kill`), kept by New Physics and drawn as Delirium has it (shots and blasts still push

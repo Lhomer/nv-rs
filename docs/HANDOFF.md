@@ -7,6 +7,18 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-27 (Delirium: the 23:11 log, the downed hand-off going to the game's ragdoll)
+
+**Status: pushed; for Patrick to try again.** His 99f6bc3 run (before 1f0e33f): `downed after 134
+frames` then `[np fall] downed on Delirium ... to the game's ragdoll`, `72154 units off`, clamp at
+7475 units/s, the lowest point -672 under the floor. Two faults: the world-frame offset (1f0e33f
+covers it) and the hand-off itself: setting the balance to falling left New Physics with "falling,
+not yet down" for the host's hand-over check that frame, which hands that to the game's ragdoll.
+`Np::fall_now` (ragdoll-core) makes the downed state at once (`Down::fresh`, the same a fall past
+any step makes); `delirium_np` calls it on both downed hand-offs. Test
+`a_body_handed_down_is_new_physics_downed`: handed down far from the world's centre, downed at
+once, still downed after 30 frames, moving under 10 units a frame, on the floor.
+
 ### Claude, 2026-11-27 (Delirium: the vanishing bodies' cause, from Patrick's pasted LOG A)
 
 **Status: pushed; for Patrick to try again.** LOG A (8db74f0, 22:38): each body stood on Delirium
