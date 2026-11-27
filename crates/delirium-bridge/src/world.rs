@@ -153,9 +153,57 @@ pub fn edge(ed: &Edge, floor: f32, step_top: f32) -> Mesh {
     m
 }
 
+/// The ground as a height field: `n` by `n` heights (row by row along y, each along x) `spacing`
+/// apart, its first corner at `corner` (x, y), every triangle facing up. What the game's collision
+/// has under and around a body (cast down at each point: rocks, steps and slopes as they are), one
+/// surface with no seams between bodies' squares.
+pub fn heightfield(corner: [f32; 2], spacing: f32, n: usize, heights: &[f32]) -> Mesh {
+    let mut m = Mesh::default();
+    if n < 2 || heights.len() < n * n {
+        return m;
+    }
+    for j in 0..n {
+        for i in 0..n {
+            m.positions.push([
+                corner[0] + i as f32 * spacing,
+                corner[1] + j as f32 * spacing,
+                heights[j * n + i],
+            ]);
+        }
+    }
+    for j in 0..n - 1 {
+        for i in 0..n - 1 {
+            let a = (j * n + i) as u32;
+            let (b, c, d) = (a + 1, a + 1 + n as u32, a + n as u32);
+            m.triangles.push([a, b, c]);
+            m.triangles.push([a, c, d]);
+        }
+    }
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A height field faces up everywhere, two triangles a cell, its corners where the heights
+    /// put them.
+    #[test]
+    fn a_height_field_faces_up() {
+        let n = 4;
+        let heights: Vec<f32> = (0..n * n).map(|k| (k % 3) as f32 * 0.1).collect();
+        let m = heightfield([-1.0, 2.0], 0.5, n, &heights);
+        assert_eq!(m.triangles.len(), 2 * (n - 1) * (n - 1));
+        assert!(
+            m.normals().iter().all(|nr| nr[2] > 0.5),
+            "{:?}",
+            m.normals()
+        );
+        assert!(near(m.positions[n + 1], [-0.5, 2.5, heights[n + 1]]));
+        assert!(heightfield([0.0, 0.0], 1.0, 3, &[0.0; 4])
+            .triangles
+            .is_empty());
+    }
 
     fn near(a: V3, b: V3) -> bool {
         sub(a, b).iter().all(|x| x.abs() < 1e-4)

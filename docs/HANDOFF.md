@@ -7,6 +7,43 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-27 (Delirium: Patrick's 3:30 PM report on c53f909, the 9mm stumble and the writhing)
+
+**Status: pushed; not run with GTA IV (for Patrick to try).** One 9mm (25.9 N s, 0.32 m/s) on a
+Powder Ganger: a board-stiff fall, then clipping and writhing, rises that never stood. Found from
+the log and fixed in `crate::delirium_np`:
+- The board fall: a single frame's knee jump (`R Calf moved 30 units`) refused the body
+  mid-stagger and the new agent made from that pose toppled. Now a jump of up to `GLITCHES` (3)
+  frames is held at the last right pose (`a jump not drawn`), the per-frame move is judged by the
+  frame's length (`pose_wrong`, 20 m/s on a long frame), and a retake gives each part the velocity
+  of New Physics' body it is on (not the root's for all).
+- Light hits: each hit is judged against the knockdown threshold (`knock::topple_speed` for
+  iKnockdownThreshold, the hits stacked by the impact stacking: `stack_hit`). Past it, Delirium's
+  own reaction and its fall; under it, a stagger with the stagger aid (`aid`: the whole body's
+  velocity nudged back over the feet while the capture point is outside them, at most 0.3 g, for
+  1.5 s) so Delirium's own steps catch it. Logged `a light hit (... under the knockdown
+  threshold)` / `a hit past the knockdown threshold`.
+- Clipping: Delirium collided with each body's floor as its own square at its own height (seams
+  and steps on uneven ground). Now the ground is one height field cast from the game's collision
+  around the pelvis (`ground_mesh`, 11 by 11 casts 0.35 m apart, each 40 units over the nearest
+  floor's height; cast again once the pelvis moves 55 units), walls and edges as before.
+- Joint limits while down (and dead): each Delirium step's pose is brought inside the skeleton's
+  limits by New Physics' own projection (`into_limits`) and put back on Delirium's parts
+  (`Dl::hold_limits`, `Agent::set_part`), so a knee can't bend back through the pelvis.
+- The standing height: taken once from the animation at the first take (`standing_height`,
+  never under 85% of the bind pose's) and kept through retakes (it read the lying 22 units).
+- The rise: Delirium's pelvis help is 1.2 of its weight (`RISE_HELP`; Delirium's own 0.5 left it
+  lying while New Physics stood); New Physics' rise waits while Delirium's pelvis lags 18 units
+  under it (`RISE_LAG`, at most `RISE_WAIT` 2 s, then it goes on from the body); New Physics
+  standing with Delirium's body still down, or not upright 3 s after, is down again on Delirium to
+  settle and rise again (no retake, never called standing while it lies).
+- Log lines: nine of them had a run of spaces for a lost line continuation; fixed.
+Tests: `a_pose_out_of_the_limits_is_brought_in`, `the_ground_is_cast_as_one_height_field`,
+`the_standing_height_is_never_a_lying_one`, `a_light_hit_staggers_and_hits_stack_to_a_knockdown`,
+`the_stagger_aid_pulls_back_over_the_feet`, `a_long_frame_may_move_further`, and the bridge's
+`a_height_field_faces_up`. Unknown until Patrick's next log: whether 1.2 weights of help lifts the
+body cleanly, and how Delirium's balance and the aid look together.
+
 ### Claude, 2026-11-27 (Delirium: Patrick's rule of 11:16 PM, the last Havok cases closed)
 
 **Status: pushed; not run with GTA IV (for Patrick to try).** On top of the entry below: a death

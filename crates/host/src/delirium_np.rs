@@ -128,7 +128,7 @@ pub(crate) fn bodies_from_parts(rig: &Rig, parts: &[Transform], origin: V3) -> V
 /// What New Physics found around the body (metres, world), as one mesh from `origin` (game
 /// units): each body's floor and walls as squares where they were met, the step edges and crates.
 pub(crate) fn world_mesh(
-    floors: &[Plane],
+    (floors, ground): (&[Plane], Option<&delirium_bridge::world::Mesh>),
     walls: &[Vec<Plane>],
     edges: &[Edge],
     centres: &[V3],
@@ -139,9 +139,13 @@ pub(crate) fn world_mesh(
     let o = [origin[0] / UNITS, origin[1] / UNITS, origin[2] / UNITS];
     let local = |p: V3| [p[0] - o[0], p[1] - o[1], p[2] - o[2]];
     let mut m = Mesh::default();
+    // The ground cast as one height field where it was (else each body's floor as a square).
+    if let Some(g) = ground {
+        m.add(g);
+    }
     for (b, c) in centres.iter().enumerate() {
         let c = local([c[0] / UNITS, c[1] / UNITS, c[2] / UNITS]);
-        if let Some(pl) = floors.get(b) {
+        if let (None, Some(pl)) = (ground, floors.get(b)) {
             m.add(&plane(
                 &Plane {
                     p: local(pl.p),
@@ -172,7 +176,7 @@ pub(crate) fn world_mesh(
             0.3,
         ));
     }
-    if floors.is_empty() {
+    if floors.is_empty() && ground.is_none() {
         // No floor found per body: the floor under the reference.
         let c = [0.0, 0.0, floor - o[2]];
         m.add(&plane(
@@ -276,7 +280,45 @@ pub(crate) struct Dl {
     pub dying: Option<u32>,
     /// What has its frame: Delirium's own reactions, or its muscles on New Physics' get-up.
     pub own: Own,
+    /// The ground under and around it as the game's collision has it (a height field cast at
+    /// [`GROUND_N`] by [`GROUND_N`] points, metres from the origin), and where it was cast (game
+    /// units): cast again once the pelvis is [`GROUND_AGAIN`] from there.
+    ground: Option<(V3, delirium_bridge::world::Mesh)>,
+    /// Frames in a row its pose was not drawn (a one-frame jump held at the last right pose).
+    glitch: u32,
+    /// Its joints kept inside the skeleton's limits this frame (down, dead): each step's pose
+    /// brought into them and put back on Delirium's parts. The most a joint was out (radians).
+    pub limits: bool,
+    pub limited: f32,
+    /// Rising: how long Delirium's body has lagged New Physics' rise (s), New Physics waiting for
+    /// it meanwhile with its last pose (`target`).
+    lag: f32,
+    target: Option<Vec<(M3, V3)>>,
 }
+
+/// The ground's height field: points a side, metres apart (3.5 m square around the pelvis).
+pub(crate) const GROUND_N: usize = 11;
+pub(crate) const GROUND_SPACING: f32 = 0.35;
+/// The pelvis this far from where the ground was cast (game units): cast again.
+pub(crate) const GROUND_AGAIN: f32 = 55.0;
+/// A joint more out of the skeleton's limits than this (radians, 3 degrees): the pose brought in.
+pub(crate) const LIMIT_HOLD: f32 = 0.052;
+/// Frames in a row a jump is held at the last right pose before Delirium is refused.
+pub(crate) const GLITCHES: u32 = 3;
+/// The pelvis help of Delirium's muscle rise (of its weight): enough to lift the body with its
+/// muscles on New Physics' rise (Delirium's own half a weight left it lying while New Physics'
+/// rise stood: Patrick's 15:30 log, "standing" with the pelvis 21 of 66 units up).
+pub(crate) const RISE_HELP: f32 = 1.2;
+/// Rising, Delirium's pelvis this far under New Physics' (game units): New Physics' rise waits
+/// for it, at most [`RISE_WAIT`] seconds, then goes on from the body as it is.
+pub(crate) const RISE_LAG: f32 = 18.0;
+pub(crate) const RISE_WAIT: f32 = 2.0;
+/// Under the knockdown threshold, a hit's stagger aid: this long (s), at most this much of g
+/// (the whole body's velocity changed toward its feet, so its own steps catch it).
+pub(crate) const AID_FOR: f32 = 1.5;
+pub(crate) const AID_MOST: f32 = 0.3;
+const AID_K: f32 = 12.0;
+const AID_C: f32 = 3.0;
 
 /// What a Delirium-owned body is doing (Patrick's plan: Delirium has a human's body for the whole
 /// fall, never the game's ragdoll). New Physics' downed controller decides the settle and the rise
@@ -431,10 +473,10 @@ pub(crate) fn part_of_body(body: usize) -> usize {
 
 impl Dl {
     /// The actor's Delirium, from its bones' worlds (`bone`: an FNV bone's world by name, game
-    /// units), moving as `velocity` (m/s), at `origin`.
+    /// units), each part moving as `velocity` has it (m/s), at `origin`.
     pub(crate) fn take(
         bone: &dyn Fn(&str) -> Option<(M3, V3)>,
-        velocity: [f32; 3],
+        velocity: &dyn Fn(usize) -> [f32; 3],
         origin: V3,
         profile: &delirium_bridge::profile::Profile,
     ) -> Result<Dl, String> {
@@ -449,12 +491,12 @@ impl Dl {
         }
         let parts = st.rig.parts_at(&worlds);
         let body = Body::new(&st.build, &st.frames, profile.kg)?;
-        let v = Vec3::from_array(velocity);
         let states: Vec<PartState> = parts
             .iter()
-            .map(|&frame| PartState {
+            .enumerate()
+            .map(|(k, &frame)| PartState {
                 frame,
-                velocity: v,
+                velocity: Vec3::from_array(velocity(k)),
                 spin: Vec3::ZERO,
             })
             .collect();
@@ -474,6 +516,12 @@ impl Dl {
             killed: false,
             dying: None,
             own: Own::Hit,
+            ground: None,
+            glitch: 0,
+            limits: false,
+            limited: 0.0,
+            lag: 0.0,
+            target: None,
         })
     }
 
@@ -511,11 +559,44 @@ impl Dl {
             Own::Hit => Ok(()),
             Own::Down => {
                 self.agent.follow(&[])?;
-                self.agent.rise(&self.world, false)?;
+                self.agent.rise(&self.world, false, 0.0)?;
                 self.agent.relax()
             }
-            Own::Rise | Own::Up { .. } => self.agent.rise(&self.world, true),
+            Own::Rise | Own::Up { .. } => self.agent.rise(&self.world, true, RISE_HELP),
         }
+    }
+
+    /// Its parts `parts` (this step's) brought inside the skeleton's limits where a joint left
+    /// them, and put back on Delirium's body moving as they moved (Patrick's 15:30 clip: a downed
+    /// body's knee bent back through its pelvis, a leg stretched off at the hip).
+    fn hold_limits(&mut self, rig: &Rig, parts: Vec<Transform>) -> Result<Vec<Transform>, String> {
+        if parts.len() != 21 {
+            return Ok(parts);
+        }
+        let bodies = bodies_from_parts(rig, &parts, self.origin);
+        let (inside, out) = into_limits(&bodies);
+        self.limited = self.limited.max(out);
+        if out <= LIMIT_HOLD {
+            return Ok(parts);
+        }
+        let fixed = parts_from_bodies(rig, &inside, self.origin);
+        let motions = self.agent.motions()?;
+        for (k, (frame, (velocity, spin))) in fixed.iter().zip(motions).enumerate() {
+            self.agent.set_part(
+                k,
+                &PartState {
+                    frame: *frame,
+                    velocity,
+                    spin,
+                },
+            )?;
+        }
+        Ok(fixed)
+    }
+
+    /// The whole body's velocity changed by `dv` (m/s).
+    fn kick(&mut self, dv: V3) -> Result<(), String> {
+        self.agent.kick(Vec3::from_array(dv))
     }
 
     /// Its muscles on New Physics' bodies at `bodies` (game units).
@@ -589,7 +670,10 @@ impl Dl {
         while self.pending >= STEP - 1e-6 {
             self.agent.step(&self.world, STEP)?;
             self.pending -= STEP;
-            let now = self.agent.parts()?;
+            let mut now = self.agent.parts()?;
+            if self.limits {
+                now = self.hold_limits(&st.rig, now)?;
+            }
             self.steps.0 = std::mem::replace(&mut self.steps.1, now);
         }
         self.frames += 1;
@@ -687,6 +771,10 @@ pub(crate) struct Posture {
     pub lean: f32,
     pub speed: f32,
     pub outside: f32,
+    /// The centre of mass and its velocity (metres, m/s), and between the feet (metres).
+    pub com: V3,
+    pub v: V3,
+    pub feet: V3,
 }
 
 impl Posture {
@@ -761,11 +849,18 @@ pub(crate) fn posture(drawn: &[(M3, V3)], before: &[(M3, V3)], floor: f32, dt: f
         }
         _ => 0.0,
     };
+    let between_feet = match feet.as_slice() {
+        [a, b] => scale(ragdoll_core::flinch::add(*a, *b), 0.5),
+        _ => c,
+    };
     Posture {
         pelvis_up: pelvis[2] - floor,
         lean,
         speed: length([v[0], v[1], v[2]]),
         outside,
+        com: c,
+        v,
+        feet: between_feet,
     }
 }
 
@@ -839,11 +934,101 @@ pub(crate) fn between(a: &[Transform], b: &[Transform], t: f32) -> Vec<Transform
         .collect()
 }
 
+/// New Physics' bodies at `bodies` (each body's node's world, game units) brought inside the
+/// skeleton's limits (its data's, as New Physics brings a downed body's), and how far out the
+/// farthest joint was before (radians). Under [`LIMIT_HOLD`] the bodies as they are.
+pub(crate) fn into_limits(bodies: &[(M3, V3)]) -> (Vec<(M3, V3)>, f32) {
+    let m = crate::new_physics::model();
+    let Some(o) = bodies.get(m.root).map(|b| b.1) else {
+        return (bodies.to_vec(), 0.0);
+    };
+    let local: Vec<(M3, V3)> = bodies
+        .iter()
+        .map(|(r, t)| (*r, ragdoll_core::flinch::sub(*t, o)))
+        .collect();
+    let mut st = m.states_from_nodes(&local);
+    let out = m
+        .data_limits_out(&st)
+        .into_iter()
+        .filter(|x| x.is_finite())
+        .fold(0.0f32, f32::max);
+    if out <= LIMIT_HOLD {
+        return (bodies.to_vec(), out);
+    }
+    // Each pass brings a joint in a step: passes until it is in (at most 96).
+    for _ in 0..8 {
+        if m.into_data_limits(&mut st, 12) <= LIMIT_HOLD * 0.5 {
+            break;
+        }
+    }
+    let inside = m
+        .node_worlds(&st)
+        .into_iter()
+        .map(|(r, t)| (r, ragdoll_core::flinch::add(t, o)))
+        .collect();
+    (inside, out)
+}
+
+/// The height of the floor `floors` has nearest (flat) to `at` (game units) at `at`, else
+/// `floor`: where a ground cast there starts from.
+pub(crate) fn floor_guess(floors: &[Plane], at: [f32; 2], floor: f32) -> f32 {
+    let p = [at[0] / UNITS, at[1] / UNITS];
+    floors
+        .iter()
+        .filter(|pl| pl.n[2] > 0.3)
+        .min_by(|a, b| {
+            let d = |pl: &Plane| (pl.p[0] - p[0]).powi(2) + (pl.p[1] - p[1]).powi(2);
+            d(a).total_cmp(&d(b))
+        })
+        .map_or(floor, |pl| {
+            let z = pl.p[2] - (pl.n[0] * (p[0] - pl.p[0]) + pl.n[1] * (p[1] - pl.p[1])) / pl.n[2];
+            z * UNITS
+        })
+}
+
+/// The ground around `centre` (game units) as a height field from `origin` (metres): each of
+/// [`GROUND_N`] by [`GROUND_N`] points [`GROUND_SPACING`] apart cast down by `cast` (from a
+/// height `guess` gives it there, so a slope's or a rock's top is met and a table's top passed
+/// under), `guess`'s own height where the cast meets nothing.
+pub(crate) fn ground_mesh(
+    centre: V3,
+    origin: V3,
+    guess: &dyn Fn([f32; 2]) -> f32,
+    cast: &mut dyn FnMut(V3) -> Option<f32>,
+) -> delirium_bridge::world::Mesh {
+    let n = GROUND_N;
+    let half = GROUND_SPACING * (n - 1) as f32 / 2.0;
+    let corner = [centre[0] / UNITS - half, centre[1] / UNITS - half];
+    let mut heights = Vec::with_capacity(n * n);
+    for j in 0..n {
+        for i in 0..n {
+            let x = (corner[0] + i as f32 * GROUND_SPACING) * UNITS;
+            let y = (corner[1] + j as f32 * GROUND_SPACING) * UNITS;
+            let z0 = guess([x, y]);
+            let z = cast([x, y, z0 + 40.0]).unwrap_or(z0);
+            heights.push((z - origin[2]) / UNITS);
+        }
+    }
+    delirium_bridge::world::heightfield(
+        [corner[0] - origin[0] / UNITS, corner[1] - origin[1] / UNITS],
+        GROUND_SPACING,
+        n,
+        &heights,
+    )
+}
+
 /// Why a pose of Delirium's is not to be drawn (none: it may be): a body that moved more than
 /// 25 units since the last frame, one more than 3 m from the pelvis (a body flung apart), or the
 /// pelvis more than 10 m from where the take began (`origin`). Patrick's 22:38 clip: two bodies
 /// vanished a few frames after the take, as if flung out of the world.
-pub(crate) fn pose_wrong(drawn: &[(M3, V3)], last: &[(M3, V3)], origin: V3) -> Option<String> {
+pub(crate) fn pose_wrong(
+    drawn: &[(M3, V3)],
+    last: &[(M3, V3)],
+    origin: V3,
+    dt: f32,
+) -> Option<String> {
+    // A frame's move: 25 units, or 20 m/s over a long frame.
+    let most = (20.0 * UNITS * dt).max(25.0);
     use ragdoll_core::flinch::{length, sub};
     let m = crate::new_physics::model();
     let pelvis = drawn.get(m.root)?.1;
@@ -863,7 +1048,7 @@ pub(crate) fn pose_wrong(drawn: &[(M3, V3)], last: &[(M3, V3)], origin: V3) -> O
         }
         if let Some((_, t0)) = last.get(b) {
             let moved = length(sub(*t, *t0));
-            if moved > 25.0 {
+            if moved > most {
                 return Some(format!(
                     "{} moved {moved:.0} units in a frame",
                     m.bodies[b].node
@@ -930,6 +1115,68 @@ pub(crate) struct Slot {
     pub retakes: u32,
     /// Delirium has had it (a human): never the game's ragdoll, whoever has it now.
     pub had: bool,
+    /// Its pelvis over the floor standing (game units): from the animation at the first take, kept
+    /// through every retake (Patrick's 15:30 log: taken again lying, its lying height of 22 units
+    /// became its standing one).
+    pub standing: Option<f32>,
+    /// The hits' push stacked (m/s, decaying with the game's impact stacking) and what is left of
+    /// a light hit's stagger aid (s), kept through a retake.
+    pub pain: f32,
+    pub aid: f32,
+}
+
+/// The pelvis's standing height (game units) for an actor whose animation has its root body
+/// `anim_pelvis` (game units) over `floor`: the animation's, never under 85% of the bind pose's
+/// (an actor taken crouched or mid-fall stands at its own height all the same).
+pub(crate) fn standing_height(anim_pelvis: f32, floor: f32) -> f32 {
+    let s = skel();
+    let bind = s
+        .names
+        .iter()
+        .position(|n| n == "Bip01 NonAccum")
+        .map_or(0.95, |i| s.rest[i].translation.z)
+        * UNITS;
+    (anim_pelvis - floor).max(0.85 * bind)
+}
+
+/// A hit's push on the body (m/s, the game's hit force applied) stacked onto `pain` after `dt`
+/// seconds of its decay (`half_life` s), and whether the stack reaches `topple` (m/s): a knock-down
+/// (Delirium's own fall) or a stagger (kept on its feet).
+pub(crate) fn stack_hit(
+    pain: f32,
+    speed: f32,
+    dt: f32,
+    half_life: f32,
+    topple: f32,
+) -> (f32, bool) {
+    let left = pain * 0.5f32.powf(dt / half_life.max(1e-3));
+    let now = left + speed.max(0.0);
+    (now, now >= topple)
+}
+
+/// The stagger aid's velocity change this frame (m/s) for a body at `pose` standing `standing`
+/// high: its centre pulled back over its feet while its capture point is outside them, and lifted
+/// while its pelvis sinks under three quarters of its height, at most [`AID_MOST`] g.
+pub(crate) fn aid(pose: &Posture, standing: f32, dt: f32) -> V3 {
+    let g = ragdoll_core::np_body::GRAVITY;
+    let mut a = [0.0f32; 3];
+    if pose.outside > 0.0 {
+        for i in 0..2 {
+            a[i] = AID_K * (pose.feet[i] - pose.com[i]) - AID_C * pose.v[i];
+        }
+    }
+    let low = 0.75 * standing - pose.pelvis_up;
+    if low > 0.0 {
+        a[2] = AID_K * low / UNITS - AID_C * pose.v[2];
+    }
+    let flat = (a[0] * a[0] + a[1] * a[1]).sqrt();
+    let most = AID_MOST * g;
+    if flat > most {
+        a[0] *= most / flat;
+        a[1] *= most / flat;
+    }
+    a[2] = a[2].clamp(0.0, most);
+    [a[0] * dt, a[1] * dt, a[2] * dt]
 }
 
 /// FNV's skeleton's worlds (metres from `origin`) where New Physics has its bodies now.
@@ -956,9 +1203,26 @@ fn take_from_np(
             .position(|n| n == name)
             .map(|i| from_tf(&w[i], origin))
     };
+    // Each part moving as New Physics' body its bone is on (or the nearest above it) moves.
     let m = crate::new_physics::model();
-    let v = np.states.get(m.root).map_or([0.0; 3], |st| st.v);
-    Dl::take(&bone, v, origin, &delirium_bridge::profile::profile(facts))
+    let names: Vec<&str> = s.names.iter().map(String::as_str).collect();
+    let part_bones = delirium_bridge::rig::part_bones(&names);
+    let v_of = |k: usize| -> [f32; 3] {
+        let mut b = part_bones.get(k).copied().flatten().or(part_bones[7]);
+        while let Some(i) = b {
+            if let Some(st) = m.body(&s.names[i]).and_then(|bi| np.states.get(bi)) {
+                return st.v;
+            }
+            b = s.parents[i];
+        }
+        np.states.get(m.root).map_or([0.0; 3], |st| st.v)
+    };
+    Dl::take(
+        &bone,
+        &v_of,
+        origin,
+        &delirium_bridge::profile::profile(facts),
+    )
 }
 
 /// Dead while New Physics has a human Delirium could have (refused, or never taken: Patrick's
@@ -1071,7 +1335,7 @@ pub(crate) fn frame_for(
             let v = [take_v[0] / UNITS, take_v[1] / UNITS, take_v[2] / UNITS];
             Dl::take(
                 &bone,
-                v,
+                &|_| v,
                 reference,
                 &delirium_bridge::profile::profile(&facts),
             )
@@ -1095,6 +1359,12 @@ pub(crate) fn frame_for(
                     note_event(format!(
                         "{id:08X}: [np delirium] downed on Delirium (taken again)"
                     ));
+                }
+                // Its standing height from the animation at the first take, kept through every
+                // retake (never a lying height).
+                if slot.standing.is_none() {
+                    let pelvis = anim.get(m.root).map_or(reference[2], |b| b.1[2]);
+                    slot.standing = Some(standing_height(pelvis, floor));
                 }
                 slot.body = Some(d);
                 slot.back = false;
@@ -1127,13 +1397,57 @@ pub(crate) fn frame_for(
     } else {
         health_left(e, actor)
     };
+    // Each hit against the knockdown threshold (the game's topple speed for its iKnockdownThreshold,
+    // the hits stacked as its impact stacking has them): past it, Delirium's own reaction, a fall
+    // allowed; under it, a stagger, the body kept on its feet by the stagger aid (Patrick's 15:30
+    // clip: a 9mm's 0.32 m/s went over stiff like a board).
+    let t = crate::gunplay::tuning();
+    let topple = ragdoll_core::knock::topple_speed(
+        ragdoll_core::knock::Body::Human,
+        1.0,
+        t.knockdown_threshold,
+    );
+    let half_life = t.impact_stacking.max(1) as f32 / 1000.0;
+    slot.pain = stack_hit(slot.pain, 0.0, dt, half_life, topple).0;
+    let (mut shots, mut knocked) = (0, false);
     for h in slot.queue.drain(..) {
         let r = match h {
-            DlHit::Shot(b, point, impulse) => d.shot(b, point, impulse, health),
-            DlHit::Blast(c, r, speed) => d.blast(c, r, speed),
+            DlHit::Shot(b, point, impulse) => {
+                let speed = ragdoll_core::flinch::length(impulse) / m.mass
+                    * t.hit_force.max(0) as f32
+                    / 100.0;
+                let (pain, knock) = stack_hit(slot.pain, speed, 0.0, half_life, topple);
+                slot.pain = pain;
+                shots += 1;
+                knocked |= knock;
+                d.shot(b, point, impulse, health)
+            }
+            DlHit::Blast(c, r, speed) => {
+                knocked = true;
+                shots += 1;
+                d.blast(c, r, speed)
+            }
         };
         if let Err(why) = r {
             failed = Some(why);
+        }
+    }
+    if shots > 0 && d.own == Own::Hit && !d.killed {
+        if knocked {
+            slot.aid = 0.0;
+            note_event(format!(
+                "{id:08X}: [np delirium] a hit past the knockdown threshold ({:.2} of {topple:.2} \
+                 m/s stacked): Delirium's own reaction, a fall allowed",
+                slot.pain
+            ));
+        } else {
+            slot.aid = AID_FOR;
+            note_event(format!(
+                "{id:08X}: [np delirium] a light hit ({:.2} of {topple:.2} m/s stacked, under the \
+                 knockdown threshold): Delirium's stagger, kept on its feet by the stagger aid for \
+                 {AID_FOR:.1} s",
+                slot.pain
+            ));
         }
     }
     // New Physics' bodies are simulated about its origin (`Np::origin`): their places in the world.
@@ -1161,8 +1475,27 @@ pub(crate) fn frame_for(
     } else {
         &np.floors
     };
+    // The ground as the game's collision has it, cast as one height field around the pelvis (cast
+    // again as the body moves on): Patrick's 15:30 clip, heels sinking into uneven ground and a
+    // leg into a rock step, each body's floor a square of its own at its own height.
+    let pelvis_now = centres.get(m.root).copied().unwrap_or(reference);
+    let recast = d.ground.as_ref().is_none_or(|(c, _)| {
+        ragdoll_core::flinch::length([pelvis_now[0] - c[0], pelvis_now[1] - c[1], 0.0])
+            > GROUND_AGAIN
+    });
+    if recast {
+        let g = ground_mesh(
+            pelvis_now,
+            d.origin,
+            &|xy| floor_guess(floors, xy, floor),
+            &mut |from| {
+                crate::active_ragdoll::cast_world(e, from, [0.0, 0.0, -1.0], 200.0).map(|h| h[2])
+            },
+        );
+        d.ground = Some((pelvis_now, g));
+    }
     let mesh = world_mesh(
-        floors,
+        (floors, d.ground.as_ref().map(|g| &g.1)),
         &np.body_walls,
         &np.edges,
         &centres,
@@ -1170,7 +1503,9 @@ pub(crate) fn frame_for(
         d.origin,
     );
     if d.frames == 0 {
-        d.standing = centres.get(m.root).map_or(0.0, |c| c[2] - floor).max(1.0);
+        d.standing = slot
+            .standing
+            .unwrap_or_else(|| standing_height(pelvis_now[2], floor));
     }
     // Down, rising or standing (alive): New Physics' downed controller's frame. Down, it ran from
     // Delirium's body as it lies (its settle timed on the real body; what it drew is not drawn);
@@ -1183,12 +1518,48 @@ pub(crate) fn frame_for(
     if d.dying.is_some() {
         np.to_limits = true;
     }
-    let target = (alive && d.own != Own::Hit).then(|| np.frame(anim, floor, dt));
+    // Rising: New Physics' rise never runs ahead of the body. While Delirium's pelvis lags New
+    // Physics' by more than RISE_LAG, New Physics waits (its pose held, its own clock with it);
+    // after RISE_WAIT it goes on from the body as it is (Patrick's 15:30 log: New Physics stood
+    // while Delirium's body still lay, "standing" with the torso 101 degrees from upright).
+    let lags = alive
+        && d.own == Own::Rise
+        && match (d.target.as_ref(), d.last.get(m.root)) {
+            (Some(t), Some(l)) => t.get(m.root).is_some_and(|tp| tp.1[2] - l.1[2] > RISE_LAG),
+            _ => false,
+        };
+    if lags && d.lag == 0.0 {
+        note_event(format!(
+            "{id:08X}: [np delirium] rising: Delirium's body lags New Physics' rise: New Physics \
+             waits for it (at most {RISE_WAIT:.0} s)"
+        ));
+    }
+    d.lag = if lags { d.lag + dt } else { 0.0 };
+    let target = if !alive || d.own == Own::Hit {
+        None
+    } else if lags && d.lag < RISE_WAIT {
+        d.target.clone()
+    } else {
+        if lags {
+            note_event(format!(
+                "{id:08X}: [np delirium] rising: the body still {RISE_WAIT:.0} s behind New \
+                 Physics' rise: New Physics goes on from the body as it is"
+            ));
+            let still = vec![([0.0; 3], [0.0; 3]); d.last.len()];
+            put_on(np, &d.last, &still);
+            d.lag = 0.0;
+        }
+        Some(np.frame(anim, floor, dt))
+    };
     if let (true, Some(t)) = (follows, target.as_ref()) {
         if let Err(why) = d.follow(&st.rig, t) {
             failed.get_or_insert(why);
         }
     }
+    d.target = if follows { target.clone() } else { None };
+    // Down or dead: its joints held inside the skeleton's limits, each step (Patrick: joint limits
+    // while downed must hold).
+    d.limits = d.own == Own::Down || d.corpse.is_some();
     let step = match failed {
         Some(why) => Err(why),
         None => d.frame(&mesh, dt),
@@ -1204,11 +1575,23 @@ pub(crate) fn frame_for(
     {
         return refused(id, "its pose went bad", slot, np, target);
     }
-    // Never a body flung away: New Physics takes it from the last pose that was right.
-    if let Some(why) = pose_wrong(&drawn, &d.last, d.origin) {
+    // Never a body flung away. A jump of a frame or two is held at the last right pose (Patrick's
+    // 15:30 log: one knee's 30-unit frame refused the body mid-stagger, and the new agent made
+    // from that pose went over like a board); only one that goes on refuses it.
+    if let Some(why) = pose_wrong(&drawn, &d.last, d.origin, dt) {
+        if d.glitch < GLITCHES && !d.last.is_empty() {
+            d.glitch += 1;
+            note_event(format!(
+                "{id:08X}: [np delirium] a jump not drawn ({why}): the last right pose held \
+                 ({} of {GLITCHES} frames)",
+                d.glitch
+            ));
+            return Some(d.last.clone());
+        }
         let why = format!("its pose went wrong: {why}");
         return refused(id, &why, slot, np, target);
     }
+    d.glitch = 0;
     // Its posture and balance from Delirium's body (New Physics' own balance never runs while
     // Delirium has it: its readings would be its defaults).
     let pose = posture(&drawn, &d.last, floor, dt);
@@ -1234,6 +1617,27 @@ pub(crate) fn frame_for(
         put_on(np, &drawn, &moving);
     }
     d.last = drawn.clone();
+    // A light hit's stagger aid: the whole body nudged back over its feet while it would fall,
+    // its own steps catching it (Delirium's balance does the stepping).
+    if alive && d.own == Own::Hit && slot.aid > 0.0 {
+        if !pose.downed(d.standing) {
+            let dv = aid(&pose, d.standing, dt);
+            if dv.iter().any(|x| *x != 0.0) {
+                if let Err(why) = d.kick(dv) {
+                    return refused(id, &why, slot, np, target);
+                }
+            }
+        }
+        slot.aid = (slot.aid - dt).max(0.0);
+    }
+    if d.limited > LIMIT_HOLD && d.frames % 30 == 0 {
+        note(format!(
+            "{id:08X}: [np delirium] joints held inside the skeleton's limits (the most out {:.1} \
+             degrees before)",
+            d.limited.to_degrees()
+        ));
+        d.limited = 0.0;
+    }
     let said = |what: &str, pose: &Posture, d: &Dl| {
         format!(
             "{id:08X}: [np delirium] {what} after {} frames (the pelvis {:.0} u over the floor of \
@@ -1249,7 +1653,8 @@ pub(crate) fn frame_for(
         let inside = np.on_data_limits && out <= crate::new_physics::HAND_LIMITS;
         if wait_over(n + 1, np.on_data_limits, out) {
             note_event(format!(
-                "{id:08X}: [np delirium] dead on Delirium mid-rise: its wait over after {} frames                  (the limbs {}, at most {:.1} degrees out): its muscles off",
+                "{id:08X}: [np delirium] dead on Delirium mid-rise: its wait over after {} frames \
+                 (the limbs {}, at most {:.1} degrees out): its muscles off",
                 n + 1,
                 if inside {
                     "brought inside the skeleton's limits"
@@ -1272,10 +1677,16 @@ pub(crate) fn frame_for(
         // to the game's ragdoll: Patrick's 23:11 log) and reads the body as it lies.
         if done == Some("it lies settled") || pose.downed(d.standing) {
             note_event(format!(
-                "{}: downed on Delirium (Delirium keeps the body; New Physics' downed controller \
+                "{}: downed on Delirium{} (Delirium keeps the body; New Physics' downed controller \
                  reads it as it lies, its settle, then its rise on Delirium's muscles)",
-                said("downed", &pose, d)
+                said("downed", &pose, d),
+                if slot.aid > 0.0 {
+                    ", a light hit's stagger aid not enough"
+                } else {
+                    ""
+                }
             ));
+            slot.aid = 0.0;
             np.fall_now("downed on Delirium");
             d.own = Own::Down;
         } else if done.is_some() {
@@ -1326,11 +1737,26 @@ pub(crate) fn frame_for(
             put_on(np, &drawn, &moving);
             d.drive(Own::Down)
         }
+        // New Physics' rise is done. Delirium's body at least half up (the pelvis at 60% of its
+        // height, the torso within 45 degrees): held on New Physics' standing pose until it is
+        // upright and still. Still down: down again on Delirium, to settle and rise again (never
+        // called standing while it lies).
+        Change::Standing if pose.pelvis_up < 0.6 * d.standing || pose.lean > 45.0 => {
+            note_event(format!(
+                "{}: New Physics' rise ended with Delirium's body still down: down again on \
+                 Delirium, to settle and rise again",
+                said("still down", &pose, d)
+            ));
+            d.own = Own::Down;
+            put_on(np, &drawn, &moving);
+            np.fall_now("Delirium's body still down");
+            d.drive(Own::Down)
+        }
         Change::Standing => {
             note_event(format!(
-                "{}: New Physics stands; Delirium's muscles hold its standing pose until it is \
-                 upright and still",
-                said("standing", &pose, d)
+                "{}: New Physics stood and Delirium's body is coming up: held on New Physics' \
+                 standing pose until it is upright and still",
+                said("coming up", &pose, d)
             ));
             if was == Own::Down {
                 d.drive(next)
@@ -1350,17 +1776,18 @@ pub(crate) fn frame_for(
             slot.back = true;
             return Some(drawn);
         }
+        // Not upright UP_MOST seconds after New Physics stood: down again on Delirium (its own
+        // body kept), to settle and rise again.
         Change::Stuck => {
-            let why = format!(
-                "not upright {UP_MOST:.0} s after New Physics stood: the pelvis {:.0} u up of \
-                 {:.0}, the torso {:.0} degrees from upright",
-                pose.pelvis_up, d.standing, pose.lean
-            );
+            note_event(format!(
+                "{}: not upright {UP_MOST:.0} s after New Physics stood: down again on Delirium, \
+                 to settle and rise again",
+                said("not upright", &pose, d)
+            ));
+            d.own = Own::Down;
             put_on(np, &drawn, &moving);
-            if pose.downed(d.standing) {
-                np.fall_now("Delirium's body didn't stand");
-            }
-            return refused(id, &why, slot, np, Some(drawn));
+            np.fall_now("Delirium's body didn't stand");
+            d.drive(Own::Down)
         }
     };
     if let Err(why) = driven {
@@ -1401,12 +1828,14 @@ fn refused(
         slot.tried = false;
         slot.again = true;
         format!(
-            "New Physics carries it this frame, then Delirium takes it again from New Physics'              pose (retake {} of {RETAKES})",
+            "New Physics carries it this frame, then Delirium takes it again from New Physics' \
+             pose (retake {} of {RETAKES})",
             slot.retakes + 1
         )
     } else {
         format!(
-            "{RETAKES} retakes used: New Physics keeps it as it is (its downed controller, its              rise; never the game's ragdoll)"
+            "{RETAKES} retakes used: New Physics keeps it as it is (its downed controller, its \
+             rise; never the game's ragdoll)"
         )
     };
     slot.retakes = slot.retakes.saturating_add(1);
@@ -1834,6 +2263,9 @@ mod tests {
             lean,
             speed: 0.0,
             outside: 0.0,
+            com: [0.0; 3],
+            v: [0.0; 3],
+            feet: [0.0; 3],
         };
         assert!(p(64.0, 5.0).upright(67.0));
         assert!(!p(47.0, 5.0).upright(67.0) && !p(47.0, 5.0).downed(67.0));
@@ -1881,6 +2313,170 @@ mod tests {
         assert!(wait_over(HAND_WAIT_FRAMES, false, 1.0));
     }
 
+    /// A downed body's pose with a knee bent the wrong way (Patrick's 15:30 clip: a leg through
+    /// the pelvis) is brought inside the skeleton's limits; the bind pose is left as it is.
+    #[test]
+    fn a_pose_out_of_the_limits_is_brought_in() {
+        let m = crate::new_physics::model();
+        let at = [-72152.0, 8282.0, 223.0];
+        let bind = bodies_posed(ID, at);
+        let (same, out) = into_limits(&bind);
+        assert!(out <= LIMIT_HOLD, "the bind pose {out} rad out");
+        assert_eq!(same, bind);
+        // The left calf turned 120 degrees about its own place.
+        let calf = m.body("Bip01 L Calf").unwrap();
+        let (c, s2) = (120f32.to_radians().cos(), 120f32.to_radians().sin());
+        let turn: M3 = [1.0, 0.0, 0.0, 0.0, c, -s2, 0.0, s2, c];
+        let mut bent = bind.clone();
+        bent[calf].0 = ragdoll_core::flinch::mul(&turn, &bent[calf].0);
+        let (inside, out) = into_limits(&bent);
+        assert!(out > 0.5, "the bent knee only {out} rad out");
+        let local: Vec<(M3, V3)> = inside
+            .iter()
+            .map(|(r, t)| (*r, ragdoll_core::flinch::sub(*t, inside[m.root].1)))
+            .collect();
+        let after = m
+            .data_limits_out(&m.states_from_nodes(&local))
+            .into_iter()
+            .fold(0.0f32, f32::max);
+        assert!(after < 0.1, "still {after} rad out after");
+    }
+
+    /// The ground cast as one height field: a rock step's top where the casts meet it, the floor
+    /// guess where they meet nothing, every cast started 40 units over the guess there (a slope's
+    /// ground met, a table's top passed under), measured from the origin.
+    #[test]
+    fn the_ground_is_cast_as_one_height_field() {
+        let origin = [-72152.0, 8282.0, 200.0];
+        let centre = [-72152.0, 8282.0, 260.0];
+        let mut froms = Vec::new();
+        let mut cast = |from: V3| {
+            froms.push(from);
+            if from[0] > centre[0] + 60.0 {
+                None
+            } else if from[0] > centre[0] {
+                Some(230.0)
+            } else {
+                Some(from[2] - 40.0)
+            }
+        };
+        let g = ground_mesh(
+            centre,
+            origin,
+            &|xy| 200.0 + 0.1 * (xy[1] - centre[1]),
+            &mut cast,
+        );
+        assert_eq!(froms.len(), GROUND_N * GROUND_N);
+        assert_eq!(g.positions.len(), GROUND_N * GROUND_N);
+        assert_eq!(g.triangles.len(), 2 * (GROUND_N - 1) * (GROUND_N - 1));
+        for (p, from) in g.positions.iter().zip(&froms) {
+            let guess = 200.0 + 0.1 * (from[1] - centre[1]);
+            assert!((from[2] - (guess + 40.0)).abs() < 1e-3);
+            let want = if from[0] > centre[0] + 60.0 {
+                guess
+            } else if from[0] > centre[0] {
+                230.0
+            } else {
+                guess
+            };
+            assert!(
+                (p[2] - (want - origin[2]) / UNITS).abs() < 1e-4,
+                "{p:?} {from:?}"
+            );
+            assert!((p[0] - (from[0] - origin[0]) / UNITS).abs() < 1e-3);
+        }
+        // The floor nearest (flat) gives the guess, its slope taken in.
+        let floors = [
+            Plane {
+                p: [centre[0] / UNITS, centre[1] / UNITS, 3.0],
+                n: ragdoll_core::flinch::unit([0.0, -0.2, 1.0]).unwrap(),
+            },
+            Plane {
+                p: [centre[0] / UNITS + 50.0, centre[1] / UNITS, 9.0],
+                n: [0.0, 0.0, 1.0],
+            },
+        ];
+        let z = floor_guess(&floors, [centre[0], centre[1] + UNITS], 0.0);
+        assert!((z - (3.0 + 0.2) * UNITS).abs() < 0.01, "{z}");
+        assert_eq!(floor_guess(&[], [0.0, 0.0], 17.0), 17.0);
+    }
+
+    /// The standing height is the animation's, never a lying one (Patrick's 15:30 log: taken
+    /// again lying, "standing 22").
+    #[test]
+    fn the_standing_height_is_never_a_lying_one() {
+        let standing = standing_height(8282.0 + 67.0, 8282.0);
+        assert!((standing - 67.0).abs() < 1e-3);
+        let lying = standing_height(8282.0 + 22.0, 8282.0);
+        assert!(lying > 50.0, "{lying}");
+    }
+
+    /// Patrick's 9mm (25.9 N s on 81 kg, 0.32 m/s) is under the knockdown threshold at 100, a
+    /// stagger; hits close together stack past it; the stack halves over the stacking half-life.
+    #[test]
+    fn a_light_hit_staggers_and_hits_stack_to_a_knockdown() {
+        let topple = ragdoll_core::knock::topple_speed(ragdoll_core::knock::Body::Human, 1.0, 100);
+        let nine = 25.9 / 81.0;
+        let (pain, knock) = stack_hit(0.0, nine, 0.0, 0.5, topple);
+        assert!(!knock, "a 9mm's {nine} m/s knocks down at {topple}");
+        let mut p = pain;
+        let mut down = false;
+        for _ in 0..10 {
+            let (q, k) = stack_hit(p, nine, 0.05, 0.5, topple);
+            p = q;
+            down |= k;
+        }
+        assert!(
+            down,
+            "ten rounds in half a second never knock down ({p} of {topple})"
+        );
+        let (half, _) = stack_hit(1.0, 0.0, 0.5, 0.5, topple);
+        assert!((half - 0.5).abs() < 1e-4);
+    }
+
+    /// The stagger aid pulls the body back over its feet while its capture point is outside them,
+    /// lifts a sinking pelvis, never more than AID_MOST g, and does nothing to a body that stands.
+    #[test]
+    fn the_stagger_aid_pulls_back_over_the_feet() {
+        let dt = 1.0 / 60.0;
+        let g = ragdoll_core::np_body::GRAVITY;
+        let pose = |outside: f32, com: V3, v: V3, up: f32| Posture {
+            pelvis_up: up,
+            lean: 10.0,
+            speed: ragdoll_core::flinch::length(v),
+            outside,
+            com,
+            v,
+            feet: [0.0, 0.0, 0.0],
+        };
+        assert_eq!(
+            aid(&pose(-0.05, [0.0, 0.0, 1.0], [0.0; 3], 66.0), 67.0, dt),
+            [0.0; 3]
+        );
+        let back = aid(&pose(0.2, [0.3, 0.0, 1.0], [1.0, 0.0, 0.0], 66.0), 67.0, dt);
+        assert!(
+            back[0] < 0.0 && back[1].abs() < 1e-6 && back[2] == 0.0,
+            "{back:?}"
+        );
+        assert!(back[0].abs() <= AID_MOST * g * dt + 1e-6);
+        let lift = aid(&pose(0.0, [0.0, 0.0, 0.6], [0.0; 3], 40.0), 67.0, dt);
+        assert!(
+            lift[2] > 0.0 && lift[2] <= AID_MOST * g * dt + 1e-6,
+            "{lift:?}"
+        );
+    }
+
+    /// A frame's move is judged by the frame's length: 30 units in a 60th of a second is a jump,
+    /// in a tenth (20 m/s at most) it is not.
+    #[test]
+    fn a_long_frame_may_move_further() {
+        let origin = [0.0, 0.0, 0.0];
+        let a = bodies_posed(ID, [0.0, 0.0, 0.0]);
+        let b = bodies_posed(ID, [30.0, 0.0, 0.0]);
+        assert!(pose_wrong(&b, &a, origin, 1.0 / 60.0).is_some());
+        assert!(pose_wrong(&b, &a, origin, 0.1).is_none());
+    }
+
     /// A 9mm's 25 N s gets under half of Delirium's own shot force, a 60 N s hit all of it, and
     /// the force stays within a tenth and three times Delirium's whatever the impulse.
     #[test]
@@ -1916,18 +2512,23 @@ mod tests {
     fn a_flung_pose_is_refused() {
         let origin = [0.0; 3];
         let a = bodies_posed(ID, [0.0; 3]);
-        assert_eq!(pose_wrong(&a, &a, origin), None);
+        assert_eq!(pose_wrong(&a, &a, origin, 1.0 / 60.0), None);
         assert_eq!(
-            pose_wrong(&bodies_posed(ID, [3.0, 0.0, 0.0]), &a, origin),
+            pose_wrong(&bodies_posed(ID, [3.0, 0.0, 0.0]), &a, origin, 1.0 / 60.0),
             None
         );
-        assert!(pose_wrong(&bodies_posed(ID, [30.0, 0.0, 0.0]), &a, origin)
-            .is_some_and(|w| w.contains("in a frame")));
+        assert!(
+            pose_wrong(&bodies_posed(ID, [30.0, 0.0, 0.0]), &a, origin, 1.0 / 60.0)
+                .is_some_and(|w| w.contains("in a frame"))
+        );
         let mut apart = a.clone();
         apart[5].1[2] += 4.0 * UNITS;
-        assert!(pose_wrong(&apart, &[], origin).is_some_and(|w| w.contains("from the pelvis")));
+        assert!(pose_wrong(&apart, &[], origin, 1.0 / 60.0)
+            .is_some_and(|w| w.contains("from the pelvis")));
         let far = bodies_posed(ID, [11.0 * UNITS, 0.0, 0.0]);
-        assert!(pose_wrong(&far, &[], origin).is_some_and(|w| w.contains("from the take")));
+        assert!(
+            pose_wrong(&far, &[], origin, 1.0 / 60.0).is_some_and(|w| w.contains("from the take"))
+        );
     }
 
     /// Each body's hit lands on its own part, or its nearest parent's that has one.
@@ -1958,14 +2559,21 @@ mod tests {
             p: [10.0, -2.0, 1.0],
             n: [0.0, 0.0, 1.0],
         }];
-        let m = world_mesh(&floors, &[], &[], &[[700.0, -140.0, 100.0]], 1.0, origin);
+        let m = world_mesh(
+            (&floors, None),
+            &[],
+            &[],
+            &[[700.0, -140.0, 100.0]],
+            1.0,
+            origin,
+        );
         assert_eq!(m.triangles.len(), 2);
         assert!(
             m.positions.iter().all(|p| p[2].abs() < 1e-4),
             "{:?}",
             m.positions
         );
-        let m = world_mesh(&[], &[], &[], &[], 1.0, origin);
+        let m = world_mesh((&[], None), &[], &[], &[], 1.0, origin);
         assert!(m.positions.iter().all(|p| p[2].abs() < 1e-4));
         assert_eq!(m.triangles.len(), 2);
     }

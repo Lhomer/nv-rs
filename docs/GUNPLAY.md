@@ -1140,7 +1140,16 @@ current New Physics; so a body Delirium refuses for itself (an error, a pose gon
 by New Physics that frame and taken again at once from New Physics' pose (`RETAKES`, 3, then New
 Physics keeps it, never the game's ragdoll), and a human that dies while New Physics has it is
 made a Delirium corpse from New Physics' pose at the death (`taken at its death from New Physics'
-pose`); every body Delirium has had (`Slot::had`) is kept from the game's ragdoll. Every change is said (`[np delirium] taken`,
+pose`); every body Delirium has had (`Slot::had`) is kept from the game's ragdoll.
+**Patrick's 3:30 PM report (c53f909):** a 9mm went over board-stiff, then writhed and clipped.
+Now: a hit under the knockdown threshold (the game's topple speed, hits stacked) is a stagger
+that Delirium's steps catch with the stagger aid; past it, Delirium's own fall. A one-frame jump is
+held at the last right pose instead of refusing the body. Delirium's ground is one height field
+cast from the game's collision around the body. Down and dead, each step's pose is held inside the
+skeleton's limits and put back on Delirium's body. The standing height is the animation's, kept
+through retakes. The rise has 1.2 body weights of pelvis help, New Physics' rise waits for a
+lagging body, and New Physics standing with the body still down is down again on Delirium to rise
+again (HANDOFF.md, 2026-11-27, has each piece). Every change is said (`[np delirium] taken`,
 `downed on Delirium`, `rising on Delirium`, `back down on Delirium`, `New Physics stands`,
 `upright and still: back to the game's animation`, `dead on Delirium (downed | mid-rise | ...)`,
 `its rises given up`, `fell ... never the game's ragdoll`, `refused while <hit | downed | rising |

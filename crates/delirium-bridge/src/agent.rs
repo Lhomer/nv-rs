@@ -233,10 +233,45 @@ impl Agent {
     }
 
     /// Its muscles on the pose given by [`Agent::follow`] (Delirium's muscle rise: stiff muscles
-    /// on every joint, the pelvis helped toward the pose's at most Delirium's own share of its
-    /// weight), or off (`on` false: its own balance again).
-    pub fn rise(&mut self, world: &World, on: bool) -> Result<(), String> {
-        ok(unsafe { sdk::nm_agent_muscle_rise(self.0, world.0, on as i32, -1.0) }).map(|_| ())
+    /// on every joint, the pelvis helped toward the pose's with at most `help` of its weight), or
+    /// off (`on` false: its own balance again).
+    pub fn rise(&mut self, world: &World, on: bool, help: f32) -> Result<(), String> {
+        ok(unsafe { sdk::nm_agent_muscle_rise(self.0, world.0, on as i32, help) }).map(|_| ())
+    }
+
+    /// Each part's velocity and spin now (m/s, rad/s).
+    pub fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String> {
+        let mut out = Vec::with_capacity(21);
+        for k in 0..21 {
+            let (mut v, mut w) = ([0f32; 3], [0f32; 3]);
+            ok(unsafe {
+                sdk::nm_agent_get_part_velocity(self.0, k, v.as_mut_ptr(), w.as_mut_ptr())
+            })?;
+            out.push((Vec3::from_array(v), Vec3::from_array(w)));
+        }
+        Ok(out)
+    }
+
+    /// Part `part` put at `frame`, moving as `velocity` and `spin` (its joints' limits brought
+    /// back onto a pose that left them).
+    pub fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String> {
+        ok(unsafe {
+            sdk::nm_agent_set_part_state(
+                self.0,
+                part as i32,
+                state.frame.translation.to_array().as_ptr(),
+                state.frame.rotation.to_array().as_ptr(),
+                state.velocity.to_array().as_ptr(),
+                state.spin.to_array().as_ptr(),
+            )
+        })
+        .map(|_| ())
+    }
+
+    /// The whole body's velocity changed by `dv` (m/s): every part alike, nothing else (no
+    /// hit, no look).
+    pub fn kick(&mut self, dv: Vec3) -> Result<(), String> {
+        ok(unsafe { sdk::nm_agent_add_velocity(self.0, dv.to_array().as_ptr()) }).map(|_| ())
     }
 
     /// The pose its muscles follow: every part's world frame (`parts`, all 21), or none (empty:
