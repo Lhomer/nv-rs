@@ -236,6 +236,10 @@ pub(crate) struct Dl {
     pub origin: V3,
     pub frames: u32,
     balanced_for: f32,
+    /// The pelvis over the floor at the take (game units): standing.
+    standing: f32,
+    /// The last frame's drawn bodies (for the speed and the hand-over's velocities).
+    last: Vec<(M3, V3)>,
     /// Dead: its muscles off for good, its ragdoll held to the pose drawn while this lives.
     corpse: Option<CorpseHold>,
 }
@@ -306,6 +310,8 @@ impl Dl {
             origin,
             frames: 0,
             balanced_for: 0.0,
+            standing: 0.0,
+            last: Vec::new(),
             corpse: None,
         })
     }
@@ -319,6 +325,11 @@ impl Dl {
             self.corpse = CorpseHold::of(e, actor);
         }
         Ok(self.corpse.is_some())
+    }
+
+    /// Whether its agent keeps its balance on its feet now.
+    pub(crate) fn agent_balancing(&self) -> bool {
+        self.agent.balancing()
     }
 
     /// Whether it is a corpse Delirium keeps.
@@ -410,7 +421,8 @@ pub(crate) fn facts_of(
     let weight = if npc {
         let w = e.mem.f32(base + NPC_WEIGHT);
         if w.is_finite() {
-            w.clamp(0.0, 100.0) as u8
+            // The slider as the form keeps it: 0 to 1 (its clear-data sets 0.5).
+            (w.clamp(0.0, 1.0) * 100.0).round() as u8
         } else {
             50
         }
@@ -440,6 +452,116 @@ pub(crate) fn health_left(e: &mut engine::prelude::Engine, actor: u32) -> f32 {
         Some(now) if most.is_finite() && most > 0.0 => (now / most).clamp(0.0, 1.0),
         _ => 1.0,
     }
+}
+
+/// The body's posture and balance as Delirium's pose has it (New Physics' bodies' worlds, game
+/// units): the pelvis over the floor, the torso's lean from upright (pelvis to head), the body's
+/// speed, and the capture point (the centre of mass carried by its speed, `x + v sqrt(h/g)`)
+/// outside the feet (metres; under 0 inside them).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Posture {
+    pub pelvis_up: f32,
+    pub lean: f32,
+    pub speed: f32,
+    pub outside: f32,
+}
+
+impl Posture {
+    /// Down: the pelvis under 55% of its standing height, or the torso more than 60 degrees from
+    /// upright (fallen over, lying, seated on the ground).
+    pub(crate) fn downed(&self, standing: f32) -> bool {
+        self.pelvis_up < 0.55 * standing || self.lean > 60.0
+    }
+}
+
+/// [`Posture`] of `drawn` over `floor` (game units), moving from `before` over `dt` seconds.
+pub(crate) fn posture(drawn: &[(M3, V3)], before: &[(M3, V3)], floor: f32, dt: f32) -> Posture {
+    use ragdoll_core::flinch::{apply_m, length, scale, sub};
+    let m = crate::new_physics::model();
+    let at = |name: &str| m.body(name).and_then(|b| drawn.get(b)).map(|w| w.1);
+    let pelvis = drawn.get(m.root).map_or([0.0; 3], |w| w.1);
+    let head = at("Bip01 Head").unwrap_or(pelvis);
+    let up = sub(head, pelvis);
+    let lean = if length(up) > 1e-3 {
+        (up[2] / length(up)).clamp(-1.0, 1.0).acos().to_degrees()
+    } else {
+        0.0
+    };
+    // The centre of mass and its speed (metres, m/s).
+    let centre = |worlds: &[(M3, V3)]| {
+        let mut c = [0.0f32; 3];
+        let mut total = 0.0;
+        for (b, def) in m.bodies.iter().enumerate() {
+            if let Some((r, t)) = worlds.get(b) {
+                let p = ragdoll_core::flinch::add(*t, apply_m(r, scale(def.com, UNITS)));
+                c = ragdoll_core::flinch::add(c, scale(p, def.mass));
+                total += def.mass;
+            }
+        }
+        scale(c, 1.0 / (total.max(1e-6) * UNITS))
+    };
+    let c = centre(drawn);
+    let v = if dt > 0.0 && before.len() == drawn.len() {
+        scale(sub(c, centre(before)), 1.0 / dt)
+    } else {
+        [0.0; 3]
+    };
+    let height = (c[2] - floor / UNITS).max(0.05);
+    let capture = ragdoll_core::flinch::add(
+        c,
+        scale(v, (height / ragdoll_core::np_body::GRAVITY).sqrt()),
+    );
+    let feet: Vec<V3> = ["Bip01 L Foot", "Bip01 R Foot"]
+        .iter()
+        .filter_map(|n| at(n))
+        .map(|f| scale(f, 1.0 / UNITS))
+        .collect();
+    // Outside the feet: from the segment between them, less a foot's half width.
+    let outside = match feet.as_slice() {
+        [a, b] => {
+            let ab = [b[0] - a[0], b[1] - a[1]];
+            let ap = [capture[0] - a[0], capture[1] - a[1]];
+            let l2 = ab[0] * ab[0] + ab[1] * ab[1];
+            let t = if l2 > 1e-9 {
+                ((ap[0] * ab[0] + ap[1] * ab[1]) / l2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let d = [ap[0] - t * ab[0], ap[1] - t * ab[1]];
+            (d[0] * d[0] + d[1] * d[1]).sqrt() - 0.1
+        }
+        _ => 0.0,
+    };
+    Posture {
+        pelvis_up: pelvis[2] - floor,
+        lean,
+        speed: length([v[0], v[1], v[2]]),
+        outside,
+    }
+}
+
+/// New Physics' bodies' velocities (m/s, rad/s) from two of Delirium's poses `dt` apart.
+pub(crate) fn velocities(drawn: &[(M3, V3)], before: &[(M3, V3)], dt: f32) -> Vec<(V3, V3)> {
+    drawn
+        .iter()
+        .enumerate()
+        .map(|(b, (r, t))| match before.get(b) {
+            Some((r0, t0)) if dt > 0.0 => {
+                let v = ragdoll_core::flinch::scale(
+                    ragdoll_core::flinch::sub(*t, *t0),
+                    1.0 / (dt * UNITS),
+                );
+                let q = ragdoll_core::active::qfrom_m(&ragdoll_core::pose::ortho(r));
+                let q0 = ragdoll_core::active::qfrom_m(&ragdoll_core::pose::ortho(r0));
+                let turn = ragdoll_core::active::qmul(q, ragdoll_core::active::qconj(q0));
+                (
+                    v,
+                    ragdoll_core::flinch::scale(ragdoll_core::active::qlog(turn), 1.0 / dt),
+                )
+            }
+            _ => ([0.0; 3], [0.0; 3]),
+        })
+        .collect()
 }
 
 /// A hit waiting for the actor's Delirium frame: a shot (New Physics' body, its point in game
@@ -490,7 +612,7 @@ pub(crate) fn frame_for(
         &[(u32, u32)],
         Option<&crate::new_physics::Snapshot>,
     ),
-    (dl, tried, queue): (&mut Option<Dl>, &mut bool, &mut Vec<DlHit>),
+    (dl, tried, queue, down): (&mut Option<Dl>, &mut bool, &mut Vec<DlHit>, &mut bool),
     np: &mut ragdoll_core::np::Np,
     (reference, take_v, floor, dt, handing): (V3, V3, f32, f32, bool),
 ) -> Option<Vec<(M3, V3)>> {
@@ -551,7 +673,10 @@ pub(crate) fn frame_for(
             }
         }
     }
-    let d = dl.as_mut()?;
+    let Some(d) = dl.as_mut() else {
+        queue.clear();
+        return None;
+    };
     let mut failed = None;
     let health = if queue.is_empty() {
         1.0
@@ -568,14 +693,36 @@ pub(crate) fn frame_for(
         }
     }
     let centres: Vec<V3> = m.node_worlds(&np.states).iter().map(|w| w.1).collect();
+    // The ground under each body: New Physics' own floors where it has them, else the game's
+    // collision cast down under each body (rocks and slopes as they are, never one flat plane at
+    // the reference's height: Patrick's 21:41 clip, a body sunk into rocks).
+    let cast_floors: Vec<Plane>;
+    let floors: &[Plane] = if np.floors.is_empty() {
+        cast_floors = centres
+            .iter()
+            .map(|c| {
+                let h = crate::active_ragdoll::floor_under(e, *c).unwrap_or(floor);
+                Plane {
+                    p: [c[0] / UNITS, c[1] / UNITS, h / UNITS],
+                    n: [0.0, 0.0, 1.0],
+                }
+            })
+            .collect();
+        &cast_floors
+    } else {
+        &np.floors
+    };
     let mesh = world_mesh(
-        &np.floors,
+        floors,
         &np.body_walls,
         &np.edges,
         &centres,
         floor / UNITS,
         d.origin,
     );
+    if d.frames == 0 {
+        d.standing = centres.get(m.root).map_or(0.0, |c| c[2] - floor).max(1.0);
+    }
     let step = match failed {
         Some(why) => Err(why),
         None => d.frame(&mesh, dt),
@@ -601,8 +748,53 @@ pub(crate) fn frame_for(
         *dl = None;
         return None;
     }
-    // New Physics' bodies on Delirium's pose (what reads them sees the real body).
+    // Its posture and balance from Delirium's body (New Physics' own balance never runs while
+    // Delirium has it: its readings would be its defaults).
+    let pose = posture(&drawn, &d.last, floor, dt);
+    if d.frames <= 20 {
+        note(format!(
+            "{id:08X}: [np delirium] frame {}: the pelvis {:.0} u over the floor (standing {:.0}), \
+             the torso {:.0} degrees from upright, {:.2} m/s, the capture point {:.3} m outside \
+             the feet, balancing {}",
+            d.frames,
+            pose.pelvis_up,
+            d.standing,
+            pose.lean,
+            pose.speed,
+            pose.outside,
+            d.agent_balancing()
+        ));
+    }
+    // New Physics' bodies on Delirium's pose (what reads them sees the real body), moving as it
+    // moves.
+    let moving = velocities(&drawn, &d.last, dt);
     np.states = m.states_from_nodes(&drawn);
+    for (st, (v, w)) in np.states.iter_mut().zip(&moving) {
+        st.v = *v;
+        st.w = *w;
+    }
+    d.last = drawn.clone();
+    // Down (fallen over, on the ground): New Physics' downed controller has it from here, moving
+    // as Delirium had it: its ground, its hits on a limp body, its settle and its get-up (the arms
+    // pushing off through planted hands; Patrick's choice: never GTA IV's get-ups). Not a corpse.
+    let done = match done {
+        None if !d.dead() && pose.downed(d.standing) => Some("downed"),
+        other => other,
+    };
+    if done == Some("downed") {
+        note(format!(
+            "{id:08X}: [np delirium] downed after {} frames (the pelvis {:.0} u over the floor of \
+             {:.0} standing, the torso {:.0} degrees from upright, {:.2} m/s): New Physics' downed \
+             controller has it from Delirium's pose, its settle and get-up",
+            d.frames, pose.pelvis_up, d.standing, pose.lean, pose.speed
+        ));
+        np.balance.phase = ragdoll_core::np_balance::Phase::Falling;
+        np.balance.since = 0.0;
+        np.balance.fall_reason = "downed on Delirium";
+        *dl = None;
+        *down = true;
+        return Some(drawn);
+    }
     if let Some(why) = done {
         note(format!(
             "{id:08X}: [np delirium] done after {} frames ({why}): New Physics goes on from its pose",
@@ -613,6 +805,7 @@ pub(crate) fn frame_for(
             np.balance.phase = ragdoll_core::np_balance::Phase::Falling;
             np.balance.since = 0.0;
             np.balance.fall_reason = "Delirium's fall";
+            *down = true;
         }
         *dl = None;
     }
@@ -691,7 +884,8 @@ mod tests {
         e.mem.map(AREA, 0x4000);
         e.mem.set_u32(ACTOR + BASE_FORM, BASE);
         e.mem.set_u8(BASE + FORM_TYPE, NPC_FORM);
-        e.mem.set_f32(BASE + NPC_WEIGHT, 80.0);
+        // The slider as the form keeps it, 0 to 1 (Patrick's Powder Ganger read 0 as 0 to 100).
+        e.mem.set_f32(BASE + NPC_WEIGHT, 0.8);
         let f = facts_of(&mut e, ACTOR);
         assert_eq!((f.actor, f.weight), (Actor::Npc, 80));
         e.mem.set_u8(BASE + FORM_TYPE, 0x2b);
@@ -747,6 +941,83 @@ mod tests {
         drop(hold);
         e.call(DISABLE_RAGDOLL_ANIM, &args![KEPT, 0u32]);
         assert_eq!(e.mem.u8(KEPT + 0x41), 0, "dropped: the game's again");
+    }
+
+    /// New Physics' bodies in FNV's bind pose (game units), turned by `r` about the pelvis and
+    /// moved by `by`.
+    fn bodies_posed(r: M3, by: V3) -> Vec<(M3, V3)> {
+        let sk = ragdoll_core::np_skeleton::Skeleton::fnv();
+        let bind = sk.bind_worlds();
+        let m = crate::new_physics::model();
+        let pelvis = bind[sk.node(&m.bodies[m.root].node).unwrap()].t;
+        m.bodies
+            .iter()
+            .map(|b| {
+                let w = &bind[sk.node(&b.node).unwrap()];
+                let off = ragdoll_core::flinch::sub(w.t, pelvis);
+                (
+                    ragdoll_core::flinch::mul(&r, &w.r),
+                    ragdoll_core::flinch::add(
+                        ragdoll_core::flinch::add(pelvis, ragdoll_core::flinch::apply_m(&r, off)),
+                        by,
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    const ID: M3 = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+    /// Standing in FNV's bind pose: the pelvis at its standing height, upright, still, the capture
+    /// point over the feet: not down. The same body lying on its back (turned 90 degrees about its
+    /// side, on the floor) is down; so is one crouched with its pelvis at a third of its height.
+    #[test]
+    fn delirium_s_pose_reads_standing_or_down() {
+        let stand = bodies_posed(ID, [0.0; 3]);
+        let m = crate::new_physics::model();
+        let feet = ["Bip01 L Foot", "Bip01 R Foot"].map(|n| stand[m.body(n).unwrap()].1[2]);
+        let floor = feet[0].min(feet[1]) - 5.0;
+        let p = posture(&stand, &stand, floor, 1.0 / 60.0);
+        let standing = p.pelvis_up;
+        assert!(standing > 40.0, "{p:?}");
+        assert!(p.lean < 15.0 && p.speed < 1e-4 && p.outside < 0.05, "{p:?}");
+        assert!(!p.downed(standing));
+        // Lying: turned about x by 90 degrees, its pelvis 8 units over the floor.
+        let lie: M3 = [1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0];
+        let pelvis = stand[m.root].1;
+        let lying = bodies_posed(lie, [0.0, 0.0, floor + 8.0 - pelvis[2]]);
+        let p = posture(&lying, &lying, floor, 1.0 / 60.0);
+        assert!(p.lean > 80.0 && p.pelvis_up < 10.0, "{p:?}");
+        assert!(p.downed(standing));
+        // Sunk to a third of its height, upright: down too.
+        let low = bodies_posed(ID, [0.0, 0.0, -standing * 0.67]);
+        assert!(posture(&low, &low, floor, 1.0 / 60.0).downed(standing));
+    }
+
+    /// The velocities handed to New Physics: a pose moved 7 units in a 60th of a second goes at
+    /// 6 m/s; one turned 0.1 rad about z spins at 6 rad/s about z; and the speed in the posture
+    /// is the centre of mass's.
+    #[test]
+    fn the_hand_over_moves_as_delirium_moved() {
+        let dt = 1.0 / 60.0;
+        let a = bodies_posed(ID, [0.0; 3]);
+        let b = bodies_posed(ID, [7.0, 0.0, 0.0]);
+        for (v, w) in velocities(&b, &a, dt) {
+            assert!(
+                (v[0] - 6.0).abs() < 1e-3 && v[1].abs() < 1e-3 && v[2].abs() < 1e-3,
+                "{v:?}"
+            );
+            assert!(ragdoll_core::flinch::length(w) < 1e-3, "{w:?}");
+        }
+        let (c, s) = (0.1f32.cos(), 0.1f32.sin());
+        let turned = bodies_posed([c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0], [0.0; 3]);
+        let w = velocities(&turned, &a, dt)[0].1;
+        assert!(
+            (w[2] - 6.0).abs() < 0.05 && w[0].abs() < 0.05 && w[1].abs() < 0.05,
+            "{w:?}"
+        );
+        let p = posture(&b, &a, 0.0, dt);
+        assert!((p.speed - 6.0).abs() < 1e-3, "{p:?}");
     }
 
     /// Each body's hit lands on its own part, or its nearest parent's that has one.

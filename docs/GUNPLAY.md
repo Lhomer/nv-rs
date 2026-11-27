@@ -1057,7 +1057,23 @@ them (the labels, the outcome, the reference's move, VATS) sees the real body. D
 actor until it lies settled for half a second (`should_get_up`: never a dead one), then New
 Physics' downed controller goes on from that pose (its settle, the data's limits, the rise
 pushing off through planted hands, the slope timings); or until it has stood balanced for two
-seconds, then New Physics' balance does. Dying (or a rise given up) hands it to New Physics at
+seconds, then New Physics' balance does. **Downed (Patrick's first live test, 5efbaf4, 21:41):**
+a Powder Ganger shot face down stayed Delirium's, frozen and sunk into rocks, every outcome
+"stood": New Physics' balance never runs while Delirium has a body, so its readings were its
+defaults (the capture point -1.000 m, 0.00 m/s), and Delirium's own "may get up" never came. Now
+each Delirium frame reads the body's posture from Delirium's pose (`delirium_np::posture`: the
+pelvis over the floor against its standing height at the take, the torso's lean from upright,
+the centre of mass's speed, the capture point outside the feet; said as `[np delirium] frame N`
+for its first 20 frames in place of New Physics' `[np balance]` lines), and the moment it is down
+(the pelvis under 55% of standing, or the torso over 60 degrees from upright) New Physics' downed
+controller has it, moving as Delirium had it (each body's velocity and spin from Delirium's last
+two poses): its ground, a limp body that answers hits, the data's limits, the settle, and its own
+get-up through planted hands (Patrick's choice: never GTA IV's get-ups), with every rule as
+before (`[np delirium] downed after N frames`, then `get-up started` and `get-up ended:
+standing` or `handed to the game (why)`). While Delirium has the body its ground is New Physics'
+floors where it has them, else the game's collision cast down under each body (rocks and slopes
+as they are), not one flat plane at the reference's height. The NPC's weight slider is read as the
+form keeps it, 0 to 1 (it read 0). Dying (or a rise given up) hands it to New Physics at
 once, which hands it to the game as it does now (the wait kept, the limbs brought in). Slice 3b,
 the corpse: an actor that dies while Delirium has it stays Delirium's, its muscles off for good
 (`Agent::kill`), kept by New Physics and drawn as Delirium has it (shots and blasts still push

@@ -7,6 +7,24 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-27 (Delirium: the downed-but-stuck bug from Patrick's first live test)
+
+**Status: pushed; for Patrick to try again.** His 5efbaf4 run (21:41, Powder Ganger FF001313,
+9mm, 23 N s a hit): taken by Delirium, down face first, but every `[np outcome]` "stood" and the
+`[np balance]` lines New Physics' defaults (capture point -1.000 m, 0.00 m/s): New Physics'
+balance doesn't run while Delirium has the body, and the hand-back waited for Delirium's own
+`should_get_up`, which never came; its world a flat plane at the reference (sunk into rocks).
+Fixed in `crate::delirium_np`: `posture` reads Delirium's pose each frame (pelvis height against
+the take's, the torso's lean, the centre of mass's speed, the capture point against the feet), the
+first 20 frames said as `[np delirium] frame N`; down (pelvis under 55% or lean over 60 degrees)
+hands it at once to New Physics' downed controller with Delirium's velocities (`velocities`), so
+New Physics' own settle and planted-hands get-up run with every rule (`[np delirium] downed`,
+`get-up started`, `get-up ended: standing | handed to the game (why)`); Delirium's ground under
+each body from the game's collision casts where New Physics has no floors; a shot's queue cleared
+when there is no Delirium (it grew). The weight slider is 0 to 1 in the form (it read 0). Tested
+(8): standing reads up, lying and sunk read down, the hand-over's velocities and spin, the weight.
+Host library and New Physics tests unchanged.
+
 ### Claude, 2026-11-27 (Delirium, slice 3b: the corpse stays Delirium's)
 
 **Status: pushed; not run with GTA IV.** Dying while Delirium has it: `Dl::die` (`Agent::kill`,

@@ -186,6 +186,9 @@ struct NpActor {
     dl: Option<crate::delirium_np::Dl>,
     dl_tried: bool,
     dl_queue: Vec<crate::delirium_np::DlHit>,
+    /// Handed down by Delirium (its downed controller has it), and its get-up begun.
+    dl_down: bool,
+    dl_rising: bool,
     /// Each body's walls found beside it (world, metres; where the cast met it, game units; its
     /// top, metres, infinite: none; how far behind the face its top reaches and along the face
     /// each way from the hit, metres, [`top_extent`]): kept while the body stays within
@@ -812,6 +815,8 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             dl: None,
             dl_tried: false,
             dl_queue: Vec::new(),
+            dl_down: false,
+            dl_rising: false,
             walls: Vec::new(),
             step_edges: Vec::new(),
             boxes: Vec::new(),
@@ -1410,13 +1415,14 @@ pub fn apply(e: &mut Engine) {
             crate::delirium_np::frame_for(
                 e,
                 (a.id, a.actor, &a.tree, a.snap.as_ref()),
-                (&mut a.dl, &mut a.dl_tried, &mut a.dl_queue),
+                (&mut a.dl, &mut a.dl_tried, &mut a.dl_queue, &mut a.dl_down),
                 np,
                 (reference, a.take_v, floor, dt, a.handing.is_some()),
             )
         } else {
             None
         };
+        let on_delirium = via_delirium.is_some();
         let drawn = match via_delirium {
             Some(d) => d,
             None => np.frame(&anim, floor, dt),
@@ -1424,9 +1430,34 @@ pub fn apply(e: &mut Engine) {
         floor_load_said(&mut a, floor, dt);
         wall_load_said(&mut a);
         let Some(np) = a.np.as_mut() else { continue };
+        // A body Delirium handed down: its get-up (New Physics' own) said as it starts and ends.
+        if a.dl_down {
+            if np.rise && np.down.is_some() && !a.dl_rising {
+                a.dl_rising = true;
+                note(format!(
+                    "{:08X}: [np delirium] get-up started: New Physics' rise (the arms pushing off \
+                     through planted hands)",
+                    a.id
+                ));
+            }
+            let ended = if a.handing.is_some() {
+                a.handing.map(|h| format!("handed to the game ({h})"))
+            } else if a.dl_rising && np.down.is_none() {
+                Some("standing".to_string())
+            } else {
+                None
+            };
+            if let Some(how) = ended {
+                note(format!("{:08X}: [np delirium] get-up ended: {how}", a.id));
+                a.dl_down = false;
+                a.dl_rising = false;
+            }
+        }
         a.anim_last = anim.clone();
         a.hit_frames += 1;
-        if a.hit_frames <= BALANCE_LOG_FRAMES {
+        // Delirium's frames say their own balance (`[np delirium] frame`): New Physics' balance
+        // doesn't run on them.
+        if a.hit_frames <= BALANCE_LOG_FRAMES && !on_delirium {
             let k = ragdoll_core::np_body::UNITS;
             let av = np.anim_velocity();
             let rv = np.balance.rel_v;
