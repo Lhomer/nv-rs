@@ -7,6 +7,30 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-27 (Delirium: the actor's facts and health pushed; the corpse slice, planned)
+
+**Status: pushed (a76976dd, Play green, latest.txt on it).** At the take each actor's facts are
+read for its own profile (NPC or creature by its base form's type, `+0x20` then `+4`; its weight
+slider `TESNPC::fWeight` `+0x1F8`), only NPCs go to Delirium, and each shot carries the health it
+has left (current over base: the owner's `+0xC` and `+4` slots, JIP's names). Race (ghouls) and
+the worn body armor (its type, power armor's flag) are still to be read; every profile row is
+neutral, so they change nothing yet.
+**Next, the corpse staying Delirium's (planned, not begun):** today a death mid-Delirium hands
+to New Physics, which hands to the game's ragdoll (`main_thread_pass`, `knockdown::place_bodies`:
+the ragdoll's bodies put on the pose drawn, given New Physics' velocities). For Patrick's plan:
+- At the death: Delirium `kill()` (muscles off), New Physics keeps the actor (no hand-over).
+- The game's ragdoll bodies (`knockdown::bodies`, as `body_holds` finds them) set keyframed
+  (`hkpRigidBody::setMotionType`, `00ca8420`, `MOTION_KEYFRAMED` 4 as `hkpworldoperationutil.rs`
+  has it) and moved onto Delirium's pose each frame, so looting, VATS, `GetRigidBodyMass` and mods
+  find them where the body is; to find first: where the game's death turns them dynamic
+  (`bhkRagdollController`), so that it is held off for Delirium's corpses only.
+- What pushes them taken to Delirium: explosions (New Physics' `blast` already queues Delirium's
+  blast), the grab's drag (the player's grab constraint on a keyframed body: its pull read and given
+  as an impulse on that part), `PushActorAway`.
+- Saving: the corpse's pose as the game writes it (from those bodies); loading: Delirium's corpse
+  made at rest on it.
+- Sleeping: a corpse at rest stops stepping (Delirium sleeps it) and wakes on a push.
+
 ### Claude, 2026-11-26 (Delirium, slice 3a: hits on Delirium, behind `running()`)
 
 **Status: pushed; not run with GTA IV (nothing of Delirium runs here).** `crate::delirium_np`:
