@@ -22,8 +22,16 @@ the ragdoll's bodies put on the pose drawn, given New Physics' velocities). For 
 - The game's ragdoll bodies (`knockdown::bodies`, as `body_holds` finds them) set keyframed
   (`hkpRigidBody::setMotionType`, `00ca8420`, `MOTION_KEYFRAMED` 4 as `hkpworldoperationutil.rs`
   has it) and moved onto Delirium's pose each frame, so looting, VATS, `GetRigidBodyMass` and mods
-  find them where the body is; to find first: where the game's death turns them dynamic
-  (`bhkRagdollController`), so that it is held off for Delirium's corpses only.
+  find them where the body is. **Found:** the game's death turns them loose in `Actor::Kill`
+  (`kill_actor`, `actor_p3.rs`): `bhkRagdollController::DisableRagdollAnim(ragdoll, 1)`
+  (`00c7c150`, on the controller at `actor + 0xac`), with the actor's collision set fixed
+  (`00c8f210`) beside it. Until that call the ragdoll's bodies follow the pose drawn (its ragdoll
+  animation, as New Physics keeps a living downed actor). So a Delirium corpse: that call held off
+  for Delirium's own actors only (an override at `00c7c150` that answers at once for their
+  controllers, a row in `overridable.tsv`; the family guards say whether a typed family holds it),
+  the actor kept by New Physics with Delirium's `kill()`, its pose drawn each frame as now; JIP's
+  OnRagdoll seam at `0xC7C151` still asked. To check on the fixture: the corpse's bodies stay on the
+  pose drawn after `Actor::Kill`, and an actor Delirium doesn't have dies as the game has it.
 - What pushes them taken to Delirium: explosions (New Physics' `blast` already queues Delirium's
   blast), the grab's drag (the player's grab constraint on a keyframed body: its pull read and given
   as an impulse on that part), `PushActorAway`.
