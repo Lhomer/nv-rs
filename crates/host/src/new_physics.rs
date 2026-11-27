@@ -1125,7 +1125,44 @@ pub fn apply(e: &mut Engine) {
         }
         let process = e.mem.u32(a.actor + PROCESS);
         let life = e.mem.u32(a.actor + LIFE_STATE);
-        if matches!(life, 1 | 2) && !a.drawn.is_empty() && a.handing != Some("death") {
+        // Dead with Delirium: its corpse (the muscles off), kept by New Physics and drawn as
+        // Delirium has it; the game's death leaves its ragdoll on that pose
+        // (`crate::delirium_np::install`). Delirium refusing it: the game's ragdoll as below.
+        let mut corpse = false;
+        if matches!(life, 1 | 2) && a.handing.is_none() {
+            if let Some(d) = a.dl.as_mut() {
+                let was = d.dead();
+                match d.die(e, a.actor) {
+                    Ok(true) => {
+                        corpse = true;
+                        if !was {
+                            note(format!(
+                                "{:08X}: [np delirium] died: Delirium keeps the body, its muscles \
+                                 off, its ragdoll on the pose drawn",
+                                a.id
+                            ));
+                            came_out(&mut a.outcome, "died".to_string());
+                        }
+                    }
+                    Ok(false) => {
+                        note(format!(
+                            "{:08X}: [np delirium] died with no ragdoll to hold: the game's death \
+                             as before",
+                            a.id
+                        ));
+                        a.dl = None;
+                    }
+                    Err(why) => {
+                        note(format!(
+                            "{:08X}: [np delirium] died, refused ({why}): the game's death as before",
+                            a.id
+                        ));
+                        a.dl = None;
+                    }
+                }
+            }
+        }
+        if !corpse && matches!(life, 1 | 2) && !a.drawn.is_empty() && a.handing != Some("death") {
             // Dead (downed or standing): the game's ragdoll takes the body from the pose drawn,
             // moving as New Physics' bodies were, on the main thread (`main_thread`); simulated
             // and drawn until then.
@@ -1139,7 +1176,8 @@ pub fn apply(e: &mut Engine) {
             came_out(&mut a.outcome, "died".to_string());
             a.handing_frames = 0;
         }
-        if a.handing.is_none()
+        if !corpse
+            && a.handing.is_none()
             && (process == 0 || e.mem.u8(process + KNOCK_STATE) != 0 || matches!(life, 1 | 2))
         {
             LET_GOS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -7,6 +7,21 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-27 (Delirium, slice 3b: the corpse stays Delirium's)
+
+**Status: pushed; not run with GTA IV.** Dying while Delirium has it: `Dl::die` (`Agent::kill`,
+the muscles off), New Physics keeps the actor (no death hand-over, no let-go), its pose drawn as
+Delirium has it. `delirium_np::install` (only where Delirium runs) overrides
+`DisableRagdollAnim` (`00c7c150`, `overridable.tsv` row, 1 direct call: the override's own call
+to the game's version for every other ragdoll): for the corpses Delirium keeps (their controllers
+at `actor + 0xac`, listed while their `Dl` lives) it does nothing but ask JIP's OnRagdoll seam, so
+their ragdolls keep following the pose drawn. Log: `[np delirium] died: Delirium keeps the body`,
+or `died, refused` / `died with no ragdoll to hold` (then the game's death as before). Tested: the
+override keeps a listed corpse's ragdoll as it was, turns any other loose as the game does, and a
+dropped corpse is the game's again; host library 508; repo hygiene; the family guards. Next: the
+grab's drag and `PushActorAway` on a Delirium corpse, the corpse asleep at rest, a loaded save's
+corpse on Delirium.
+
 ### Claude, 2026-11-27 (Delirium: the actor's facts and health pushed; the corpse slice, planned)
 
 **Status: pushed (a76976dd, Play green, latest.txt on it).** At the take each actor's facts are

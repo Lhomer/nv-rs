@@ -1579,6 +1579,10 @@ pub fn install(e: &mut Engine, choice: &Choice) {
     // log; anything wrong leaves New Physics as it is.
     if choice.gunplay.new_physics {
         eprintln!("{}", delirium_bridge::start_once(&choice.delirium_game));
+        // Delirium's corpses: the game's death leaves their ragdolls on the pose drawn.
+        if delirium_bridge::running() {
+            crate::delirium_np::install(e);
+        }
     }
     crate::perk_every_level::set_rate(choice.perks_per_level);
     for fix in FIXES.iter().filter(|f| choice.is_on(f)) {

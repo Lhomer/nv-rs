@@ -1058,8 +1058,18 @@ actor until it lies settled for half a second (`should_get_up`: never a dead one
 Physics' downed controller goes on from that pose (its settle, the data's limits, the rise
 pushing off through planted hands, the slope timings); or until it has stood balanced for two
 seconds, then New Physics' balance does. Dying (or a rise given up) hands it to New Physics at
-once, which hands it to the game as it does now (the wait kept, the limbs brought in): the corpse
-staying Delirium's is a later slice. Anything Delirium refuses (`[np delirium] refused`, `not
+once, which hands it to the game as it does now (the wait kept, the limbs brought in). Slice 3b,
+the corpse: an actor that dies while Delirium has it stays Delirium's, its muscles off for good
+(`Agent::kill`), kept by New Physics and drawn as Delirium has it (shots and blasts still push
+it). The game's death (`Actor::Kill`) would turn its ragdoll loose with
+`bhkRagdollController::DisableRagdollAnim` (`00c7c150`); where Delirium runs that call is
+overridden (`delirium_np::install`, a row of `overridable.tsv`) to do nothing for the corpses
+Delirium keeps (JIP's OnRagdoll seam still asked) and the game's own for every other ragdoll, so
+the corpse's Havok bodies keep following its pose and what reads them (looting, VATS, mods) finds
+them where the body is. A corpse dropped (its cell gone, Delirium refusing) is the game's again;
+one Delirium refuses at the death, or with no ragdoll controller, dies as before. Still to come:
+a grab's drag on the corpse given to Delirium, `PushActorAway`, the corpse at rest asleep, and a
+loaded save's corpse made on Delirium. Anything Delirium refuses (`[np delirium] refused`, `not
 taken`, its pose gone bad) lets New Physics take the actor from the pose it had. The shot's
 health is the share the actor has left (its current health over its base, 1 when unknown). The
 profile's facts are read from the actor at the take: NPC or creature (its base form's type: only

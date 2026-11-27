@@ -240,6 +240,7 @@
 00c44280	0	nv-rs full screen taken as the borderless window
 00c65a80	1	nv-rs smooth physics drawing
 00c73170	1	nv-rs high-frame-rate landing
+00c7c150	1	nv-rs Delirium corpses (where Delirium runs)
 00c903a0	1	nv-rs Havok reference counts without the global lock
 00c903b0	0	nv-rs Havok reference counts without the global lock
 00c90510	0	nv-rs Havok reference counts without the global lock

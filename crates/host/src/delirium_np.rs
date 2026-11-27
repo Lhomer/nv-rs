@@ -167,6 +167,66 @@ pub(crate) fn world_mesh(
     m
 }
 
+/// `bhkRagdollController::DisableRagdollAnim` (`00c7c150`): `Actor::Kill` turns a body's ragdoll
+/// loose with it (its bodies stop following the pose drawn). The actor's ragdoll controller is at
+/// `actor + 0xac`.
+pub(crate) const DISABLE_RAGDOLL_ANIM: u32 = 0x00c7_c150;
+const RAGDOLL_CONTROLLER: u32 = 0xac;
+
+/// The ragdoll controllers of the corpses Delirium keeps: the game's death leaves their ragdolls
+/// following the pose drawn (Delirium's body with its muscles off).
+static CORPSES: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+/// [`DISABLE_RAGDOLL_ANIM`] over the game's: nothing for a corpse Delirium keeps (but JIP's
+/// OnRagdoll seam at its entry, asked as the game's is), the game's own for every other ragdoll.
+fn disable_ragdoll_anim(e: &mut engine::prelude::Engine, a: &[u32]) -> engine::prelude::Ret {
+    let controller = a.first().copied().unwrap_or(0);
+    let kept = CORPSES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(&controller);
+    if kept {
+        if e.hook_users(engine_core::extend::Hook::OnRagdoll) != 0 {
+            e.site(DISABLE_RAGDOLL_ANIM + 1, &[controller]);
+        }
+    } else {
+        engine::units::bshavok::bhkragdollcontroller::bhk_ragdoll_controller_disable_ragdoll_anim(
+            e,
+            engine::prelude::Ptr::new(controller),
+            a.get(1).copied().unwrap_or(0) as u8,
+        );
+    }
+    engine::prelude::Ret::default()
+}
+
+/// Where Delirium runs: the corpses' hold over the game's death ([`disable_ragdoll_anim`]).
+pub(crate) fn install(e: &mut engine::prelude::Engine) {
+    e.register(DISABLE_RAGDOLL_ANIM, disable_ragdoll_anim);
+}
+
+/// A corpse's hold: its controller listed while it lives, unlisted when dropped.
+pub(crate) struct CorpseHold(u32);
+
+impl CorpseHold {
+    fn of(e: &engine::prelude::Engine, actor: u32) -> Option<CorpseHold> {
+        let c = e.mem.u32(actor + RAGDOLL_CONTROLLER);
+        if c == 0 {
+            return None;
+        }
+        CORPSES.lock().unwrap_or_else(|p| p.into_inner()).push(c);
+        Some(CorpseHold(c))
+    }
+}
+
+impl Drop for CorpseHold {
+    fn drop(&mut self) {
+        let mut list = CORPSES.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(i) = list.iter().position(|&c| c == self.0) {
+            list.remove(i);
+        }
+    }
+}
+
 /// One actor's Delirium: its agent, its own body (its profile's) and its world, the origin its
 /// places are measured from (the reference at the take), and how long it has stood balanced.
 pub(crate) struct Dl {
@@ -176,6 +236,8 @@ pub(crate) struct Dl {
     pub origin: V3,
     pub frames: u32,
     balanced_for: f32,
+    /// Dead: its muscles off for good, its ragdoll held to the pose drawn while this lives.
+    corpse: Option<CorpseHold>,
 }
 
 /// What a frame of Delirium came to.
@@ -244,7 +306,24 @@ impl Dl {
             origin,
             frames: 0,
             balanced_for: 0.0,
+            corpse: None,
         })
+    }
+
+    /// Dead: its muscles off (Delirium's corpse), its ragdoll kept on the pose drawn when the
+    /// game's death would turn it loose. Answers whether it is held (an actor with no ragdoll
+    /// controller is not).
+    pub(crate) fn die(&mut self, e: &engine::prelude::Engine, actor: u32) -> Result<bool, String> {
+        if self.corpse.is_none() {
+            self.agent.kill()?;
+            self.corpse = CorpseHold::of(e, actor);
+        }
+        Ok(self.corpse.is_some())
+    }
+
+    /// Whether it is a corpse Delirium keeps.
+    pub(crate) fn dead(&self) -> bool {
+        self.corpse.is_some()
     }
 
     /// A shot on New Physics' body `body` at `point` (game units) along `dir`.
@@ -628,6 +707,46 @@ mod tests {
         assert!((health_left(&mut e, ACTOR) - 0.25).abs() < 1e-6);
         e.register(BASE_FN, |_, _| 0.0f32.into_ret());
         assert_eq!(health_left(&mut e, ACTOR), 1.0);
+    }
+
+    /// The game's death on a ragdoll: a corpse Delirium keeps keeps its ragdoll following the pose
+    /// drawn (`DisableRagdollAnim` leaves it as it was); every other ragdoll is turned loose as
+    /// the game has it; a corpse dropped is the game's again.
+    #[test]
+    fn the_games_death_turns_only_other_ragdolls_loose() {
+        use engine::prelude::*;
+        const AREA: u32 = 0x7700_0000;
+        const ACTOR: u32 = AREA;
+        const KEPT: u32 = AREA + 0x1000;
+        const OTHER: u32 = AREA + 0x2000;
+        let mut e = Engine::new();
+        e.mem.map(AREA, 0x4000);
+        // The exe's vector the game's version copies (`010c71b0`): zero in the fixture.
+        e.mem.map(0x010c_7000, 0x1000);
+        install(&mut e);
+        for c in [KEPT, OTHER] {
+            // Its ragdoll animation on (`+0x42`), the bytes the game's clears set.
+            e.mem.set_u8(c + 0x42, 1);
+            e.mem.set_u8(c + 0x41, 1);
+            e.mem.set_u8(c + 0x43, 1);
+        }
+        e.mem.set_u32(ACTOR + RAGDOLL_CONTROLLER, KEPT);
+        let hold = CorpseHold::of(&e, ACTOR).unwrap();
+        e.call(DISABLE_RAGDOLL_ANIM, &args![KEPT, 1u32]);
+        e.call(DISABLE_RAGDOLL_ANIM, &args![OTHER, 0u32]);
+        assert_eq!(
+            (e.mem.u8(KEPT + 0x41), e.mem.u8(KEPT + 0x43)),
+            (1, 1),
+            "the kept one"
+        );
+        assert_eq!(
+            (e.mem.u8(OTHER + 0x41), e.mem.u8(OTHER + 0x43)),
+            (0, 0),
+            "the other"
+        );
+        drop(hold);
+        e.call(DISABLE_RAGDOLL_ANIM, &args![KEPT, 0u32]);
+        assert_eq!(e.mem.u8(KEPT + 0x41), 0, "dropped: the game's again");
     }
 
     /// Each body's hit lands on its own part, or its nearest parent's that has one.
