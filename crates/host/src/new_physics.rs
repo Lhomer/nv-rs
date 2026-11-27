@@ -181,18 +181,8 @@ struct NpActor {
     /// Downed, how long the AI has wished no rise (s; 0 while it wishes one): said with the
     /// joints' figure, which a body lying unasked keeps inside the skeleton's limits.
     unasked: f32,
-    /// Its Delirium (`crate::delirium_np`), where Delirium runs: made at its first frame, the
-    /// hits queued for it, and whether it was tried (once a take).
-    dl: Option<crate::delirium_np::Dl>,
-    dl_tried: bool,
-    dl_queue: Vec<crate::delirium_np::DlHit>,
-    /// Left by Delirium while downed (refused: New Physics' downed controller has it), and its
-    /// get-up begun.
-    dl_down: bool,
-    dl_rising: bool,
-    /// Handed back by Delirium upright and still (taken again by a new hit, and never the game's
-    /// ragdoll meanwhile).
-    dl_back: bool,
+    /// Its Delirium (`crate::delirium_np::Slot`), where Delirium runs.
+    dl: crate::delirium_np::Slot,
     /// Each body's walls found beside it (world, metres; where the cast met it, game units; its
     /// top, metres, infinite: none; how far behind the face its top reaches and along the face
     /// each way from the hit, metres, [`top_extent`]): kept while the body stays within
@@ -222,8 +212,8 @@ pub(crate) struct Snapshot {
 const HISTORY_FRAMES: usize = 3;
 /// The hand-over waits for the body inside the skeleton's limits (radians out), at most this many
 /// frames.
-const HAND_LIMITS: f32 = 0.09;
-const HAND_WAIT_FRAMES: u32 = 45;
+pub(crate) const HAND_LIMITS: f32 = 0.09;
+pub(crate) const HAND_WAIT_FRAMES: u32 = 45;
 
 /// The snapshot of `root`'s animation: its world and the locals of `tree`.
 fn snapshot(e: &Engine, root: u32, tree: &[(u32, u32)]) -> Snapshot {
@@ -824,12 +814,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             jumps_said: 0,
             joints_said: JOINTS_EVERY,
             unasked: 0.0,
-            dl: None,
-            dl_tried: false,
-            dl_queue: Vec::new(),
-            dl_down: false,
-            dl_rising: false,
-            dl_back: false,
+            dl: Default::default(),
             walls: Vec::new(),
             step_edges: Vec::new(),
             boxes: Vec::new(),
@@ -934,7 +919,7 @@ pub fn blast(e: &mut Engine, actor: u32, centre: V3, force: f32, radius: f32) {
     );
     strike(a, total, body, &against, pushes, false);
     // Delirium takes it as its own blast (its falloff over the bodies), not as a shot.
-    crate::delirium_np::queue_blast(&mut a.dl_queue, centre, radius, force / m.mass);
+    crate::delirium_np::queue_blast(&mut a.dl.queue, centre, radius, force / m.mass);
 }
 
 /// For the tests (Patrick's answer 4: a body that starts lying face down, a fixture pose only):
@@ -1041,7 +1026,7 @@ fn strike(
                 "{:08X}: [np hit] {p:.1} N s on {} (pellet {} of a burst, {:.2} m/s in all); {against}",
                 a.id, m.bodies[body].node, o.pellets, o.speed
             ));
-            crate::delirium_np::queue_shot(&mut a.dl_queue, &pushes);
+            crate::delirium_np::queue_shot(&mut a.dl.queue, &pushes);
             for (b, point, impulse) in pushes {
                 match a.np.as_mut() {
                     Some(np) => np.hit(b, point, impulse),
@@ -1083,7 +1068,7 @@ fn strike(
         p / m.mass,
         m.mass
     ));
-    crate::delirium_np::queue_shot(&mut a.dl_queue, &pushes);
+    crate::delirium_np::queue_shot(&mut a.dl.queue, &pushes);
     for (b, point, impulse) in pushes {
         match a.np.as_mut() {
             Some(np) => np.hit(b, point, impulse),
@@ -1151,7 +1136,7 @@ pub fn apply(e: &mut Engine) {
             note_event(format!(
                 "{:08X}: [np lost] {why}{}",
                 a.id,
-                if a.dl.is_some() {
+                if a.dl.body.is_some() {
                     " while Delirium had it"
                 } else {
                     ""
@@ -1166,7 +1151,12 @@ pub fn apply(e: &mut Engine) {
         // (`crate::delirium_np::install`). Delirium refusing it: the game's ragdoll as below.
         let mut corpse = false;
         if matches!(life, 1 | 2) && a.handing.is_none() {
-            if let Some(d) = a.dl.as_mut() {
+            // Dead while New Physics has a human Delirium could have (it refused it): its corpse
+            // is Delirium's all the same, made from New Physics' pose (Patrick's rule).
+            if let Some(np) = a.np.as_ref() {
+                crate::delirium_np::corpse_from_new_physics(e, (a.id, a.actor), np, &mut a.dl);
+            }
+            if let Some(d) = a.dl.body.as_mut() {
                 let was = d.dead();
                 match d.die(e, a.actor) {
                     Ok(true) => {
@@ -1174,10 +1164,13 @@ pub fn apply(e: &mut Engine) {
                         if !was {
                             note_event(format!(
                                 "{:08X}: [np delirium] dead on Delirium ({}): Delirium keeps the \
-                                 body, its muscles off, its ragdoll on the pose drawn (never the \
-                                 game's)",
+                                 body, its ragdoll on the pose drawn (never the game's)",
                                 a.id,
                                 match d.own {
+                                    _ if d.dying.is_some() => {
+                                        "mid-rise: its wait first, the limbs brought in, then its \
+                                         muscles off"
+                                    }
                                     crate::delirium_np::Own::Hit => "hit",
                                     crate::delirium_np::Own::Down => "downed",
                                     crate::delirium_np::Own::Rise => "mid-rise",
@@ -1193,14 +1186,14 @@ pub fn apply(e: &mut Engine) {
                              as before",
                             a.id
                         ));
-                        a.dl = None;
+                        a.dl.body = None;
                     }
                     Err(why) => {
                         note_event(format!(
                             "{:08X}: [np delirium] died, refused ({why}): the game's death as before",
                             a.id
                         ));
-                        a.dl = None;
+                        a.dl.body = None;
                     }
                 }
             }
@@ -1453,13 +1446,7 @@ pub fn apply(e: &mut Engine) {
             crate::delirium_np::frame_for(
                 e,
                 (a.id, a.actor, &a.tree, a.snap.as_ref(), &anim),
-                (
-                    &mut a.dl,
-                    &mut a.dl_tried,
-                    &mut a.dl_queue,
-                    &mut a.dl_down,
-                    &mut a.dl_back,
-                ),
+                &mut a.dl,
                 np,
                 (reference, a.take_v, floor, dt, a.handing.is_some()),
             )
@@ -1475,9 +1462,9 @@ pub fn apply(e: &mut Engine) {
         wall_load_said(&mut a);
         let Some(np) = a.np.as_mut() else { continue };
         // A downed body Delirium refused: its get-up (New Physics' own) said as it starts and ends.
-        if a.dl_down {
-            if np.rise && np.down.is_some() && !a.dl_rising {
-                a.dl_rising = true;
+        if a.dl.down {
+            if np.rise && np.down.is_some() && !a.dl.rising {
+                a.dl.rising = true;
                 note_event(format!(
                     "{:08X}: [np delirium] get-up started: New Physics' rise (the arms pushing off \
                      through planted hands)",
@@ -1486,15 +1473,15 @@ pub fn apply(e: &mut Engine) {
             }
             let ended = if a.handing.is_some() {
                 a.handing.map(|h| format!("handed to the game ({h})"))
-            } else if a.dl_rising && np.down.is_none() {
+            } else if a.dl.rising && np.down.is_none() {
                 Some("standing".to_string())
             } else {
                 None
             };
             if let Some(how) = ended {
                 note(format!("{:08X}: [np delirium] get-up ended: {how}", a.id));
-                a.dl_down = false;
-                a.dl_rising = false;
+                a.dl.down = false;
+                a.dl.rising = false;
             }
         }
         a.anim_last = anim.clone();
@@ -1647,7 +1634,7 @@ pub fn apply(e: &mut Engine) {
             ));
         }
         a.steps_logged = np.balance.taken.len();
-        let dl_corpse = a.dl.as_ref().is_some_and(|d| d.dead());
+        let dl_corpse = a.dl.body.as_ref().is_some_and(|d| d.dead());
         if np.down.is_some() && !dl_corpse {
             let give_up = downed(e, &mut a, dt);
             if give_up {
@@ -1672,7 +1659,7 @@ pub fn apply(e: &mut Engine) {
         // Delirium's body (or one it handed back upright) never goes to the game's ragdoll: its
         // rises given up, it lies and settles again before it tries again; a fall, New Physics'
         // downed controller has it at once (Patrick's plan: Delirium's for the whole fall).
-        if a.handing.is_none() && (a.dl.is_some() || a.dl_back) {
+        if a.handing.is_none() && a.dl.had {
             if a.choice == "give up" {
                 note_event(format!(
                     "{:08X}: [np delirium] its rises given up ({} tries): it stays down on \
@@ -1693,7 +1680,7 @@ pub fn apply(e: &mut Engine) {
                         "" => "steps",
                         r => r,
                     },
-                    if a.dl.is_some() {
+                    if a.dl.body.is_some() {
                         "on Delirium"
                     } else {
                         "after Delirium handed it back"

@@ -1130,8 +1130,17 @@ standing height, the torso within 20 degrees) and still (under 0.15 m/s for 0.3 
 the game's animation (New Physics' standing balance from Delirium's pose lets it go). Rises given
 up on Delirium settle again and try again; a fall New Physics' balance reads while Delirium has
 the body (or after it handed it back) makes New Physics' downed controller at once, never the
-game's ragdoll. A death at any point is Delirium's corpse below (its muscles and the pose it
-followed off at once; no hand-over, so no wait). Every change is said (`[np delirium] taken`,
+game's ragdoll. A death at any point is Delirium's corpse below; a death mid-rise (rising, or
+held standing) keeps the wait and brings the limbs in, as New Physics' own death hand-over did:
+Delirium's muscles keep following New Physics' pose while New Physics brings the limbs inside the
+skeleton's limits, until they are inside (`HAND_LIMITS`) or the longest wait (`HAND_WAIT_FRAMES`),
+then the muscles go off (`[np delirium] dead on Delirium mid-rise: its wait over after N frames`).
+Patrick's rule of 2026-11-26 23:16: only a missing GTA IV path or a failed unlock leaves the
+current New Physics; so a body Delirium refuses for itself (an error, a pose gone bad) is carried
+by New Physics that frame and taken again at once from New Physics' pose (`RETAKES`, 3, then New
+Physics keeps it, never the game's ragdoll), and a human that dies while New Physics has it is
+made a Delirium corpse from New Physics' pose at the death (`taken at its death from New Physics'
+pose`); every body Delirium has had (`Slot::had`) is kept from the game's ragdoll. Every change is said (`[np delirium] taken`,
 `downed on Delirium`, `rising on Delirium`, `back down on Delirium`, `New Physics stands`,
 `upright and still: back to the game's animation`, `dead on Delirium (downed | mid-rise | ...)`,
 `its rises given up`, `fell ... never the game's ragdoll`, `refused while <hit | downed | rising |

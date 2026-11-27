@@ -268,6 +268,12 @@ pub(crate) struct Dl {
     steps: (Vec<Transform>, Vec<Transform>),
     /// Dead: its muscles off for good, its ragdoll held to the pose drawn while this lives.
     corpse: Option<CorpseHold>,
+    /// Its muscles off (dead, after any wait).
+    killed: bool,
+    /// Died mid-rise: frames of its wait so far, its muscles still on New Physics' pose while the
+    /// limbs are brought inside the skeleton's limits (Patrick: a death mid-rise keeps the wait and
+    /// brings the limbs in).
+    pub dying: Option<u32>,
     /// What has its frame: Delirium's own reactions, or its muscles on New Physics' get-up.
     pub own: Own,
 }
@@ -465,6 +471,8 @@ impl Dl {
             pending: 0.0,
             steps: (Vec::new(), Vec::new()),
             corpse: None,
+            killed: false,
+            dying: None,
             own: Own::Hit,
         })
     }
@@ -474,10 +482,25 @@ impl Dl {
     /// controller is not).
     pub(crate) fn die(&mut self, e: &engine::prelude::Engine, actor: u32) -> Result<bool, String> {
         if self.corpse.is_none() {
-            self.agent.kill()?;
             self.corpse = CorpseHold::of(e, actor);
+            if self.corpse.is_none() {
+                return Ok(false);
+            }
+            // Mid-rise: its wait first, the limbs brought in (`frame_for`); else limp at once.
+            if matches!(self.own, Own::Rise | Own::Up { .. }) {
+                self.dying = Some(0);
+            } else {
+                self.kill()?;
+            }
         }
-        Ok(self.corpse.is_some())
+        Ok(true)
+    }
+
+    /// Its muscles off for good.
+    fn kill(&mut self) -> Result<(), String> {
+        self.dying = None;
+        self.killed = true;
+        self.agent.kill()
     }
 
     /// Its drive for `own`: down again after its muscles followed (relaxed, as Delirium's own
@@ -884,17 +907,114 @@ pub(crate) fn queue_blast(queue: &mut Vec<DlHit>, centre: V3, radius: f32, speed
     queue.push(DlHit::Blast(centre, radius, speed));
 }
 
-/// The actor's frame on Delirium, where it runs: its Delirium made at its first frame (once a
-/// take: its bones read from the animation's snapshot; taken again after it was handed back
-/// upright, on a new hit, from New Physics' bodies), the queued hits given, the world New Physics
+/// How many times a body Delirium refused is taken again from New Physics' pose (each refusal
+/// one; a corpse made at a death after New Physics had it too) before New Physics keeps it.
+pub(crate) const RETAKES: u32 = 3;
+
+/// An actor's Delirium, where Delirium runs: its body there, the hits queued for it, and who has
+/// had it.
+#[derive(Default)]
+pub(crate) struct Slot {
+    pub body: Option<Dl>,
+    /// Tried (a take made or refused): taken again only as below.
+    pub tried: bool,
+    pub queue: Vec<DlHit>,
+    /// Left by Delirium while downed (New Physics' downed controller has it), its get-up begun:
+    /// said by the host.
+    pub down: bool,
+    pub rising: bool,
+    /// Handed back upright and still: taken again by a new hit.
+    pub back: bool,
+    /// Refused: taken again at once from New Physics' pose, [`RETAKES`] times at most.
+    pub again: bool,
+    pub retakes: u32,
+    /// Delirium has had it (a human): never the game's ragdoll, whoever has it now.
+    pub had: bool,
+}
+
+/// FNV's skeleton's worlds (metres from `origin`) where New Physics has its bodies now.
+fn np_skeleton(np: &ragdoll_core::np::Np, origin: V3) -> Vec<Transform> {
+    let bodies: Vec<(M3, V3)> = crate::new_physics::model()
+        .node_worlds(&np.states)
+        .iter()
+        .map(|(r, t)| (*r, ragdoll_core::flinch::add(*t, np.origin)))
+        .collect();
+    skeleton_from_bodies(&bodies, origin)
+}
+
+/// A Delirium from New Physics' bodies as they are (at `origin`), moving as its root body.
+fn take_from_np(
+    np: &ragdoll_core::np::Np,
+    origin: V3,
+    facts: &delirium_bridge::profile::Facts,
+) -> Result<Dl, String> {
+    let w = np_skeleton(np, origin);
+    let s = skel();
+    let bone = |name: &str| {
+        s.names
+            .iter()
+            .position(|n| n == name)
+            .map(|i| from_tf(&w[i], origin))
+    };
+    let m = crate::new_physics::model();
+    let v = np.states.get(m.root).map_or([0.0; 3], |st| st.v);
+    Dl::take(&bone, v, origin, &delirium_bridge::profile::profile(facts))
+}
+
+/// Dead while New Physics has a human Delirium could have (refused, or never taken: Patrick's
+/// rule, the corpse is Delirium's): a Delirium made at once from New Physics' pose, to be its
+/// corpse. Whether it was made (else the game's death as before, said).
+pub(crate) fn corpse_from_new_physics(
+    e: &mut engine::prelude::Engine,
+    (id, actor): (u32, u32),
+    np: &ragdoll_core::np::Np,
+    slot: &mut Slot,
+) -> bool {
+    if slot.body.is_some() || !delirium_bridge::running() || slot.retakes > RETAKES {
+        return false;
+    }
+    let facts = facts_of(e, actor);
+    if !delirium_bridge::profile::takes(&facts) {
+        return false;
+    }
+    let m = crate::new_physics::model();
+    let origin = ragdoll_core::flinch::add(
+        m.node_worlds(&np.states)
+            .get(m.root)
+            .map_or([0.0; 3], |w| w.1),
+        np.origin,
+    );
+    match take_from_np(np, origin, &facts) {
+        Ok(d) => {
+            crate::new_physics::note_event(format!(
+                "{id:08X}: [np delirium] taken at its death from New Physics' pose: its corpse is \
+                 Delirium's"
+            ));
+            slot.body = Some(d);
+            slot.tried = true;
+            slot.had = true;
+            true
+        }
+        Err(why) => {
+            slot.retakes = slot.retakes.saturating_add(1);
+            crate::new_physics::note_event(format!(
+                "{id:08X}: [np delirium] its corpse not taken ({why}): the game's death as before"
+            ));
+            false
+        }
+    }
+}
+
+/// The actor's frame on Delirium, where it runs: its Delirium made at its first frame (its bones
+/// read from the animation's snapshot; taken again from New Physics' bodies after a refusal, or
+/// on a new hit after it was handed back upright), the queued hits given, the world New Physics
 /// found around it set, a step; the drawn bodies are Delirium's, for the whole fall (Patrick's
-/// plan: never the game's ragdoll, alive, downed, rising or dead). Hit, its reactions are
+/// rule: never the game's ragdoll, alive, downed, rising or dead). Hit, its reactions are
 /// Delirium's own and New Physics' bodies are kept on its pose; downed, it lies as Delirium has it
 /// while New Physics' downed controller reads it and times its settle; rising and standing, its
 /// muscles follow New Physics' rise (the arms pushing off through planted hands) until it is
-/// upright and still, then the game's animation has it again. None: New Physics' own frame (never
-/// taken, refused while hit, or handed back).
-#[allow(clippy::too_many_arguments)]
+/// upright and still, then the game's animation has it again; dead mid-rise, its wait first, the
+/// limbs brought in. None: New Physics' own frame (not taken, refused while hit, handed back).
 pub(crate) fn frame_for(
     e: &mut engine::prelude::Engine,
     (id, actor, tree, snap, anim): (
@@ -904,101 +1024,110 @@ pub(crate) fn frame_for(
         Option<&crate::new_physics::Snapshot>,
         &[(M3, V3)],
     ),
-    (dl, tried, queue, down, back): (
-        &mut Option<Dl>,
-        &mut bool,
-        &mut Vec<DlHit>,
-        &mut bool,
-        &mut bool,
-    ),
+    slot: &mut Slot,
     np: &mut ragdoll_core::np::Np,
     (reference, take_v, floor, dt, handing): (V3, V3, f32, f32, bool),
 ) -> Option<Vec<(M3, V3)>> {
     use crate::new_physics::{note, note_event};
     let m = crate::new_physics::model();
     if handing {
-        if dl.take().is_some() {
+        if slot.body.take().is_some() {
             note_event(format!(
                 "{id:08X}: [np delirium] handed over (dying or given up): New Physics hands it \
                  over from Delirium's pose"
             ));
         }
-        queue.clear();
+        slot.queue.clear();
         return None;
     }
-    // Handed back upright: taken again only by a new hit, from where New Physics has the body.
-    if dl.is_none() && !*tried && (!*back || !queue.is_empty()) {
-        *tried = true;
-        let names: Vec<(Vec<u8>, u32)> = tree
-            .iter()
-            .map(|&(n, _)| (crate::active_ragdoll::node_name(e, n), n))
-            .collect();
-        let again = back.then(|| {
-            let bodies: Vec<(M3, V3)> = m
-                .node_worlds(&np.states)
-                .iter()
-                .map(|(r, t)| (*r, ragdoll_core::flinch::add(*t, np.origin)))
-                .collect();
-            skeleton_from_bodies(&bodies, reference)
-        });
-        let s = skel();
-        let bone = |name: &str| -> Option<(M3, V3)> {
-            if let Some(w) = again.as_ref() {
-                let i = s.names.iter().position(|n| n == name)?;
-                return Some(from_tf(&w[i], reference));
-            }
-            let addr = names
-                .iter()
-                .find(|(n, _)| n.as_slice() == name.as_bytes())?
-                .1;
-            snap.map(|s| crate::new_physics::snapshot_worlds(s, tree, &[addr])[0])
-        };
+    // First, or again at once after a refusal, or on a new hit after it was handed back upright
+    // (then from where New Physics has the body).
+    if slot.body.is_none() && !slot.tried && (slot.again || !slot.back || !slot.queue.is_empty()) {
+        slot.tried = true;
         // Each NPC its own settings (`delirium_bridge::profile`: neutral for now) from its facts.
         let facts = facts_of(e, actor);
         if !delirium_bridge::profile::takes(&facts) {
             note_event(format!(
                 "{id:08X}: [np delirium] not taken (not a human NPC): New Physics has it as before"
             ));
-            queue.clear();
+            slot.queue.clear();
             return None;
         }
-        let v = [take_v[0] / UNITS, take_v[1] / UNITS, take_v[2] / UNITS];
-        match Dl::take(
-            &bone,
-            v,
-            reference,
-            &delirium_bridge::profile::profile(&facts),
-        ) {
-            Ok(d) => {
+        let from_np = slot.again || slot.back;
+        let taken = if from_np {
+            take_from_np(np, reference, &facts)
+        } else {
+            let names: Vec<(Vec<u8>, u32)> = tree
+                .iter()
+                .map(|&(n, _)| (crate::active_ragdoll::node_name(e, n), n))
+                .collect();
+            let bone = |name: &str| -> Option<(M3, V3)> {
+                let addr = names
+                    .iter()
+                    .find(|(n, _)| n.as_slice() == name.as_bytes())?
+                    .1;
+                snap.map(|s| crate::new_physics::snapshot_worlds(s, tree, &[addr])[0])
+            };
+            let v = [take_v[0] / UNITS, take_v[1] / UNITS, take_v[2] / UNITS];
+            Dl::take(
+                &bone,
+                v,
+                reference,
+                &delirium_bridge::profile::profile(&facts),
+            )
+        };
+        match taken {
+            Ok(mut d) => {
                 note_event(format!(
                     "{id:08X}: [np delirium] taken{}: Delirium has it from its pose (its own body; \
                      its facts {facts:?})",
-                    if *back { " again by a new hit" } else { "" }
+                    if slot.again {
+                        " again after a refusal, from New Physics' pose"
+                    } else if slot.back {
+                        " again by a new hit"
+                    } else {
+                        ""
+                    }
                 ));
-                *dl = Some(d);
-                *back = false;
+                // Taken again while New Physics has it downed: down on Delirium at once.
+                if from_np && np.down.is_some() {
+                    d.own = Own::Down;
+                    note_event(format!(
+                        "{id:08X}: [np delirium] downed on Delirium (taken again)"
+                    ));
+                }
+                slot.body = Some(d);
+                slot.back = false;
+                slot.again = false;
+                slot.had = true;
             }
             Err(why) => {
+                slot.again = false;
                 note_event(format!(
-                    "{id:08X}: [np delirium] not taken ({why}): New Physics has it as before"
+                    "{id:08X}: [np delirium] not taken ({why}): New Physics has it as before{}",
+                    if slot.had {
+                        " (never the game's ragdoll)"
+                    } else {
+                        ""
+                    }
                 ));
-                queue.clear();
+                slot.queue.clear();
                 return None;
             }
         }
     }
     let st = delirium_bridge::started()?;
-    let Some(d) = dl.as_mut() else {
-        queue.clear();
+    let Some(d) = slot.body.as_mut() else {
+        slot.queue.clear();
         return None;
     };
     let mut failed = None;
-    let health = if queue.is_empty() {
+    let health = if slot.queue.is_empty() {
         1.0
     } else {
         health_left(e, actor)
     };
-    for h in queue.drain(..) {
+    for h in slot.queue.drain(..) {
         let r = match h {
             DlHit::Shot(b, point, impulse) => d.shot(b, point, impulse, health),
             DlHit::Blast(c, r, speed) => d.blast(c, r, speed),
@@ -1047,8 +1176,13 @@ pub(crate) fn frame_for(
     // Delirium's body as it lies (its settle timed on the real body; what it drew is not drawn);
     // rising and standing, its bodies are the pose Delirium's muscles follow: its rise as it has
     // it, the arms pushing off through planted hands, its joint limits while downed.
-    let alive = !d.dead();
+    let alive = !d.killed;
     let follows = alive && matches!(d.own, Own::Rise | Own::Up { .. });
+    // Dead mid-rise, its wait: New Physics brings the limbs inside the skeleton's limits (as it
+    // does for the game's ragdoll's hand-over) while Delirium's muscles still follow its pose.
+    if d.dying.is_some() {
+        np.to_limits = true;
+    }
     let target = (alive && d.own != Own::Hit).then(|| np.frame(anim, floor, dt));
     if let (true, Some(t)) = (follows, target.as_ref()) {
         if let Err(why) = d.follow(&st.rig, t) {
@@ -1062,18 +1196,18 @@ pub(crate) fn frame_for(
     let (drawn, done) = match step {
         Ok(Step::Drawn(drawn)) => (drawn, None),
         Ok(Step::Done(drawn, why)) => (drawn, Some(why)),
-        Err(why) => return refused(id, &why, dl, down, np, target),
+        Err(why) => return refused(id, &why, slot, np, target),
     };
     if !drawn
         .iter()
         .all(|(r, t)| r.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite()))
     {
-        return refused(id, "its pose went bad", dl, down, np, target);
+        return refused(id, "its pose went bad", slot, np, target);
     }
     // Never a body flung away: New Physics takes it from the last pose that was right.
     if let Some(why) = pose_wrong(&drawn, &d.last, d.origin) {
         let why = format!("its pose went wrong: {why}");
-        return refused(id, &why, dl, down, np, target);
+        return refused(id, &why, slot, np, target);
     }
     // Its posture and balance from Delirium's body (New Physics' own balance never runs while
     // Delirium has it: its readings would be its defaults).
@@ -1110,6 +1244,28 @@ pub(crate) fn frame_for(
     if !alive {
         return Some(drawn);
     }
+    if let Some(n) = d.dying {
+        let out = np.report.limit_most;
+        let inside = np.on_data_limits && out <= crate::new_physics::HAND_LIMITS;
+        if wait_over(n + 1, np.on_data_limits, out) {
+            note_event(format!(
+                "{id:08X}: [np delirium] dead on Delirium mid-rise: its wait over after {} frames                  (the limbs {}, at most {:.1} degrees out): its muscles off",
+                n + 1,
+                if inside {
+                    "brought inside the skeleton's limits"
+                } else {
+                    "not all inside the skeleton's limits at the longest wait"
+                },
+                out.to_degrees()
+            ));
+            if let Err(why) = d.kill() {
+                return refused(id, &why, slot, np, Some(drawn));
+            }
+        } else {
+            d.dying = Some(n + 1);
+        }
+        return Some(drawn);
+    }
     if d.own == Own::Hit {
         // Down (fallen over, on the ground, or lying settled): Delirium keeps it; New Physics'
         // downed controller is made at once (never "falling, not yet down", which the host hands
@@ -1128,9 +1284,9 @@ pub(crate) fn frame_for(
                 "{}: upright and back to the game's animation (it stood balanced again)",
                 said("upright", &pose, d)
             ));
-            *dl = None;
-            *tried = false;
-            *back = true;
+            slot.body = None;
+            slot.tried = false;
+            slot.back = true;
         }
         return Some(drawn);
     }
@@ -1189,9 +1345,9 @@ pub(crate) fn frame_for(
                 said("upright", &pose, d)
             ));
             put_on(np, &drawn, &moving);
-            *dl = None;
-            *tried = false;
-            *back = true;
+            slot.body = None;
+            slot.tried = false;
+            slot.back = true;
             return Some(drawn);
         }
         Change::Stuck => {
@@ -1204,28 +1360,36 @@ pub(crate) fn frame_for(
             if pose.downed(d.standing) {
                 np.fall_now("Delirium's body didn't stand");
             }
-            return refused(id, &why, dl, down, np, Some(drawn));
+            return refused(id, &why, slot, np, Some(drawn));
         }
     };
     if let Err(why) = driven {
-        return refused(id, &why, dl, down, np, target);
+        return refused(id, &why, slot, np, target);
     }
     Some(drawn)
 }
 
-/// Delirium refused or failed the actor (`why`, said in the log): the current New Physics has it
-/// as it is now. Hit: New Physics' own frame from the pose it had (None). Downed, rising or
-/// standing: New Physics' downed controller goes on as it is (its frame this frame `target`,
-/// drawn), its get-up said by the host.
+/// Whether a death mid-rise's wait is over after `frames` of it: the limbs inside the skeleton's
+/// limits (New Physics on them, `out` radians out at most), or the longest wait, as New Physics'
+/// own death hand-over has them.
+pub(crate) fn wait_over(frames: u32, on_limits: bool, out: f32) -> bool {
+    (on_limits && out <= crate::new_physics::HAND_LIMITS)
+        || frames >= crate::new_physics::HAND_WAIT_FRAMES
+}
+
+/// Delirium refused or failed the actor (`why`, said in the log): New Physics carries it this
+/// frame as it is (hit: its own frame from the pose it had, None; downed, rising or standing: its
+/// downed controller's frame `target`), and Delirium takes it again at once from New Physics'
+/// pose, [`RETAKES`] times at most; after that New Physics keeps it (never the game's ragdoll:
+/// the host keeps every body Delirium had from it).
 fn refused(
     id: u32,
     why: &str,
-    dl: &mut Option<Dl>,
-    down: &mut bool,
+    slot: &mut Slot,
     np: &ragdoll_core::np::Np,
     target: Option<Vec<(M3, V3)>>,
 ) -> Option<Vec<(M3, V3)>> {
-    let own = dl.take().map(|d| (d.own, d.dead()));
+    let own = slot.body.take().map(|d| (d.own, d.killed));
     let had = match own {
         Some((_, true)) => "dead",
         Some((Own::Hit, _)) | None => "hit",
@@ -1233,11 +1397,23 @@ fn refused(
         Some((Own::Rise, _)) => "rising",
         Some((Own::Up { .. }, _)) => "standing",
     };
+    let then = if slot.retakes < RETAKES {
+        slot.tried = false;
+        slot.again = true;
+        format!(
+            "New Physics carries it this frame, then Delirium takes it again from New Physics'              pose (retake {} of {RETAKES})",
+            slot.retakes + 1
+        )
+    } else {
+        format!(
+            "{RETAKES} retakes used: New Physics keeps it as it is (its downed controller, its              rise; never the game's ragdoll)"
+        )
+    };
+    slot.retakes = slot.retakes.saturating_add(1);
     crate::new_physics::note_event(format!(
-        "{id:08X}: [np delirium] refused while {had} ({why}): New Physics has it as it is now \
-         (fallback)"
+        "{id:08X}: [np delirium] refused while {had} ({why}): {then}"
     ));
-    *down = np.down.is_some();
+    slot.down = np.down.is_some();
     target
 }
 
@@ -1663,6 +1839,46 @@ mod tests {
         assert!(!p(47.0, 5.0).upright(67.0) && !p(47.0, 5.0).downed(67.0));
         assert!(!p(64.0, 30.0).upright(67.0) && !p(64.0, 30.0).downed(67.0));
         assert!(p(20.0, 80.0).downed(67.0) && !p(20.0, 80.0).upright(67.0));
+    }
+
+    /// A refused body is taken again from New Physics' pose at once, RETAKES times; then New
+    /// Physics keeps it (and the host still keeps it from the game's ragdoll: `had` stays). The
+    /// frame New Physics carries it is the one given back.
+    #[test]
+    fn a_refused_body_is_taken_again_then_kept_by_new_physics() {
+        let anim = bodies_posed(ID, [100.0, 200.0, 300.0]);
+        let mut np = ragdoll_core::np::Np::new(crate::new_physics::model().clone(), &anim, 1.0);
+        np.fall_now("test");
+        let mut slot = Slot {
+            tried: true,
+            had: true,
+            ..Default::default()
+        };
+        for k in 1..=RETAKES {
+            let back = refused(0x1234, "test", &mut slot, &np, Some(anim.clone()));
+            assert_eq!(back.as_deref(), Some(anim.as_slice()));
+            assert!(slot.again && !slot.tried, "retake {k}");
+            assert_eq!(slot.retakes, k);
+            assert!(slot.down && slot.had);
+            // As if the retake was made.
+            slot.again = false;
+            slot.tried = true;
+        }
+        assert!(refused(0x1234, "test", &mut slot, &np, None).is_none());
+        assert!(!slot.again && slot.tried && slot.had, "kept by New Physics");
+        assert!(slot.retakes > RETAKES);
+    }
+
+    /// A death mid-rise waits until the limbs are inside the skeleton's limits, at most New
+    /// Physics' own death hand-over's longest wait.
+    #[test]
+    fn a_death_mid_rise_waits_for_the_limbs() {
+        use crate::new_physics::{HAND_LIMITS, HAND_WAIT_FRAMES};
+        assert!(!wait_over(1, false, 0.0));
+        assert!(!wait_over(1, true, HAND_LIMITS * 2.0));
+        assert!(wait_over(1, true, HAND_LIMITS * 0.5));
+        assert!(!wait_over(HAND_WAIT_FRAMES - 1, true, 1.0));
+        assert!(wait_over(HAND_WAIT_FRAMES, false, 1.0));
     }
 
     /// A 9mm's 25 N s gets under half of Delirium's own shot force, a 60 N s hit all of it, and

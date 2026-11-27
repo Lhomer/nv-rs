@@ -7,6 +7,21 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-27 (Delirium: Patrick's rule of 11:16 PM, the last Havok cases closed)
+
+**Status: pushed; not run with GTA IV (for Patrick to try).** On top of the entry below: a death
+mid-rise keeps the wait and brings the limbs in on Delirium (`Dl::dying`, `wait_over`: the
+muscles still follow New Physics' pose with `to_limits` until the limbs are inside or 45 frames);
+a refusal is no longer a fallback for good: New Physics carries that frame and Delirium takes the
+body again from New Physics' pose (`refused`, at most `RETAKES` = 3, then New Physics keeps it);
+a human dying while New Physics has it becomes a Delirium corpse from New Physics' pose
+(`corpse_from_new_physics`); the host's Delirium fields are one `delirium_np::Slot`, and its
+guards against the game's ragdoll cover every body Delirium has had (`Slot::had`). Tests:
+`a_refused_body_is_taken_again_then_kept_by_new_physics`, `a_death_mid_rise_waits_for_the_limbs`.
+Still open for corpses (unchanged): a grab's drag given to Delirium, `PushActorAway`, the corpse
+asleep at rest, a loaded save's corpse made on Delirium. Next queued: the upstream merge to
+74ce1325 (tried in a worktree: 7 conflicts, all both-sides, plus one format-string test fix).
+
 ### Claude, 2026-11-27 (Delirium keeps the downed body and does the get-up: no Havok at all)
 
 **Status: pushed; not run with GTA IV (for Patrick to try).** Patrick's addendum: a living downed
