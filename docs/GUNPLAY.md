@@ -1088,7 +1088,20 @@ times), a flinch or a small step for a 9mm. (3) A pose that flings the body is n
 take): `[np delirium] refused (its pose went wrong: ...)`, and New Physics takes the actor from the
 last right pose. (4) New Physics no longer lets an actor go without a word: one whose form is gone
 or whose 3D was made anew or unloaded is said (`[np lost] ... while Delirium had it`) and its
-outcome closed as `lost (why)`. Dying (or a rise given up) hands it to New Physics at
+outcome closed as `lost (why)`.
+**The cause, from LOG A (the 22:38 log, pasted):** both bodies stood on Delirium for 6 frames
+(the pelvis at its standing height, the torso within 9 degrees), then `Knockdown: [np fall] into
+its ragdoll (knock state 2)` and the game's ragdoll's clamp fired at 7475 units a second for 8 s,
+the settler's pelvis ending 1628 units over the navmesh: thrown out of the world. New Physics
+simulates each body about its own origin (`Np::origin`: its states are local to it), and the
+Delirium path put Delirium's pose into those states in the world's frame; the moment New Physics
+had the body again, it was some 72,000 units from where it should be, its balance read a fall,
+and that pose went to the game's ragdoll. Now New Physics' bodies are put on Delirium's pose in
+its own frame (`delirium_np::put_on`), and the world's places of its bodies (the floor casts, the
+world mesh) are read with its origin added. The line that would have said why New Physics took
+the body back was lost to the log's 20 lines a second; the lines that say who has a body
+(Delirium's taken, refused, downed, done, died, handed over, get-up, `[np lost]`) now always print
+(`new_physics::note_event`). Dying (or a rise given up) hands it to New Physics at
 once, which hands it to the game as it does now (the wait kept, the limbs brought in). Slice 3b,
 the corpse: an actor that dies while Delirium has it stays Delirium's, its muscles off for good
 (`Agent::kill`), kept by New Physics and drawn as Delirium has it (shots and blasts still push

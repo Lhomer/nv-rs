@@ -611,6 +611,14 @@ pub fn falls() -> Vec<Fall> {
     FALLS.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
+/// A line that says a change of who has the body (taken, refused, downed, handed over, lost):
+/// always printed, never held back by [`note`]'s 20 lines a second (Patrick's 22:38 log lost the
+/// line that said why Delirium let a body go, among a burst of per-frame lines).
+pub(crate) fn note_event(line: String) {
+    room_events::record("note", &format!("\"text\":{}", room_events::text(&line)));
+    eprintln!("{line}");
+}
+
 pub(crate) fn note(line: String) {
     room_events::record("note", &format!("\"text\":{}", room_events::text(&line)));
     static N: Mutex<(Option<Instant>, u32)> = Mutex::new((None, 0));
@@ -1135,7 +1143,7 @@ pub fn apply(e: &mut Engine) {
         if let Some(why) = lost {
             let now = outcome_now(&a);
             close_outcome(a.id, &mut a.outcome, &format!("{now}, lost ({why})"));
-            note(format!(
+            note_event(format!(
                 "{:08X}: [np lost] {why}{}",
                 a.id,
                 if a.dl.is_some() {
@@ -1159,7 +1167,7 @@ pub fn apply(e: &mut Engine) {
                     Ok(true) => {
                         corpse = true;
                         if !was {
-                            note(format!(
+                            note_event(format!(
                                 "{:08X}: [np delirium] died: Delirium keeps the body, its muscles \
                                  off, its ragdoll on the pose drawn",
                                 a.id
@@ -1168,7 +1176,7 @@ pub fn apply(e: &mut Engine) {
                         }
                     }
                     Ok(false) => {
-                        note(format!(
+                        note_event(format!(
                             "{:08X}: [np delirium] died with no ragdoll to hold: the game's death \
                              as before",
                             a.id
@@ -1176,7 +1184,7 @@ pub fn apply(e: &mut Engine) {
                         a.dl = None;
                     }
                     Err(why) => {
-                        note(format!(
+                        note_event(format!(
                             "{:08X}: [np delirium] died, refused ({why}): the game's death as before",
                             a.id
                         ));
@@ -1452,7 +1460,7 @@ pub fn apply(e: &mut Engine) {
         if a.dl_down {
             if np.rise && np.down.is_some() && !a.dl_rising {
                 a.dl_rising = true;
-                note(format!(
+                note_event(format!(
                     "{:08X}: [np delirium] get-up started: New Physics' rise (the arms pushing off \
                      through planted hands)",
                     a.id

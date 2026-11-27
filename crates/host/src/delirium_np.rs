@@ -594,6 +594,25 @@ pub(crate) fn velocities(drawn: &[(M3, V3)], before: &[(M3, V3)], dt: f32) -> Ve
         .collect()
 }
 
+/// New Physics' bodies put on `drawn` (each body's node's world, game units) moving as `moving`
+/// (m/s, rad/s): in New Physics' own frame, about its origin (`Np::origin`), as its frame keeps
+/// them. Patrick's 22:38 log: put there in the world's frame, New Physics found the body thousands
+/// of units off when it took it back, read a fall and handed that pose to the game's ragdoll,
+/// which flung it out of the world (the pelvis 1628 units over the navmesh).
+pub(crate) fn put_on(np: &mut ragdoll_core::np::Np, drawn: &[(M3, V3)], moving: &[(V3, V3)]) {
+    let m = crate::new_physics::model();
+    let o = np.origin;
+    let local: Vec<(M3, V3)> = drawn
+        .iter()
+        .map(|(r, t)| (*r, ragdoll_core::flinch::sub(*t, o)))
+        .collect();
+    np.states = m.states_from_nodes(&local);
+    for (st, (v, w)) in np.states.iter_mut().zip(moving) {
+        st.v = *v;
+        st.w = *w;
+    }
+}
+
 /// The impulse (N s) Delirium's shot force is scaled from: a hit this strong gets Delirium's own
 /// force ([`delirium_bridge::agent::SHOT_FORCE`]), a lighter one less, a heavier more (a 9mm's
 /// 25 N s a flinch or a small step, not GTA IV's pistol lurch: Patrick's 22:38 clip).
@@ -708,11 +727,11 @@ pub(crate) fn frame_for(
     np: &mut ragdoll_core::np::Np,
     (reference, take_v, floor, dt, handing): (V3, V3, f32, f32, bool),
 ) -> Option<Vec<(M3, V3)>> {
-    use crate::new_physics::note;
+    use crate::new_physics::{note, note_event};
     let m = crate::new_physics::model();
     if handing {
         if dl.take().is_some() {
-            note(format!(
+            note_event(format!(
                 "{id:08X}: [np delirium] handed over (dying or given up): New Physics hands it \
                  over from Delirium's pose"
             ));
@@ -736,7 +755,7 @@ pub(crate) fn frame_for(
         // Each NPC its own settings (`delirium_bridge::profile`: neutral for now) from its facts.
         let facts = facts_of(e, actor);
         if !delirium_bridge::profile::takes(&facts) {
-            note(format!(
+            note_event(format!(
                 "{id:08X}: [np delirium] not taken (not a human NPC): New Physics has it as before"
             ));
             queue.clear();
@@ -750,14 +769,14 @@ pub(crate) fn frame_for(
             &delirium_bridge::profile::profile(&facts),
         ) {
             Ok(d) => {
-                note(format!(
+                note_event(format!(
                     "{id:08X}: [np delirium] taken: Delirium has it from its pose (its own body; \
                      its facts {facts:?})"
                 ));
                 *dl = Some(d);
             }
             Err(why) => {
-                note(format!(
+                note_event(format!(
                     "{id:08X}: [np delirium] not taken ({why}): New Physics has it as before"
                 ));
                 queue.clear();
@@ -784,7 +803,12 @@ pub(crate) fn frame_for(
             failed = Some(why);
         }
     }
-    let centres: Vec<V3> = m.node_worlds(&np.states).iter().map(|w| w.1).collect();
+    // New Physics' bodies are simulated about its origin (`Np::origin`): their places in the world.
+    let centres: Vec<V3> = m
+        .node_worlds(&np.states)
+        .iter()
+        .map(|w| ragdoll_core::flinch::add(w.1, np.origin))
+        .collect();
     // The ground under each body: New Physics' own floors where it has them, else the game's
     // collision cast down under each body (rocks and slopes as they are, never one flat plane at
     // the reference's height: Patrick's 21:41 clip, a body sunk into rocks).
@@ -823,7 +847,7 @@ pub(crate) fn frame_for(
         Ok(Step::Drawn(drawn)) => (drawn, None),
         Ok(Step::Done(drawn, why)) => (drawn, Some(why)),
         Err(why) => {
-            note(format!(
+            note_event(format!(
                 "{id:08X}: [np delirium] refused ({why}): New Physics has it from the pose it had"
             ));
             *dl = None;
@@ -834,7 +858,7 @@ pub(crate) fn frame_for(
         .iter()
         .all(|(r, t)| r.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite()))
     {
-        note(format!(
+        note_event(format!(
             "{id:08X}: [np delirium] its pose went bad: New Physics has it from the pose it had"
         ));
         *dl = None;
@@ -842,7 +866,7 @@ pub(crate) fn frame_for(
     }
     // Never a body flung away: New Physics takes it from the last pose that was right.
     if let Some(why) = pose_wrong(&drawn, &d.last, d.origin) {
-        note(format!(
+        note_event(format!(
             "{id:08X}: [np delirium] refused (its pose went wrong: {why}): New Physics has it \
              from the last right pose"
         ));
@@ -869,11 +893,7 @@ pub(crate) fn frame_for(
     // New Physics' bodies on Delirium's pose (what reads them sees the real body), moving as it
     // moves.
     let moving = velocities(&drawn, &d.last, dt);
-    np.states = m.states_from_nodes(&drawn);
-    for (st, (v, w)) in np.states.iter_mut().zip(&moving) {
-        st.v = *v;
-        st.w = *w;
-    }
+    put_on(np, &drawn, &moving);
     d.last = drawn.clone();
     // Down (fallen over, on the ground): New Physics' downed controller has it from here, moving
     // as Delirium had it: its ground, its hits on a limp body, its settle and its get-up (the arms
@@ -883,7 +903,7 @@ pub(crate) fn frame_for(
         other => other,
     };
     if done == Some("downed") {
-        note(format!(
+        note_event(format!(
             "{id:08X}: [np delirium] downed after {} frames (the pelvis {:.0} u over the floor of \
              {:.0} standing, the torso {:.0} degrees from upright, {:.2} m/s): New Physics' downed \
              controller has it from Delirium's pose, its settle and get-up",
@@ -897,7 +917,7 @@ pub(crate) fn frame_for(
         return Some(drawn);
     }
     if let Some(why) = done {
-        note(format!(
+        note_event(format!(
             "{id:08X}: [np delirium] done after {} frames ({why}): New Physics goes on from its pose",
             d.frames
         ));
@@ -1119,6 +1139,50 @@ mod tests {
         );
         let p = posture(&b, &a, 0.0, dt);
         assert!((p.speed - 6.0).abs() < 1e-3, "{p:?}");
+    }
+
+    /// New Physics' bodies put on a pose of Delirium's far from the world's centre, as Patrick's
+    /// actors are (-72152, 8282): New Physics draws that pose back where it is, to the hundredth of
+    /// a unit, moving as given; its next frame of its own carries on from there, never thousands
+    /// of units off.
+    #[test]
+    fn new_physics_takes_the_pose_where_it_is() {
+        let at = [-72152.0, 8282.0, 6440.0];
+        let anim = bodies_posed(ID, at);
+        let mut np = ragdoll_core::np::Np::new(crate::new_physics::model().clone(), &anim, 1.0);
+        assert!(
+            ragdoll_core::flinch::length(np.origin) > 1000.0,
+            "{:?}",
+            np.origin
+        );
+        // Delirium's pose: the body moved 3 units and turned a little.
+        let (c, s) = (0.05f32.cos(), 0.05f32.sin());
+        let drawn = bodies_posed(
+            [c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0],
+            [at[0] + 3.0, at[1], at[2]],
+        );
+        let moving = vec![([0.5, 0.0, 0.0], [0.0, 0.0, 1.0]); drawn.len()];
+        put_on(&mut np, &drawn, &moving);
+        let m = crate::new_physics::model();
+        let back = m.node_worlds(&np.states);
+        for (b, ((_, t), (_, want))) in back.iter().zip(&drawn).enumerate() {
+            let t = ragdoll_core::flinch::add(*t, np.origin);
+            let d = ragdoll_core::flinch::length(ragdoll_core::flinch::sub(t, *want));
+            assert!(d < 0.01, "{}: {d} units off", m.bodies[b].node);
+        }
+        assert!(np
+            .states
+            .iter()
+            .all(|s| s.v == [0.5, 0.0, 0.0] && s.w == [0.0, 0.0, 1.0]));
+        // New Physics' own frame from there: the body where Delirium left it (moved by its own
+        // physics a little in a frame, never by thousands of units).
+        let next = np.frame(&drawn, at[2] - 80.0, 1.0 / 60.0);
+        let pelvis = next[m.root].1;
+        let off = ragdoll_core::flinch::length(ragdoll_core::flinch::sub(pelvis, drawn[m.root].1));
+        assert!(
+            off < 5.0,
+            "the pelvis {off} units off after New Physics' frame"
+        );
     }
 
     /// A 9mm's 25 N s gets under half of Delirium's own shot force, a 60 N s hit all of it, and

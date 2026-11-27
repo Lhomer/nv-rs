@@ -7,6 +7,21 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-27 (Delirium: the vanishing bodies' cause, from Patrick's pasted LOG A)
+
+**Status: pushed; for Patrick to try again.** LOG A (8db74f0, 22:38): each body stood on Delirium
+6 frames, then New Physics handed it to the game's ragdoll as a fall (`Knockdown: [np fall] into
+its ragdoll (knock state 2)`), whose clamp then fired at 7475 units/s for 8 s and the body ended
+1628 units over the navmesh: thrown out of the world. The cause was mine: `Np`'s states are local
+to `Np::origin`, and the Delirium path wrote Delirium's world-frame pose into them, so when New
+Physics had the body back (the reason's line lost to `note`'s 20 lines a second) it was ~72,000
+units off, read a fall and handed it over. Fixed: `delirium_np::put_on` shifts into New Physics'
+frame; the body centres for the floor casts and the world mesh add `np.origin`; the lines that say
+who has a body print always (`note_event`). New test `new_physics_takes_the_pose_where_it_is`
+(fails on the old sync: 72,625 units off): the pose put on at -72152, 8282 comes back within 0.01
+units and New Physics' next frame keeps the pelvis within 5 units. With 99f6bc31's fixes (whole
+steps drawn between, the shot by the impulse, flung poses refused, lost actors logged).
+
 ### Claude, 2026-11-27 (Delirium: vanishing bodies and the stumble, Patrick's 8db74f0 test)
 
 **Status: pushed; for Patrick to try again.** His 22:38 run: a Powder Ganger (25.9 N s, Spine2)
