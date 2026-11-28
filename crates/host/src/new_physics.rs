@@ -1592,9 +1592,11 @@ pub fn apply(e: &mut Engine) {
             o.set_most = o.set_most.max(set_directly);
             o.since += dt;
             let weight = model().mass * ragdoll_core::np_body::GRAVITY;
-            o.floor_most = o
-                .floor_most
-                .max(np.report.floor_load.iter().sum::<f32>() / weight);
+            if crate::delirium_np::np_is_the_body(&a.dl) {
+                o.floor_most = o
+                    .floor_most
+                    .max(np.report.floor_load.iter().sum::<f32>() / weight);
+            }
             let spine = model().body("Bip01 Spine2").unwrap_or(0);
             o.spine_peak = o.spine_peak.max(
                 ragdoll_core::np_skeleton::angle_between(&drawn[spine].0, &anim[spine].0)
@@ -1757,12 +1759,11 @@ pub fn apply(e: &mut Engine) {
             keep.push(a);
             continue;
         }
-        let calm = np.down.is_none()
-            && a.label.is_none()
+        let settled = np.down.is_none() && a.label.is_none() && a.since_hit > LET_GO_AFTER;
+        let calm = settled
             && np.phase() == Phase::Standing
             && !np.muscles.soft()
-            && np.balance.step.is_none()
-            && a.since_hit > LET_GO_AFTER;
+            && np.balance.step.is_none();
         if calm {
             let (off, legs) = a.drawn.iter().zip(&anim).zip(&model().bodies).fold(
                 (0.0f32, 0.0f32),
@@ -1793,10 +1794,21 @@ pub fn apply(e: &mut Engine) {
                 }
                 a.release += dt;
             } else {
-                a.release = 0.0;
+                a.release = (a.release - RELEASE_BACK * dt).max(0.0);
+            }
+        } else if settled && a.release > 0.0 {
+            // Its legs already blending in: a step its own balance takes meanwhile (its feet on
+            // uneven ground, off the animation's) never pulls them back. Cut off, the legs went
+            // back to the step's pose in a frame, 5 units (the trench replay): the blend goes on,
+            // then it is let go.
+            a.release += dt;
+            if a.release >= RELEASE_FOR {
+                summary(&mut a);
+                continue;
             }
         } else {
-            a.release = 0.0;
+            // A new hit or a fall: the legs eased back out of the animation, never snapped.
+            a.release = (a.release - RELEASE_BACK * dt).max(0.0);
         }
         close_if_due(&mut a);
         keep.push(a);
@@ -2704,7 +2716,11 @@ fn wall_load_said(a: &mut NpActor) {
     if total <= 1.0 {
         return;
     }
-    if let Some(o) = a.outcome.as_mut() {
+    if let Some(o) = a
+        .outcome
+        .as_mut()
+        .filter(|_| crate::delirium_np::np_is_the_body(&a.dl))
+    {
         o.wall_most = o.wall_most.max(total);
     }
     if a.wall_logs >= FLOOR_LOGS {
@@ -3789,6 +3805,9 @@ pub(crate) fn is_dead(e: &Engine, actor: u32) -> bool {
 
 /// The legs' blend into the animation before a calm body is let go (s).
 pub const RELEASE_FOR: f32 = 0.5;
+/// A blend cut off is eased back out this many times as fast as it came in (a quarter second
+/// from all the way in).
+const RELEASE_BACK: f32 = 2.0;
 
 /// A leg's body (a thigh, a calf, a foot).
 fn is_leg(node: &str) -> bool {

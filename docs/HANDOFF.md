@@ -7,6 +7,38 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-28 (Patrick's bug report 3, 23:16 on 29b839b: the trench clip, the launcher with no desktop)
+
+**Status: see the commit; pushed once the suites passed.** The launcher: `Launcher.exe
+--update-and-physics-test` writes its first line to `userdata\logs\launcher.log` the moment it
+starts (its pid, session and whether it has a desktop), and started with no desktop (session 0, a
+remote or background PowerShell) runs itself again in the logged-on player's session through an
+interactive-only scheduled task (`nv-rs physics test`, removed afterwards), waits for it and passes
+on its exit code (`physics-test-exit.txt`). Delirium (`crate::delirium_np`): the per-step
+teleports are gone. Rising and held standing, Delirium's parts are put on New Physics' rise pose
+each step (moving as it moves) and that pose is drawn, planted hands and all (Delirium's muscles
+never lifted it; eased toward it, it floated up seated). Down or dead, the joint limits are put on
+the drawn pose only, coming in over about 0.25 s (`LIMIT_RAMP`): put back on Delirium's parts each
+step they fought its solver (the writhing, sliding, stretched limbs); all at once, a rise's squat
+cut back down threw a thigh 15 units in a frame. A rise cut back down eases from New Physics' pose
+to Delirium's over `EASE_BACK` (0.2 s). The ground is cast from 100 units over the body (a trench's
+bank). The light-hit aid lasts 3 s, pulls at most 0.5 g and holds the pelvis up from 90% of its
+height at up to 1 g. Every `[np hit]` is logged (`note_event`), and hits on a downed or rising body
+are said. New Physics' wall and floor loads count only while its bodies are the body
+(`np_is_the_body`: put on Delirium's lying pose, its solver read 160 kN shoving them out). New
+Physics' let-go: legs already blending into the animation finish the blend when its balance starts
+a step, never snapped back (5 units in a frame on bumps). The replay harness claims the actor before
+each hit, as the self-test does. The stand-in lies flat and settles on the ground (it lay propped
+at 83 degrees, its pelvis 10 units in the air). New checks (`crate::physics_checks`, both layers):
+jumps over 15 units, the pelvis 25 units over standing, each body against the ground under it,
+limbs stretched, a light hit downing it, down again with no hit, a stiff body sliding while it lies,
+a rise from the ground with no hand planted; and the `trench` scenario (a 9mm standing on bumps,
+then a heavy hit and three 9mm hits while down). Open: on harsher ground (12-unit bumps every 100,
+37-degree slopes everywhere) New Physics' own rise and standing balance break down (its solver
+read 700 kN on bump faces it took for walls, a foot thrown 60 units; with the faces taken as slopes
+instead, a 52 kN jam and a hand-back that never came). The CI's trench is 6 units every 140; the
+game's own trench scenario runs on the real ground near the room.
+
 ### Claude, 2026-11-28 (the self-test unattended; the slope's hand-back fixed)
 
 **Status: pushed.** Patrick's ask (9:26 PM): `Launcher.exe --update-and-physics-test` (the

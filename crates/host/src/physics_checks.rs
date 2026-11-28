@@ -552,10 +552,11 @@ pub fn judge(
             if let Some((p, _)) = stance(&f.drawn, f.floor) {
                 if p < HAND_LOW * st {
                     low = true;
-                    if hands
-                        .iter()
-                        .any(|&h| f.drawn.get(h).is_some_and(|b| b.1[2] - ground_of(f, h) <= HAND_NEAR))
-                    {
+                    if hands.iter().any(|&h| {
+                        f.drawn
+                            .get(h)
+                            .is_some_and(|b| b.1[2] - ground_of(f, h) <= HAND_NEAR)
+                    }) {
                         planted = true;
                     }
                 }

@@ -3,7 +3,7 @@
 //! rise's sequencing) runs in CI, where Delirium cannot (it needs the player's GTA IV). It is a
 //! mechanical double, nothing of Delirium's: standing, it takes a light hit as a small shove and a
 //! heavy one (or its death) as a fall, tipping over its feet onto the ground in under a second;
-//! lying, it settles on the ground the world mesh gives it; its muscles on (`rise`/`follow`), its
+//! lying, it settles flat on the ground the world mesh gives it; its muscles on (`rise`/`follow`), its
 //! parts go to the pose given, quickly; its parts set or kicked as asked. Metres from the origin,
 //! Z up, 21 parts as Delirium's.
 
@@ -64,6 +64,8 @@ const FALL_FOR: f32 = 0.8;
 const MUSCLE: f32 = 9.0;
 const SHOVE: f32 = 0.0015;
 const RADIUS: f32 = 0.06;
+/// How fast a limp body comes down onto the ground under it (m/s).
+const SETTLE: f32 = 1.5;
 
 enum State {
     Standing,
@@ -104,8 +106,10 @@ impl StandIn {
         best
     }
 
-    /// The whole pose lifted so no part is under the ground.
-    fn onto_ground(&mut self) {
+    /// The whole pose lifted so no part is under the ground; lying limp (no muscles on it), let
+    /// down onto it as well (at most [`SETTLE`] m/s), so it lies on the ground, never propped
+    /// over it.
+    fn onto_ground(&mut self, dt: f32) {
         let lift = self
             .parts
             .iter()
@@ -113,7 +117,15 @@ impl StandIn {
                 self.ground(p.translation)
                     .map(|g| g + RADIUS - p.translation.z)
             })
-            .fold(0.0f32, f32::max);
+            .reduce(f32::max)
+            .unwrap_or(0.0);
+        let limp = matches!(self.state, State::Lying) && (self.dead || self.follow.is_empty());
+        if lift < 0.0 && limp {
+            let down = lift.max(-SETTLE * dt);
+            for p in &mut self.parts {
+                p.translation.z += down;
+            }
+        }
         if lift > 0.0 {
             for p in &mut self.parts {
                 p.translation.z += lift;
@@ -191,7 +203,7 @@ impl DlBody for StandIn {
         match &mut self.state {
             State::Falling(t, axis, pivot, start) => {
                 *t += dt;
-                let a = (*t / FALL_FOR).min(1.0) * 1.45;
+                let a = (*t / FALL_FOR).min(1.0) * std::f32::consts::FRAC_PI_2;
                 let q = Quat::from_axis_angle(*axis, a);
                 for (p, s) in self.parts.iter_mut().zip(start.iter()) {
                     p.translation = *pivot + q * (s.translation - *pivot);
@@ -229,7 +241,7 @@ impl DlBody for StandIn {
                 self.state = State::Standing;
             }
         }
-        self.onto_ground();
+        self.onto_ground(dt);
         Ok(())
     }
     fn parts(&self) -> Result<Vec<Transform>, String> {

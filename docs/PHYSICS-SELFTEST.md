@@ -106,7 +106,7 @@ tips it over its feet, its muscles on, its parts go where it is told). Everythin
 is the real integration: `crate::delirium_np`'s frame, the put-on, the hand-overs and retakes, the
 joint limits drawn, the ground cast and fed, the rise drawn as New Physics' with Delirium's parts put on it, the hand-back to the animation.
 The CI runs `physics_replay::synthetic()` (the same scenarios at 120 frames a second, flat, on
-a slope and in a trench's bumps, 12 units high every 100). A replay from the player's PC runs the same way:
+a slope and in a trench's bumps, 6 units high every 140). A replay from the player's PC runs the same way:
 
 ```
 NV_PHYSICS_REPLAY=physics-selftest-...-replay.txt cargo test -p host --lib replay_from_the_file -- --nocapture

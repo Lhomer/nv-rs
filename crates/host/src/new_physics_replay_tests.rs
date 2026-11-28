@@ -52,9 +52,8 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
     // The ground: the fixture's floor, tilted as the replay's, met by every cast.
     let at = f.reference();
     rig_fixture::SLOPE.with(|c| c.set(Some([at[0], at[1], s.slope[0], s.slope[1]])));
-    rig_fixture::BUMPS.with(|c| {
-        c.set((s.bumps[0] > 0.0).then_some([at[0], at[1], s.bumps[0], s.bumps[1]]))
-    });
+    rig_fixture::BUMPS
+        .with(|c| c.set((s.bumps[0] > 0.0).then_some([at[0], at[1], s.bumps[0], s.bumps[1]])));
     rig_fixture::WORLD.with(|w| *w.borrow_mut() = Some(Vec::new()));
     // A hand-over to the game's ragdoll, should one come: answered as the game would.
     f.e.register_double(0x008c_7aa0, |_, _| 0u32.into_ret());
@@ -108,6 +107,13 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
         for (_, body, p, dir) in s.hits.iter().filter(|h| h.0 == i) {
             let b = model().body(body).unwrap_or(model().root);
             let point = f.world_of(f.at[body_nodes[b]]).1;
+            // As the game's self-test (and a bullet) does: New Physics takes the actor for the hit
+            // (again, once it let it go to its animation), then the hit.
+            assert!(
+                claim(&mut f.e, ACTOR),
+                "{}: not claimed for the hit at {t:.2} s",
+                s.name
+            );
             hit_shot(&mut f.e, ACTOR, *p, point, *dir, false);
             struck = struck.max(*p);
         }

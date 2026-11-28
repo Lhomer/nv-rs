@@ -219,10 +219,11 @@ pub fn synthetic() -> Vec<Scenario> {
             None,
         ),
         // Patrick's 23:16 clip: a light 9mm on a Powder Ganger standing in a trench's uneven dirt
-        // (it must stay up), then a heavy hit and more 9mm hits while it is down (it must rise,
+        // (it must stay up), then a heavy hit and three more 9mm hits once it is down, a quarter
+        // second apart, before its rise (New Physics settles under a second on flat ground; it must rise,
         // its hands planted, nothing launched, stretched, sunk in the dirt or sliding).
         Scenario {
-            bumps: [12.0, 100.0],
+            bumps: [6.0, 140.0],
             ..s(
                 "trench",
                 "rises",
@@ -231,9 +232,9 @@ pub fn synthetic() -> Vec<Scenario> {
                 vec![
                     (60, "Bip01 Spine2", 25.9, back),
                     (540, "Bip01 Spine2", 160.0, back),
-                    (780, "Bip01 R Forearm", 25.9, back),
-                    (840, "Bip01 Spine2", 25.9, back),
-                    (900, "Bip01 L Calf", 25.9, back),
+                    (650, "Bip01 R Forearm", 25.9, back),
+                    (680, "Bip01 Spine2", 25.9, back),
+                    (710, "Bip01 L Calf", 25.9, back),
                 ],
                 None,
             )

@@ -422,6 +422,17 @@ pub(crate) struct Dl {
     /// Down or dead: the most a joint of the drawn pose was out of the skeleton's limits before it
     /// was drawn inside them (radians).
     pub limited: f32,
+    /// Down or dead: how far the drawn pose's limits have come in (New Physics' passes, growing
+    /// [`LIMIT_RAMP`] a second from none each time it lies down), so a pose far out (a rise's squat
+    /// cut back down) is brought in over a few frames, never in one.
+    limit_in: f32,
+    /// How long New Physics' bodies have been the body (rising or held standing: its pose drawn),
+    /// s; none otherwise.
+    np_for: f32,
+    /// Just back on Delirium's own body from New Physics' rise pose (a rise cut back down): each
+    /// body's offset from Delirium's pose to the one last drawn (a turn and a move, game units),
+    /// and how much of it is left, eased out over [`EASE_BACK`].
+    ease: Option<(Vec<(M3, V3)>, f32)>,
     /// Rising or held standing: New Physics' pose of the frame before (its parts' velocities).
     target: Option<Vec<(M3, V3)>>,
     /// Rising or held standing: New Physics' rise pose its parts are put on each step, and their
@@ -454,9 +465,13 @@ pub(crate) const RISE_HELP: f32 = 1.2;
 pub(crate) const RETAKE_MOST: f32 = 2.0;
 /// Delirium this long with a body (s) without a refusal: its retakes counted from none again.
 pub(crate) const RETAKES_BACK_AFTER: f32 = 5.0;
-/// The skeleton's limits on the pose drawn: this many of New Physics' passes (each a small step
-/// in), enough to bring a joint all the way in.
-pub(crate) const LIMIT_PASSES: usize = 96;
+/// The skeleton's limits on the pose drawn: at most this many of New Physics' passes (each turns a
+/// joint at most 0.01 rad in), enough to bring in a joint 100 degrees out, and the passes it grows
+/// by a second (lying down: about 3 degrees a frame at 120 frames a second, all of it in 0.25 s).
+/// Brought in all at once, a rise's squat cut back down threw the thigh 15 units in a frame
+/// (refused, then a 29 m/s snap: the trench replay).
+pub(crate) const LIMIT_PASSES: usize = 180;
+pub(crate) const LIMIT_RAMP: f32 = 720.0;
 /// Under the knockdown threshold, a hit's stagger aid: this long (s), at most [`AID_MOST`] of g
 /// (the whole body's velocity changed toward its feet, so its own steps catch it), and the pelvis
 /// held up from [`AID_FROM`] of its standing height, at most [`AID_LIFT`] g. Patrick's 23:16 clip:
@@ -468,6 +483,58 @@ pub(crate) const AID_FROM: f32 = 0.9;
 const AID_K: f32 = 12.0;
 const AID_LIFT_K: f32 = 40.0;
 const AID_C: f32 = 3.0;
+
+/// Whether New Physics' own bodies are the real body of an actor whose Delirium slot is `slot`
+/// (its solver's loads against walls and the floor are then the body's): no Delirium, or
+/// Delirium's parts on New Physics' rise (its pose drawn) for [`NP_SETTLED_IN`] already. While
+/// Delirium's own reactions have it (hit, lying, dead), New Physics' bodies are only put on
+/// Delirium's pose each frame, and its solver's loads (shoving those bodies out of what they were
+/// put into) say nothing of the body: the trench replay read 160 kN on a wall from that; and so
+/// for the first frames of a rise, its bodies pushed out of its own floors from Delirium's pose
+/// (34 kN on the spine in a frame, the body drawn at under 3 m/s).
+pub(crate) fn np_is_the_body(slot: &Slot) -> bool {
+    slot.body.as_ref().map_or(true, |d| {
+        !d.dead() && matches!(d.own, Own::Rise | Own::Up { .. }) && d.np_for > NP_SETTLED_IN
+    })
+}
+
+/// Back on Delirium's own body from New Physics' rise pose, the difference eased out over this (s).
+pub(crate) const EASE_BACK: f32 = 0.2;
+
+/// Each body's offset from `from` to `to` (the turn `to·from⁻¹`, the move).
+fn offsets(from: &[(M3, V3)], to: &[(M3, V3)]) -> Vec<(M3, V3)> {
+    use ragdoll_core::flinch::{mul, sub, transpose};
+    from.iter()
+        .zip(to)
+        .map(|(a, b)| (mul(&b.0, &transpose(&a.0)), sub(b.1, a.1)))
+        .collect()
+}
+
+/// `pose` with `left` (0 to 1) of each body's offset `offs` put on it.
+fn eased(pose: &[(M3, V3)], offs: &[(M3, V3)], left: f32) -> Vec<(M3, V3)> {
+    use ragdoll_core::active::{m_from_q, qfrom_m};
+    use ragdoll_core::flinch::{add, mul, scale};
+    let k = left.clamp(0.0, 1.0);
+    pose.iter()
+        .zip(offs)
+        .map(|((r, t), (dr, dt))| {
+            let q = qfrom_m(dr);
+            let s = if q[0] < 0.0 { -1.0 } else { 1.0 };
+            let part = [
+                1.0 + (s * q[0] - 1.0) * k,
+                s * q[1] * k,
+                s * q[2] * k,
+                s * q[3] * k,
+            ];
+            let n = part.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+            let part = part.map(|x| x / n);
+            (mul(&m_from_q(part), r), add(*t, scale(*dt, k)))
+        })
+        .collect()
+}
+
+/// New Physics' bodies this long the body (s) before their loads are its.
+pub(crate) const NP_SETTLED_IN: f32 = 0.15;
 
 /// What a Delirium-owned body is doing (Patrick's plan: Delirium has a human's body for the whole
 /// fall, never the game's ragdoll). New Physics' downed controller decides the settle and the rise
@@ -668,6 +735,9 @@ impl Dl {
             ground: None,
             glitch: 0,
             limited: 0.0,
+            limit_in: 0.0,
+            np_for: 0.0,
+            ease: None,
             target: None,
             guide: None,
             age: 0.0,
@@ -1152,9 +1222,7 @@ pub(crate) fn ground_mesh(
             // clip, heels in the dirt), else from over the guess, else the guess.
             let z0 = guess([x, y]);
             let high = cast([x, y, centre[2].max(z0) + 100.0]);
-            let z = high
-                .or_else(|| cast([x, y, z0 + 40.0]))
-                .unwrap_or(z0);
+            let z = high.or_else(|| cast([x, y, z0 + 40.0])).unwrap_or(z0);
             heights.push((z - origin[2]) / UNITS);
         }
     }
@@ -1752,15 +1820,36 @@ pub(crate) fn frame_for(
     // it). Down or dead: drawn inside the skeleton's limits (never put back on Delirium's parts:
     // done each step, that fought its own solver, the writhing, the sliding and the stretched
     // limbs of Patrick's 23:16 clip).
+    let was_np = d.np_for > 0.0;
     if let (true, Some(t)) = (follows, target.as_ref()) {
         drawn = t.clone();
+        d.limit_in = 0.0;
+        d.np_for += dt;
+        d.ease = None;
     } else if d.own == Own::Down || d.corpse.is_some() {
-        let (inside, out, worst) = into_limits(&drawn, LIMIT_PASSES);
+        d.limit_in = (d.limit_in + LIMIT_RAMP * dt).min(LIMIT_PASSES as f32);
+        let (inside, out, worst) = into_limits(&drawn, d.limit_in as usize);
         if out > d.limited {
             d.worst = worst;
         }
         d.limited = d.limited.max(out);
         drawn = inside;
+    }
+    // Back on Delirium's own body from New Physics' rise pose: the two differ a little (its parts
+    // put on that pose, stepped, the skeleton made again from them), eased out over a moment,
+    // never popped in a frame (the trench replay: every body 3 to 6 units at once).
+    if !follows && was_np && d.last.len() == drawn.len() {
+        d.ease = Some((offsets(&drawn, &d.last), 1.0));
+    }
+    if let Some((offs, left)) = d.ease.as_mut() {
+        drawn = eased(&drawn, offs, *left);
+        *left -= dt / EASE_BACK;
+        if *left <= 0.0 {
+            d.ease = None;
+        }
+    }
+    if !follows {
+        d.np_for = 0.0;
     }
     // Never a body flung away. A jump of a frame or two is held at the last right pose (Patrick's
     // 15:30 log: one knee's 30-unit frame refused the body mid-stagger, and the new agent made

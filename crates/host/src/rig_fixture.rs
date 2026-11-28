@@ -154,10 +154,12 @@ thread_local! {
 /// The ground under `at` (the floor, tilted by [`SLOPE`]), boxes aside.
 fn ground_at(at: V3) -> Option<f32> {
     let f = FLOOR.with(std::cell::Cell::get)?;
-    let bumps = BUMPS.with(std::cell::Cell::get).map_or(0.0, |[x0, y0, h, l]| {
-        let k = std::f32::consts::TAU / l.max(1.0);
-        h * ((at[0] - x0) * k).sin() * ((at[1] - y0) * k * 0.77).cos()
-    });
+    let bumps = BUMPS
+        .with(std::cell::Cell::get)
+        .map_or(0.0, |[x0, y0, h, l]| {
+            let k = std::f32::consts::TAU / l.max(1.0);
+            h * ((at[0] - x0) * k).sin() * ((at[1] - y0) * k * 0.77).cos()
+        });
     Some(
         bumps
             + match SLOPE.with(std::cell::Cell::get) {
