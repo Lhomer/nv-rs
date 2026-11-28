@@ -53,10 +53,10 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
     crate::knockdown::clear();
     set_keep_down(true);
     let was = crate::gunplay::tuning();
-    crate::gunplay::set_tuning(crate::gunplay::Tuning {
+    crate::gunplay::set_thread_tuning(Some(crate::gunplay::Tuning {
         new_physics: true,
         ..was
-    });
+    }));
     // A human NPC (its base form an NPC's), with a ragdoll controller its corpse can be held by.
     f.e.mem.set_u32(ACTOR + 0x20, FAKE_BASE);
     f.e.mem.set_u8(FAKE_BASE + 4, 0x2a);
@@ -179,7 +179,7 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
     rig_fixture::BUMPS.with(|c| c.set(None));
     rig_fixture::GRID.with(|g| *g.borrow_mut() = None);
     rig_fixture::WORLD.with(|w| *w.borrow_mut() = None);
-    crate::gunplay::set_tuning(was);
+    crate::gunplay::set_thread_tuning(None);
     let mut expect = s.expect();
     expect.standing = standing;
     let checks = physics_checks::judge(&frames, &expect, to_havok(ACTOR) - havok_before, None);

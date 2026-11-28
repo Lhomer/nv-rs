@@ -367,7 +367,24 @@ pub fn set_tuning(tuning: Tuning) {
 
 /// The tuning in force.
 pub fn tuning() -> Tuning {
+    #[cfg(test)]
+    if let Some(t) = TEST_TUNING.with(std::cell::Cell::get) {
+        return t;
+    }
     *TUNING.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: this thread's tuning, whatever other tests set meanwhile (the replays claim
+    /// the actor at each hit; another test's `set_tuning` turned New Physics off under them).
+    static TEST_TUNING: std::cell::Cell<Option<Tuning>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tests only: this thread's own tuning ([`tuning`] answers it here), or none: the shared one.
+#[cfg(test)]
+pub fn set_thread_tuning(t: Option<Tuning>) {
+    TEST_TUNING.with(|c| c.set(t));
 }
 
 /// Whether the row is on now (the Settings menu's Weighty Combat row): the snappy movement
