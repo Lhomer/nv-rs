@@ -254,9 +254,6 @@ impl DlBody for StandIn {
         self.follow = parts.to_vec();
         Ok(())
     }
-    fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String> {
-        Ok(self.vel.iter().map(|v| (*v, Vec3::ZERO)).collect())
-    }
     fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String> {
         if let (Some(p), Some(v)) = (self.parts.get_mut(part), self.vel.get_mut(part)) {
             *p = state.frame;

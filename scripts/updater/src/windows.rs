@@ -50,8 +50,21 @@ extern "system" {
 extern "system" {
     fn GetStockObject(index: i32) -> *mut c_void;
 }
+#[link(name = "user32")]
+extern "system" {
+    fn GetProcessWindowStation() -> *mut c_void;
+    fn GetUserObjectInformationW(
+        object: *mut c_void,
+        index: i32,
+        info: *mut c_void,
+        length: u32,
+        needed: *mut u32,
+    ) -> i32;
+}
 #[link(name = "kernel32")]
 extern "system" {
+    fn GetCurrentProcessId() -> u32;
+    fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> i32;
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
     fn OpenMutexW(access: u32, inherit: i32, name: *const u16) -> *mut c_void;
     fn CloseHandle(handle: *mut c_void) -> i32;
@@ -723,7 +736,10 @@ pub fn run() {
     };
     // The unattended physics self-test: no window, no question; its exit code says how it went.
     if let Some(given) = update::physics_test_args(&args) {
-        std::process::exit(physics_test(&install, given.as_deref()));
+        let in_session = args
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(update::IN_SESSION));
+        std::process::exit(physics_test(&install, given.as_deref(), in_session));
     }
     if !install.join("Play.exe").exists() {
         return error(&format!(
@@ -836,16 +852,16 @@ fn update_to(
 /// for its build to catch up with Play's newest, at most [`update::TESTER_WAIT`]), its
 /// `Play.exe --physics-test` run with no window of the launcher's and no question
 /// (`NV_RS_NO_WINDOWS=1`) until the game ends by itself, then the results read. No message box, no
-/// status window; what it did is in `userdata\logs\physics-test-launcher.txt`, the results in
+/// status window; what it did is in `userdata\logs\launcher.log` (its first line at once), the
+/// results in
 /// `userdata\logs\physics-selftest-latest.txt` (a "NOT RUN" one when it could not run). Only the
 /// tester's programs are ever replaced (never its `userdata`: saves, INIs).
-fn physics_test(install: &Path, given: Option<&Path>) -> i32 {
+fn physics_test(install: &Path, given: Option<&Path>, in_session: bool) -> i32 {
     let dir = update::physics_test_dir(install, crate::room(), given);
     let logs = dir.join(update::USERDATA).join("logs");
     let _ = std::fs::create_dir_all(&logs);
-    let results = logs.join(update::RESULTS_LATEST);
-    let journal = logs.join("physics-test-launcher.txt");
-    let _ = std::fs::write(&journal, b"");
+    let journal = logs.join(update::LAUNCHER_LOG);
+    let exit_file = logs.join(update::EXIT_FILE);
     let say = |line: &str| {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -853,9 +869,161 @@ fn physics_test(install: &Path, given: Option<&Path>) -> i32 {
             .create(true)
             .open(&journal)
         {
-            let _ = writeln!(f, "{line}");
+            let _ = writeln!(f, "{} {line}", clock());
         }
     };
+    // The first line at once (Patrick's 10:14 PM run left nothing to see).
+    if !in_session {
+        let _ = std::fs::write(&journal, b"");
+    }
+    let session = this_session();
+    say(&format!(
+        "Launcher.exe {}{}: pid {}, session {session}, its desktop {}; the tester {}",
+        update::PHYSICS_TEST,
+        if in_session {
+            " (in the player's session)"
+        } else {
+            ""
+        },
+        // SAFETY: no arguments.
+        unsafe { GetCurrentProcessId() },
+        if has_desktop() {
+            "visible"
+        } else {
+            "none (a service or remote shell)"
+        },
+        dir.display()
+    ));
+    if !in_session {
+        let _ = std::fs::remove_file(&exit_file);
+    }
+    // No desktop here (a remote or background shell: the game can't open its window): the run
+    // starts again in the logged-on player's own session and is waited for.
+    if !in_session && (!has_desktop() || session == 0) {
+        return in_players_session(install, &dir, &exit_file, &say);
+    }
+    let code = physics_test_here(&dir, &logs, &say);
+    let _ = std::fs::write(&exit_file, format!("exit {code}\n"));
+    say(&format!("done: exit {code}"));
+    code
+}
+
+/// The time now, `HH:MM:SS` (UTC), for the launcher's log.
+fn clock() -> String {
+    let s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    format!("{:02}:{:02}:{:02}Z", s / 3600 % 24, s / 60 % 60, s % 60)
+}
+
+/// This process's Windows session (0: the services' own, with no player's desktop).
+fn this_session() -> u32 {
+    let mut session = 0u32;
+    // SAFETY: the session is written through a valid pointer.
+    unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) };
+    session
+}
+
+/// Whether this process's window station is a visible one (the player's desktop), not a
+/// service's or a remote shell's hidden one.
+fn has_desktop() -> bool {
+    // USEROBJECTFLAGS: fInherit, fReserved, dwFlags (WSF_VISIBLE = 1).
+    let mut flags = [0u32; 3];
+    let mut needed = 0u32;
+    // SAFETY: the buffer is the size given; a failed call leaves it zeroed (no desktop).
+    unsafe {
+        let station = GetProcessWindowStation();
+        if station.is_null() {
+            return false;
+        }
+        GetUserObjectInformationW(
+            station,
+            1,
+            flags.as_mut_ptr().cast(),
+            std::mem::size_of_val(&flags) as u32,
+            &mut needed,
+        );
+    }
+    flags[2] & 1 != 0
+}
+
+/// The run started again in the logged-on player's desktop session (a scheduled task, interactive
+/// only, run now) and waited for: its exit file's code.
+fn in_players_session(install: &Path, dir: &Path, exit_file: &Path, say: &dyn Fn(&str)) -> i32 {
+    let exe = std::env::current_exe().unwrap_or_else(|_| install.join("Launcher.exe"));
+    let schtasks = |args: &[String]| -> Result<(), String> {
+        let out = Command::new(system_tool("schtasks.exe"))
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("schtasks.exe could not run ({e})"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout).trim(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    };
+    let task =
+        |verb: &str| -> Vec<String> { vec![verb.into(), "/TN".into(), update::TASK_NAME.into()] };
+    say("no desktop here: starting it again in the logged-on player's session (a scheduled task)");
+    let not_run = |why: String| -> i32 {
+        say(&format!("not run (exit {}): {why}", update::NOT_RUN));
+        let results = exit_file.with_file_name(update::RESULTS_LATEST);
+        let _ = std::fs::write(
+            &results,
+            update::physics_not_run(update::NOT_RUN, &why, None),
+        );
+        update::NOT_RUN
+    };
+    if let Err(why) = schtasks(&update::task_create_args(&exe, dir)) {
+        return not_run(format!("the task could not be made: {why}"));
+    }
+    if let Err(why) = schtasks(&task("/Run")) {
+        let _ = schtasks(&{
+            let mut d = task("/Delete");
+            d.push("/F".into());
+            d
+        });
+        return not_run(format!(
+            "the task could not run (is the player logged on at the PC?): {why}"
+        ));
+    }
+    let since = std::time::Instant::now();
+    let code = loop {
+        if let Some(code) = std::fs::read_to_string(exit_file)
+            .ok()
+            .and_then(|t| update::exit_file_code(&t))
+        {
+            break code;
+        }
+        if since.elapsed().as_secs() > update::IN_SESSION_MOST {
+            break not_run(format!(
+                "the run in the player's session did not end within {} min",
+                update::IN_SESSION_MOST / 60
+            ));
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    };
+    let _ = schtasks(&{
+        let mut d = task("/Delete");
+        d.push("/F".into());
+        d
+    });
+    say(&format!(
+        "the run in the player's session ended: exit {code}"
+    ));
+    code
+}
+
+/// The run itself, here (a desktop session).
+fn physics_test_here(dir: &Path, logs: &Path, say: &dyn Fn(&str)) -> i32 {
+    let dir = dir.to_path_buf();
+    let results = logs.join(update::RESULTS_LATEST);
     let installed = || {
         std::fs::read_to_string(dir.join("BUILD.txt"))
             .ok()

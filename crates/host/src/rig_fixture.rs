@@ -139,6 +139,9 @@ thread_local! {
     pub static FLOOR: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
     /// Its slope (a point's x and y, the rise along x and along y: units a unit), none flat.
     pub static SLOPE: std::cell::Cell<Option<[f32; 4]>> = const { std::cell::Cell::new(None) };
+    /// Bumps on it, as a trench's dirt (a point's x and y, the height and the length of a bump:
+    /// game units), none smooth.
+    pub static BUMPS: std::cell::Cell<Option<[f32; 4]>> = const { std::cell::Cell::new(None) };
     /// The world the tests' ray casts meet (`crate::active_ragdoll`'s `cast_world`): the floor
     /// and these boxes (each its least and most corner, game units: a wall, a crate, a slab);
     /// none: the casts find nothing, as before.
@@ -151,10 +154,17 @@ thread_local! {
 /// The ground under `at` (the floor, tilted by [`SLOPE`]), boxes aside.
 fn ground_at(at: V3) -> Option<f32> {
     let f = FLOOR.with(std::cell::Cell::get)?;
-    Some(match SLOPE.with(std::cell::Cell::get) {
-        Some([x0, y0, gx, gy]) => f + gx * (at[0] - x0) + gy * (at[1] - y0),
-        None => f,
-    })
+    let bumps = BUMPS.with(std::cell::Cell::get).map_or(0.0, |[x0, y0, h, l]| {
+        let k = std::f32::consts::TAU / l.max(1.0);
+        h * ((at[0] - x0) * k).sin() * ((at[1] - y0) * k * 0.77).cos()
+    });
+    Some(
+        bumps
+            + match SLOPE.with(std::cell::Cell::get) {
+                Some([x0, y0, gx, gy]) => f + gx * (at[0] - x0) + gy * (at[1] - y0),
+                None => f,
+            },
+    )
 }
 
 /// The tests' collision floor under `at` ([`FLOOR`], tilted by [`SLOPE`]): with a [`WORLD`], the
@@ -252,6 +262,7 @@ impl Fixture {
         e.register_double(0x008c_7aa0, |_, _| 0u32.into_ret());
         FLOOR.with(|f| f.set(ground.collision));
         SLOPE.with(|f| f.set(None));
+        BUMPS.with(|f| f.set(None));
         WORLD.with(|w| *w.borrow_mut() = None);
         ARMED.with(|a| a.set(false));
         let at: Vec<u32> = (0..nodes.len() as u32)

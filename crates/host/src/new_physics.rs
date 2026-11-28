@@ -1067,7 +1067,9 @@ fn strike(
     a.floor_logs = 0;
     a.wall_logs = 0;
     a.history.clear();
-    note(format!(
+    // Every hit said (never dropped by the log's 20 lines a second: Patrick's 23:16 log had one
+    // `[np hit]` while later shots jolted the body).
+    note_event(format!(
         "{:08X}: [np hit] {} N s on {} ({:.2} m/s on its {:.0} kg); {against}",
         a.id,
         format_args!("{p:.1}"),

@@ -287,7 +287,6 @@ pub(crate) trait DlBody: Send {
     fn relax(&mut self) -> Result<(), String>;
     fn rise(&mut self, on: bool, help: f32) -> Result<(), String>;
     fn follow(&mut self, parts: &[Transform]) -> Result<(), String>;
-    fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String>;
     fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String>;
     fn kick(&mut self, dv: Vec3) -> Result<(), String>;
 }
@@ -340,9 +339,6 @@ impl DlBody for RealBody {
     }
     fn follow(&mut self, parts: &[Transform]) -> Result<(), String> {
         self.agent.follow(parts)
-    }
-    fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String> {
-        self.agent.motions()
     }
     fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String> {
         self.agent.set_part(part, state)
@@ -423,20 +419,15 @@ pub(crate) struct Dl {
     ground: Option<(V3, delirium_bridge::world::Mesh)>,
     /// Frames in a row its pose was not drawn (a one-frame jump held at the last right pose).
     glitch: u32,
-    /// Its joints kept inside the skeleton's limits this frame (down, dead): each step's pose
-    /// brought into them and put back on Delirium's parts. The most a joint was out (radians).
-    pub limits: bool,
+    /// Down or dead: the most a joint of the drawn pose was out of the skeleton's limits before it
+    /// was drawn inside them (radians).
     pub limited: f32,
-    /// Rising: how long Delirium's body has lagged New Physics' rise (s), New Physics waiting for
-    /// it meanwhile with its last pose (`target`).
-    lag: f32,
+    /// Rising or held standing: New Physics' pose of the frame before (its parts' velocities).
     target: Option<Vec<(M3, V3)>>,
-    /// The lag said this rise (once a rise, not each frame it lags: Patrick's 17:34 log had it
-    /// 109 times).
-    lag_said: bool,
-    /// While it lags New Physics' rise: the parts' pose its parts are eased toward each step
-    /// ([`RISE_GUIDE`] of the way), its muscles still on it.
-    guide: Option<Vec<Transform>>,
+    /// Rising or held standing: New Physics' rise pose its parts are put on each step, and their
+    /// velocities (m/s): the body Delirium's, its get-up New Physics' (its planted hands, its
+    /// timings; Delirium's muscles alone never lifted it: Patrick's 23:16 clip).
+    guide: Option<(Vec<Transform>, Vec<Vec3>)>,
     /// Seconds since this Delirium was made (after [`RETAKES_BACK_AFTER`] without a refusal the
     /// retakes are counted from none again).
     pub age: f32,
@@ -457,27 +448,25 @@ pub(crate) const GLITCHES: u32 = 3;
 /// muscles on New Physics' rise (Delirium's own half a weight left it lying while New Physics'
 /// rise stood: Patrick's 15:30 log, "standing" with the pelvis 21 of 66 units up).
 pub(crate) const RISE_HELP: f32 = 1.2;
-/// Rising, Delirium's pelvis this far under New Physics' (game units): New Physics' rise waits
-/// for it, at most [`RISE_WAIT`] seconds, then goes on from the body as it is.
-pub(crate) const RISE_LAG: f32 = 18.0;
-pub(crate) const RISE_WAIT: f32 = 2.0;
-/// Lagging the rise: each Delirium step its parts eased this share of the way to New Physics'
-/// rise pose (a 60th of a second each), so the body is lifted with its muscles, never left lying.
-pub(crate) const RISE_GUIDE: f32 = 0.12;
 /// A body taken again moves at most this fast (m/s, each part): New Physics' step from a pose
 /// deep in its walls had parts at many metres a second (Patrick's 17:34 clip: a light hit on a
 /// prone body, refused, taken again and thrown yards).
 pub(crate) const RETAKE_MOST: f32 = 2.0;
 /// Delirium this long with a body (s) without a refusal: its retakes counted from none again.
 pub(crate) const RETAKES_BACK_AFTER: f32 = 5.0;
-/// The skeleton's limits each Delirium step: this many of New Physics' passes (each a small step
-/// in): a joint brought in steadily, never thrown 100 degrees in a step.
-pub(crate) const LIMIT_PASSES: usize = 12;
-/// Under the knockdown threshold, a hit's stagger aid: this long (s), at most this much of g
-/// (the whole body's velocity changed toward its feet, so its own steps catch it).
-pub(crate) const AID_FOR: f32 = 1.5;
-pub(crate) const AID_MOST: f32 = 0.3;
+/// The skeleton's limits on the pose drawn: this many of New Physics' passes (each a small step
+/// in), enough to bring a joint all the way in.
+pub(crate) const LIMIT_PASSES: usize = 96;
+/// Under the knockdown threshold, a hit's stagger aid: this long (s), at most [`AID_MOST`] of g
+/// (the whole body's velocity changed toward its feet, so its own steps catch it), and the pelvis
+/// held up from [`AID_FROM`] of its standing height, at most [`AID_LIFT`] g. Patrick's 23:16 clip:
+/// a light 9mm still downed him about 1.5 s after the hit, with a third of g for 1.5 s.
+pub(crate) const AID_FOR: f32 = 3.0;
+pub(crate) const AID_MOST: f32 = 0.5;
+pub(crate) const AID_LIFT: f32 = 1.0;
+pub(crate) const AID_FROM: f32 = 0.9;
 const AID_K: f32 = 12.0;
+const AID_LIFT_K: f32 = 40.0;
 const AID_C: f32 = 3.0;
 
 /// What a Delirium-owned body is doing (Patrick's plan: Delirium has a human's body for the whole
@@ -678,11 +667,8 @@ impl Dl {
             own: Own::Hit,
             ground: None,
             glitch: 0,
-            limits: false,
             limited: 0.0,
-            lag: 0.0,
             target: None,
-            lag_said: false,
             guide: None,
             age: 0.0,
             worst: "",
@@ -728,37 +714,6 @@ impl Dl {
             }
             Own::Rise | Own::Up { .. } => self.agent.rise(true, RISE_HELP),
         }
-    }
-
-    /// Its parts `parts` (this step's) brought inside the skeleton's limits where a joint left
-    /// them, and put back on Delirium's body moving as they moved (Patrick's 15:30 clip: a downed
-    /// body's knee bent back through its pelvis, a leg stretched off at the hip).
-    fn hold_limits(&mut self, rig: &Rig, parts: Vec<Transform>) -> Result<Vec<Transform>, String> {
-        if parts.len() != 21 {
-            return Ok(parts);
-        }
-        let bodies = bodies_from_parts(rig, &parts, self.origin);
-        let (inside, out, worst) = into_limits(&bodies, LIMIT_PASSES);
-        if out > self.limited {
-            self.worst = worst;
-        }
-        self.limited = self.limited.max(out);
-        if out <= LIMIT_HOLD {
-            return Ok(parts);
-        }
-        let fixed = parts_from_bodies(rig, &inside, self.origin);
-        let motions = self.agent.motions()?;
-        for (k, (frame, (velocity, spin))) in fixed.iter().zip(motions).enumerate() {
-            self.agent.set_part(
-                k,
-                &PartState {
-                    frame: *frame,
-                    velocity,
-                    spin,
-                },
-            )?;
-        }
-        Ok(fixed)
     }
 
     /// The whole body's velocity changed by `dv` (m/s).
@@ -829,18 +784,16 @@ impl Dl {
         // Whole steps of Delirium's own (at most four a frame: a long frame is not caught up).
         self.pending += dt.clamp(0.0, 4.0 * STEP);
         while self.pending >= STEP - 1e-6 {
-            if let Some(g) = self.guide.as_ref() {
-                let now = self.agent.parts()?;
-                if now.len() == 21 && g.len() == 21 {
-                    let eased = between(&now, g, RISE_GUIDE);
-                    let motions = self.agent.motions()?;
-                    for (k, (frame, (velocity, spin))) in eased.iter().zip(motions).enumerate() {
+            // Rising or held standing: its parts on New Physics' pose (moving as it moves).
+            if let Some((g, v)) = self.guide.as_ref() {
+                if g.len() == 21 {
+                    for (k, frame) in g.iter().enumerate() {
                         self.agent.set_part(
                             k,
                             &PartState {
                                 frame: *frame,
-                                velocity,
-                                spin,
+                                velocity: v.get(k).copied().unwrap_or(Vec3::ZERO),
+                                spin: Vec3::ZERO,
                             },
                         )?;
                     }
@@ -848,10 +801,7 @@ impl Dl {
             }
             self.agent.step(STEP)?;
             self.pending -= STEP;
-            let mut now = self.agent.parts()?;
-            if self.limits {
-                now = self.hold_limits(rig, now)?;
-            }
+            let now = self.agent.parts()?;
             self.steps.0 = std::mem::replace(&mut self.steps.1, now);
         }
         self.frames += 1;
@@ -1198,8 +1148,13 @@ pub(crate) fn ground_mesh(
         for i in 0..n {
             let x = (corner[0] + i as f32 * GROUND_SPACING) * UNITS;
             let y = (corner[1] + j as f32 * GROUND_SPACING) * UNITS;
+            // From above the body (a trench's bank higher than the floor guessed: Patrick's 23:16
+            // clip, heels in the dirt), else from over the guess, else the guess.
             let z0 = guess([x, y]);
-            let z = cast([x, y, z0 + 40.0]).unwrap_or(z0);
+            let high = cast([x, y, centre[2].max(z0) + 100.0]);
+            let z = high
+                .or_else(|| cast([x, y, z0 + 40.0]))
+                .unwrap_or(z0);
             heights.push((z - origin[2]) / UNITS);
         }
     }
@@ -1212,7 +1167,7 @@ pub(crate) fn ground_mesh(
 }
 
 /// Why a pose of Delirium's is not to be drawn (none: it may be): a body that moved more than
-/// 25 units since the last frame, one more than 3 m from the pelvis (a body flung apart), or the
+/// [`crate::physics_checks::JUMP_MOST`] units since the last frame, one more than 3 m from the pelvis (a body flung apart), or the
 /// pelvis more than 10 m from where the take began (`origin`). Patrick's 22:38 clip: two bodies
 /// vanished a few frames after the take, as if flung out of the world.
 pub(crate) fn pose_wrong(
@@ -1221,8 +1176,8 @@ pub(crate) fn pose_wrong(
     origin: V3,
     dt: f32,
 ) -> Option<String> {
-    // A frame's move: 25 units, or 20 m/s over a long frame.
-    let most = (20.0 * UNITS * dt).max(25.0);
+    // A frame's move: 15 units (Patrick's 23:16 ask), or 20 m/s over a long frame.
+    let most = (20.0 * UNITS * dt).max(crate::physics_checks::JUMP_MOST);
     use ragdoll_core::flinch::{length, sub};
     let m = crate::new_physics::model();
     let pelvis = drawn.get(m.root)?.1;
@@ -1349,8 +1304,9 @@ pub(crate) fn stack_hit(
 }
 
 /// The stagger aid's velocity change this frame (m/s) for a body at `pose` standing `standing`
-/// high: its centre pulled back over its feet while its capture point is outside them, and lifted
-/// while its pelvis sinks under three quarters of its height, at most [`AID_MOST`] g.
+/// high: its centre pulled back over its feet while its capture point is outside them (at most
+/// [`AID_MOST`] g), and lifted while its pelvis sinks under [`AID_FROM`] of its height (at most
+/// [`AID_LIFT`] g).
 pub(crate) fn aid(pose: &Posture, standing: f32, dt: f32) -> V3 {
     let g = ragdoll_core::np_body::GRAVITY;
     let mut a = [0.0f32; 3];
@@ -1359,9 +1315,9 @@ pub(crate) fn aid(pose: &Posture, standing: f32, dt: f32) -> V3 {
             *x = AID_K * (pose.feet[i] - pose.com[i]) - AID_C * pose.v[i];
         }
     }
-    let low = 0.75 * standing - pose.pelvis_up;
+    let low = AID_FROM * standing - pose.pelvis_up;
     if low > 0.0 {
-        a[2] = AID_K * low / UNITS - AID_C * pose.v[2];
+        a[2] = AID_LIFT_K * low / UNITS - AID_C * pose.v[2];
     }
     let flat = (a[0] * a[0] + a[1] * a[1]).sqrt();
     let most = AID_MOST * g;
@@ -1369,7 +1325,7 @@ pub(crate) fn aid(pose: &Posture, standing: f32, dt: f32) -> V3 {
         a[0] *= most / flat;
         a[1] *= most / flat;
     }
-    a[2] = a[2].clamp(0.0, most);
+    a[2] = a[2].clamp(0.0, AID_LIFT * g);
     [a[0] * dt, a[1] * dt, a[2] * dt]
 }
 
@@ -1642,6 +1598,18 @@ pub(crate) fn frame_for(
             failed = Some(why);
         }
     }
+    if shots > 0 && d.own != Own::Hit && !d.killed {
+        note_event(format!(
+            "{id:08X}: [np delirium] {shots} hit(s) while {} ({:.2} m/s stacked): Delirium's body \
+             takes them as it lies, New Physics' settle and rise go on",
+            match d.own {
+                Own::Down => "down",
+                Own::Rise => "rising",
+                _ => "held standing",
+            },
+            slot.pain
+        ));
+    }
     if shots > 0 && d.own == Own::Hit && !d.killed {
         if knocked {
             slot.aid = 0.0;
@@ -1731,39 +1699,9 @@ pub(crate) fn frame_for(
     if d.dying.is_some() {
         np.to_limits = true;
     }
-    // Rising: New Physics' rise never runs ahead of the body. While Delirium's pelvis lags New
-    // Physics' by more than RISE_LAG, New Physics waits (its pose held, its own clock with it);
-    // after RISE_WAIT it goes on from the body as it is (Patrick's 15:30 log: New Physics stood
-    // while Delirium's body still lay, "standing" with the torso 101 degrees from upright).
-    let lags = alive
-        && d.own == Own::Rise
-        && match (d.target.as_ref(), d.last.get(m.root)) {
-            (Some(t), Some(l)) => t.get(m.root).is_some_and(|tp| tp.1[2] - l.1[2] > RISE_LAG),
-            _ => false,
-        };
-    if lags && !d.lag_said {
-        d.lag_said = true;
-        note_event(format!(
-            "{id:08X}: [np delirium] rising: Delirium's body lags New Physics' rise: New Physics \
-             waits for it (at most {RISE_WAIT:.0} s), its parts eased toward the rise's pose \
-             (said once a rise)"
-        ));
-    }
-    d.lag = if lags { d.lag + dt } else { 0.0 };
     let target = if !alive || d.own == Own::Hit {
         None
-    } else if lags && d.lag < RISE_WAIT {
-        d.target.clone()
     } else {
-        if lags {
-            note_event(format!(
-                "{id:08X}: [np delirium] rising: the body still {RISE_WAIT:.0} s behind New \
-                 Physics' rise: New Physics goes on from the body as it is"
-            ));
-            let still = vec![([0.0; 3], [0.0; 3]); d.last.len()];
-            put_on(np, &d.last, &still);
-            d.lag = 0.0;
-        }
         Some(np.frame(anim, floor, dt))
     };
     if let (true, Some(t)) = (follows, target.as_ref()) {
@@ -1771,29 +1709,35 @@ pub(crate) fn frame_for(
             failed.get_or_insert(why);
         }
     }
-    d.target = if follows { target.clone() } else { None };
-    // Lagging the rise (or held on New Physics' standing pose): its parts eased toward that pose
-    // each step, its muscles on it too.
-    d.guide = match (
-        follows && (lags || matches!(d.own, Own::Up { .. })),
-        target.as_ref(),
-    ) {
-        (true, Some(t)) => Some(parts_from_bodies(d.rig, t, d.origin)),
+    // Rising or held standing: Delirium's parts on New Physics' rise pose each step, moving as it
+    // moves (the earlier frame's pose to this one's), and that pose drawn: no lag, no float, no
+    // snap (Patrick's 23:16 clip: eased toward it, the body floated up seated, its hands unused).
+    d.guide = match (follows, target.as_ref()) {
+        (true, Some(t)) => {
+            let parts = parts_from_bodies(d.rig, t, d.origin);
+            let v = match d.target.as_ref() {
+                Some(prev) if dt > 0.0 => parts_from_bodies(d.rig, prev, d.origin)
+                    .iter()
+                    .zip(&parts)
+                    .map(|(a, b)| (b.translation - a.translation) / dt)
+                    .collect(),
+                _ => vec![Vec3::ZERO; parts.len()],
+            };
+            Some((parts, v))
+        }
         _ => None,
     };
+    d.target = if follows { target.clone() } else { None };
     // Its retakes counted from none again once it has kept a body a while.
     d.age += dt;
     if d.age > RETAKES_BACK_AFTER && (1..=RETAKES).contains(&slot.retakes) {
         slot.retakes = 0;
     }
-    // Down or dead: its joints held inside the skeleton's limits, each step (Patrick: joint limits
-    // while downed must hold).
-    d.limits = d.own == Own::Down || d.corpse.is_some();
     let step = match failed {
         Some(why) => Err(why),
         None => d.frame(&mesh, dt),
     };
-    let (drawn, done) = match step {
+    let (mut drawn, done) = match step {
         Ok(Step::Drawn(drawn)) => (drawn, None),
         Ok(Step::Done(drawn, why)) => (drawn, Some(why)),
         Err(why) => return refused(id, &why, slot, np, target),
@@ -1803,6 +1747,20 @@ pub(crate) fn frame_for(
         .all(|(r, t)| r.iter().all(|x| x.is_finite()) && t.iter().all(|x| x.is_finite()))
     {
         return refused(id, "its pose went bad", slot, np, target);
+    }
+    // Rising or held standing: New Physics' rise pose is the one drawn (Delirium's parts are on
+    // it). Down or dead: drawn inside the skeleton's limits (never put back on Delirium's parts:
+    // done each step, that fought its own solver, the writhing, the sliding and the stretched
+    // limbs of Patrick's 23:16 clip).
+    if let (true, Some(t)) = (follows, target.as_ref()) {
+        drawn = t.clone();
+    } else if d.own == Own::Down || d.corpse.is_some() {
+        let (inside, out, worst) = into_limits(&drawn, LIMIT_PASSES);
+        if out > d.limited {
+            d.worst = worst;
+        }
+        d.limited = d.limited.max(out);
+        drawn = inside;
     }
     // Never a body flung away. A jump of a frame or two is held at the last right pose (Patrick's
     // 15:30 log: one knee's 30-unit frame refused the body mid-stagger, and the new agent made
@@ -1861,8 +1819,8 @@ pub(crate) fn frame_for(
     }
     if d.limited > LIMIT_HOLD && d.frames % 30 == 0 {
         note(format!(
-            "{id:08X}: [np delirium] joints held inside the skeleton's limits (the most out {:.1} \
-             degrees before, {})",
+            "{id:08X}: [np delirium] joints drawn inside the skeleton's limits (the most out {:.1} \
+             degrees, {})",
             d.limited.to_degrees(),
             d.worst
         ));
@@ -1946,7 +1904,6 @@ pub(crate) fn frame_for(
     };
     let driven = match change {
         Change::Rising => {
-            d.lag_said = false;
             note_event(format!(
                 "{}: rising on Delirium (its muscles on New Physics' rise, the arms pushing off \
                  through planted hands)",
@@ -2667,7 +2624,8 @@ mod tests {
     }
 
     /// The stagger aid pulls the body back over its feet while its capture point is outside them,
-    /// lifts a sinking pelvis, never more than AID_MOST g, and does nothing to a body that stands.
+    /// lifts a sinking pelvis (never more than AID_LIFT g), never pulls more than AID_MOST g, and
+    /// does nothing to a body that stands.
     #[test]
     fn the_stagger_aid_pulls_back_over_the_feet() {
         let dt = 1.0 / 60.0;
@@ -2693,7 +2651,7 @@ mod tests {
         assert!(back[0].abs() <= AID_MOST * g * dt + 1e-6);
         let lift = aid(&pose(0.0, [0.0, 0.0, 0.6], [0.0; 3], 40.0), 67.0, dt);
         assert!(
-            lift[2] > 0.0 && lift[2] <= AID_MOST * g * dt + 1e-6,
+            lift[2] > 0.0 && lift[2] <= AID_LIFT * g * dt + 1e-6,
             "{lift:?}"
         );
     }

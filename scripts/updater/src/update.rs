@@ -93,6 +93,46 @@ pub const RESULTS_LATEST: &str = "physics-selftest-latest.txt";
 /// The longest the game's self-test may take (s) before the launcher ends it.
 pub const PHYSICS_TEST_MOST: u64 = 20 * 60;
 
+/// The unattended run's own log (its first line written the moment it starts), the file its last
+/// step writes its exit code to, the flag of a run started in the player's desktop session, and
+/// the scheduled task that starts it there (a shell with no desktop: a remote or background one,
+/// where the game can't open its window).
+pub const LAUNCHER_LOG: &str = "launcher.log";
+pub const EXIT_FILE: &str = "physics-test-exit.txt";
+pub const IN_SESSION: &str = "--in-session";
+pub const TASK_NAME: &str = "nv-rs physics test";
+/// The longest the run started in the desktop session may take (s): the wait for the tester's
+/// build, its update and the self-test.
+pub const IN_SESSION_MOST: u64 = TESTER_WAIT + PHYSICS_TEST_MOST + 10 * 60;
+
+/// `schtasks.exe`'s arguments that make the task running `exe` (the launcher) in the logged-on
+/// player's own desktop session (`/IT`: only while they are logged on) for the tester at `dir`.
+pub fn task_create_args(exe: &Path, dir: &Path) -> Vec<String> {
+    let run = format!(
+        "\"{}\" {PHYSICS_TEST} --install \"{}\" {IN_SESSION}",
+        exe.display(),
+        dir.display()
+    );
+    [
+        "/Create", "/F", "/TN", TASK_NAME, "/SC", "ONCE", "/ST", "23:59", "/IT", "/TR",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .chain([run])
+    .collect()
+}
+
+/// The exit code an exit file says (`exit N` on its first line); `None` before it is written.
+pub fn exit_file_code(text: &str) -> Option<i32> {
+    text.lines()
+        .next()?
+        .trim()
+        .strip_prefix("exit ")?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// The unattended run's arguments: `None` without [`PHYSICS_TEST`]; else the tester's folder
 /// given with `--install` (none: found from where the launcher is).
 pub fn physics_test_args(args: &[String]) -> Option<Option<PathBuf>> {
@@ -653,6 +693,29 @@ mod tests {
     /// The tester's release behind the newest Play build (Patrick, 0c1fbbf: f9eac18's tester was
     /// started as the newest): the launcher waits for it, whatever is installed; once it is out,
     /// it is installed unless it is the installed one.
+    /// A run with no desktop starts itself again in the player's session: the task's command line
+    /// quotes the launcher and the tester's folder (spaces in them) and carries `--in-session`; the
+    /// exit file's code is read back.
+    #[test]
+    fn the_run_starts_again_in_the_players_session() {
+        let args = task_create_args(
+            Path::new("C:\\a b\\Launcher.exe"),
+            Path::new("C:\\a b\\tester"),
+        );
+        assert!(args.iter().any(|a| a == "/IT"));
+        let run = args.last().unwrap();
+        assert!(
+            run.starts_with("\"C:\\a b\\Launcher.exe\" --update-and-physics-test"),
+            "{run}"
+        );
+        assert!(run.contains("--install \"C:\\a b\\tester\"") && run.ends_with(IN_SESSION));
+        assert!(run.len() < 261, "schtasks /TR is at most 261 characters");
+        assert_eq!(exit_file_code("exit 1\n"), Some(1));
+        assert_eq!(exit_file_code("exit 0"), Some(0));
+        assert_eq!(exit_file_code(""), None);
+        assert_eq!(exit_file_code("half"), None);
+    }
+
     /// The unattended run: its flag and `--install`, its folder, and the exit code each results
     /// file says.
     #[test]

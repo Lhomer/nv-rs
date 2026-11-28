@@ -52,6 +52,9 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
     // The ground: the fixture's floor, tilted as the replay's, met by every cast.
     let at = f.reference();
     rig_fixture::SLOPE.with(|c| c.set(Some([at[0], at[1], s.slope[0], s.slope[1]])));
+    rig_fixture::BUMPS.with(|c| {
+        c.set((s.bumps[0] > 0.0).then_some([at[0], at[1], s.bumps[0], s.bumps[1]]))
+    });
     rig_fixture::WORLD.with(|w| *w.borrow_mut() = Some(Vec::new()));
     // A hand-over to the game's ragdoll, should one come: answered as the game would.
     f.e.register_double(0x008c_7aa0, |_, _| 0u32.into_ret());
@@ -101,10 +104,12 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
         if !died {
             keyframe(&mut f);
         }
+        let mut struck = 0.0f32;
         for (_, body, p, dir) in s.hits.iter().filter(|h| h.0 == i) {
             let b = model().body(body).unwrap_or(model().root);
             let point = f.world_of(f.at[body_nodes[b]]).1;
             hit_shot(&mut f.e, ACTOR, *p, point, *dir, false);
+            struck = struck.max(*p);
         }
         if s.kill == Some(i) && !died {
             died = true;
@@ -113,10 +118,17 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
         crate::active_ragdoll::apply(&mut f.e);
         crate::active_ragdoll::read_drawn(&mut f.e);
         let p = watch(ACTOR);
+        let drawn = p.as_ref().map(|p| p.drawn.clone()).unwrap_or_default();
         frames.push(Frame {
             t,
             dt,
-            drawn: p.as_ref().map(|p| p.drawn.clone()).unwrap_or_default(),
+            ground: drawn
+                .iter()
+                .map(|b| rig_fixture::floor_at(b.1).unwrap_or(floor))
+                .collect(),
+            drawn,
+            hit: struck,
+            rising: p.as_ref().is_some_and(|p| p.down && p.rise),
             floor: rig_fixture::floor_at(f.reference()).unwrap_or(floor),
             owner: p.as_ref().map_or("animation", |p| p.owner),
             havok: p.as_ref().is_some_and(|p| p.handing.is_some()),
@@ -125,8 +137,20 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
             dead: died,
         });
     }
+    // Who had it, each change (with the pelvis over the floor): the run's story, beside its lines.
+    let mut last = String::new();
+    for f in &frames {
+        let rising = if f.rising { " (rising)" } else { "" };
+        let tag = format!("{}{rising}", f.owner);
+        if tag != last {
+            let up = physics_checks::stance(&f.drawn, f.floor).map_or(-1.0, |p| p.0);
+            println!("  {}: {:.2} s {tag}, the pelvis {up:.0} u up", s.name, f.t);
+            last = tag;
+        }
+    }
     crate::delirium_stand_in::set_on(false);
     rig_fixture::SLOPE.with(|c| c.set(None));
+    rig_fixture::BUMPS.with(|c| c.set(None));
     rig_fixture::WORLD.with(|w| *w.borrow_mut() = None);
     crate::gunplay::set_tuning(was);
     let mut expect = s.expect();
@@ -159,8 +183,9 @@ fn run_all(scenarios: &[Scenario]) -> (Vec<String>, Vec<String>) {
 
 /// The self-test's scenarios, synthetic, over the stand-in: every check of the integration's own
 /// passes (no snap at the end of a rise, no pose jumps, no launch, no joint past its limit while
-/// down, never under the floor, never the game's ragdoll, the AI has it back, a corpse
-/// Delirium's).
+/// down, never under the ground under each body, no limb stretched, no light hit downing it, never
+/// down again of its own, never a stiff body sliding, every rise with its hands planted, never the
+/// game's ragdoll, the AI has it back, a corpse Delirium's).
 #[test]
 fn replay_the_selftest_scenarios_over_the_stand_in() {
     let (failed, fixed) = run_all(&physics_replay::synthetic());

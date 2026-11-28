@@ -33,6 +33,7 @@ console's `kill`, the target's essential flag cleared first).
 | `kill-mid-rise` | a heavy hit, then the console's kill half a second into its rise | dies, a Delirium corpse |
 | `past-threshold` | a heavy hit | rises |
 | `light-standing-slope`, `past-threshold-slope` | the same on a slope of 1:8 to 1:2 found within 20 m of the room (SKIP when there is none) | stays / rises |
+| `trench` | on uneven ground as a trench's dirt (bumps of 12 to 60 units within 1.4 m, found within 30 m of the room; SKIP when there is none): a 9mm standing, 4 s later a heavy hit, then three 9mm hits while it is down (forearm, chest, calf) | the 9mm doesn't down it; it rises |
 
 ### Unattended: `Launcher.exe --update-and-physics-test`
 
@@ -43,6 +44,12 @@ for the tester's build to catch up with Play's newest, updates the physics teste
 `Play.exe --physics-test` with no launcher window (`NV_RS_NO_WINDOWS=1`) until the game ends by
 itself (at most 20 minutes, then it is ended), and reads the results. If the game or Play.exe is
 already running it does nothing.
+
+**Started from a shell with no desktop** (a remote or background PowerShell, Windows' session
+0, where the game can't open its window): it starts itself again in the logged-on player's own
+desktop session (a scheduled task, `nv-rs physics test`, interactive only, removed afterwards)
+and waits for that run, passing on its exit code. The player has to be logged on at the PC
+(the screen may be locked or the window minimized).
 
 Exit code: **0** every check passed, **1** a check failed, **2** it could not run (no tester and
 no release, the game wrote no results, the self-test ran out of time), **3** the game or Play.exe
@@ -69,8 +76,9 @@ Files, in the tester's `userdata\logs`:
 
 - `physics-selftest-latest.txt`: the newest results, always here (a `NOT RUN (exit N)` one with
   the reason when it could not run).
-- `physics-test-launcher.txt`: what the launcher did (the builds it saw, the update, the wait,
-  Play.exe's end).
+- `launcher.log`: what the launcher did, its first line the moment it starts (its session and
+  whether it has a desktop, the builds it saw, the update, the wait, Play.exe's end).
+- `physics-test-exit.txt`: `exit N`, the run's last step.
 - `physics-selftest-<UTC stamp>.txt` and `-replay.txt`: each run's own (below).
 - `game-<stamp>.log`: the run's game log (its path is in the results' header).
 
@@ -82,7 +90,7 @@ Files, in the tester's `userdata\logs`:
   `replay:` and `game log:` their paths), then a line per check, `PASS|FAIL|SKIP <scenario>: <check> (<where it counts>): <figures>`, and at the
   end `ALL PASS` or `FAILED: <scenarios>`.
 - `physics-selftest-YYYYMMDD-HHMMSS-replay.txt`: what was done, frame by frame (each frame's
-  seconds, the hits, the death's frame, the slope, the standing height): nothing of GTA IV's and no
+  seconds, the hits, the death's frame, the slope, the bumps, the standing height): nothing of GTA IV's and no
   game file's contents, safe to paste. Layer 2 runs it again.
 
 The game's log has the self-test's last line: `physics self-test: all pass` or `N failed (...)`,
@@ -96,9 +104,9 @@ and where the two files went. The Record button and F9 still record clips while 
 (`crate::delirium_stand_in`: a mechanical double; a light hit shoves it, a heavy hit or its death
 tips it over its feet, its muscles on, its parts go where it is told). Everything between the two
 is the real integration: `crate::delirium_np`'s frame, the put-on, the hand-overs and retakes, the
-joint limits held, the ground cast and fed, the rise's sequencing, the hand-back to the animation.
-The CI runs `physics_replay::synthetic()` (the same scenarios at 120 frames a second, flat and on
-a slope). A replay from the player's PC runs the same way:
+joint limits drawn, the ground cast and fed, the rise drawn as New Physics' with Delirium's parts put on it, the hand-back to the animation.
+The CI runs `physics_replay::synthetic()` (the same scenarios at 120 frames a second, flat, on
+a slope and in a trench's bumps, 12 units high every 100). A replay from the player's PC runs the same way:
 
 ```
 NV_PHYSICS_REPLAY=physics-selftest-...-replay.txt cargo test -p host --lib replay_from_the_file -- --nocapture
@@ -116,10 +124,15 @@ Each check is in `crate::physics_checks` and is the same in both layers.
 | the rise ends with no snap (no bone over 10 units a frame within a second of upright) | counts | counts |
 | the AI has it again (New Physics lets it go to its animation within 6 s of upright) | counts | counts |
 | the corpse is Delirium's (and the game's ragdoll held on its pose: lootable, draggable) | counts | counts (the hold not asked) |
-| no pose jumps (no bone over 25 units a frame) | counts | counts |
-| no launch (no bone over 9 m/s, a wall under 20000 N, the floor under 25 body weights) | counts | counts |
+| no pose jumps (no bone over 15 units a frame) | counts | counts |
+| no launch (no bone over 9 m/s, the pelvis never 25 units over standing, a wall under 20000 N, the floor under 25 body weights) | counts | counts |
 | no joint past its limit while down or dead (under 5 degrees, from 0.25 s lying) | counts | counts |
-| never under the floor (no node over 5 units under it) | counts | counts |
+| never under the ground (no node over 5 units under the ground under it, each body's own) | counts | counts |
+| no limb stretched (no bone more than 12% and 3 units off its length) | counts | counts |
+| a light hit never downs it (no 9mm-class hit, under 100 N s, followed by lying within 3 s) | counts | counts |
+| never down again of its own (lying again with no hit in the 1.5 s before) | counts | counts |
+| never sliding while limp (from 1 s lying, no 0.5 s with the pelvis 15 units across and no bone 4 units about it) | counts | counts |
+| every rise with its hands planted (rising with the pelvis under 60% of standing, a wrist within 15 units of the ground) | counts | counts |
 | never the game's ragdoll (no hand-over to it, no frame waiting for one) | counts | counts |
 
 What only real Delirium can show (its stagger keeps it up, its muscles lift it) counts only on the

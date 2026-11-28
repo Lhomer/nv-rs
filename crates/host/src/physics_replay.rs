@@ -11,6 +11,7 @@
 //! scenario light-standing
 //! expect stays 67.0
 //! slope 0.000 0.000
+//! bumps 12.0 100.0
 //! dt 0.0083 0.0081 ...
 //! hit 120 Bip01_Spine2 25.9 0.000 -1.000 0.000
 //! kill 900
@@ -26,6 +27,8 @@ pub struct Scenario {
     pub standing: f32,
     /// The ground's rise along x and y (units a unit) under the actor.
     pub slope: [f32; 2],
+    /// Its bumps (a trench's dirt): a bump's height and length (game units); 0: smooth.
+    pub bumps: [f32; 2],
     /// Each frame's seconds.
     pub dt: Vec<f32>,
     /// The hits: the frame, the body's node, the impulse (N s), its direction.
@@ -52,6 +55,9 @@ pub fn write(scenarios: &[Scenario]) -> String {
         out += &format!("scenario {}\n", s.name);
         out += &format!("expect {} {:.1}\n", s.expect, s.standing);
         out += &format!("slope {:.4} {:.4}\n", s.slope[0], s.slope[1]);
+        if s.bumps[0] > 0.0 {
+            out += &format!("bumps {:.1} {:.1}\n", s.bumps[0], s.bumps[1]);
+        }
         for chunk in s.dt.chunks(32) {
             let line: Vec<String> = chunk.iter().map(|d| format!("{d:.5}")).collect();
             out += &format!("dt {}\n", line.join(" "));
@@ -95,6 +101,7 @@ pub fn parse(text: &str) -> Result<Vec<Scenario>, String> {
                     expect: String::new(),
                     standing: 0.0,
                     slope: [0.0; 2],
+                    bumps: [0.0; 2],
                     dt: Vec::new(),
                     hits: Vec::new(),
                     kill: None,
@@ -108,6 +115,7 @@ pub fn parse(text: &str) -> Result<Vec<Scenario>, String> {
                         s.standing = f(2)?;
                     }
                     "slope" => s.slope = [f(1)?, f(2)?],
+                    "bumps" => s.bumps = [f(1)?.clamp(0.0, 60.0), f(2)?.clamp(20.0, 400.0)],
                     "dt" => {
                         for i in 1..w.len() {
                             s.dt.push(f(i)?.clamp(0.0, 0.1));
@@ -146,6 +154,7 @@ pub fn synthetic() -> Vec<Scenario> {
         expect: expect.into(),
         standing: 0.0,
         slope,
+        bumps: [0.0; 2],
         dt: frames(seconds),
         hits: hits
             .into_iter()
@@ -209,6 +218,26 @@ pub fn synthetic() -> Vec<Scenario> {
             ],
             None,
         ),
+        // Patrick's 23:16 clip: a light 9mm on a Powder Ganger standing in a trench's uneven dirt
+        // (it must stay up), then a heavy hit and more 9mm hits while it is down (it must rise,
+        // its hands planted, nothing launched, stretched, sunk in the dirt or sliding).
+        Scenario {
+            bumps: [12.0, 100.0],
+            ..s(
+                "trench",
+                "rises",
+                22.0,
+                [0.0; 2],
+                vec![
+                    (60, "Bip01 Spine2", 25.9, back),
+                    (540, "Bip01 Spine2", 160.0, back),
+                    (780, "Bip01 R Forearm", 25.9, back),
+                    (840, "Bip01 Spine2", 25.9, back),
+                    (900, "Bip01 L Calf", 25.9, back),
+                ],
+                None,
+            )
+        },
         s(
             "dies-downed",
             "dies",
@@ -239,6 +268,7 @@ mod tests {
             assert_eq!(a.hits.len(), b.hits.len());
             assert_eq!(a.hits[0].1, b.hits[0].1);
             assert_eq!(a.kill, b.kill);
+            assert_eq!(a.bumps, b.bumps);
         }
         assert!(parse("hit 1 x 2 0 0 0").is_err());
     }

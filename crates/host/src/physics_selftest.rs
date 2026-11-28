@@ -34,6 +34,8 @@ pub fn on() -> bool {
 pub enum Place {
     Flat,
     Slope,
+    /// Uneven ground, as a trench's dirt (bumps of 12 to 60 units within a 1.4 m square).
+    Uneven,
 }
 
 /// Which way a hit comes: from the player (it falls away, face up) or from behind it (toward the
@@ -74,7 +76,8 @@ const HEAVY: f32 = 160.0;
 
 /// Patrick's list (17:47): a light body shot standing, a head shot, a body shot while staggering,
 /// hits downed face down and face up, a hit mid-rise, a killing shot mid-rise, a hit past the
-/// knockdown threshold; the light hit and the heavy one again on the slope.
+/// knockdown threshold; the light hit and the heavy one again on the slope; and Patrick's 23:16
+/// case, a light hit standing in a trench's uneven dirt, then hits while it is down there.
 pub const PLANS: &[Plan] = &[
     Plan {
         name: "light-standing",
@@ -170,6 +173,28 @@ pub const PLANS: &[Plan] = &[
         expect: "rises",
         watch: 14.0,
     },
+    // Patrick's 23:16 clip: one 9mm on a Powder Ganger standing in a trench's uneven dirt (it must
+    // stay up: "a light hit never downs it"), then a heavy hit and more 9mm hits while it is down
+    // (it must rise with its hands planted, never launched, stretched, sunk in the dirt, sliding
+    // or down again of its own).
+    Plan {
+        name: "trench",
+        place: Place::Uneven,
+        acts: &[
+            Act::Hit("Bip01 Spine2", NINE, From::Front),
+            Act::Wait(4.0),
+            Act::Hit("Bip01 Spine2", HEAVY, From::Front),
+            Act::UntilDown(8.0),
+            Act::Wait(1.0),
+            Act::Hit("Bip01 R Forearm", NINE, From::Front),
+            Act::Wait(0.5),
+            Act::Hit("Bip01 Spine2", NINE, From::Front),
+            Act::Wait(0.5),
+            Act::Hit("Bip01 L Calf", NINE, From::Back),
+        ],
+        expect: "rises",
+        watch: 14.0,
+    },
 ];
 
 /// Seconds the target is left to settle after it is placed, and the whole run's most (s).
@@ -203,6 +228,10 @@ struct Run {
     failed: Vec<&'static str>,
     replays: Vec<Scenario>,
     slope: Option<Option<V3>>,
+    /// The uneven spot (and its bumps' height), once looked for.
+    uneven: Option<Option<(V3, f32)>>,
+    /// The impulse of a hit this frame (N s), for the frame watched next.
+    struck: f32,
 }
 
 static RUN: Mutex<Option<Run>> = Mutex::new(None);
@@ -227,6 +256,8 @@ pub fn frame(e: &mut Engine, player: u32) {
         failed: Vec::new(),
         replays: Vec::new(),
         slope: None,
+        uneven: None,
+        struck: 0.0,
     });
     let dt = {
         let s = e.mem.f32(0x011d_ea30);
@@ -335,6 +366,7 @@ fn empty(name: &str) -> Scenario {
         expect: String::new(),
         standing: 0.0,
         slope: [0.0; 2],
+        bumps: [0.0; 2],
         dt: Vec::new(),
         hits: Vec::new(),
         kill: None,
@@ -353,11 +385,18 @@ fn begin(e: &mut Engine, player: u32, run: &mut Run) {
     let Some((target, at, _)) = crate::test_range::phone_target() else {
         return;
     };
-    if plan.place == Place::Slope {
-        if run.slope.is_none() {
+    if plan.place == Place::Slope || plan.place == Place::Uneven {
+        if plan.place == Place::Slope && run.slope.is_none() {
             run.slope = Some(find_slope(e, at));
         }
-        match run.slope.flatten() {
+        if plan.place == Place::Uneven && run.uneven.is_none() {
+            run.uneven = Some(find_uneven(e, at));
+        }
+        let spot = match plan.place {
+            Place::Slope => run.slope.flatten(),
+            _ => run.uneven.flatten().map(|u| u.0),
+        };
+        match spot {
             Some(p) => {
                 let t = id(e, target);
                 for (axis, v) in ["x", "y", "z"].iter().zip([p[0], p[1], p[2] + 5.0]) {
@@ -366,8 +405,13 @@ fn begin(e: &mut Engine, player: u32, run: &mut Run) {
             }
             None => {
                 run.lines.push(format!(
-                    "SKIP {}: no slope between 1:8 and 1:2 found within 20 m of the room",
-                    plan.name
+                    "SKIP {}: {} found within 30 m of the room",
+                    plan.name,
+                    if plan.place == Place::Slope {
+                        "no slope between 1:8 and 1:2"
+                    } else {
+                        "no uneven ground (bumps of 12 to 60 units within 1.4 m)"
+                    }
                 ));
                 run.plan += 1;
                 if run.plan >= PLANS.len() {
@@ -415,6 +459,54 @@ fn find_slope(e: &mut Engine, at: V3) -> Option<V3> {
     None
 }
 
+/// A spot near `at` (within 30 m) whose ground is uneven as a trench's dirt: its heights over a
+/// 1.4 m square (5 by 5 casts) 12 to 60 units apart, no step between neighbours over 1:1; and
+/// the bumps' height (half the spread). None if the room has none.
+fn find_uneven(e: &mut Engine, at: V3) -> Option<(V3, f32)> {
+    let u = ragdoll_core::np_body::UNITS;
+    let step = 0.35 * u;
+    for r in [0.0f32, 3.0, 5.0, 8.0, 11.0, 14.0, 18.0, 22.0, 26.0, 30.0] {
+        let n = if r == 0.0 { 1 } else { 16 };
+        for k in 0..n {
+            let a = k as f32 * std::f32::consts::TAU / n as f32;
+            let p = [at[0] + a.cos() * r * u, at[1] + a.sin() * r * u];
+            let Some(h) = ground(e, p, at[2]) else {
+                continue;
+            };
+            let mut hs = [[0.0f32; 5]; 5];
+            let mut ok = true;
+            for (j, row) in hs.iter_mut().enumerate() {
+                for (i, x) in row.iter_mut().enumerate() {
+                    let q = [
+                        p[0] + (i as f32 - 2.0) * step,
+                        p[1] + (j as f32 - 2.0) * step,
+                    ];
+                    match ground(e, q, h) {
+                        Some(z) => *x = z,
+                        None => ok = false,
+                    }
+                }
+            }
+            if !ok {
+                continue;
+            }
+            let all = hs.iter().flatten();
+            let (lo, hi) = all.fold((f32::INFINITY, f32::NEG_INFINITY), |a, &z| {
+                (a.0.min(z), a.1.max(z))
+            });
+            let steep = (0..5).any(|j| {
+                (0..4).any(|i| {
+                    (hs[j][i + 1] - hs[j][i]).abs() > step || (hs[i + 1][j] - hs[i][j]).abs() > step
+                })
+            });
+            if (12.0..=60.0).contains(&(hi - lo)) && !steep {
+                return Some(([p[0], p[1], h], (hi - lo) * 0.5));
+            }
+        }
+    }
+    None
+}
+
 /// A hit on `body` of the target with `p` N s.
 fn hit(e: &mut Engine, player: u32, run: &mut Run, body: &'static str, p: f32, from: From) {
     let target = run.target;
@@ -436,6 +528,7 @@ fn hit(e: &mut Engine, player: u32, run: &mut Run, body: &'static str, p: f32, f
     let point =
         crate::new_physics::body_point(e, target, body).unwrap_or([it[0], it[1], it[2] + 85.0]);
     crate::new_physics::hit_shot(e, target, p, point, dir, false);
+    run.struck = run.struck.max(p);
     run.replay
         .hits
         .push((run.replay.dt.len(), body.to_string(), p, dir));
@@ -454,10 +547,19 @@ fn observe(e: &mut Engine, run: &mut Run, dt: f32) {
         run.standing = w.as_ref().and_then(|w| w.standing).unwrap_or(0.0);
     }
     run.replay.dt.push(dt);
+    let drawn = w.as_ref().map(|w| w.drawn.clone()).unwrap_or_default();
+    // The ground under each body, cast from over the pelvis' floor (a trench's bank, a slope).
+    let ground_under = drawn
+        .iter()
+        .map(|b| ground(e, [b.1[0], b.1[1]], floor).unwrap_or(floor))
+        .collect();
     run.frames.push(Frame {
         t: run.t,
         dt,
-        drawn: w.as_ref().map(|w| w.drawn.clone()).unwrap_or_default(),
+        drawn,
+        ground: ground_under,
+        hit: std::mem::take(&mut run.struck),
+        rising: w.as_ref().is_some_and(|w| w.down && w.rise),
         floor,
         owner: w.as_ref().map_or("animation", |w| w.owner),
         havok: w.as_ref().is_some_and(|w| w.handing.is_some()),
@@ -512,6 +614,11 @@ fn judge(e: &mut Engine, run: &mut Run) {
                 gx.map_or(0.0, |(a, b)| (a - b) / u),
                 gy.map_or(0.0, |(a, b)| (a - b) / u),
             ];
+        }
+    }
+    if plan.place == Place::Uneven {
+        if let Some(Some((_, h))) = run.uneven {
+            replay.bumps = [h, 100.0];
         }
     }
     run.replays.push(replay);
@@ -619,10 +726,12 @@ mod tests {
             "mid-rise-hit",
             "kill-mid-rise",
             "past-threshold",
+            "trench",
         ] {
             assert!(names.contains(&n), "{n}");
         }
         assert!(PLANS.iter().any(|p| p.place == Place::Slope));
+        assert!(PLANS.iter().any(|p| p.place == Place::Uneven));
         for p in PLANS {
             assert!(matches!(p.expect, "stays" | "rises" | "dies"), "{}", p.name);
             assert!(
