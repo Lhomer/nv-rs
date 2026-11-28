@@ -2359,6 +2359,21 @@ pub fn phone_target() -> Option<(u32, [f32; 3], f32)> {
     Some((target, at, angle))
 }
 
+/// Tests only: the phone's range ready with its target `form` (a form id, as the range keeps it)
+/// standing at `at`; none: the range off.
+#[cfg(test)]
+pub(crate) fn set_phone_target_for_tests(target: Option<(u32, [f32; 3])>) {
+    with_range(|r| {
+        r.phase = if target.is_some() {
+            Phase::Ready
+        } else {
+            Phase::Off
+        };
+        r.targets = target.map(|t| vec![t.0]).unwrap_or_default();
+    });
+    *PHONE_SPOT.lock().unwrap_or_else(|p| p.into_inner()) = target.map(|(_, at)| (0, at, 0.0));
+}
+
 /// The phone's guns given (form ids, in `phone_range::GUNS` order of those found).
 pub fn phone_guns() -> Vec<u32> {
     PHONE_GUNS

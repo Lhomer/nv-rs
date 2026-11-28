@@ -1375,6 +1375,8 @@ impl PlayerMovement {
                 } else {
                     crate::save_out::flush();
                 }
+                // The physics self-test's results written even so (where it was, this line).
+                crate::physics_selftest::at_stop(&line);
                 // The lines still on their way written first, so this one ends the log.
                 crate::hitch_log::flush_lines();
                 eprintln!("{line}");

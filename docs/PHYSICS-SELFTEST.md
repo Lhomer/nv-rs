@@ -75,7 +75,10 @@ $t = '<tester>'; $b = Join-Path $env:TEMP 'nv-rs-boot'; Remove-Item $b -Recurse 
 Files, in the tester's `userdata\logs`:
 
 - `physics-selftest-latest.txt`: the newest results, always here (a `NOT RUN (exit N)` one with
-  the reason when it could not run).
+  the reason when it could not run). While the game runs it says where the self-test is
+  (`RUNNING: <scenario> (n of N), <stage>`). If the game stops mid-run, the results are written
+  all the same: the scenarios done, `FAIL <scenario>: the game stopped N s into it (<stage>):
+  <the game's stop line>`, and `FAILED: ... (the game stopped in <scenario>)` last (exit 1).
 - `launcher.log`: what the launcher did, its first line the moment it starts (its session and
   whether it has a desktop, the builds it saw, the update, the wait, Play.exe's end).
 - `physics-test-exit.txt`: `exit N`, the run's last step.

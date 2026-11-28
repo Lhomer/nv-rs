@@ -7,6 +7,20 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-28 (the self-test's first run on Patrick's PC, ec4caa3: the crash at frame 575)
+
+**Status: see the commit.** The unattended command ran from Patrick's remote shell, but the game
+stopped 11 s in ("read of unmapped memory at ff00134a in 009445b0 < 0093e860 < 0086e650"): the
+self-test took `crate::test_range::phone_target()`'s target, a form id (FF00131A), for the
+reference itself, so New Physics claimed "actor" FF00131A and the game read its position at
++0x30. It now looks the reference up with the game's `LookupFormByID` each time
+(`physics_selftest::target_ref`; `room_script` always did); a form id naming no reference fails
+the scenario and goes on. CI never saw it: the replay drives the fixture's actor directly. The
+self-test also keeps what it has reached (`PROGRESS`, apart from the run's lock, which a fault
+inside a game call may leave taken): the latest results file says `RUNNING: <scenario>, <stage>`
+while it runs, and the game's stop (`player_move`) has it write its results with the stop's line
+and `FAILED` last (`physics_selftest::at_stop`).
+
 ### Claude, 2026-11-28 (Patrick's bug report 3, 23:16 on 29b839b: the trench clip, the launcher with no desktop)
 
 **Status: see the commit; pushed once the suites passed.** The launcher: `Launcher.exe

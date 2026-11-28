@@ -285,16 +285,13 @@ pub fn frame(e: &mut Engine, player: u32) {
         }
         Stage::Placing(until) => {
             run.t += dt;
-            if run.t >= until {
-                let plan = &PLANS[run.plan];
-                run.target = crate::test_range::phone_target().map_or(0, |t| t.0);
-                run.havok_before = crate::new_physics::to_havok(run.target);
-                run.frames.clear();
-                run.replay = empty(plan.name);
-                run.replay.expect = plan.expect.to_string();
-                run.t = 0.0;
-                run.stage = Stage::Acting(0, 0.0);
-                run.standing = 0.0;
+            if run.t >= until && !acting_begins(e, run) {
+                run.plan += 1;
+                if run.plan >= PLANS.len() {
+                    finish(run);
+                } else {
+                    begin(e, player, run);
+                }
             }
         }
         Stage::Acting(i, wait_until) => {
@@ -306,8 +303,16 @@ pub fn frame(e: &mut Engine, player: u32) {
             }
             let Some(act) = plan.acts.get(i).copied() else {
                 run.stage = Stage::Watching(run.t + plan.watch);
+                progress(
+                    run,
+                    format!("watched after its last action ({:.0} s)", plan.watch),
+                );
                 return;
             };
+            progress(
+                run,
+                format!("action {} of {}: {act:?}", i + 1, plan.acts.len()),
+            );
             let next = match act {
                 Act::Hit(body, p, from) => {
                     hit(e, player, run, body, p, from);
@@ -359,6 +364,31 @@ pub fn frame(e: &mut Engine, player: u32) {
     }
 }
 
+/// The placed target settled: the scenario's actions begin on it (its reference, never its form
+/// id). False, the scenario said as failed, when there is no target to act on (the next is
+/// begun).
+fn acting_begins(e: &mut Engine, run: &mut Run) -> bool {
+    let plan = &PLANS[run.plan];
+    let Some((target, _)) = target_ref(e) else {
+        run.lines.push(format!(
+            "FAIL {}: the range's target could not be found to act on",
+            plan.name
+        ));
+        run.failed.push(plan.name);
+        return false;
+    };
+    run.target = target;
+    run.havok_before = crate::new_physics::to_havok(run.target);
+    run.frames.clear();
+    run.replay = empty(plan.name);
+    run.replay.expect = plan.expect.to_string();
+    run.t = 0.0;
+    run.stage = Stage::Acting(0, 0.0);
+    run.standing = 0.0;
+    progress(run, "its actions begun".into());
+    true
+}
+
 /// A scenario with nothing in it yet.
 fn empty(name: &str) -> Scenario {
     Scenario {
@@ -378,11 +408,25 @@ fn id(e: &Engine, r: u32) -> String {
     format!("{:08X}", e.mem.u32(r + 0x0c))
 }
 
+/// The game's `LookupFormByID`.
+const LOOKUP_FORM: u32 = 0x0048_39c0;
+
+/// The phone's range's target as a reference (its form id looked up; looked up afresh each time:
+/// the range's reset puts a new one down), and where it first stood; none while the range has no
+/// target, or its form id is no reference. `crate::test_range::phone_target` gives the form id:
+/// taken for the reference itself, New Physics claimed "actor" FF00131A and the game read its
+/// position at FF00134A (Patrick's run on ec4caa3, frame 575).
+fn target_ref(e: &mut Engine) -> Option<(u32, V3)> {
+    let (form, at, _) = crate::test_range::phone_target()?;
+    let r = e.call(LOOKUP_FORM, &args![form]).u32();
+    (r != 0 && e.mem.u32(r + 0x0c) == form).then_some((r, at))
+}
+
 /// The next scenario begun: the target put back where it first stood (or on the slope).
 fn begin(e: &mut Engine, player: u32, run: &mut Run) {
     let plan = &PLANS[run.plan];
     crate::test_range::phone_reset(e, player);
-    let Some((target, at, _)) = crate::test_range::phone_target() else {
+    let Some((target, at)) = target_ref(e) else {
         return;
     };
     if plan.place == Place::Slope || plan.place == Place::Uneven {
@@ -425,6 +469,7 @@ fn begin(e: &mut Engine, player: u32, run: &mut Run) {
     }
     run.t = 0.0;
     run.stage = Stage::Placing(SETTLE);
+    progress(run, "the target placed, settling".into());
 }
 
 /// The ground's height under `at` (game units), cast from a metre over it.
@@ -624,46 +669,185 @@ fn judge(e: &mut Engine, run: &mut Run) {
     run.replays.push(replay);
 }
 
-/// The results and the replay written, the game ended.
-fn finish(run: &mut Run) {
-    let stamp = utc_stamp();
-    let dir = std::env::var_os("NV_REPORT_LOG")
+/// Where the self-test's files go: beside the game's log (`NV_REPORT_LOG`'s folder), else
+/// `NV_REPORT_DIR`, else here.
+fn out_dir() -> std::path::PathBuf {
+    std::env::var_os("NV_REPORT_LOG")
         .map(std::path::PathBuf::from)
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .or_else(|| std::env::var_os("NV_REPORT_DIR").map(std::path::PathBuf::from))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// The newest results' file, at a place that never changes (`Launcher.exe
+/// --update-and-physics-test` reads it).
+const LATEST: &str = "physics-selftest-latest.txt";
+
+/// The results' text: the header (the build, the run's stamp, Delirium, the replay's and the
+/// game log's paths), each line, and the last line (`ALL PASS`, `FAILED: ...`, `RUNNING: ...`).
+fn results_text(stamp: &str, replay: &std::path::Path, lines: &[String], last: &str) -> String {
     let log = std::env::var_os("NV_REPORT_LOG")
         .map(|p| std::path::PathBuf::from(p).display().to_string())
         .unwrap_or_else(|| "(not known: NV_REPORT_LOG not set)".into());
     let mut text = format!(
-        "nv-rs physics self-test\nbuild: {}\nrun: {stamp} UTC\nDelirium: {}\ngame log: {log}\n",
+        "nv-rs physics self-test\nbuild: {}\nrun: {stamp} UTC\nDelirium: {}\nreplay: {}\ngame \
+         log: {log}\n",
         crate::room_record::commit(),
         if delirium_bridge::running() {
             "on"
         } else {
             "off (New Physics alone: what only Delirium's body shows doesn't apply)"
-        }
+        },
+        replay.display()
     );
-    for l in &run.lines {
+    for l in lines {
         text += l;
         text += "\n";
     }
-    text += &if run.failed.is_empty() {
-        "ALL PASS\n".to_string()
-    } else {
-        format!("FAILED: {}\n", run.failed.join(", "))
+    text += last;
+    text += "\n";
+    text
+}
+
+/// What the run has reached, kept apart from [`RUN`] (whose lock a frame holds across the game's
+/// calls, and which a fault inside one may leave taken): the scenario, its stage, its seconds,
+/// the lines and replays of the scenarios done, and the run's stamp. Read at a stop of the game
+/// ([`at_stop`]), so the results say where it was even then.
+struct Progress {
+    stamp: String,
+    scenario: &'static str,
+    plan: usize,
+    stage: String,
+    t: f32,
+    lines: Vec<String>,
+    failed: Vec<&'static str>,
+    replays: Vec<Scenario>,
+}
+
+static PROGRESS: Mutex<Option<Progress>> = Mutex::new(None);
+
+/// [`PROGRESS`] brought up to `run` at `stage`, and the results' latest file says it is running
+/// (if the game is ended from outside, that is where it was).
+fn progress(run: &Run, stage: String) {
+    let plan = PLANS.get(run.plan);
+    let text = {
+        let mut guard = PROGRESS.lock().unwrap_or_else(|p| p.into_inner());
+        let p = guard.get_or_insert_with(|| Progress {
+            stamp: utc_stamp(),
+            scenario: "",
+            plan: 0,
+            stage: String::new(),
+            t: 0.0,
+            lines: Vec::new(),
+            failed: Vec::new(),
+            replays: Vec::new(),
+        });
+        p.t = run.t;
+        // The same stage again (an action waiting, frame by frame): nothing new to say.
+        if p.plan == run.plan && p.stage == stage && !p.scenario.is_empty() {
+            return;
+        }
+        p.scenario = plan.map_or("the end", |p| p.name);
+        p.plan = run.plan;
+        p.stage = stage;
+        p.lines = run.lines.clone();
+        p.failed = run.failed.clone();
+        p.replays = run.replays.clone();
+        let replay = out_dir().join(format!("physics-selftest-{}-replay.txt", p.stamp));
+        results_text(
+            &p.stamp,
+            &replay,
+            &p.lines,
+            &format!(
+                "RUNNING: {} ({} of {}), {}",
+                p.scenario,
+                p.plan + 1,
+                PLANS.len(),
+                p.stage
+            ),
+        )
     };
+    let _ = std::fs::write(out_dir().join(LATEST), text.as_bytes());
+}
+
+/// The game stopped (or ended) while the self-test ran: its results written all the same, with
+/// the scenarios done, the one it was in and its stage, and the stop's line, ending `FAILED`
+/// (Patrick's run on ec4caa3: a crash at frame 575 left no results). Called by the game's stop
+/// (`crate::player_move`); nothing when the self-test is off or ended.
+pub fn at_stop(line: &str) {
+    if on() {
+        stopped(line);
+    }
+}
+
+/// [`at_stop`]'s results, the self-test on.
+fn stopped(line: &str) {
+    let guard = match PROGRESS.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(g)) => g.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    let Some(p) = guard.as_ref() else {
+        return;
+    };
+    if p.scenario == "the end" {
+        return;
+    }
+    let dir = out_dir();
+    let replay = dir.join(format!("physics-selftest-{}-replay.txt", p.stamp));
+    let mut lines = p.lines.clone();
+    lines.push(format!(
+        "FAIL {}: the game stopped {:.1} s into it ({}): {line}",
+        p.scenario, p.t, p.stage
+    ));
+    let mut failed = p.failed.clone();
+    failed.push(p.scenario);
+    let text = results_text(
+        &p.stamp,
+        &replay,
+        &lines,
+        &format!(
+            "FAILED: {} (the game stopped in {})",
+            failed.join(", "),
+            p.scenario
+        ),
+    );
+    let _ = std::fs::write(&replay, crate::physics_replay::write(&p.replays));
+    let _ = std::fs::write(
+        dir.join(format!("physics-selftest-{}.txt", p.stamp)),
+        text.as_bytes(),
+    );
+    let _ = std::fs::write(dir.join(LATEST), text.as_bytes());
+    eprintln!(
+        "physics self-test: the game stopped in {} ({}): results written to {}",
+        p.scenario,
+        p.stage,
+        dir.join(LATEST).display()
+    );
+}
+
+/// The results and the replay written, the game ended.
+fn finish(run: &mut Run) {
+    let stamp = PROGRESS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map_or_else(utc_stamp, |p| p.stamp.clone());
+    let dir = out_dir();
     let results = dir.join(format!("physics-selftest-{stamp}.txt"));
     let replay = dir.join(format!("physics-selftest-{stamp}-replay.txt"));
     let replay_text = crate::physics_replay::write(&run.replays);
-    text = text.replacen(
-        "game log:",
-        &format!("replay: {}\ngame log:", replay.display()),
-        1,
-    );
-    // The newest also at a place that never changes (`Launcher.exe --update-and-physics-test`
-    // reads it).
-    let latest = dir.join("physics-selftest-latest.txt");
+    let last = if run.failed.is_empty() {
+        "ALL PASS".to_string()
+    } else {
+        format!("FAILED: {}", run.failed.join(", "))
+    };
+    let text = results_text(&stamp, &replay, &run.lines, &last);
+    // Ended: a stop from here on (the game's own end) says nothing more.
+    if let Some(p) = PROGRESS.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+        p.scenario = "the end";
+    }
+    let latest = dir.join(LATEST);
     let wrote = std::fs::write(&results, text.as_bytes()).is_ok()
         && std::fs::write(&replay, replay_text).is_ok()
         && std::fs::write(&latest, text.as_bytes()).is_ok();
@@ -712,6 +896,136 @@ fn utc_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The range keeps its target as a form id (FF00131A in Patrick's run); the self-test acts on
+    /// the reference it names, looked up with the game's `LookupFormByID`, never on the form id
+    /// itself (taken for a reference, New Physics claimed FF00131A and the game read FF00134A:
+    /// the crash at frame 575 on ec4caa3). With no reference for it, the scenario fails and is
+    /// passed, nothing acted on.
+    #[test]
+    fn the_selftest_acts_on_the_targets_reference_not_its_form_id() {
+        const FORM: u32 = 0xff00_131a;
+        const REFERENCE: u32 = 0x0300_0000;
+        let mut e = Engine::new();
+        e.mem.map(REFERENCE, 0x1000);
+        e.mem.set_u32(REFERENCE + 0x0c, FORM);
+        e.register_double(LOOKUP_FORM, |_, a| {
+            if a[0] == FORM { REFERENCE } else { 0 }.into_ret()
+        });
+        crate::test_range::set_phone_target_for_tests(Some((FORM, [1.0, 2.0, 3.0])));
+        let mut run = Run {
+            plan: 0,
+            stage: Stage::Placing(0.0),
+            t: 3.0,
+            total: 3.0,
+            target: 0,
+            frames: Vec::new(),
+            replay: empty(""),
+            havok_before: 0,
+            standing: 0.0,
+            lines: Vec::new(),
+            failed: Vec::new(),
+            replays: Vec::new(),
+            slope: None,
+            uneven: None,
+            struck: 0.0,
+        };
+        assert!(acting_begins(&mut e, &mut run));
+        assert_eq!(run.target, REFERENCE, "{:08X}", run.target);
+        assert!(matches!(run.stage, Stage::Acting(0, _)));
+        assert_eq!(run.replay.name, PLANS[0].name);
+        assert_eq!(target_ref(&mut e), Some((REFERENCE, [1.0, 2.0, 3.0])));
+        // A form id that names no reference: the scenario fails, nothing acted on.
+        crate::test_range::set_phone_target_for_tests(Some((0xff00_2000, [0.0; 3])));
+        let mut run2 = Run {
+            target: 0,
+            lines: Vec::new(),
+            failed: Vec::new(),
+            ..run
+        };
+        assert!(!acting_begins(&mut e, &mut run2));
+        assert_eq!(run2.target, 0);
+        assert_eq!(run2.failed, [PLANS[0].name]);
+        crate::test_range::set_phone_target_for_tests(None);
+        assert_eq!(target_ref(&mut e), None);
+    }
+
+    /// The game stopping mid-run still leaves results: the scenarios done, the one it was in with
+    /// its stage and seconds, the stop's line, and `FAILED` last (what the launcher reads as a
+    /// failed run, exit 1); while it runs, the latest file says where it is.
+    #[test]
+    fn a_stop_mid_run_still_writes_the_results() {
+        let dir = std::env::temp_dir().join(format!("nv-selftest-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("NV_REPORT_DIR", &dir);
+        let run = Run {
+            plan: 1,
+            stage: Stage::Acting(0, 0.0),
+            t: 0.4,
+            total: 9.0,
+            target: 0,
+            frames: Vec::new(),
+            replay: empty(PLANS[1].name),
+            havok_before: 0,
+            standing: 0.0,
+            lines: vec![format!(
+                "PASS {}: no pose jumps (PC and CI): ...",
+                PLANS[0].name
+            )],
+            failed: Vec::new(),
+            replays: vec![empty(PLANS[0].name)],
+            slope: None,
+            uneven: None,
+            struck: 0.0,
+        };
+        progress(&run, "action 1 of 1: a hit".into());
+        let running = std::fs::read_to_string(dir.join(LATEST)).unwrap();
+        assert!(
+            running.trim_end().ends_with(&format!(
+                "RUNNING: {} (2 of {}), action 1 of 1: a hit",
+                PLANS[1].name,
+                PLANS.len()
+            )),
+            "{running}"
+        );
+        let stop = "Game's main stopped in frame 575: read of unmapped memory at ff00134a (in \
+                    009445b0 < 0093e860)";
+        stopped(stop);
+        let text = std::fs::read_to_string(dir.join(LATEST)).unwrap();
+        assert!(
+            text.starts_with("nv-rs physics self-test\nbuild: "),
+            "{text}"
+        );
+        assert!(text.contains(&format!("PASS {}: no pose jumps", PLANS[0].name)));
+        assert!(
+            text.contains(&format!(
+                "FAIL {}: the game stopped 0.4 s into it (action 1 of 1: a hit): {stop}",
+                PLANS[1].name
+            )),
+            "{text}"
+        );
+        let last = text.lines().last().unwrap();
+        assert_eq!(
+            last,
+            format!(
+                "FAILED: {} (the game stopped in {})",
+                PLANS[1].name, PLANS[1].name
+            )
+        );
+        // The stamped copy and the replay of the scenarios done are there too.
+        let files: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            files.iter().any(|f| f.ends_with("-replay.txt")),
+            "{files:?}"
+        );
+        assert_eq!(files.len(), 3, "{files:?}");
+        std::env::remove_var("NV_REPORT_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Patrick's list is all there, each scenario with a hit and an expectation the checks know.
     #[test]
