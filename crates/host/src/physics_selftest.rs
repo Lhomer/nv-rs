@@ -402,6 +402,7 @@ fn empty(name: &str) -> Scenario {
         dt: Vec::new(),
         hits: Vec::new(),
         kill: None,
+        obstacles: false,
     }
 }
 
@@ -468,10 +469,33 @@ fn begin(e: &mut Engine, player: u32, run: &mut Run) {
                 return;
             }
         }
+    } else if let Some(to) = clear_of_obstacles(e, player, at) {
+        // Flat: on clear ground, never by the phone range's obstacles stood behind the target
+        // (Patrick's PC run on fcb591c: a railing a metre behind it, every body thrown back came
+        // down over it, its feet and calves against it at 10 to 78 kN).
+        let t = id(e, target);
+        for (axis, v) in ["x", "y", "z"].iter().zip([to[0], to[1], to[2] + 5.0]) {
+            crate::test_range::run_line(e, &format!("{t}.setpos {axis} {v:.0}"));
+        }
     }
     run.t = 0.0;
     run.stage = Stage::Placing(SETTLE);
     progress(run, "the target placed, settling".into());
+}
+
+/// How far toward the player a flat scenario's target stands from the phone range's spot (m): the
+/// range's obstacles stand 0.55 to 1 m behind that spot, a fall is under 2 m long.
+pub const FLAT_CLEAR: f32 = 3.0;
+
+/// The ground [`FLAT_CLEAR`] toward the player (at `player`'s position) from the target's spot
+/// `at` (game units); none if the player stands on the spot.
+fn clear_of_obstacles(e: &mut Engine, player: u32, at: V3) -> Option<V3> {
+    let u = ragdoll_core::np_body::UNITS;
+    let p = crate::new_physics::ref_position(e, player);
+    let d = ragdoll_core::flinch::unit([p[0] - at[0], p[1] - at[1], 0.0])?;
+    let xy = [at[0] + d[0] * FLAT_CLEAR * u, at[1] + d[1] * FLAT_CLEAR * u];
+    let z = ground(e, xy, at[2]).unwrap_or(at[2]);
+    Some([xy[0], xy[1], z])
 }
 
 /// A body's own ground is cast from this far over it (game units): deeper in the ground than this

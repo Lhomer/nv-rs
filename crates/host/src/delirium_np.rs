@@ -131,13 +131,13 @@ pub(crate) fn bodies_from_parts(rig: &Rig, parts: &[Transform], origin: V3) -> V
 /// units): each body's floor and walls as squares where they were met, the step edges and crates.
 pub(crate) fn world_mesh(
     (floors, ground): (&[Plane], Option<&delirium_bridge::world::Mesh>),
-    walls: &[Vec<Plane>],
+    (walls, tops): (&[Vec<Plane>], &[Vec<f32>]),
     edges: &[Edge],
     centres: &[V3],
     floor: f32,
     origin: V3,
 ) -> delirium_bridge::world::Mesh {
-    use delirium_bridge::world::{edge, plane, Mesh};
+    use delirium_bridge::world::{edge, plane, wall, Mesh};
     let o = [origin[0] / UNITS, origin[1] / UNITS, origin[2] / UNITS];
     let local = |p: V3| [p[0] - o[0], p[1] - o[1], p[2] - o[2]];
     let mut m = Mesh::default();
@@ -157,15 +157,31 @@ pub(crate) fn world_mesh(
                 1.0,
             ));
         }
-        for pl in walls.get(b).into_iter().flatten() {
-            m.add(&plane(
-                &Plane {
-                    p: local(pl.p),
-                    n: pl.n,
-                },
-                c,
-                0.75,
-            ));
+        // Each wall beside it, while the body is in front of its face, as high as the wall (behind
+        // it, a body that went over or past it was shoved back out through it: Patrick's PC run
+        // on fcb591c, bodies thrown back over the range's railing at 10 to 78 kN, 60 units into
+        // the ground).
+        for (k, pl) in walls.get(b).into_iter().flatten().enumerate() {
+            let pl = Plane {
+                p: local(pl.p),
+                n: pl.n,
+            };
+            let front = c
+                .iter()
+                .zip(pl.p)
+                .zip(pl.n)
+                .map(|((c, p), n)| (c - p) * n)
+                .sum::<f32>();
+            if front < 0.0 {
+                continue;
+            }
+            let top = tops
+                .get(b)
+                .and_then(|t| t.get(k))
+                .copied()
+                .filter(|t| t.is_finite())
+                .map_or(f32::INFINITY, |t| t - o[2]);
+            m.add(&wall(&pl, c, 0.75, top));
         }
     }
     for ed in edges {
@@ -407,6 +423,8 @@ pub(crate) struct Dl {
     /// limbs are brought inside the skeleton's limits (Patrick: a death mid-rise keeps the wait and
     /// brings the limbs in).
     pub dying: Option<u32>,
+    /// Knocked down (a hit past the knockdown threshold): seconds since, until it is down.
+    pub knocked_for: Option<f32>,
     /// What has its frame: Delirium's own reactions, or its muscles on New Physics' get-up.
     pub own: Own,
     /// The ground under and around it as the game's collision has it (a height field cast at
@@ -472,6 +490,10 @@ pub(crate) const LIMIT_RAMP: f32 = 720.0;
 /// at least this long (s) before it may go back to the game's animation, upright and still, and at
 /// most this long (s) before it goes back upright all the same (not upright: down on Delirium).
 pub(crate) const STAGGER_LEAST: f32 = 1.0;
+/// The share of its health a knockdown's shot tells Delirium is left (its shot task's fall).
+pub(crate) const KNOCKED_HEALTH: f32 = 0.0;
+/// Knocked down and still on its feet this long after (s): its muscles off, it goes down.
+pub(crate) const KNOCK_FALL_BY: f32 = 1.5;
 pub(crate) const STAGGER_MOST: f32 = 6.0;
 
 /// Whether New Physics' own bodies are the real body of an actor whose Delirium slot is `slot`
@@ -839,6 +861,7 @@ impl Dl {
             corpse: None,
             killed: false,
             dying: None,
+            knocked_for: None,
             own: Own::Hit,
             ground: None,
             glitch: 0,
@@ -1763,8 +1786,10 @@ pub(crate) fn frame_for(
                     }
                 }
                 // Under the threshold Delirium's shot task is told the actor is unhurt (its own
-                // stagger, never its fall); past it, the health the actor has left.
-                d.shot(b, point, impulse, if knock { health } else { 1.0 })
+                // stagger, never its fall); past it, that little is left (its shot task's fall: told
+                // the actor's full health, every knockdown of Patrick's PC run on fcb591c staggered
+                // and stood again).
+                d.shot(b, point, impulse, if knock { KNOCKED_HEALTH } else { 1.0 })
             }
             DlHit::Blast(c, r, speed) => {
                 knocked = true;
@@ -1798,13 +1823,15 @@ pub(crate) fn frame_for(
     }
     if shots > 0 && d.own == Own::Hit && !d.killed {
         if knocked {
+            d.knocked_for.get_or_insert(0.0);
             note_event(format!(
                 "{id:08X}: [np delirium] a hit past the knockdown threshold ({:.2} of {topple:.2} \
-                 m/s stacked, {:.0} of {:.0} health to Delirium): Delirium's own reaction, a fall \
-                 allowed",
+                 m/s stacked, {:.0} of {:.0} health to Delirium's shot, the actor's {:.0}%): \
+                 Delirium's own reaction, its fall",
                 slot.pain,
-                delirium_bridge::agent::ped_health(health),
-                delirium_bridge::agent::FULL_HEALTH
+                delirium_bridge::agent::ped_health(KNOCKED_HEALTH),
+                delirium_bridge::agent::FULL_HEALTH,
+                health * 100.0
             ));
         } else if np.down.is_none() {
             d.own = Own::Stagger {
@@ -1868,7 +1895,7 @@ pub(crate) fn frame_for(
     }
     let mesh = world_mesh(
         (floors, d.ground.as_ref().map(|g| &g.1)),
-        &np.body_walls,
+        (&np.body_walls, &np.body_wall_tops),
         &np.edges,
         &centres,
         floor / UNITS,
@@ -2059,6 +2086,20 @@ pub(crate) fn frame_for(
         return Some(drawn);
     }
     if d.own == Own::Hit {
+        if let Some(t) = d.knocked_for.as_mut() {
+            *t += dt;
+            if *t >= KNOCK_FALL_BY && !pose.downed(d.standing) {
+                d.knocked_for = None;
+                note_event(format!(
+                    "{}: knocked down and still on its feet {KNOCK_FALL_BY:.1} s after: its \
+                     muscles off, it goes down",
+                    said("still up", &pose, d)
+                ));
+                if let Err(why) = d.agent.relax() {
+                    return refused(id, &why, slot, np, Some(drawn));
+                }
+            }
+        }
         // Down (fallen over, on the ground, or lying settled): Delirium keeps it; New Physics'
         // downed controller is made at once (never "falling, not yet down", which the host hands
         // to the game's ragdoll: Patrick's 23:11 log) and reads the body as it lies.
@@ -2070,8 +2111,10 @@ pub(crate) fn frame_for(
             ));
             np.fall_now("downed on Delirium");
             d.own = Own::Down;
-        } else if done.is_some() {
-            // It stood balanced again two seconds: upright, still, its animation's again.
+            d.knocked_for = None;
+        } else if done.is_some() && d.knocked_for.is_none() {
+            // It stood balanced again two seconds: upright, still, its animation's again (never
+            // a knockdown, which goes down).
             note_event(format!(
                 "{}: upright and back to the game's animation (it stood balanced again)",
                 said("upright", &pose, d)
@@ -3032,7 +3075,7 @@ mod tests {
         }];
         let m = world_mesh(
             (&floors, None),
-            &[],
+            (&[], &[]),
             &[],
             &[[700.0, -140.0, 100.0]],
             1.0,
@@ -3044,8 +3087,47 @@ mod tests {
             "{:?}",
             m.positions
         );
-        let m = world_mesh((&[], None), &[], &[], &[], 1.0, origin);
+        let m = world_mesh((&[], None), (&[], &[]), &[], &[], 1.0, origin);
         assert!(m.positions.iter().all(|p| p[2].abs() < 1e-4));
         assert_eq!(m.triangles.len(), 2);
+    }
+
+    /// A wall beside a body goes to Delirium only while the body is in front of its face, and
+    /// never over its top (Patrick's PC run on fcb591c: bodies thrown back over the range's
+    /// railing, its square reaching over the railing and kept behind it, were shoved out at 10 to
+    /// 78 kN and 60 units into the ground).
+    #[test]
+    fn a_wall_goes_to_delirium_in_front_of_it_and_never_over_its_top() {
+        let origin = [0.0, 0.0, 0.0];
+        let u = UNITS;
+        // A railing's face at y = -1 m facing +y, its top 1 m up.
+        let walls = vec![vec![Plane {
+            p: [0.0, -1.0, 0.5],
+            n: [0.0, 1.0, 0.0],
+        }]];
+        let tops = vec![vec![1.0]];
+        let mesh =
+            |centre: V3| world_mesh((&[], None), (&walls, &tops), &[], &[centre], 0.0, origin);
+        // In front, its centre 0.6 m up: the face from 0.75 under the centre to the top only.
+        let m = mesh([0.0, -0.8 * u, 0.6 * u]);
+        let zs: Vec<f32> = m.positions.iter().map(|p| p[2]).collect();
+        assert!(!zs.is_empty());
+        let most = zs.iter().copied().fold(f32::MIN, f32::max);
+        assert!((most - 1.0).abs() < 1e-3, "{zs:?}");
+        // Behind it (gone over the railing): nothing.
+        assert!(
+            mesh([0.0, -1.3 * u, 0.6 * u]).triangles.is_empty() || {
+                // (The floor's square under the reference is all there is.)
+                mesh([0.0, -1.3 * u, 0.6 * u])
+                    .positions
+                    .iter()
+                    .all(|p| p[2].abs() < 1e-4)
+            }
+        );
+        // Over its top (a body 0.8 m over it): nothing.
+        assert!(mesh([0.0, -0.8 * u, 1.8 * u])
+            .positions
+            .iter()
+            .all(|p| p[2].abs() < 1e-4));
     }
 }

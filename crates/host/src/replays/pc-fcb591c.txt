@@ -1,0 +1,90 @@
+nv-rs physics replay 1
+# Patrick's PC run on fcb591c (2026-11-28 10:10 UTC, the game's self-test with Delirium): each
+# scenario's hits (their frames, bodies, impulses and directions), its slope, its bumps, the
+# trench's ground as cast under the body and its length as recorded; each frame's seconds the
+# scenario's mean. The flat scenarios' target stood in front of the phone range's obstacles.
+scenario light-standing
+expect stays 67.2
+slope 0.0000 0.0000
+frames 632 0.0079
+hit 1 Bip01_Spine2 25.90 -0.0007 -1.0000 0.0000
+obstacles
+end
+scenario head-shot
+expect stays 67.2
+slope 0.0000 0.0000
+frames 614 0.0082
+hit 1 Bip01_Head 25.90 -0.0007 -1.0000 0.0000
+obstacles
+end
+scenario staggering-hit
+expect stays 67.2
+slope 0.0000 0.0000
+frames 674 0.0079
+hit 1 Bip01_Spine2 25.90 -0.0007 -1.0000 0.0000
+hit 36 Bip01_Spine2 25.90 -0.0007 -1.0000 0.0000
+obstacles
+end
+scenario downed-face-down
+expect rises 67.2
+slope 0.0000 0.0000
+frames 2470 0.0079
+hit 1 Bip01_Spine2 160.00 0.0007 1.0000 0.0000
+hit 605 Bip01_Spine2 25.90 0.0345 -0.9994 0.0000
+obstacles
+end
+scenario downed-face-up
+expect rises 67.2
+slope 0.0000 0.0000
+frames 1698 0.0100
+hit 1 Bip01_Spine2 160.00 -0.0007 -1.0000 0.0000
+hit 257 Bip01_R_Forearm 25.90 0.1313 -0.9913 0.0000
+obstacles
+end
+scenario mid-rise-hit
+expect rises 67.2
+slope 0.0000 0.0000
+frames 3389 0.0078
+hit 1 Bip01_Spine2 160.00 -0.0007 -1.0000 0.0000
+hit 1510 Bip01_Spine2 25.90 -0.0096 -1.0000 0.0000
+obstacles
+end
+scenario kill-mid-rise
+expect dies 67.2
+slope 0.0000 0.0000
+frames 2134 0.0082
+hit 1 Bip01_Spine2 160.00 -0.0007 -1.0000 0.0000
+kill 1468
+obstacles
+end
+scenario past-threshold
+expect rises 67.2
+slope 0.0000 0.0000
+frames 1397 0.0100
+hit 1 Bip01_Spine2 160.00 -0.0007 -1.0000 0.0000
+obstacles
+end
+scenario light-standing-slope
+expect stays 67.1
+slope 0.0479 0.1619
+frames 537 0.0094
+hit 1 Bip01_Spine2 25.90 0.5543 -0.8323 0.0000
+end
+scenario past-threshold-slope
+expect rises 67.2
+slope 0.0479 0.1619
+frames 1593 0.0088
+hit 1 Bip01_Spine2 160.00 0.5543 -0.8323 0.0000
+end
+scenario trench
+expect rises 67.1
+slope 0.0000 0.0000
+bumps 15.8 100.0
+grid -3.5 -0.8 2.0 -3.3 -13.7 -2.0 0.8 3.5 -3.0 -13.4 -1.7 0.3 0.0 -8.1 -16.1 -1.8 0.2 -4.7 -11.8 -19.5 -1.1 -5.2 -10.5 -15.8 -28.1
+frames 2143 0.0096
+hit 1 Bip01_Spine2 25.90 -0.0007 -1.0000 0.0000
+hit 546 Bip01_Spine2 160.00 0.0068 -1.0000 0.0000
+hit 769 Bip01_R_Forearm 25.90 0.0489 -0.9988 0.0000
+hit 796 Bip01_Spine2 25.90 0.1066 -0.9943 0.0000
+hit 818 Bip01_L_Calf 25.90 -0.1323 0.9912 0.0000
+end

@@ -7,6 +7,28 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-28 (Patrick's PC run on fcb591c: 108 passed, 34 failed; knockdowns stood, the range's railing)
+
+**Status: see the commit.** The run is a CI replay (`crates/host/src/replays/pc-fcb591c.txt`, the
+flat scenarios marked `obstacles`: the phone range's railing, half wall, table and low wall stood
+0.55 to 1 m behind the target). Found and fixed:
+- Every knockdown stood: Delirium's shot task was told the actor's full health and staggered
+  back up (its falls on 8a9b4a4 were the false walls). A hit past the knockdown threshold now tells
+  it little is left (`KNOCKED_HEALTH`, its shot task's own fall), and a knocked body still on its
+  feet 1.5 s later has its muscles off (`KNOCK_FALL_BY`). The stand-in falls only so (a hit given
+  full health shoves it and it stands), so CI fails without it.
+- The range's obstacles: every flat scenario's body thrown back came down over the railing a metre
+  behind it. Delirium was given each wall as a square around each body, reaching over the wall's
+  top and kept once the body had gone over or past it: shoved out at 10 to 78 kN. Walls now go to
+  Delirium only while a body is in front of the face and never over its top
+  (`delirium_bridge::world::wall`; `the_range_obstacles_never_shove_the_body`: 62 and 116 kN
+  before). The stand-in now pushes its parts out of wall faces. The self-test's flat scenarios
+  stand 3 m nearer the player, clear of the obstacles (`FLAT_CLEAR`); the fcb591c replay runs on
+  clear ground too (all 11 pass), the stand-in being unable to fold over a railing.
+- The light hits read "pelvis 56 of 67" on the PC only (CI keeps 57 and up): the check now says
+  when and who had the body; "back to the animation at 0.0 s" was a frame before the hit was drawn
+  (now the first frame let go after one drawn).
+
 ### Claude, 2026-11-28 (Patrick's PC run on 8a9b4a4: 92 passed, 50 failed; false walls, Delirium's stagger)
 
 **Status: see the commit.** The run is a CI replay (`crates/host/src/replays/pc-8a9b4a4.txt`, the

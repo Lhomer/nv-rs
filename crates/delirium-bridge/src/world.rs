@@ -103,6 +103,34 @@ pub fn plane(pl: &Plane, at: V3, half: f32) -> Mesh {
     m
 }
 
+/// A wall New Physics found as a square `half` each way around `at` (projected onto it), facing
+/// its normal, cut off at its top (`top`, metres; infinite: none known): nothing of it over the
+/// wall's own top (a square reaching over a railing's or a low wall's top was a wall in the air
+/// a body coming down over it was shoved out of).
+pub fn wall(pl: &Plane, at: V3, half: f32, top: f32) -> Mesh {
+    let n = unit(pl.n);
+    let c = sub(at, scale(n, dot(sub(at, pl.p), n)));
+    let (u, v) = across(n);
+    // Up the face: from `half` under its centre to `half` over it, or to the top.
+    let up = if v[2] > 0.05 && top.is_finite() {
+        ((top - c[2]) / v[2]).min(half)
+    } else {
+        half
+    };
+    let mut m = Mesh::default();
+    if up <= -half {
+        return m;
+    }
+    let (u, below, over) = (scale(u, half), scale(v, -half), scale(v, up));
+    m.quad([
+        add(sub(c, u), below),
+        add(add(c, u), below),
+        add(add(c, u), over),
+        add(sub(c, u), over),
+    ]);
+    m
+}
+
 /// A step's or crate's edge, down to `floor` (metres): its face under the edge (facing away from
 /// its top), and for a crate (`top` over 0) its top and the other three sides; a step's top as
 /// deep as `step_top` (the floors hold the rest).

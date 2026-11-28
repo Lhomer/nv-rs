@@ -111,8 +111,11 @@ its feet; its muscles on, its parts go where it is told). Everything between the
 is the real integration: `crate::delirium_np`'s frame, the put-on, the hand-overs and retakes, the
 joint limits drawn, the ground cast and fed, the rise drawn as New Physics' with Delirium's parts put on it, the hand-back to the animation.
 The CI also runs Patrick's PC runs on 5f52c0e (`crates/host/src/replays/pc-5f52c0e.txt`, its open
-failures listed and explained in `KNOWN_OPEN_PC_5F52C0E`) and on 8a9b4a4 (`pc-8a9b4a4.txt`, none
-open). A PC replay's scenario is acted by the self-test's plan of its name (until down, until
+failures listed and explained in `KNOWN_OPEN_PC_5F52C0E`), on 8a9b4a4 (`pc-8a9b4a4.txt`, none
+open) and on fcb591c (`pc-fcb591c.txt`: on clear ground, none open; by the phone range's
+obstacles as they stood, its walls checked). The self-test's flat scenarios stand 3 m nearer the
+player than the phone range's spot (`FLAT_CLEAR`), clear of its railing, half wall, table and low
+wall; a replay line `obstacles` lays them (about their size) behind the target. A PC replay's scenario is acted by the self-test's plan of its name (until down, until
 rising, its waits), its hits as recorded, so each hit and the kill land where they did in the fall
 and the rise; a synthetic one at its frames. The CI runs `physics_replay::synthetic()` (the same scenarios at 120 frames a second, flat, on
 a slope and in a trench's bumps, 6 units high every 140). A replay from the player's PC runs the same way:

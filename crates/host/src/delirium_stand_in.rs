@@ -1,9 +1,9 @@
 //! Tests only: a stand-in for Delirium's body (`crate::delirium_np::DlBody`), so the integration
 //! (its frames, the put-on, the hand-overs and retakes, the joint limits held, the ground fed, the
 //! rise's sequencing) runs in CI, where Delirium cannot (it needs the player's GTA IV). It is a
-//! mechanical double, nothing of Delirium's: standing, it takes a light hit as a small shove (on
-//! its own balance, the stagger gives way about 2 s later, as Delirium's did on Patrick's PC) and a
-//! heavy one (or its death) as a fall, tipping over its feet onto the ground in under a second;
+//! mechanical double, nothing of Delirium's: standing, it takes a hit as a small shove and stands,
+//! a heavy one told little health is left (or its death) as a fall, tipping over its feet onto the
+//! ground in under a second; walls given in the world mesh push its parts out of their faces;
 //! lying, it settles flat on the ground the world mesh gives it; its muscles on (`rise`/`follow`), its
 //! parts go to the pose given, quickly; its parts set as asked. Metres from the origin,
 //! Z up, 21 parts as Delirium's.
@@ -53,22 +53,27 @@ pub fn body(states: &[PartState]) -> Box<dyn DlBody> {
         rise: false,
         still: 0.0,
         triangles: Vec::new(),
+        walls: Vec::new(),
         limp_for: 0.0,
         shrug: 0.0,
         shrug_for: 0.0,
-        staggered: None,
     })
 }
 
 /// A hit's force over which it falls (Delirium's shot force for a hit past the knockdown
-/// threshold: `crate::delirium_np::shot_force`).
+/// threshold: `crate::delirium_np::shot_force`), told less than this share of its health is left:
+/// with more, Delirium's shot task staggers and stands (Patrick's PC run on fcb591c: every 160 N s
+/// hit given full health stood again within 2 s, and the knockdowns never went down).
 const FALL_FORCE: f32 = 600.0;
+const FALL_HEALTH: f32 = 0.5;
 /// Its fall's length (s), its muscles' quickness (each second they close this share of the way,
 /// as an exponent), a shove's speed per unit of force (m/s), its parts' radius over the ground (m).
 const FALL_FOR: f32 = 0.8;
 const MUSCLE: f32 = 9.0;
 const SHOVE: f32 = 0.0015;
 const RADIUS: f32 = 0.06;
+/// How far behind a wall's face a part is still pushed out of it (m).
+const WALL_DEPTH: f32 = 0.4;
 /// How fast a limp body comes down onto the ground under it (m/s).
 const SETTLE: f32 = 1.5;
 
@@ -89,20 +94,14 @@ struct StandIn {
     still: f32,
     /// The ground's triangles facing up (the world mesh).
     triangles: Vec<[Vec3; 3]>,
+    /// The walls' triangles (facing across) and each one's front.
+    walls: Vec<([Vec3; 3], Vec3)>,
     /// How long it has lain limp (s): its arms swing meanwhile.
     limp_for: f32,
     /// A hit's shrug standing (rad, at its height), and how long it has gone on (s).
     shrug: f32,
     shrug_for: f32,
-    /// A light hit standing, on its own balance (no pose followed): seconds since, and the way it
-    /// was pushed.
-    staggered: Option<(f32, Vec3)>,
 }
-
-/// On its own balance, a light hit's stagger gives way this long after it (s), and it falls the
-/// way it was pushed, as Delirium's did after every 9mm of Patrick's PC run on 8a9b4a4 (down 1.6 to
-/// 2.2 s after the hit, the stagger aid or not); its muscles on a pose given, it holds.
-const STAGGER_GIVES_WAY: f32 = 1.9;
 
 /// Hit standing, its shoulders shrug: each arm turned about its clavicle this far (rad), dying out
 /// over [`SHRUG_FOR`] (s), its shoulder off where FNV's skeleton has it, as Delirium's staggers do
@@ -168,6 +167,32 @@ impl StandIn {
         }
     }
 
+    /// Each part within a wall's face (from [`WALL_DEPTH`] behind it to its radius in front) put
+    /// back out in front of it, as a collider pushes a body out of a face it is in.
+    fn out_of_walls(&mut self) {
+        for p in &mut self.parts {
+            for ([a, b, c], n) in &self.walls {
+                let d = (p.translation - *a).dot(*n);
+                if d >= RADIUS || d <= -WALL_DEPTH {
+                    continue;
+                }
+                let q = p.translation - *n * d;
+                let (v0, v1, v2) = (*b - *a, *c - *a, q - *a);
+                let (d00, d01, d11) = (v0.dot(v0), v0.dot(v1), v1.dot(v1));
+                let (d20, d21) = (v2.dot(v0), v2.dot(v1));
+                let den = d00 * d11 - d01 * d01;
+                if den.abs() < 1e-12 {
+                    continue;
+                }
+                let v = (d11 * d20 - d01 * d21) / den;
+                let w = (d00 * d21 - d01 * d20) / den;
+                if v >= 0.0 && w >= 0.0 && v + w <= 1.0 {
+                    p.translation += *n * (RADIUS - d);
+                }
+            }
+        }
+    }
+
     /// It begins to fall along `dir` (flat), over its feet.
     fn fall(&mut self, dir: Vec3) {
         if !matches!(self.state, State::Standing) {
@@ -191,6 +216,15 @@ impl DlBody for StandIn {
             .map(|t| [v(t[0]), v(t[1]), v(t[2])])
             .filter(|[a, b, c]| (*b - *a).cross(*c - *a).normalize_or_zero().z > 0.5)
             .collect();
+        self.walls = mesh
+            .triangles
+            .iter()
+            .map(|t| [v(t[0]), v(t[1]), v(t[2])])
+            .filter_map(|[a, b, c]| {
+                let n = (b - a).cross(c - a).normalize_or_zero();
+                (n != Vec3::ZERO && n.z.abs() < 0.5).then_some(([a, b, c], n))
+            })
+            .collect();
         Ok(())
     }
     fn shot(
@@ -201,8 +235,11 @@ impl DlBody for StandIn {
         health: f32,
         force: f32,
     ) -> Result<(), String> {
-        let _ = health;
-        if matches!(self.state, State::Standing) && !self.dead && force > FALL_FORCE {
+        if matches!(self.state, State::Standing)
+            && !self.dead
+            && force > FALL_FORCE
+            && health < FALL_HEALTH
+        {
             self.fall(dir);
         } else {
             let k = part.min(self.vel.len().saturating_sub(1));
@@ -213,9 +250,6 @@ impl DlBody for StandIn {
                 }
                 self.shrug = SHRUG;
                 self.shrug_for = 0.0;
-                if !self.dead {
-                    self.staggered = Some((0.0, dir));
-                }
             } else {
                 self.vel[k] += push;
             }
@@ -264,17 +298,6 @@ impl DlBody for StandIn {
                 } else if matches!(self.state, State::Lying) {
                     self.still += dt;
                 }
-            }
-        }
-        // A light hit's stagger on its own balance gives way; its muscles on a pose, it holds.
-        if let Some((t, dir)) = self.staggered.as_mut() {
-            *t += dt;
-            let (t, dir) = (*t, *dir);
-            if !matches!(self.state, State::Standing) || self.dead || !self.follow.is_empty() {
-                self.staggered = None;
-            } else if t >= STAGGER_GIVES_WAY {
-                self.staggered = None;
-                self.fall(dir);
             }
         }
         if done_falling {
@@ -329,6 +352,7 @@ impl DlBody for StandIn {
             }
         }
         self.onto_ground(dt);
+        self.out_of_walls();
         Ok(())
     }
     fn parts(&self) -> Result<Vec<Transform>, String> {
@@ -343,6 +367,12 @@ impl DlBody for StandIn {
     fn relax(&mut self) -> Result<(), String> {
         self.follow.clear();
         self.rise = false;
+        // Relaxed on its feet: it goes down the way it is moving (else backward).
+        if matches!(self.state, State::Standing) {
+            let v = self.vel.first().copied().unwrap_or(Vec3::ZERO);
+            let back = -(self.parts[0].rotation * Vec3::Y);
+            self.fall(if v.length() > 0.05 { v } else { back });
+        }
         Ok(())
     }
     fn rise(&mut self, on: bool, _help: f32) -> Result<(), String> {

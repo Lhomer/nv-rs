@@ -43,6 +43,9 @@ pub struct Scenario {
     pub hits: Vec<(usize, String, f32, [f32; 3])>,
     /// The frame the actor died, if it did.
     pub kill: Option<usize>,
+    /// The phone's range's obstacles stood behind the actor, as the game's self-test placed them
+    /// (`crate::phone_range::Piece::spot`): a railing, a half wall, a table and a low wall.
+    pub obstacles: bool,
 }
 
 impl Scenario {
@@ -86,6 +89,9 @@ pub fn write(scenarios: &[Scenario]) -> String {
         if let Some(k) = s.kill {
             out += &format!("kill {k}\n");
         }
+        if s.obstacles {
+            out += "obstacles\n";
+        }
         out += "end\n";
     }
     out
@@ -119,6 +125,7 @@ pub fn parse(text: &str) -> Result<Vec<Scenario>, String> {
                     dt: Vec::new(),
                     hits: Vec::new(),
                     kill: None,
+                    obstacles: false,
                 })
             }
             Some(k) => {
@@ -153,6 +160,7 @@ pub fn parse(text: &str) -> Result<Vec<Scenario>, String> {
                         [f(4)?, f(5)?, f(6)?],
                     )),
                     "kill" => s.kill = Some(f(1)? as usize),
+                    "obstacles" => s.obstacles = true,
                     "end" => out.extend(cur.take()),
                     _ => return Err(bad("unknown line")),
                 }
@@ -187,6 +195,7 @@ pub fn synthetic() -> Vec<Scenario> {
             .map(|(f, b, p, d)| (f, b.to_string(), p, d))
             .collect(),
         kill,
+        obstacles: false,
     };
     let back = [0.0, -1.0, 0.0];
     vec![

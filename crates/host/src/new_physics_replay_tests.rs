@@ -43,6 +43,77 @@ const KNOWN_OPEN_PC_5F52C0E: &[(&str, &str)] = &[
     ("trench", "every rise with its hands planted"),
 ];
 
+/// The way from the player through the target (flat, unit): the way its plan's first hit from the
+/// front pushes (from behind, the other way); a scenario with no plan, its first hit's.
+fn away(s: &Scenario) -> [f32; 2] {
+    use crate::physics_selftest::{Act, From};
+    let d = s.hits.first().map_or([0.0, -1.0, 0.0], |h| h.3);
+    let back = crate::physics_selftest::PLANS
+        .iter()
+        .find(|p| p.name == s.name)
+        .and_then(|p| {
+            p.acts.iter().find_map(|a| match a {
+                Act::Hit(_, _, from) => Some(*from == From::Back),
+                _ => None,
+            })
+        })
+        .unwrap_or(false);
+    let k = if back { -1.0 } else { 1.0 };
+    let l = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-6);
+    [k * d[0] / l, k * d[1] / l]
+}
+
+/// The phone's range's obstacles behind a target at `at` (`away` from the player, the floor at
+/// `floor`), each where the self-test placed it (`crate::phone_range::Piece::spot`: so far behind
+/// and to the right), as boxes about its size (the CI has no game files: a railing 2 m wide and
+/// 1 m high, a half wall 2 by 1.2 m, a table 1.4 by 0.8 by 0.8 m, a low wall 1.2 m wide and 0.45 m
+/// high).
+fn obstacle_boxes(at: V3, away: [f32; 2], floor: f32) -> Vec<(V3, V3)> {
+    use crate::phone_range::Piece;
+    let u = ragdoll_core::np_body::UNITS;
+    let right = [away[1], -away[0]];
+    Piece::ALL
+        .iter()
+        .map(|&piece| {
+            let (behind, side) = piece.spot();
+            // Depth, width, height (m).
+            let (depth, width, height) = match piece {
+                Piece::Railing => (0.1, 2.0, 1.0),
+                Piece::HalfWall => (0.25, 2.0, 1.2),
+                Piece::Table => (0.8, 1.4, 0.8),
+                Piece::Low => (0.4, 1.2, 0.45),
+            };
+            let c = [
+                at[0] + (away[0] * behind + right[0] * side) * u,
+                at[1] + (away[1] * behind + right[1] * side) * u,
+            ];
+            let corner = |a: f32, r: f32| {
+                [
+                    c[0] + (away[0] * a + right[0] * r) * u,
+                    c[1] + (away[1] * a + right[1] * r) * u,
+                ]
+            };
+            let cs = [
+                corner(-depth / 2.0, -width / 2.0),
+                corner(depth / 2.0, -width / 2.0),
+                corner(-depth / 2.0, width / 2.0),
+                corner(depth / 2.0, width / 2.0),
+            ];
+            let lo = [
+                cs.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min),
+                cs.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min),
+                floor - 20.0,
+            ];
+            let hi = [
+                cs.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max),
+                cs.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max),
+                floor + height * u,
+            ];
+            (lo, hi)
+        })
+        .collect()
+}
+
 /// A recorded scenario acted by the self-test's plan of its name (`physics_selftest::PLANS`): which
 /// of its acts is next, the wait under way, the hits made, and whether the kill is now.
 struct PlanRun {
@@ -151,7 +222,12 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
     rig_fixture::BUMPS.with(|c| {
         c.set((s.bumps[0] > 0.0 && !grid).then_some([at[0], at[1], s.bumps[0], s.bumps[1]]));
     });
-    rig_fixture::WORLD.with(|w| *w.borrow_mut() = Some(Vec::new()));
+    let boxes = if s.obstacles {
+        obstacle_boxes(at, away(s), rig_fixture::floor_at(at).unwrap_or(0.0))
+    } else {
+        Vec::new()
+    };
+    rig_fixture::WORLD.with(|w| *w.borrow_mut() = Some(boxes));
     // A hand-over to the game's ragdoll, should one come: answered as the game would.
     f.e.register_double(0x008c_7aa0, |_, _| 0u32.into_ret());
     f.e.register_double(0x0088_45a0, |_, _| 1u32.into_ret());
@@ -347,6 +423,61 @@ fn replay_patricks_pc_run_on_8a9b4a4() {
     let (failed, fixed) = run_all(&scenarios, KNOWN_OPEN_PC_8A9B4A4);
     assert!(failed.is_empty(), "failed: {failed:#?}");
     assert!(fixed.is_empty(), "fixed, take off KNOWN_OPEN: {fixed:#?}");
+}
+
+/// Open over Patrick's PC run on fcb591c (`replays/pc-fcb591c.txt`), each reported to him.
+const KNOWN_OPEN_PC_FCB591C: &[(&str, &str)] = &[];
+
+/// Patrick's PC run on fcb591c (the game's self-test with Delirium; `replays/pc-fcb591c.txt`: its
+/// hits, slopes, the trench's ground as cast and its lengths), run again over the stand-in, each
+/// scenario acted by its plan, on clear ground as the self-test now acts its flat scenarios
+/// (`physics_selftest::FLAT_CLEAR`); that run's knockdowns stood (Delirium's shot told the actor's
+/// full health) and fail here without the knockdown's own health. The range's obstacles it stood
+/// by are the next test's: the stand-in tips over its feet as one piece and cannot come down over
+/// a railing as a body does.
+#[test]
+fn replay_patricks_pc_run_on_fcb591c() {
+    let mut scenarios = physics_replay::parse(include_str!("replays/pc-fcb591c.txt")).unwrap();
+    assert_eq!(scenarios.len(), 11);
+    for s in &mut scenarios {
+        s.obstacles = false;
+    }
+    let (failed, fixed) = run_all(&scenarios, KNOWN_OPEN_PC_FCB591C);
+    assert!(failed.is_empty(), "failed: {failed:#?}");
+    assert!(fixed.is_empty(), "fixed, take off KNOWN_OPEN: {fixed:#?}");
+}
+
+/// Patrick's PC run on fcb591c's flat scenarios by the phone range's obstacles as they stood (a
+/// railing a metre behind the target, a low wall, a half wall and a table): bodies thrown back
+/// over them are never shoved by the walls Delirium is given (at most 20 kN against a wall, no
+/// bone over 15 units a frame; before, each wall's square reached over the railing and stayed
+/// behind it: 62 and 116 kN, 60 units into the ground on the PC).
+#[test]
+fn the_range_obstacles_never_shove_the_body() {
+    let scenarios = physics_replay::parse(include_str!("replays/pc-fcb591c.txt")).unwrap();
+    let mut failed = Vec::new();
+    for s in scenarios.iter().filter(|s| s.obstacles) {
+        let (lines, _) = replay(s);
+        for l in &lines {
+            println!("{l}");
+        }
+        let jumps = lines
+            .iter()
+            .find(|l| l.contains(&format!("{}: no pose jumps (", s.name)));
+        if !jumps.is_some_and(|l| l.starts_with("PASS")) {
+            failed.push(format!("{}: {jumps:?}", s.name));
+        }
+        let wall = lines
+            .iter()
+            .find(|l| l.contains(&format!("{}: no launch (", s.name)))
+            .and_then(|l| l.split("a wall at most ").nth(1))
+            .and_then(|r| r.split(' ').next())
+            .and_then(|n| n.parse::<f32>().ok());
+        if !wall.is_some_and(|w| w <= 20000.0) {
+            failed.push(format!("{}: a wall at most {wall:?} N", s.name));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
 }
 
 /// A replay recorded by the game's self-test (`NV_PHYSICS_REPLAY`, a file; nothing to do without

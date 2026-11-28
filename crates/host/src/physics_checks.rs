@@ -211,7 +211,16 @@ pub fn judge(
         .filter_map(|f| stance(&f.drawn, f.floor).map(|(p, l)| (f.t, p, l)))
         .collect();
     let upright = |p: f32, l: f32| p >= UPRIGHT_PELVIS * st && l < UPRIGHT_LEAN;
-    let released = frames.iter().position(|f| f.drawn.is_empty() && f.t > 0.0);
+    // Let go to its animation: the first frame drawn by nothing after one that was (the PC's first
+    // frames, before the hit is drawn, read as let go at 0.0 s).
+    let first_drawn = frames.iter().position(|f| !f.drawn.is_empty());
+    let released = first_drawn.and_then(|d| {
+        frames
+            .iter()
+            .skip(d)
+            .position(|f| f.drawn.is_empty() && f.t > 0.0)
+            .map(|i| i + d)
+    });
     // Each frame's most moving body, its speed, and which it was.
     let mut jump = (0.0f32, 0.0f32, "");
     let mut fastest = (0.0f32, 0.0f32, "");
@@ -237,14 +246,27 @@ pub fn judge(
         }
     }
     if expect.stays_standing {
-        let low = poses.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+        // The lowest the pelvis came, when and who had the body then (the PC's lowest was only a
+        // number: Patrick's run on fcb591c, 56 of 67 on every flat light hit).
+        let lowest = frames
+            .iter()
+            .filter_map(|f| stance(&f.drawn, f.floor).map(|(p, _)| (p, f.t, f.owner)))
+            .fold(None, |a: Option<(f32, f32, &str)>, b| match a {
+                Some(x) if x.0 <= b.0 => Some(x),
+                _ => Some(b),
+            });
+        let low = lowest.map_or(f32::INFINITY, |l| l.0);
         check(
             "light hit stays standing",
             low >= STANDING_LOW * st,
-            format!(
-                "the pelvis at least {low:.0} u over the floor of {st:.0} standing (at least {:.0})",
-                STANDING_LOW * st
-            ),
+            match lowest {
+                Some((p, t, owner)) => format!(
+                    "the pelvis at least {p:.0} u over the floor of {st:.0} standing (at {t:.2} s, \
+                     {owner}; at least {:.0})",
+                    STANDING_LOW * st
+                ),
+                None => "never drawn".into(),
+            },
             Where::Pc,
         );
         let last = poses.last().copied();
