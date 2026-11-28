@@ -144,7 +144,7 @@ pub fn parse(text: &str) -> Result<Vec<Scenario>, String> {
                     "frames" => {
                         let n = (f(1)? as usize).min(100_000);
                         let dt = f(2)?.clamp(0.0, 0.1);
-                        s.dt.extend(std::iter::repeat_n(dt, n));
+                        s.dt.extend(std::iter::repeat(dt).take(n));
                     }
                     "hit" => s.hits.push((
                         f(1)? as usize,

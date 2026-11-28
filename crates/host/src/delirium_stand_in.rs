@@ -4,7 +4,7 @@
 //! mechanical double, nothing of Delirium's: standing, it takes a light hit as a small shove and a
 //! heavy one (or its death) as a fall, tipping over its feet onto the ground in under a second;
 //! lying, it settles flat on the ground the world mesh gives it; its muscles on (`rise`/`follow`), its
-//! parts go to the pose given, quickly; its parts set or kicked as asked. Metres from the origin,
+//! parts go to the pose given, quickly; its parts set as asked. Metres from the origin,
 //! Z up, 21 parts as Delirium's.
 
 use crate::delirium_np::DlBody;
@@ -336,12 +336,6 @@ impl DlBody for StandIn {
         if let (Some(p), Some(v)) = (self.parts.get_mut(part), self.vel.get_mut(part)) {
             *p = state.frame;
             *v = state.velocity;
-        }
-        Ok(())
-    }
-    fn kick(&mut self, dv: Vec3) -> Result<(), String> {
-        for v in &mut self.vel {
-            *v += dv;
         }
         Ok(())
     }

@@ -289,7 +289,6 @@ pub(crate) trait DlBody: Send {
     fn follow(&mut self, parts: &[Transform]) -> Result<(), String>;
     fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String>;
     fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String>;
-    fn kick(&mut self, dv: Vec3) -> Result<(), String>;
 }
 
 /// Delirium's own body: its agent, its build (the actor's profile's), its world.
@@ -346,9 +345,6 @@ impl DlBody for RealBody {
     }
     fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String> {
         self.agent.set_part(part, state)
-    }
-    fn kick(&mut self, dv: Vec3) -> Result<(), String> {
-        self.agent.kick(dv)
     }
 }
 
@@ -877,11 +873,6 @@ impl Dl {
             }
             Own::Rise | Own::Up { .. } => self.agent.rise(true, RISE_HELP),
         }
-    }
-
-    /// The whole body's velocity changed by `dv` (m/s).
-    fn kick(&mut self, dv: V3) -> Result<(), String> {
-        self.agent.kick(Vec3::from_array(dv))
     }
 
     /// The upper body's velocity changed by `dv` (m/s): the pelvis, the spine, the neck, the head

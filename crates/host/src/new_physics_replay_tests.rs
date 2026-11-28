@@ -172,6 +172,9 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
         }
     }
     crate::delirium_stand_in::set_on(false);
+    // Nothing of this run left for the next test at the fixture's address (an actor New Physics
+    // still had, its drawn pose written into the next fixture's nodes by its hook).
+    crate::active_ragdoll::clear();
     rig_fixture::SLOPE.with(|c| c.set(None));
     rig_fixture::BUMPS.with(|c| c.set(None));
     rig_fixture::GRID.with(|g| *g.borrow_mut() = None);
