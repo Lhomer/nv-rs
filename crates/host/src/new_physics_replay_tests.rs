@@ -52,8 +52,12 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
     // The ground: the fixture's floor, tilted as the replay's, met by every cast.
     let at = f.reference();
     rig_fixture::SLOPE.with(|c| c.set(Some([at[0], at[1], s.slope[0], s.slope[1]])));
-    rig_fixture::BUMPS
-        .with(|c| c.set((s.bumps[0] > 0.0).then_some([at[0], at[1], s.bumps[0], s.bumps[1]])));
+    // The ground as cast in the game (its grid) where the replay has it, else its bumps.
+    let grid = s.grid.len() == 25;
+    rig_fixture::GRID.with(|g| *g.borrow_mut() = grid.then(|| ([at[0], at[1]], s.grid.clone())));
+    rig_fixture::BUMPS.with(|c| {
+        c.set((s.bumps[0] > 0.0 && !grid).then_some([at[0], at[1], s.bumps[0], s.bumps[1]]));
+    });
     rig_fixture::WORLD.with(|w| *w.borrow_mut() = Some(Vec::new()));
     // A hand-over to the game's ragdoll, should one come: answered as the game would.
     f.e.register_double(0x008c_7aa0, |_, _| 0u32.into_ret());
@@ -157,6 +161,7 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
     crate::delirium_stand_in::set_on(false);
     rig_fixture::SLOPE.with(|c| c.set(None));
     rig_fixture::BUMPS.with(|c| c.set(None));
+    rig_fixture::GRID.with(|g| *g.borrow_mut() = None);
     rig_fixture::WORLD.with(|w| *w.borrow_mut() = None);
     crate::gunplay::set_tuning(was);
     let mut expect = s.expect();
@@ -195,6 +200,19 @@ fn run_all(scenarios: &[Scenario]) -> (Vec<String>, Vec<String>) {
 #[test]
 fn replay_the_selftest_scenarios_over_the_stand_in() {
     let (failed, fixed) = run_all(&physics_replay::synthetic());
+    assert!(failed.is_empty(), "failed: {failed:#?}");
+    assert!(fixed.is_empty(), "fixed, take off KNOWN_OPEN: {fixed:#?}");
+}
+
+/// Patrick's PC run on 5f52c0e (the game's self-test with Delirium; `replays/pc-5f52c0e.txt`: its
+/// hits, slopes, bumps and lengths), run again over the stand-in: what failed there for the
+/// integration's own reasons (the refusals and retakes, the shoulders drawn off FNV's skeleton,
+/// a rise given up standing, the corpse after the retakes) fails here too.
+#[test]
+fn replay_patricks_pc_run_on_5f52c0e() {
+    let scenarios = physics_replay::parse(include_str!("replays/pc-5f52c0e.txt")).unwrap();
+    assert_eq!(scenarios.len(), 11);
+    let (failed, fixed) = run_all(&scenarios);
     assert!(failed.is_empty(), "failed: {failed:#?}");
     assert!(fixed.is_empty(), "fixed, take off KNOWN_OPEN: {fixed:#?}");
 }

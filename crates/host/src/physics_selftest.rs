@@ -228,8 +228,9 @@ struct Run {
     failed: Vec<&'static str>,
     replays: Vec<Scenario>,
     slope: Option<Option<V3>>,
-    /// The uneven spot (and its bumps' height), once looked for.
-    uneven: Option<Option<(V3, f32)>>,
+    /// The uneven spot, its bumps' height and its ground's heights as cast (5 by 5, 0.35 m apart,
+    /// against the spot's), once looked for.
+    uneven: Option<Option<(V3, f32, [f32; 25])>>,
     /// The impulse of a hit this frame (N s), for the frame watched next.
     struck: f32,
 }
@@ -397,6 +398,7 @@ fn empty(name: &str) -> Scenario {
         standing: 0.0,
         slope: [0.0; 2],
         bumps: [0.0; 2],
+        grid: Vec::new(),
         dt: Vec::new(),
         hits: Vec::new(),
         kill: None,
@@ -472,6 +474,10 @@ fn begin(e: &mut Engine, player: u32, run: &mut Run) {
     progress(run, "the target placed, settling".into());
 }
 
+/// A body's own ground is cast from this far over it (game units): deeper in the ground than this
+/// is not seen as under it.
+const GROUND_OVER: f32 = 35.0;
+
 /// The ground's height under `at` (game units), cast from a metre over it.
 fn ground(e: &mut Engine, at: [f32; 2], over: f32) -> Option<f32> {
     crate::active_ragdoll::cast_world(e, [at[0], at[1], over + 70.0], [0.0, 0.0, -1.0], 400.0)
@@ -506,8 +512,9 @@ fn find_slope(e: &mut Engine, at: V3) -> Option<V3> {
 
 /// A spot near `at` (within 30 m) whose ground is uneven as a trench's dirt: its heights over a
 /// 1.4 m square (5 by 5 casts) 12 to 60 units apart, no step between neighbours over 1:1; and
-/// the bumps' height (half the spread). None if the room has none.
-fn find_uneven(e: &mut Engine, at: V3) -> Option<(V3, f32)> {
+/// the bumps' height (half the spread) and the heights cast (row by row, against the spot's).
+/// None if the room has none.
+fn find_uneven(e: &mut Engine, at: V3) -> Option<(V3, f32, [f32; 25])> {
     let u = ragdoll_core::np_body::UNITS;
     let step = 0.35 * u;
     for r in [0.0f32, 3.0, 5.0, 8.0, 11.0, 14.0, 18.0, 22.0, 26.0, 30.0] {
@@ -545,7 +552,11 @@ fn find_uneven(e: &mut Engine, at: V3) -> Option<(V3, f32)> {
                 })
             });
             if (12.0..=60.0).contains(&(hi - lo)) && !steep {
-                return Some(([p[0], p[1], h], (hi - lo) * 0.5));
+                let mut grid = [0.0f32; 25];
+                for (k, z) in hs.iter().flatten().enumerate() {
+                    grid[k] = z - h;
+                }
+                return Some(([p[0], p[1], h], (hi - lo) * 0.5, grid));
             }
         }
     }
@@ -593,10 +604,17 @@ fn observe(e: &mut Engine, run: &mut Run, dt: f32) {
     }
     run.replay.dt.push(dt);
     let drawn = w.as_ref().map(|w| w.drawn.clone()).unwrap_or_default();
-    // The ground under each body, cast from over the pelvis' floor (a trench's bank, a slope).
+    // The ground under each body, cast from a little over the body itself ([`GROUND_OVER`]): from
+    // over the pelvis' floor, a railing's or a table's top beside the target was taken for the
+    // ground under a foot ("21 to 29 units under the ground", always a foot, Patrick's PC run on
+    // 5f52c0e).
     let ground_under = drawn
         .iter()
-        .map(|b| ground(e, [b.1[0], b.1[1]], floor).unwrap_or(floor))
+        .map(|b| {
+            ground(e, [b.1[0], b.1[1]], b.1[2] + GROUND_OVER - 70.0)
+                .filter(|&z| z <= b.1[2] + GROUND_OVER)
+                .unwrap_or(floor)
+        })
         .collect();
     run.frames.push(Frame {
         t: run.t,
@@ -662,8 +680,9 @@ fn judge(e: &mut Engine, run: &mut Run) {
         }
     }
     if plan.place == Place::Uneven {
-        if let Some(Some((_, h))) = run.uneven {
+        if let Some(Some((_, h, grid))) = run.uneven {
             replay.bumps = [h, 100.0];
+            replay.grid = grid.to_vec();
         }
     }
     run.replays.push(replay);

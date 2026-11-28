@@ -212,20 +212,28 @@ pub fn judge(
         .collect();
     let upright = |p: f32, l: f32| p >= UPRIGHT_PELVIS * st && l < UPRIGHT_LEAN;
     let released = frames.iter().position(|f| f.drawn.is_empty() && f.t > 0.0);
-    // Each frame's most moving body, its speed.
-    let mut jump = (0.0f32, 0.0f32);
-    let mut fastest = (0.0f32, 0.0f32);
+    // Each frame's most moving body, its speed, and which it was.
+    let mut jump = (0.0f32, 0.0f32, "");
+    let mut fastest = (0.0f32, 0.0f32, "");
+    let names = &crate::new_physics::model().bodies;
     for w in frames.windows(2) {
         if w[0].drawn.is_empty() || w[1].drawn.is_empty() || w[1].dt <= 0.0 {
             continue;
         }
-        let d = moved_most(&w[0].drawn, &w[1].drawn);
+        let (b, d) = w[0]
+            .drawn
+            .iter()
+            .zip(&w[1].drawn)
+            .map(|(x, y)| length(sub(x.1, y.1)))
+            .enumerate()
+            .fold((0, 0.0f32), |a, b| if b.1 > a.1 { b } else { a });
+        let name = names.get(b).map_or("", |n| n.node.as_str());
         if d > jump.0 {
-            jump = (d, w[1].t);
+            jump = (d, w[1].t, name);
         }
         let v = d / UNITS / w[1].dt;
         if v > fastest.0 {
-            fastest = (v, w[1].t);
+            fastest = (v, w[1].t, name);
         }
     }
     if expect.stays_standing {
@@ -341,8 +349,8 @@ pub fn judge(
         "no pose jumps",
         jump.0 <= JUMP_MOST,
         format!(
-            "a bone at most {:.1} u in a frame (at {:.1} s; at most {JUMP_MOST:.0})",
-            jump.0, jump.1
+            "a bone at most {:.1} u in a frame ({} at {:.1} s; at most {JUMP_MOST:.0})",
+            jump.0, jump.2, jump.1
         ),
         Where::Both,
     );
@@ -356,10 +364,10 @@ pub fn judge(
             && floor_load <= FLOOR_MOST
             && over <= OVER_STANDING,
         format!(
-            "the fastest bone {:.1} m/s (at {:.1} s; at most {SPEED_MOST:.0}), the pelvis at most \
+            "the fastest bone {:.1} m/s ({} at {:.1} s; at most {SPEED_MOST:.0}), the pelvis at most \
              {over:.0} u over standing (at most {OVER_STANDING:.0}), a wall at most {wall:.0} N \
              (at most {WALL_MOST:.0}), the floor at most {floor_load:.1} body weights (at most {FLOOR_MOST:.0})",
-            fastest.0, fastest.1
+            fastest.0, fastest.2, fastest.1
         ),
         Where::Both,
     );

@@ -13,10 +13,14 @@
 //! slope 0.000 0.000
 //! bumps 12.0 100.0
 //! dt 0.0083 0.0081 ...
+//! frames 600 0.0083
 //! hit 120 Bip01_Spine2 25.9 0.000 -1.000 0.000
 //! kill 900
 //! end
 //! ```
+
+/// A replay's ground grid's spacing (game units: 0.35 m).
+pub const GRID_SPACING: f32 = 0.35 * ragdoll_core::np_body::UNITS;
 
 /// A scenario's expectation (`crate::physics_checks::Expect`) and its inputs.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,6 +33,10 @@ pub struct Scenario {
     pub slope: [f32; 2],
     /// Its bumps (a trench's dirt): a bump's height and length (game units); 0: smooth.
     pub bumps: [f32; 2],
+    /// The ground as the game's self-test cast it there (5 by 5 heights, row by row along y,
+    /// [`GRID_SPACING`] apart, against the actor's spot; game units); empty: none (the bumps
+    /// stand for it).
+    pub grid: Vec<f32>,
     /// Each frame's seconds.
     pub dt: Vec<f32>,
     /// The hits: the frame, the body's node, the impulse (N s), its direction.
@@ -57,6 +65,10 @@ pub fn write(scenarios: &[Scenario]) -> String {
         out += &format!("slope {:.4} {:.4}\n", s.slope[0], s.slope[1]);
         if s.bumps[0] > 0.0 {
             out += &format!("bumps {:.1} {:.1}\n", s.bumps[0], s.bumps[1]);
+        }
+        if s.grid.len() == 25 {
+            let g: Vec<String> = s.grid.iter().map(|z| format!("{z:.1}")).collect();
+            out += &format!("grid {}\n", g.join(" "));
         }
         for chunk in s.dt.chunks(32) {
             let line: Vec<String> = chunk.iter().map(|d| format!("{d:.5}")).collect();
@@ -95,6 +107,7 @@ pub fn parse(text: &str) -> Result<Vec<Scenario>, String> {
         match w.first().copied() {
             None => {}
             Some("nv-rs") => {}
+            Some(c) if c.starts_with('#') => {}
             Some("scenario") => {
                 cur = Some(Scenario {
                     name: w.get(1).ok_or_else(|| bad("a name"))?.to_string(),
@@ -102,6 +115,7 @@ pub fn parse(text: &str) -> Result<Vec<Scenario>, String> {
                     standing: 0.0,
                     slope: [0.0; 2],
                     bumps: [0.0; 2],
+                    grid: Vec::new(),
                     dt: Vec::new(),
                     hits: Vec::new(),
                     kill: None,
@@ -116,10 +130,21 @@ pub fn parse(text: &str) -> Result<Vec<Scenario>, String> {
                     }
                     "slope" => s.slope = [f(1)?, f(2)?],
                     "bumps" => s.bumps = [f(1)?.clamp(0.0, 60.0), f(2)?.clamp(20.0, 400.0)],
+                    "grid" => {
+                        s.grid = (1..=25)
+                            .map(|i| f(i).map(|z| z.clamp(-100.0, 100.0)))
+                            .collect::<Result<_, _>>()?;
+                    }
                     "dt" => {
                         for i in 1..w.len() {
                             s.dt.push(f(i)?.clamp(0.0, 0.1));
                         }
+                    }
+                    // So many frames of the same seconds (a replay written by hand).
+                    "frames" => {
+                        let n = (f(1)? as usize).min(100_000);
+                        let dt = f(2)?.clamp(0.0, 0.1);
+                        s.dt.extend(std::iter::repeat_n(dt, n));
                     }
                     "hit" => s.hits.push((
                         f(1)? as usize,
@@ -155,6 +180,7 @@ pub fn synthetic() -> Vec<Scenario> {
         standing: 0.0,
         slope,
         bumps: [0.0; 2],
+        grid: Vec::new(),
         dt: frames(seconds),
         hits: hits
             .into_iter()
@@ -270,6 +296,7 @@ mod tests {
             assert_eq!(a.hits[0].1, b.hits[0].1);
             assert_eq!(a.kill, b.kill);
             assert_eq!(a.bumps, b.bumps);
+            assert_eq!(a.grid, b.grid);
         }
         assert!(parse("hit 1 x 2 0 0 0").is_err());
     }

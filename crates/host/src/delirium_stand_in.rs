@@ -52,6 +52,7 @@ pub fn body(states: &[PartState]) -> Box<dyn DlBody> {
         rise: false,
         still: 0.0,
         triangles: Vec::new(),
+        limp_for: 0.0,
     })
 }
 
@@ -84,7 +85,16 @@ struct StandIn {
     still: f32,
     /// The ground's triangles facing up (the world mesh).
     triangles: Vec<[Vec3; 3]>,
+    /// How long it has lain limp (s): its arms swing meanwhile.
+    limp_for: f32,
 }
+
+/// Lying limp, each arm (its clavicle, upper arm, forearm and hand: parts 13 to 16, 17 to 20)
+/// swings about its clavicle as Delirium's arms do on the ground, this far (rad) at this rate
+/// (rad/s): past FNV's own joint limits (Patrick's PC run on 5f52c0e: an upper arm 85 degrees out
+/// of them), the shoulder moved off where FNV's skeleton has it.
+const ARM_SWING: f32 = 1.4;
+const ARM_RATE: f32 = 2.5;
 
 impl StandIn {
     /// The ground's height under `p` (the highest triangle facing up there).
@@ -234,6 +244,25 @@ impl DlBody for StandIn {
             self.still = 0.0;
             self.vel.fill(Vec3::ZERO);
         }
+        // Its arms swing while it lies limp, each about its clavicle, the two out of step.
+        let limp = matches!(self.state, State::Lying) && (self.dead || self.follow.is_empty());
+        if limp && self.parts.len() == 21 {
+            let before = ARM_SWING * (ARM_RATE * self.limp_for).sin();
+            self.limp_for += dt;
+            let now = ARM_SWING * (ARM_RATE * self.limp_for).sin();
+            let across = self.parts[10].rotation * Vec3::X;
+            for (arm, sign) in [(13usize, 1.0f32), (17, -1.0)] {
+                let q = Quat::from_axis_angle(across, sign * (now - before));
+                let pivot = self.parts[arm].translation;
+                for k in arm..arm + 4 {
+                    let p = &mut self.parts[k];
+                    p.translation = pivot + q * (p.translation - pivot);
+                    p.rotation = (q * p.rotation).normalize();
+                }
+            }
+        } else {
+            self.limp_for = 0.0;
+        }
         // Up again on its feet (its muscles brought it there): standing.
         if matches!(self.state, State::Lying) && !self.dead && self.rise {
             let up = self.parts[12].translation - self.parts[0].translation;
@@ -265,6 +294,9 @@ impl DlBody for StandIn {
     fn follow(&mut self, parts: &[Transform]) -> Result<(), String> {
         self.follow = parts.to_vec();
         Ok(())
+    }
+    fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String> {
+        Ok(self.vel.iter().map(|v| (*v, Vec3::ZERO)).collect())
     }
     fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String> {
         if let (Some(p), Some(v)) = (self.parts.get_mut(part), self.vel.get_mut(part)) {

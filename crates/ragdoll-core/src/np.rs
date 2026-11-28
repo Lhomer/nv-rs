@@ -1873,48 +1873,66 @@ impl Np {
         let anim_root = scale(anim[r].1, 1.0 / UNITS);
         self.balance.shift = [pelvis[0] - anim_root[0], pelvis[1] - anim_root[1], 0.0];
         if down.stood >= STAND_HOLD {
-            // The animation on the feet as they stand (its feet's middle on theirs; the root on
-            // the pelvis, the balance's own shift slid it there after the hand-over, the body
-            // and the reference with it).
-            let fb = self.balance.feet;
-            let unshifted = self.model.states_from_nodes(anim);
-            let body_mid = scale(add(self.states[fb[0]].x, self.states[fb[1]].x), 0.5);
-            let anim_mid = scale(add(unshifted[fb[0]].x, unshifted[fb[1]].x), 0.5);
-            let shift = [body_mid[0] - anim_mid[0], body_mid[1] - anim_mid[1], 0.0];
-            self.balance = Balance::new(&self.model);
-            self.balance.shift = shift;
-            // Both feet planted where they stand (the balance's legs reach them, as after a
-            // step's landing, until a stance step brings them to the animation's stance): driven
-            // to the animation's own legs once standing, the pelvis was pushed off where it
-            // stood.
-            let feet = self.balance.feet;
-            for side in 0..2 {
-                let st = self.states[feet[side]];
-                self.balance.plants[side] = Some((st.x, st.q));
-            }
-            // Recovering first, as after a step: no step of its own while the pose eases into
-            // the animation's ([`STAND_BLEND`]).
-            self.balance.phase = crate::np_balance::Phase::Recovering;
-            // Handed over at rest, as the game's own get-up leaves a body (its bones and
-            // controller stilled): no flat motion against the ground left in the bodies, and the
-            // animation's measured velocity the ground's.
-            let g = self.ground_v;
-            for st in self.states.iter_mut() {
-                st.v = [g[0], g[1], st.v[2]];
-            }
-            self.anim_v = [g[0], g[1], 0.0];
-            self.anim_samples.clear();
-            self.stand_from = Some((
-                relative_of(&self.model, &self.model.node_worlds(&self.states)),
-                self.states[r].q,
-            ));
-            self.rise = false;
-            self.down = None;
-            self.stood_up = 0.0;
+            self.stand_from_down(anim);
         } else {
             self.down = Some(down);
         }
         self.model.node_worlds(&self.states)
+    }
+
+    /// Stood: the balance has the body again from where it stands (the animation on its feet,
+    /// both feet planted, recovering first, at rest on the ground it is carried on), its downed
+    /// state and rise ended.
+    fn stand_from_down(&mut self, anim: &[(M3, V3)]) {
+        let r = self.model.root;
+        // The animation on the feet as they stand (its feet's middle on theirs; the root on
+        // the pelvis, the balance's own shift slid it there after the hand-over, the body
+        // and the reference with it).
+        let fb = self.balance.feet;
+        let unshifted = self.model.states_from_nodes(anim);
+        let body_mid = scale(add(self.states[fb[0]].x, self.states[fb[1]].x), 0.5);
+        let anim_mid = scale(add(unshifted[fb[0]].x, unshifted[fb[1]].x), 0.5);
+        let shift = [body_mid[0] - anim_mid[0], body_mid[1] - anim_mid[1], 0.0];
+        self.balance = Balance::new(&self.model);
+        self.balance.shift = shift;
+        // Both feet planted where they stand (the balance's legs reach them, as after a
+        // step's landing, until a stance step brings them to the animation's stance): driven
+        // to the animation's own legs once standing, the pelvis was pushed off where it
+        // stood.
+        let feet = self.balance.feet;
+        for side in 0..2 {
+            let st = self.states[feet[side]];
+            self.balance.plants[side] = Some((st.x, st.q));
+        }
+        // Recovering first, as after a step: no step of its own while the pose eases into
+        // the animation's ([`STAND_BLEND`]).
+        self.balance.phase = crate::np_balance::Phase::Recovering;
+        // Handed over at rest, as the game's own get-up leaves a body (its bones and
+        // controller stilled): no flat motion against the ground left in the bodies, and the
+        // animation's measured velocity the ground's.
+        let g = self.ground_v;
+        for st in self.states.iter_mut() {
+            st.v = [g[0], g[1], st.v[2]];
+        }
+        self.anim_v = [g[0], g[1], 0.0];
+        self.anim_samples.clear();
+        self.stand_from = Some((
+            relative_of(&self.model, &self.model.node_worlds(&self.states)),
+            self.states[r].q,
+        ));
+        self.rise = false;
+        self.down = None;
+        self.stood_up = 0.0;
+    }
+
+    /// A rise that stands the body upright but was given up (its stand never read: its feet's
+    /// load came and went): stood all the same, as [`Np::frame`] stands one (the host's
+    /// Delirium integration, `crate::delirium_np` in the host, when the body it draws is upright
+    /// and still). Nothing when the body is not downed.
+    pub fn stand_now(&mut self, anim: &[(M3, V3)]) {
+        if self.down.is_some() {
+            self.stand_from_down(anim);
+        }
     }
 
     /// How far the feet stand off the animation's stance (m, flat: each foot's offset from its

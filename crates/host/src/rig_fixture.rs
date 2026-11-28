@@ -142,6 +142,11 @@ thread_local! {
     /// Bumps on it, as a trench's dirt (a point's x and y, the height and the length of a bump:
     /// game units), none smooth.
     pub static BUMPS: std::cell::Cell<Option<[f32; 4]>> = const { std::cell::Cell::new(None) };
+    /// The ground as cast in the game around a spot (its x and y, then 5 by 5 heights against it,
+    /// row by row along y, `crate::physics_replay::GRID_SPACING` apart), its edge's heights
+    /// beyond; none: none.
+    pub static GRID: std::cell::RefCell<Option<([f32; 2], Vec<f32>)>> =
+        const { std::cell::RefCell::new(None) };
     /// The world the tests' ray casts meet (`crate::active_ragdoll`'s `cast_world`): the floor
     /// and these boxes (each its least and most corner, game units: a wall, a crate, a slab);
     /// none: the casts find nothing, as before.
@@ -160,8 +165,21 @@ fn ground_at(at: V3) -> Option<f32> {
             let k = std::f32::consts::TAU / l.max(1.0);
             h * ((at[0] - x0) * k).sin() * ((at[1] - y0) * k * 0.77).cos()
         });
+    let grid = GRID.with(|g| {
+        g.borrow().as_ref().map_or(0.0, |(c, h)| {
+            let k = crate::physics_replay::GRID_SPACING;
+            let u = ((at[0] - c[0]) / k + 2.0).clamp(0.0, 4.0);
+            let v = ((at[1] - c[1]) / k + 2.0).clamp(0.0, 4.0);
+            let (i, j) = ((u.floor() as usize).min(3), (v.floor() as usize).min(3));
+            let (fu, fv) = (u - i as f32, v - j as f32);
+            let z = |i: usize, j: usize| h.get(j * 5 + i).copied().unwrap_or(0.0);
+            (z(i, j) * (1.0 - fu) + z(i + 1, j) * fu) * (1.0 - fv)
+                + (z(i, j + 1) * (1.0 - fu) + z(i + 1, j + 1) * fu) * fv
+        })
+    });
     Some(
         bumps
+            + grid
             + match SLOPE.with(std::cell::Cell::get) {
                 Some([x0, y0, gx, gy]) => f + gx * (at[0] - x0) + gy * (at[1] - y0),
                 None => f,
@@ -265,6 +283,7 @@ impl Fixture {
         FLOOR.with(|f| f.set(ground.collision));
         SLOPE.with(|f| f.set(None));
         BUMPS.with(|f| f.set(None));
+        GRID.with(|g| *g.borrow_mut() = None);
         WORLD.with(|w| *w.borrow_mut() = None);
         ARMED.with(|a| a.set(false));
         let at: Vec<u32> = (0..nodes.len() as u32)

@@ -1,0 +1,81 @@
+nv-rs physics replay 1
+# Patrick's PC run on 5f52c0e (2026-11-28 07:33 UTC, the game's self-test with Delirium): each
+# scenario's hits (their frames, bodies, impulses and directions), its slope, its bumps and its
+# length as recorded; each frame's seconds the scenario's mean (the recorded ones varied 7 to
+# 20 ms a frame).
+scenario light-standing
+expect stays 67.2
+slope 0.0000 0.0000
+frames 554 0.0090
+hit 1 Bip01_Spine2 25.90 -0.0008 -1.0000 0.0000
+end
+scenario head-shot
+expect stays 67.2
+slope 0.0000 0.0000
+frames 503 0.0100
+hit 1 Bip01_Head 25.90 -0.0008 -1.0000 0.0000
+end
+scenario staggering-hit
+expect stays 67.2
+slope 0.0000 0.0000
+frames 536 0.0100
+hit 1 Bip01_Spine2 25.90 -0.0008 -1.0000 0.0000
+hit 34 Bip01_Spine2 25.90 -0.0008 -1.0000 0.0000
+end
+scenario downed-face-down
+expect rises 67.2
+slope 0.0000 0.0000
+frames 1665 0.0105
+hit 1 Bip01_Spine2 160.00 0.0008 1.0000 0.0000
+hit 335 Bip01_Spine2 25.90 0.3056 -0.9522 0.0000
+end
+scenario downed-face-up
+expect rises 67.2
+slope 0.0000 0.0000
+frames 1950 0.0083
+hit 1 Bip01_Spine2 160.00 -0.0008 -1.0000 0.0000
+hit 325 Bip01_R_Forearm 25.90 0.0765 -0.9971 0.0000
+end
+scenario mid-rise-hit
+expect rises 67.2
+slope 0.0000 0.0000
+frames 2170 0.0090
+hit 1 Bip01_Spine2 160.00 -0.0008 -1.0000 0.0000
+hit 577 Bip01_Spine2 25.90 0.0481 -0.9988 0.0000
+end
+scenario kill-mid-rise
+expect dies 67.2
+slope 0.0000 0.0000
+frames 1130 0.0080
+hit 1 Bip01_Spine2 160.00 -0.0008 -1.0000 0.0000
+kill 458
+end
+scenario past-threshold
+expect rises 67.2
+slope 0.0000 0.0000
+frames 1375 0.0102
+hit 1 Bip01_Spine2 160.00 -0.0008 -1.0000 0.0000
+end
+scenario light-standing-slope
+expect stays 67.1
+slope 0.0478 0.1619
+frames 556 0.0090
+hit 1 Bip01_Spine2 25.90 0.5543 -0.8324 0.0000
+end
+scenario past-threshold-slope
+expect rises 67.1
+slope 0.0478 0.1619
+frames 1610 0.0087
+hit 1 Bip01_Spine2 160.00 0.5543 -0.8324 0.0000
+end
+scenario trench
+expect rises 67.1
+slope 0.0000 0.0000
+bumps 15.8 100.0
+frames 2370 0.0080
+hit 1 Bip01_Spine2 25.90 -0.0008 -1.0000 0.0000
+hit 365 Bip01_Spine2 160.00 0.0023 -1.0000 0.0000
+hit 376 Bip01_R_Forearm 25.90 0.0045 -1.0000 0.0000
+hit 399 Bip01_Spine2 25.90 0.0053 -1.0000 0.0000
+hit 424 Bip01_L_Calf 25.90 -0.0049 1.0000 0.0000
+end

@@ -287,6 +287,7 @@ pub(crate) trait DlBody: Send {
     fn relax(&mut self) -> Result<(), String>;
     fn rise(&mut self, on: bool, help: f32) -> Result<(), String>;
     fn follow(&mut self, parts: &[Transform]) -> Result<(), String>;
+    fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String>;
     fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String>;
     fn kick(&mut self, dv: Vec3) -> Result<(), String>;
 }
@@ -339,6 +340,9 @@ impl DlBody for RealBody {
     }
     fn follow(&mut self, parts: &[Transform]) -> Result<(), String> {
         self.agent.follow(parts)
+    }
+    fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String> {
+        self.agent.motions()
     }
     fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String> {
         self.agent.set_part(part, state)
@@ -478,7 +482,10 @@ pub(crate) const LIMIT_RAMP: f32 = 720.0;
 /// a light 9mm still downed him about 1.5 s after the hit, with a third of g for 1.5 s.
 pub(crate) const AID_FOR: f32 = 3.0;
 pub(crate) const AID_MOST: f32 = 0.5;
-pub(crate) const AID_LIFT: f32 = 1.0;
+pub(crate) const AID_LIFT: f32 = 0.5;
+/// The parts the stagger aid moves: the pelvis (0), the spine (7 to 10), the neck (11), the head
+/// (12) and the arms (13 to 20); never the legs (1 to 6).
+pub(crate) const UPPER_PARTS: [usize; 15] = [0, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
 pub(crate) const AID_FROM: f32 = 0.9;
 const AID_K: f32 = 12.0;
 const AID_LIFT_K: f32 = 40.0;
@@ -496,6 +503,88 @@ pub(crate) fn np_is_the_body(slot: &Slot) -> bool {
     slot.body.as_ref().map_or(true, |d| {
         !d.dead() && matches!(d.own, Own::Rise | Own::Up { .. }) && d.np_for > NP_SETTLED_IN
     })
+}
+
+/// A pose of Delirium's that moved more than this in a frame (game units) is not drawn.
+pub(crate) const POSE_JUMP: f32 = 25.0;
+
+/// What is drawn of a body Delirium has had turns each joint at most this fast (rad/s) and moves
+/// its root at most this fast (m/s) ([`continuous`]).
+pub(crate) const TURN_RATE: f32 = 12.0;
+pub(crate) const ROOT_RATE: f32 = 6.0;
+
+/// The pose to draw this frame, from the one drawn last (`last`) toward the one wanted (`want`,
+/// both each body's node's world, game units), `dt` seconds on: made again through FNV's own
+/// skeleton, each bone at its own length under its parent (the bones New Physics has no body for,
+/// the clavicles, the pelvis, the neck, at their bind turn under theirs), each joint turned
+/// toward the wanted turn at most [`TURN_RATE`], the root moved at most [`ROOT_RATE`]. So what
+/// is drawn never jumps (a refusal, a retake, the skeleton's limits brought in, Delirium's own
+/// glitches: 23 to 62 units in a frame in Patrick's PC run on 5f52c0e) and never stretches (the
+/// upper arms 24 to 30% off their bones' length there: Delirium's clavicles move them where
+/// FNV's, never drawn by New Physics, are not).
+pub(crate) fn continuous(last: &[(M3, V3)], want: &[(M3, V3)], dt: f32) -> Vec<(M3, V3)> {
+    let m = crate::new_physics::model();
+    let s = skel();
+    if last.len() != want.len() || want.len() <= m.root || dt <= 0.0 {
+        return want.to_vec();
+    }
+    let o = want[m.root].1;
+    let (wl, ww) = (skeleton_from_bodies(last, o), skeleton_from_bodies(want, o));
+    let n = s.names.len();
+    let root = s.names.iter().position(|x| *x == m.bodies[m.root].node);
+    // The root body's bone and every bone above it: the chain's start, not made under a parent.
+    let mut above = vec![false; n];
+    let mut b = root;
+    while let Some(i) = b {
+        above[i] = true;
+        b = s.parents[i];
+    }
+    let toward = |a: Quat, b: Quat, most: f32| {
+        let b = if a.dot(b) < 0.0 { -b } else { b };
+        let angle = a.angle_between(b);
+        if angle <= most || angle < 1e-6 {
+            b
+        } else {
+            a.slerp(b, most / angle).normalize()
+        }
+    };
+    let turn_most = TURN_RATE * dt;
+    let move_most = ROOT_RATE * dt;
+    let mut out: Vec<Transform> = Vec::with_capacity(n);
+    for b in 0..n {
+        let t = match s.parents[b] {
+            Some(p) if !above[b] => {
+                let local_last = wl[p].rotation.inverse() * wl[b].rotation;
+                let local_want = ww[p].rotation.inverse() * ww[b].rotation;
+                let q = toward(local_last, local_want, turn_most);
+                let pw = out[p];
+                Transform::from_translation(pw.translation + pw.rotation * s.local_t[b])
+                    .with_rotation((pw.rotation * q).normalize())
+            }
+            _ => {
+                let d = ww[b].translation - wl[b].translation;
+                let l = d.length();
+                let at = if l > move_most {
+                    wl[b].translation + d * (move_most / l)
+                } else {
+                    ww[b].translation
+                };
+                Transform::from_translation(at)
+                    .with_rotation(toward(wl[b].rotation, ww[b].rotation, turn_most))
+            }
+        };
+        out.push(t);
+    }
+    m.bodies
+        .iter()
+        .enumerate()
+        .map(|(i, body)| {
+            s.names
+                .iter()
+                .position(|x| *x == body.node)
+                .map_or(want[i], |k| from_tf(&out[k], o))
+        })
+        .collect()
 }
 
 /// Back on Delirium's own body from New Physics' rise pose, the difference eased out over this (s).
@@ -789,6 +878,30 @@ impl Dl {
     /// The whole body's velocity changed by `dv` (m/s).
     fn kick(&mut self, dv: V3) -> Result<(), String> {
         self.agent.kick(Vec3::from_array(dv))
+    }
+
+    /// The upper body's velocity changed by `dv` (m/s): the pelvis, the spine, the neck, the head
+    /// and the arms ([`UPPER_PARTS`]), the legs left as they are. A change to the whole body only
+    /// slid it, feet and all, and lifted, it took the weight off the feet its balance stands on
+    /// (Patrick's PC run on 5f52c0e: a 9mm still downed him with the aid on).
+    fn kick_upper(&mut self, dv: V3) -> Result<(), String> {
+        let parts = self.agent.parts()?;
+        let motions = self.agent.motions()?;
+        let dv = Vec3::from_array(dv);
+        for k in UPPER_PARTS {
+            let (Some(frame), Some(&(velocity, spin))) = (parts.get(k), motions.get(k)) else {
+                continue;
+            };
+            self.agent.set_part(
+                k,
+                &PartState {
+                    frame: *frame,
+                    velocity: velocity + dv,
+                    spin,
+                },
+            )?;
+        }
+        Ok(())
     }
 
     /// Its muscles on New Physics' bodies at `bodies` (game units).
@@ -1235,7 +1348,7 @@ pub(crate) fn ground_mesh(
 }
 
 /// Why a pose of Delirium's is not to be drawn (none: it may be): a body that moved more than
-/// [`crate::physics_checks::JUMP_MOST`] units since the last frame, one more than 3 m from the pelvis (a body flung apart), or the
+/// [`POSE_JUMP`] units since the last frame, one more than 3 m from the pelvis (a body flung apart), or the
 /// pelvis more than 10 m from where the take began (`origin`). Patrick's 22:38 clip: two bodies
 /// vanished a few frames after the take, as if flung out of the world.
 pub(crate) fn pose_wrong(
@@ -1244,8 +1357,12 @@ pub(crate) fn pose_wrong(
     origin: V3,
     dt: f32,
 ) -> Option<String> {
-    // A frame's move: 15 units (Patrick's 23:16 ask), or 20 m/s over a long frame.
-    let most = (20.0 * UNITS * dt).max(crate::physics_checks::JUMP_MOST);
+    // A frame's move: 25 units, or 20 m/s over a long frame. Never the self-test's 15 units
+    // (`crate::physics_checks::JUMP_MOST`): at 100 frames a second Delirium's own limbs move that
+    // far in a fall, and each refusal and retake from New Physics' pose was itself a jump
+    // (Patrick's PC run on 5f52c0e: refused three times a scenario, then New Physics kept it).
+    // What is drawn is kept smooth by [`continuous`].
+    let most = (20.0 * UNITS * dt).max(POSE_JUMP);
     use ragdoll_core::flinch::{length, sub};
     let m = crate::new_physics::model();
     let pelvis = drawn.get(m.root)?.1;
@@ -1340,6 +1457,8 @@ pub(crate) struct Slot {
     /// a light hit's stagger aid (s), kept through a retake.
     pub pain: f32,
     pub aid: f32,
+    /// Its corpse could not be made on Delirium (not tried again).
+    pub corpse_failed: bool,
 }
 
 /// The pelvis's standing height (game units) for an actor whose animation has its root body
@@ -1466,7 +1585,11 @@ pub(crate) fn corpse_from_new_physics(
     np: &ragdoll_core::np::Np,
     slot: &mut Slot,
 ) -> bool {
-    if slot.body.is_some() || !running() || slot.retakes > RETAKES {
+    // Retakes used up or not (they keep a living body Delirium flung from being taken again and
+    // again), a corpse is Delirium's: after the third refusal it went to the game's ragdoll
+    // (Patrick's PC run on 5f52c0e, kill-mid-rise). Only a corpse Delirium could not make is left
+    // to the game.
+    if slot.body.is_some() || !running() || slot.corpse_failed {
         return false;
     }
     let facts = facts_of(e, actor);
@@ -1492,7 +1615,7 @@ pub(crate) fn corpse_from_new_physics(
             true
         }
         Err(why) => {
-            slot.retakes = slot.retakes.saturating_add(1);
+            slot.corpse_failed = true;
             crate::new_physics::note_event(format!(
                 "{id:08X}: [np delirium] its corpse not taken ({why}): the game's death as before"
             ));
@@ -1899,7 +2022,7 @@ pub(crate) fn frame_for(
         if !pose.downed(d.standing) {
             let dv = aid(&pose, d.standing, dt);
             if dv.iter().any(|x| *x != 0.0) {
-                if let Err(why) = d.kick(dv) {
+                if let Err(why) = d.kick_upper(dv) {
                     return refused(id, &why, slot, np, target);
                 }
             }
@@ -1977,6 +2100,22 @@ pub(crate) fn frame_for(
             slot.back = true;
         }
         return Some(drawn);
+    }
+    // Rising, upright and still when New Physics gives its rise up (its stand never read, its
+    // feet's load coming and going): it stood all the same. Taken for a failed rise, the body was
+    // dropped from standing ("down again" with the pelvis at 68 of 67 units and the torso 6
+    // degrees from upright: Patrick's PC run on 5f52c0e, eight times).
+    if d.own == Own::Rise
+        && !np.rise
+        && np.down.is_some()
+        && pose.upright(d.standing)
+        && pose.speed < UP_STILL
+    {
+        np.stand_now(anim);
+        note_event(format!(
+            "{id:08X}: [np delirium] upright and still as New Physics gave its rise up: stood \
+             (never dropped from standing)"
+        ));
     }
     let (next, change) = next_own(
         d.own,

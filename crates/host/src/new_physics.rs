@@ -1471,6 +1471,13 @@ pub fn apply(e: &mut Engine) {
             Some(d) => d,
             None => np.frame(&anim, floor, dt),
         };
+        // A body Delirium has had: drawn smooth and whole, whoever has it this frame (its joints
+        // turned at most so fast, its bones at their lengths: `crate::delirium_np::continuous`).
+        let drawn = if a.dl.had && a.drawn.len() == drawn.len() {
+            crate::delirium_np::continuous(&a.drawn, &drawn, dt)
+        } else {
+            drawn
+        };
         floor_load_said(&mut a, floor, dt);
         wall_load_said(&mut a);
         let Some(np) = a.np.as_mut() else { continue };
