@@ -39,3 +39,6 @@ __pycache__/
 .claude/worktrees/
 # The Direct3D 9 adapter capture (scripts/d3d9-capture): this machine's hardware, never commit
 d3d9_adapter.tsv
+
+# The physics self-test's results and replays (written beside a run; never committed).
+physics-selftest-*.txt

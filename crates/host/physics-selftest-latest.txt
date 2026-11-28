@@ -1,7 +1,0 @@
-nv-rs physics self-test
-build: local
-run: 20261128-070954 UTC
-Delirium: off (New Physics alone: what only Delirium's body shows doesn't apply)
-replay: ./physics-selftest-20261128-070954-replay.txt
-game log: (not known: NV_REPORT_LOG not set)
-RUNNING: light-standing (1 of 11), its actions begun

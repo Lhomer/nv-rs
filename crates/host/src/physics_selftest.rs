@@ -670,13 +670,21 @@ fn judge(e: &mut Engine, run: &mut Run) {
 }
 
 /// Where the self-test's files go: beside the game's log (`NV_REPORT_LOG`'s folder), else
-/// `NV_REPORT_DIR`, else here.
-fn out_dir() -> std::path::PathBuf {
-    std::env::var_os("NV_REPORT_LOG")
-        .map(std::path::PathBuf::from)
-        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-        .or_else(|| std::env::var_os("NV_REPORT_DIR").map(std::path::PathBuf::from))
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
+/// `NV_REPORT_DIR`, else here. Tests: only the folder a test names ([`tests::OUT`]), none
+/// otherwise (a test's progress file was written into the crate's folder, and committed).
+fn out_dir() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    {
+        tests::OUT.with(|o| o.borrow().clone())
+    }
+    #[cfg(not(test))]
+    Some(
+        std::env::var_os("NV_REPORT_LOG")
+            .map(std::path::PathBuf::from)
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+            .or_else(|| std::env::var_os("NV_REPORT_DIR").map(std::path::PathBuf::from))
+            .unwrap_or_else(|| std::path::PathBuf::from(".")),
+    )
 }
 
 /// The newest results' file, at a place that never changes (`Launcher.exe
@@ -753,7 +761,9 @@ fn progress(run: &Run, stage: String) {
         p.lines = run.lines.clone();
         p.failed = run.failed.clone();
         p.replays = run.replays.clone();
-        let replay = out_dir().join(format!("physics-selftest-{}-replay.txt", p.stamp));
+        let replay = out_dir()
+            .unwrap_or_default()
+            .join(format!("physics-selftest-{}-replay.txt", p.stamp));
         results_text(
             &p.stamp,
             &replay,
@@ -767,7 +777,9 @@ fn progress(run: &Run, stage: String) {
             ),
         )
     };
-    let _ = std::fs::write(out_dir().join(LATEST), text.as_bytes());
+    if let Some(dir) = out_dir() {
+        let _ = std::fs::write(dir.join(LATEST), text.as_bytes());
+    }
 }
 
 /// The game stopped (or ended) while the self-test ran: its results written all the same, with
@@ -793,7 +805,9 @@ fn stopped(line: &str) {
     if p.scenario == "the end" {
         return;
     }
-    let dir = out_dir();
+    let Some(dir) = out_dir() else {
+        return;
+    };
     let replay = dir.join(format!("physics-selftest-{}-replay.txt", p.stamp));
     let mut lines = p.lines.clone();
     lines.push(format!(
@@ -833,7 +847,7 @@ fn finish(run: &mut Run) {
         .unwrap_or_else(|p| p.into_inner())
         .as_ref()
         .map_or_else(utc_stamp, |p| p.stamp.clone());
-    let dir = out_dir();
+    let dir = out_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let results = dir.join(format!("physics-selftest-{stamp}.txt"));
     let replay = dir.join(format!("physics-selftest-{stamp}-replay.txt"));
     let replay_text = crate::physics_replay::write(&run.replays);
@@ -894,8 +908,14 @@ fn utc_stamp() -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    thread_local! {
+        /// The folder this test's self-test files go to (none: not written).
+        pub static OUT: std::cell::RefCell<Option<std::path::PathBuf>> =
+            const { std::cell::RefCell::new(None) };
+    }
 
     /// The range keeps its target as a form id (FF00131A in Patrick's run); the self-test acts on
     /// the reference it names, looked up with the game's `LookupFormByID`, never on the form id
@@ -958,7 +978,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nv-selftest-stop-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("NV_REPORT_DIR", &dir);
+        OUT.with(|o| *o.borrow_mut() = Some(dir.clone()));
         let run = Run {
             plan: 1,
             stage: Stage::Acting(0, 0.0),
@@ -1023,7 +1043,7 @@ mod tests {
             "{files:?}"
         );
         assert_eq!(files.len(), 3, "{files:?}");
-        std::env::remove_var("NV_REPORT_DIR");
+        OUT.with(|o| *o.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
