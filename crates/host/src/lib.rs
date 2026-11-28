@@ -24,6 +24,8 @@ pub mod cell_entry_wait;
 pub mod cell_offsets;
 pub mod compact_menus;
 pub(crate) mod delirium_np;
+#[cfg(test)]
+pub(crate) mod delirium_stand_in;
 pub mod direct_files;
 pub mod down_log;
 pub mod draw_thread;
@@ -59,6 +61,9 @@ pub mod perk_every_level;
 pub mod perks;
 pub mod phone_range;
 pub mod phys_blend;
+pub mod physics_checks;
+pub mod physics_replay;
+pub mod physics_selftest;
 pub mod pickpocket_chance;
 pub mod player_high_process;
 pub mod player_move;

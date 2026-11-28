@@ -213,6 +213,9 @@ const HISTORY_FRAMES: usize = 3;
 /// The hand-over waits for the body inside the skeleton's limits (radians out), at most this many
 /// frames.
 pub(crate) const HAND_LIMITS: f32 = 0.09;
+/// A body on Delirium settled and waiting this long (s): its rise asked for though the hands
+/// can't push up yet.
+const DELIRIUM_WAIT: f32 = 1.5;
 pub(crate) const HAND_WAIT_FRAMES: u32 = 45;
 
 /// The snapshot of `root`'s animation: its world and the locals of `tree`.
@@ -1217,6 +1220,10 @@ pub fn apply(e: &mut Engine) {
             && (process == 0 || e.mem.u8(process + KNOCK_STATE) != 0 || matches!(life, 1 | 2))
         {
             LET_GOS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            TO_HAVOK
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(a.actor);
             let now = outcome_now(&a);
             close_outcome(a.id, &mut a.outcome, &format!("{now}, let go to the game"));
             note(format!(
@@ -1442,7 +1449,7 @@ pub fn apply(e: &mut Engine) {
         np.edges.extend(a.boxes.iter().copied());
         // Where Delirium runs, a human's frame is Delirium's for the whole fall, until it is back
         // upright and still (`crate::delirium_np`).
-        let via_delirium = if delirium_bridge::running() {
+        let via_delirium = if crate::delirium_np::running() {
             crate::delirium_np::frame_for(
                 e,
                 (a.id, a.actor, &a.tree, a.snap.as_ref(), &anim),
@@ -3042,6 +3049,11 @@ fn main_thread_pass(e: &mut Engine) {
         } else {
             a.held.clone()
         };
+        // Each hand-over to the game's ragdoll counted (the self-test's "never Havok").
+        TO_HAVOK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(a.actor);
         if reason == "death" {
             let (moved, given) =
                 crate::knockdown::place_bodies(e, a.actor, &shown, &animated, &velocities);
@@ -3492,7 +3504,13 @@ fn downed(e: &mut Engine, a: &mut NpActor, dt: f32) -> bool {
     } else if failed {
         // A rise gave up this frame: a moment's rest before the next.
         "wait"
-    } else if np.rise || rd.can_push_up {
+    } else if np.rise
+        || rd.can_push_up
+        || (a.dl.body.is_some() && a.choice == "wait" && a.choice_for >= DELIRIUM_WAIT)
+    {
+        // On Delirium the body lies as Delirium has it, its hands where they fell (New Physics'
+        // settle never places them): waited a while settled, its rise is asked for all the same,
+        // and the rise plants the hands (the CI's replay: it waited for ever).
         "stand"
     } else {
         "wait"
@@ -3715,6 +3733,88 @@ pub fn unwrite(e: &mut Engine) {
 /// Each body's node's world (rotation, game units).
 pub type Pose = Vec<(M3, V3)>;
 
+/// Where body `name` of `actor` is now (game units: its node's world), while New Physics has it.
+pub(crate) fn body_point(e: &Engine, actor: u32, name: &str) -> Option<V3> {
+    let b = model().body(name)?;
+    let actors = ACTORS.lock().unwrap_or_else(|p| p.into_inner());
+    let a = actors.iter().find(|a| a.actor == actor)?;
+    let node = *a.nodes.get(b)?;
+    Some(read3(e, node + WORLD_TRANSLATION))
+}
+
+/// A reference's position (game units).
+pub(crate) fn ref_position(e: &Engine, r: u32) -> V3 {
+    read3(e, r + REFR_POSITION)
+}
+
+/// Whether the game has `actor` dying or dead.
+pub(crate) fn is_dead(e: &Engine, actor: u32) -> bool {
+    matches!(e.mem.u32(actor + LIFE_STATE), 1 | 2)
+}
+
+/// Each actor handed to (or let go into) the game's ragdoll, in order.
+static TO_HAVOK: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// How many times `actor` went to the game's ragdoll (handed over, or let go to it).
+pub(crate) fn to_havok(actor: u32) -> usize {
+    TO_HAVOK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .filter(|&&a| a == actor)
+        .count()
+}
+
+/// What the self-test (`crate::physics_selftest`) reads of an actor New Physics has, each frame.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Watch {
+    /// The bodies drawn (each body's node's world, game units).
+    pub drawn: Vec<(M3, V3)>,
+    /// Downed in New Physics' controller, and its rise asked for.
+    pub down: bool,
+    pub rise: bool,
+    /// Who has the body: `delirium hit|down|rise|up|dead` or `new physics`.
+    pub owner: &'static str,
+    /// Waiting for the game's ragdoll (its reason).
+    pub handing: Option<&'static str>,
+    /// The open hit's most against a wall (N) and on the floor (body weights).
+    pub wall_most: f32,
+    pub floor_most: f32,
+    /// The standing pelvis height Delirium measures against (game units), once it has had it.
+    pub standing: Option<f32>,
+}
+
+/// [`Watch`] of `actor`, while New Physics has it.
+pub(crate) fn watch(actor: u32) -> Option<Watch> {
+    ACTORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|a| a.actor == actor)
+        .map(|a| {
+            use crate::delirium_np::Own;
+            Watch {
+                drawn: a.drawn.clone(),
+                down: a.np.as_ref().is_some_and(|n| n.down.is_some()),
+                rise: a.np.as_ref().is_some_and(|n| n.rise),
+                owner: match a.dl.body.as_ref() {
+                    None => "new physics",
+                    Some(d) if d.dead() => "delirium dead",
+                    Some(d) => match d.own {
+                        Own::Hit => "delirium hit",
+                        Own::Down => "delirium down",
+                        Own::Rise => "delirium rise",
+                        Own::Up { .. } => "delirium up",
+                    },
+                },
+                handing: a.handing,
+                wall_most: a.outcome.as_ref().map_or(0.0, |o| o.wall_most),
+                floor_most: a.outcome.as_ref().map_or(0.0, |o| o.floor_most),
+                standing: a.dl.standing,
+            }
+        })
+}
+
 /// The last frame's drawn bodies (each body's node's world) and read-back (degrees, units) of
 /// `actor`.
 pub fn drawn(actor: u32) -> Option<(Pose, (f32, f32))> {
@@ -3887,6 +3987,9 @@ pub fn clear() {
 #[cfg(test)]
 #[path = "new_physics_fixture_tests.rs"]
 mod fixture_tests;
+#[cfg(test)]
+#[path = "new_physics_replay_tests.rs"]
+mod replay_tests;
 
 #[cfg(test)]
 #[path = "new_physics_vats_tests.rs"]

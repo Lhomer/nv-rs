@@ -13,6 +13,9 @@
 //!   Play.exe --import-saves   copies the saves from Documents\My Games\FalloutNV (read only)
 //!   Play.exe --install-mods   the mod installer, in the launcher's terminal
 //!   Play.exe --check          everything up to starting the game, then says what it found
+//!   Play.exe --physics-test   the physics test room's self-test: hits on its target, each
+//!                             outcome checked, the results written beside the game's log
+//!                             (`physics-selftest-*.txt`), then the game ends by itself
 //!   --game FOLDER             the game's folder, instead of looking for it
 //!   --from FOLDER             with --import-saves: where to copy saves from
 //!
@@ -1071,6 +1074,9 @@ struct Options {
     /// `NV_RS_ROOM=1`): the game starts straight into the room, with F9 clips
     /// (docs/WINDOWS-ROOM.md).
     room: bool,
+    /// `--physics-test`: the room, its self-test run with no one at the keyboard
+    /// (`host::physics_selftest`), the game ended after it.
+    physics_test: bool,
     /// `--mod-manager` given.
     mod_manager: bool,
     /// Why this run plays the mod manager's way (the `manager` profile; [`manager_reason`]), set by
@@ -1087,6 +1093,7 @@ fn parse_options(raw: &[String]) -> Options {
     let mut options = Options {
         mods: false,
         room: option_env!("NV_RS_ROOM") == Some("1"),
+        physics_test: false,
         mod_manager: false,
         manager: None,
         install: false,
@@ -1100,6 +1107,10 @@ fn parse_options(raw: &[String]) -> Options {
         match arg.as_str() {
             "--mods" => options.mods = true,
             "--room" => options.room = true,
+            "--physics-test" => {
+                options.room = true;
+                options.physics_test = true;
+            }
             "--mod-manager" => options.mod_manager = true,
             "--import-saves" => options.import = true,
             "--install-mods" => options.install = true,
@@ -1582,6 +1593,11 @@ fn play(
             .env("NV_ROOM_RECORD", "1");
         package.log("the physics test room: NV_TEST_RANGE_PHONE=1, NV_ROOM_RECORD=1");
     }
+    if options.physics_test {
+        command.env("NV_PHYSICS_SELFTEST", "1");
+        package
+            .log("the physics self-test: NV_PHYSICS_SELFTEST=1 (the game ends by itself after it)");
+    }
 
     let fallout_ini = text_of(&std::fs::read(profile.fallout_ini()).unwrap_or_default());
     // A settings.ini still there (its choices could not go into the files) is read the same way
@@ -1981,6 +1997,8 @@ mod tests {
         assert!(o.mods && o.import && !o.check_only && !o.install);
         assert_eq!(o.room, option_env!("NV_RS_ROOM") == Some("1"));
         assert!(parse_options(&["--room".to_string()]).room);
+        let o = parse_options(&["--physics-test".to_string()]);
+        assert!(o.room && o.physics_test);
         assert!(parse_options(&["--install-mods".to_owned()]).install);
         assert_eq!(o.game.unwrap(), PathBuf::from("D:\\x"));
         assert_eq!(o.from.unwrap(), PathBuf::from("E:\\y"));

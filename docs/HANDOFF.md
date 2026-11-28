@@ -7,6 +7,28 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-27 (the hit reactions' self-test: in the game and in CI)
+
+**Status: pushed.** Patrick's ask (5:47 PM): test the hit reactions without anyone aiming.
+docs/PHYSICS-SELFTEST.md has it all. Layer 1, `Play.exe --physics-test` (`crate::physics_selftest`):
+the room's target struck by a fixed list of hits through New Physics' own hit path, each outcome
+watched (`new_physics::watch`) and judged (`crate::physics_checks`), `physics-selftest-<UTC>.txt`
+and its `-replay.txt` written beside the game's log, the game ended by itself. Layer 2, CI:
+`new_physics::replay_tests` runs the scenarios (`physics_replay::synthetic`, or a recorded replay
+with `NV_PHYSICS_REPLAY`) through New Physics' real path on the mannequin with a stand-in body for
+Delirium (`crate::delirium_stand_in`; Delirium is behind `delirium_np::DlBody`, `RealBody` the
+real one). The replay found and fixed three faults at once: a body on Delirium could wait downed
+for ever (New Physics' choice waited for hands placed to push up, and Delirium's lying pose never
+places them: `DELIRIUM_WAIT`, 1.5 s, then its rise is asked for and the rise plants them), and the
+health read crashed on an actor with no actor-value table (both fixed). **Open, for Patrick to
+decide:** on a slope New Physics never lets a body that stood again go back to the game's AI
+(with or without Delirium: its knee stands bent a few units off the flat animation's, over
+`LET_GO_OFF`), so the NPC stays held, not moving or fighting. Giving the legs room snaps them to
+the animation in a frame (`np_a_slab_edge_holds_the_body` caught it); the fix would blend the legs
+to the animation before letting go and leave the game's own feet unplaced on a slope, as vanilla
+does. The CI's replay tracks it in `KNOWN_OPEN` (it fails if it starts passing, or anything else
+fails).
+
 ### Claude, 2026-11-27 (Delirium: Patrick's 5:34 PM report on adbee09, every shot killed the agent)
 
 **Status: pushed; not run with GTA IV (for Patrick to try).** The cause of most of it: Delirium's

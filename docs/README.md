@@ -36,6 +36,7 @@ function by function into Rust (`crates/engine*`), started on the player's own e
 | [PERFORMANCE.md](PERFORMANCE.md) | Frame-time measurements |
 | [FIXES.md](FIXES.md) | The fixes preset: what differs from the original by default, how to pin vanilla |
 | [GUNPLAY.md](GUNPLAY.md) | Weighty combat: recoil, sway, hit-stop, reach, kill impulses and dismemberment by force (what the original does, the hooks, the tuning, the Test Range) |
+| [PHYSICS-SELFTEST.md](PHYSICS-SELFTEST.md) | The hit reactions' self-test: `Play.exe --physics-test` on the player's PC (real Delirium) and the replay over a stand-in body in CI; which checks count where |
 | [../tools/ragdoll-lab/README.md](../tools/ragdoll-lab/README.md) | The ragdoll lab: the active ragdoll's controller (`crates/ragdoll-core`) on a capsule mannequin in the browser, its sliders, ini export and scripted scenarios |
 | [VR.md](VR.md) | VR plans |
 

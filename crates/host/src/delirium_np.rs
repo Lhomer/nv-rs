@@ -72,6 +72,8 @@ pub(crate) fn from_tf(tf: &Transform, origin: V3) -> (M3, V3) {
 /// FNV's bones' worlds (metres from the origin) for Delirium's parts at `parts`: the rig's pose,
 /// down the skeleton from its root, the whole skeleton moved so the pelvis is where the rig puts
 /// it.
+// Each bone indexes its turn, its parent's and its local place together.
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn bones_from_parts(rig: &Rig, parts: &[Transform]) -> Vec<Transform> {
     let s = skel();
     let (local, hips) = rig.pose(parts);
@@ -191,6 +193,17 @@ pub(crate) fn world_mesh(
     m
 }
 
+/// Whether `actor`'s corpse is one Delirium keeps (its ragdoll held on the pose drawn: the
+/// game's loot, drag and VATS find it where it lies).
+pub(crate) fn corpse_held(e: &engine::prelude::Engine, actor: u32) -> bool {
+    let c = e.mem.u32(actor + RAGDOLL_CONTROLLER);
+    c != 0
+        && CORPSES
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&c)
+}
+
 /// `bhkRagdollController::DisableRagdollAnim` (`00c7c150`): `Actor::Kill` turns a body's ragdoll
 /// loose with it (its bodies stop following the pose drawn). The actor's ragdoll controller is at
 /// `actor + 0xac`.
@@ -251,12 +264,136 @@ impl Drop for CorpseHold {
     }
 }
 
-/// One actor's Delirium: its agent, its own body (its profile's) and its world, the origin its
-/// places are measured from (the reference at the take), and how long it has stood balanced.
-pub(crate) struct Dl {
+/// What New Physics asks of a body on Delirium: the real one (Delirium's agent, its body and its
+/// world: [`RealBody`]) where Delirium runs, or, in the tests, a stand-in
+/// (`crate::delirium_stand_in`: the integration's frames, hand-overs and checks run in CI without
+/// GTA IV). Metres from the origin, Z up; each call as the bridge's (`delirium_bridge::agent`).
+pub(crate) trait DlBody: Send {
+    fn set_mesh(&mut self, mesh: &delirium_bridge::world::Mesh) -> Result<(), String>;
+    fn shot(
+        &mut self,
+        part: usize,
+        at: Vec3,
+        dir: Vec3,
+        health: f32,
+        force: f32,
+    ) -> Result<(), String>;
+    fn blast(&mut self, at: Vec3, radius: f32, speed: f32) -> Result<(), String>;
+    fn kill(&mut self) -> Result<(), String>;
+    fn step(&mut self, dt: f32) -> Result<(), String>;
+    fn parts(&self) -> Result<Vec<Transform>, String>;
+    fn balancing(&self) -> bool;
+    fn should_get_up(&self, after: f32) -> bool;
+    fn relax(&mut self) -> Result<(), String>;
+    fn rise(&mut self, on: bool, help: f32) -> Result<(), String>;
+    fn follow(&mut self, parts: &[Transform]) -> Result<(), String>;
+    fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String>;
+    fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String>;
+    fn kick(&mut self, dv: Vec3) -> Result<(), String>;
+}
+
+/// Delirium's own body: its agent, its build (the actor's profile's), its world.
+pub(crate) struct RealBody {
     agent: Agent,
     _body: Body,
     world: World,
+}
+
+impl DlBody for RealBody {
+    fn set_mesh(&mut self, mesh: &delirium_bridge::world::Mesh) -> Result<(), String> {
+        self.world.set_mesh(1, mesh)
+    }
+    fn shot(
+        &mut self,
+        part: usize,
+        at: Vec3,
+        dir: Vec3,
+        health: f32,
+        force: f32,
+    ) -> Result<(), String> {
+        self.agent
+            .shot_force(&self.world, part, at, dir, health, force)
+    }
+    fn blast(&mut self, at: Vec3, radius: f32, speed: f32) -> Result<(), String> {
+        self.agent.explosion(&self.world, at, radius, speed)
+    }
+    fn kill(&mut self) -> Result<(), String> {
+        self.agent.kill()
+    }
+    fn step(&mut self, dt: f32) -> Result<(), String> {
+        self.agent.step(&self.world, dt)
+    }
+    fn parts(&self) -> Result<Vec<Transform>, String> {
+        self.agent.parts()
+    }
+    fn balancing(&self) -> bool {
+        self.agent.balancing()
+    }
+    fn should_get_up(&self, after: f32) -> bool {
+        self.agent.should_get_up(after)
+    }
+    fn relax(&mut self) -> Result<(), String> {
+        self.agent.relax()
+    }
+    fn rise(&mut self, on: bool, help: f32) -> Result<(), String> {
+        self.agent.rise(&self.world, on, help)
+    }
+    fn follow(&mut self, parts: &[Transform]) -> Result<(), String> {
+        self.agent.follow(parts)
+    }
+    fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String> {
+        self.agent.motions()
+    }
+    fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String> {
+        self.agent.set_part(part, state)
+    }
+    fn kick(&mut self, dv: Vec3) -> Result<(), String> {
+        self.agent.kick(dv)
+    }
+}
+
+/// Whether bodies go to Delirium: where it runs, or in a test with its stand-in on.
+pub(crate) fn running() -> bool {
+    #[cfg(test)]
+    if crate::delirium_stand_in::on() {
+        return true;
+    }
+    delirium_bridge::running()
+}
+
+/// The rig (FNV's bones on Delirium's parts) bodies are made with: Delirium's, or the stand-in's.
+fn rig() -> Option<&'static Rig> {
+    #[cfg(test)]
+    if crate::delirium_stand_in::on() {
+        return Some(crate::delirium_stand_in::rig());
+    }
+    delirium_bridge::started().map(|s| &s.rig)
+}
+
+/// A body for `states` with `profile`'s settings: Delirium's, or the test's stand-in.
+fn make_body(
+    states: &[PartState],
+    profile: &delirium_bridge::profile::Profile,
+) -> Result<Box<dyn DlBody>, String> {
+    #[cfg(test)]
+    if crate::delirium_stand_in::on() {
+        return Ok(crate::delirium_stand_in::body(states));
+    }
+    let st = delirium_bridge::started().ok_or("Delirium isn't running")?;
+    let body = Body::new(&st.build, &st.frames, profile.kg)?;
+    let agent = Agent::new(&body, states, profile)?;
+    Ok(Box::new(RealBody {
+        agent,
+        _body: body,
+        world: World::new()?,
+    }))
+}
+
+/// One actor's Delirium: its agent, its own body (its profile's) and its world, the origin its
+/// places are measured from (the reference at the take), and how long it has stood balanced.
+pub(crate) struct Dl {
+    agent: Box<dyn DlBody>,
+    rig: &'static Rig,
     pub origin: V3,
     pub frames: u32,
     balanced_for: f32,
@@ -430,6 +567,8 @@ pub(crate) fn next_own(
 /// FNV's whole skeleton's worlds (metres from `origin`, game units) for New Physics' bodies at
 /// `bodies` (each body's node's world, game units): each body's node where its body is, every
 /// other bone (the pelvis, the clavicles, the neck) under its parent as in the bind pose.
+// Each bone reads its own world and its parent's, built in order.
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn skeleton_from_bodies(bodies: &[(M3, V3)], origin: V3) -> Vec<Transform> {
     let s = skel();
     let m = crate::new_physics::model();
@@ -503,7 +642,7 @@ impl Dl {
         origin: V3,
         profile: &delirium_bridge::profile::Profile,
     ) -> Result<Dl, String> {
-        let st = delirium_bridge::started().ok_or("Delirium isn't running")?;
+        let rig = rig().ok_or("Delirium isn't running")?;
         let s = skel();
         let mut worlds = s.rest.clone();
         for (i, n) in s.names.iter().enumerate() {
@@ -512,8 +651,7 @@ impl Dl {
                 worlds[i] = to_tf(&r, t, origin);
             }
         }
-        let parts = st.rig.parts_at(&worlds);
-        let body = Body::new(&st.build, &st.frames, profile.kg)?;
+        let parts = rig.parts_at(&worlds);
         let states: Vec<PartState> = parts
             .iter()
             .enumerate()
@@ -523,11 +661,10 @@ impl Dl {
                 spin: Vec3::ZERO,
             })
             .collect();
-        let agent = Agent::new(&body, &states, profile)?;
+        let agent = make_body(&states, profile)?;
         Ok(Dl {
             agent,
-            _body: body,
-            world: World::new()?,
+            rig,
             origin,
             frames: 0,
             balanced_for: 0.0,
@@ -586,10 +723,10 @@ impl Dl {
             Own::Hit => Ok(()),
             Own::Down => {
                 self.agent.follow(&[])?;
-                self.agent.rise(&self.world, false, 0.0)?;
+                self.agent.rise(false, 0.0)?;
                 self.agent.relax()
             }
-            Own::Rise | Own::Up { .. } => self.agent.rise(&self.world, true, RISE_HELP),
+            Own::Rise | Own::Up { .. } => self.agent.rise(true, RISE_HELP),
         }
     }
 
@@ -661,14 +798,8 @@ impl Dl {
         let d = Vec3::from_array(dir).normalize_or_zero();
         // `dir` is the hit's impulse (N s): its size sets the shot's force.
         let p = ragdoll_core::flinch::length(dir);
-        self.agent.shot_force(
-            &self.world,
-            part_of_body(body),
-            at,
-            d,
-            health,
-            shot_force(p),
-        )
+        self.agent
+            .shot(part_of_body(body), at, d, health, shot_force(p))
     }
 
     /// A blast at `centre` (game units), reaching `radius` (game units), `speed` m/s at its centre.
@@ -678,7 +809,7 @@ impl Dl {
             (centre[1] - self.origin[1]) / UNITS,
             (centre[2] - self.origin[2]) / UNITS,
         );
-        self.agent.explosion(&self.world, at, radius / UNITS, speed)
+        self.agent.blast(at, radius / UNITS, speed)
     }
 
     /// One frame: the world set to `mesh`, the agent stepped by `dt`, its pose as New Physics'
@@ -688,9 +819,9 @@ impl Dl {
         mesh: &delirium_bridge::world::Mesh,
         dt: f32,
     ) -> Result<Step, String> {
-        let st = delirium_bridge::started().ok_or("Delirium isn't running")?;
+        let rig = self.rig;
         use delirium_bridge::agent::STEP;
-        self.world.set_mesh(1, mesh)?;
+        self.agent.set_mesh(mesh)?;
         if self.steps.1.is_empty() {
             let now = self.agent.parts()?;
             self.steps = (now.clone(), now);
@@ -715,11 +846,11 @@ impl Dl {
                     }
                 }
             }
-            self.agent.step(&self.world, STEP)?;
+            self.agent.step(STEP)?;
             self.pending -= STEP;
             let mut now = self.agent.parts()?;
             if self.limits {
-                now = self.hold_limits(&st.rig, now)?;
+                now = self.hold_limits(rig, now)?;
             }
             self.steps.0 = std::mem::replace(&mut self.steps.1, now);
         }
@@ -732,7 +863,7 @@ impl Dl {
             &self.steps.1,
             (self.pending / STEP).clamp(0.0, 1.0),
         );
-        let drawn = bodies_from_parts(&st.rig, &parts, self.origin);
+        let drawn = bodies_from_parts(rig, &parts, self.origin);
         // Once down, New Physics' downed controller says when it is done (`next_own`).
         if self.own != Own::Hit {
             return Ok(Step::Drawn(drawn));
@@ -794,6 +925,17 @@ pub(crate) fn facts_of(
 /// The share of its health `actor` has left (0 to 1; 1 when unknown): Delirium's shot task takes
 /// it (a lot left staggers, little drops it).
 pub(crate) fn health_left(e: &mut engine::prelude::Engine, actor: u32) -> f32 {
+    // No actor-value owner's table (a half-made actor): unknown.
+    let table = actor.wrapping_add(AV_OWNER);
+    let vtable = if e.mem.is_mapped(table) {
+        e.mem.u32(table)
+    } else {
+        0
+    };
+    let slot = vtable.wrapping_add(AV_BASE);
+    if vtable == 0 || !e.mem.is_mapped(slot) || e.mem.u32(slot) == 0 {
+        return 1.0;
+    }
     let now = engine::actor_values::current(e, actor, AV_HEALTH);
     let most = e
         .vcall(
@@ -1122,7 +1264,7 @@ pub(crate) enum DlHit {
 /// A hit's pushes as one Delirium shot (its strongest: where the round struck), queued where
 /// Delirium runs. Every pellet and every round of a burst is its own: nothing capped.
 pub(crate) fn queue_shot(queue: &mut Vec<DlHit>, pushes: &[(usize, V3, V3)]) {
-    if !delirium_bridge::running() {
+    if !running() {
         return;
     }
     let strongest = pushes.iter().max_by(|a, b| {
@@ -1135,7 +1277,7 @@ pub(crate) fn queue_shot(queue: &mut Vec<DlHit>, pushes: &[(usize, V3, V3)]) {
 
 /// A blast queued for Delirium in place of the shot its pushes just queued.
 pub(crate) fn queue_blast(queue: &mut Vec<DlHit>, centre: V3, radius: f32, speed: f32) {
-    if !delirium_bridge::running() {
+    if !running() {
         return;
     }
     if matches!(queue.last(), Some(DlHit::Shot(..))) {
@@ -1213,8 +1355,8 @@ pub(crate) fn aid(pose: &Posture, standing: f32, dt: f32) -> V3 {
     let g = ragdoll_core::np_body::GRAVITY;
     let mut a = [0.0f32; 3];
     if pose.outside > 0.0 {
-        for i in 0..2 {
-            a[i] = AID_K * (pose.feet[i] - pose.com[i]) - AID_C * pose.v[i];
+        for (i, x) in a.iter_mut().enumerate().take(2) {
+            *x = AID_K * (pose.feet[i] - pose.com[i]) - AID_C * pose.v[i];
         }
     }
     let low = 0.75 * standing - pose.pelvis_up;
@@ -1300,7 +1442,7 @@ pub(crate) fn corpse_from_new_physics(
     np: &ragdoll_core::np::Np,
     slot: &mut Slot,
 ) -> bool {
-    if slot.body.is_some() || !delirium_bridge::running() || slot.retakes > RETAKES {
+    if slot.body.is_some() || !running() || slot.retakes > RETAKES {
         return false;
     }
     let facts = facts_of(e, actor);
@@ -1345,6 +1487,7 @@ pub(crate) fn corpse_from_new_physics(
 /// muscles follow New Physics' rise (the arms pushing off through planted hands) until it is
 /// upright and still, then the game's animation has it again; dead mid-rise, its wait first, the
 /// limbs brought in. None: New Physics' own frame (not taken, refused while hit, handed back).
+#[allow(clippy::type_complexity)]
 pub(crate) fn frame_for(
     e: &mut engine::prelude::Engine,
     (id, actor, tree, snap, anim): (
@@ -1452,7 +1595,6 @@ pub(crate) fn frame_for(
             }
         }
     }
-    let st = delirium_bridge::started()?;
     let Some(d) = slot.body.as_mut() else {
         slot.queue.clear();
         return None;
@@ -1550,7 +1692,7 @@ pub(crate) fn frame_for(
     // again as the body moves on): Patrick's 15:30 clip, heels sinking into uneven ground and a
     // leg into a rock step, each body's floor a square of its own at its own height.
     let pelvis_now = centres.get(m.root).copied().unwrap_or(reference);
-    let recast = d.ground.as_ref().is_none_or(|(c, _)| {
+    let recast = d.ground.as_ref().map_or(true, |(c, _)| {
         ragdoll_core::flinch::length([pelvis_now[0] - c[0], pelvis_now[1] - c[1], 0.0])
             > GROUND_AGAIN
     });
@@ -1625,7 +1767,7 @@ pub(crate) fn frame_for(
         Some(np.frame(anim, floor, dt))
     };
     if let (true, Some(t)) = (follows, target.as_ref()) {
-        if let Err(why) = d.follow(&st.rig, t) {
+        if let Err(why) = d.follow(d.rig, t) {
             failed.get_or_insert(why);
         }
     }
@@ -1636,7 +1778,7 @@ pub(crate) fn frame_for(
         follows && (lags || matches!(d.own, Own::Up { .. })),
         target.as_ref(),
     ) {
-        (true, Some(t)) => Some(parts_from_bodies(&st.rig, t, d.origin)),
+        (true, Some(t)) => Some(parts_from_bodies(d.rig, t, d.origin)),
         _ => None,
     };
     // Its retakes counted from none again once it has kept a body a while.

@@ -241,6 +241,7 @@ pub fn frame(e: &mut Engine, player: u32) {
         crate::test_range::phone_keep(e);
     }
     crate::room_script::frame(e, player);
+    crate::physics_selftest::frame(e, player);
 }
 
 /// The room's game, shared by the Android app and the Linux room (`android/`, `linux/`): the host
