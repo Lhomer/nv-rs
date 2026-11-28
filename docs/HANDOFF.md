@@ -7,6 +7,38 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-28 (Patrick's PC run on 5f52c0e: 11 of 11 failed; what was the integration's)
+
+**Status: see the commit.** The first full self-test with real Delirium (78 checks passed, 64
+failed) is a CI replay now (`crates/host/src/replays/pc-5f52c0e.txt`: each scenario's hits,
+slope, bumps and length, each frame's seconds its mean; `replay_patricks_pc_run_on_5f52c0e`),
+with the stand-in doing what Delirium did there: shrugging its shoulders when hit standing and
+swinging its arms far past FNV's limits lying (`crate::delirium_stand_in`). Fixed:
+- Stretched upper arms (24 to 30%): New Physics draws only its 18 bodies, never the clavicles,
+  and Delirium's clavicles moved the upper arms where FNV's are not. What is drawn of a body
+  Delirium has had is now made again through FNV's skeleton (`delirium_np::continuous`: each bone
+  at its length, the clavicles at their bind turn) with each joint turned at most 12 rad/s and the
+  root moved at most 6 m/s, so it never jumps either (23 to 62 units in a frame there, from the
+  refusals, the retakes and the limits brought in). Without it the replay's light hits fail the
+  stretch check at 20 to 29%.
+- The refusals: Delirium's own jump guard had been lowered to the self-test's 15 units a frame;
+  at 100 frames a second its limbs move that far, and each refusal and retake was a jump. 25 again.
+- "Down again" from standing: New Physics gave a rise up with the body upright and still (its feet's
+  load never read): stood now (`Np::stand_now`, the stand's own hand-over, made a function).
+- The corpse after three refusals went to the game's ragdoll: a corpse is Delirium's whatever the
+  retakes (`Slot::corpse_failed` stops only a corpse Delirium could not make).
+- The stagger aid changed the whole body's velocity, the feet's too, and at 1 g took the weight off
+  them: now the upper body only, at most half a g up.
+- The self-test cast each body's ground from 70 units over the floor (a railing's or a table's top
+  read as the ground over a foot): now from 35 over the body. Jumps and launches name their bone.
+- Two check bugs: a 9mm a tenth of a second after a heavy hit was blamed for the fall; a rise cut
+  short low (a death) was judged for its hands.
+Replays record the uneven spot's ground grid as cast (`grid`), the CI's fixture lays it
+(`rig_fixture::GRID`). Open (`KNOWN_OPEN_PC_5F52C0E`): New Physics' rise from a body lying flat
+stalls at once and is tried again (mid-rise-hit); that run's trench as a 15.8-unit sine keeps New
+Physics' standing balance from coming calm (no grid then). What only Delirium shows (light hits
+keeping it up, how far its arms go) is for the next PC run.
+
 ### Claude, 2026-11-28 (the self-test's first run on Patrick's PC, ec4caa3: the crash at frame 575)
 
 **Status: see the commit.** The unattended command ran from Patrick's remote shell, but the game

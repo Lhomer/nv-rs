@@ -23,6 +23,19 @@ const FAKE_CONTROLLER: u32 = 0x0200_e800;
 /// AI was fixed with the legs' blend, `RELEASE_FOR`).
 const KNOWN_OPEN: &[(&str, &str)] = &[];
 
+/// Open over Patrick's PC run on 5f52c0e (`replays/pc-5f52c0e.txt`), each reported to him:
+/// - `mid-rise-hit`, down again of its own: New Physics' own rise, begun from a body lying flat
+///   (the pelvis 6 units up), stalls at once (no height gained in 1.5 s) and is given up; its next
+///   try stands. The planted-hands rise's start from flat, not the integration's.
+/// - `trench`, the AI has it again: that run's trench ground is only its bumps' height (15.8
+///   units) laid as a sine every 100 units, 37-degree slopes everywhere (its ground grid as cast
+///   was not recorded yet); New Physics' standing balance never comes calm on it. The game's own
+///   trench (the same run) rose and was let go.
+const KNOWN_OPEN_PC_5F52C0E: &[(&str, &str)] = &[
+    ("mid-rise-hit", "never down again of its own"),
+    ("trench", "the AI has it again"),
+];
+
 /// `s` run: its checks' lines and whether every one that counts here passed.
 fn replay(s: &Scenario) -> (Vec<String>, bool) {
     let _one = crate::active_ragdoll::tests::SERIAL
@@ -170,15 +183,15 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
     physics_checks::lines(&s.name, &checks, false)
 }
 
-/// Every scenario of `scenarios` run, its lines printed; the failures not on [`KNOWN_OPEN`]
-/// (`scenario: check`), and those on it that passed.
-fn run_all(scenarios: &[Scenario]) -> (Vec<String>, Vec<String>) {
+/// Every scenario of `scenarios` run, its lines printed; the failures not on `known` (as
+/// [`KNOWN_OPEN`]: `scenario: check`), and those on it that passed.
+fn run_all(scenarios: &[Scenario], known: &[(&str, &str)]) -> (Vec<String>, Vec<String>) {
     let (mut failed, mut fixed) = (Vec::new(), Vec::new());
     for s in scenarios {
         let (lines, _) = replay(s);
         for l in &lines {
             println!("{l}");
-            let known = KNOWN_OPEN
+            let known = known
                 .iter()
                 .any(|(sc, c)| *sc == s.name && l.contains(&format!("{sc}: {c} (")));
             if l.starts_with("FAIL") && !known {
@@ -199,7 +212,7 @@ fn run_all(scenarios: &[Scenario]) -> (Vec<String>, Vec<String>) {
 /// game's ragdoll, the AI has it back, a corpse Delirium's).
 #[test]
 fn replay_the_selftest_scenarios_over_the_stand_in() {
-    let (failed, fixed) = run_all(&physics_replay::synthetic());
+    let (failed, fixed) = run_all(&physics_replay::synthetic(), KNOWN_OPEN);
     assert!(failed.is_empty(), "failed: {failed:#?}");
     assert!(fixed.is_empty(), "fixed, take off KNOWN_OPEN: {fixed:#?}");
 }
@@ -212,7 +225,7 @@ fn replay_the_selftest_scenarios_over_the_stand_in() {
 fn replay_patricks_pc_run_on_5f52c0e() {
     let scenarios = physics_replay::parse(include_str!("replays/pc-5f52c0e.txt")).unwrap();
     assert_eq!(scenarios.len(), 11);
-    let (failed, fixed) = run_all(&scenarios);
+    let (failed, fixed) = run_all(&scenarios, KNOWN_OPEN_PC_5F52C0E);
     assert!(failed.is_empty(), "failed: {failed:#?}");
     assert!(fixed.is_empty(), "fixed, take off KNOWN_OPEN: {fixed:#?}");
 }
@@ -226,6 +239,6 @@ fn replay_from_the_file() {
     };
     let text = std::fs::read_to_string(&path).unwrap();
     let scenarios = physics_replay::parse(&text).unwrap();
-    let (failed, _) = run_all(&scenarios);
+    let (failed, _) = run_all(&scenarios, KNOWN_OPEN);
     assert!(failed.is_empty(), "failed: {failed:#?}");
 }

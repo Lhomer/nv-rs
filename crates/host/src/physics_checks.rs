@@ -445,12 +445,16 @@ pub fn judge(
         Where::Both,
     );
     // A light hit never downs it: lying within a few seconds of one with no heavier hit since.
+    // A light hit only, no heavy one within [`LIGHT_DOWN_WITHIN`] before it either (a 9mm a tenth
+    // of a second after a heavy hit is not what downed the body).
     let mut felled: Option<(f32, f32)> = None;
     let mut light: Option<f32> = None;
+    let mut heavy_at = f32::NEG_INFINITY;
     for f in frames {
         if f.hit >= LIGHT_HIT {
             light = None;
-        } else if f.hit > 0.0 && !lying(f.owner) && !f.dead {
+            heavy_at = f.t;
+        } else if f.hit > 0.0 && !lying(f.owner) && !f.dead && f.t - heavy_at > LIGHT_DOWN_WITHIN {
             light.get_or_insert(f.t);
         }
         if let Some(at) = light {
@@ -546,18 +550,22 @@ pub fn judge(
         ),
         Where::Both,
     );
-    // Each rise from low: a hand planted.
+    // Each rise that lifts the pelvis from low (under [`HAND_LOW`] of standing) to over it: a hand
+    // planted while it was low. A rise cut short low (a death, a hit) lifted nothing.
     let hands: Vec<usize> = ["Bip01 L Hand", "Bip01 R Hand"]
         .iter()
         .filter_map(|n| crate::new_physics::model().body(n))
         .collect();
-    let (mut rises, mut handless, mut low, mut planted) = (0, 0, false, false);
+    let (mut rises, mut handless, mut low, mut planted, mut lifted) = (0, 0, false, false, false);
     let mut first_bad: Option<f32> = None;
     let mut was_rising = false;
     for f in frames {
         let rising = f.rising && !f.drawn.is_empty() && !f.dead;
         if rising {
             if let Some((p, _)) = stance(&f.drawn, f.floor) {
+                if p >= HAND_LOW * st && low {
+                    lifted = true;
+                }
                 if p < HAND_LOW * st {
                     low = true;
                     if hands.iter().any(|&h| {
@@ -571,7 +579,7 @@ pub fn judge(
             }
         }
         if was_rising && !rising {
-            if low {
+            if lifted {
                 rises += 1;
                 if !planted {
                     handless += 1;
@@ -580,10 +588,11 @@ pub fn judge(
             }
             low = false;
             planted = false;
+            lifted = false;
         }
         was_rising = rising;
     }
-    if was_rising && low {
+    if was_rising && lifted {
         rises += 1;
         if !planted {
             handless += 1;

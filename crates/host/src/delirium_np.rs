@@ -485,7 +485,8 @@ pub(crate) const AID_MOST: f32 = 0.5;
 pub(crate) const AID_LIFT: f32 = 0.5;
 /// The parts the stagger aid moves: the pelvis (0), the spine (7 to 10), the neck (11), the head
 /// (12) and the arms (13 to 20); never the legs (1 to 6).
-pub(crate) const UPPER_PARTS: [usize; 15] = [0, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+pub(crate) const UPPER_PARTS: [usize; 15] =
+    [0, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
 pub(crate) const AID_FROM: f32 = 0.9;
 const AID_K: f32 = 12.0;
 const AID_LIFT_K: f32 = 40.0;
@@ -569,8 +570,11 @@ pub(crate) fn continuous(last: &[(M3, V3)], want: &[(M3, V3)], dt: f32) -> Vec<(
                 } else {
                     ww[b].translation
                 };
-                Transform::from_translation(at)
-                    .with_rotation(toward(wl[b].rotation, ww[b].rotation, turn_most))
+                Transform::from_translation(at).with_rotation(toward(
+                    wl[b].rotation,
+                    ww[b].rotation,
+                    turn_most,
+                ))
             }
         };
         out.push(t);

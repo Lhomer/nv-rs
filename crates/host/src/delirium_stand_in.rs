@@ -53,6 +53,8 @@ pub fn body(states: &[PartState]) -> Box<dyn DlBody> {
         still: 0.0,
         triangles: Vec::new(),
         limp_for: 0.0,
+        shrug: 0.0,
+        shrug_for: 0.0,
     })
 }
 
@@ -87,7 +89,17 @@ struct StandIn {
     triangles: Vec<[Vec3; 3]>,
     /// How long it has lain limp (s): its arms swing meanwhile.
     limp_for: f32,
+    /// A hit's shrug standing (rad, at its height), and how long it has gone on (s).
+    shrug: f32,
+    shrug_for: f32,
 }
+
+/// Hit standing, its shoulders shrug: each arm turned about its clavicle this far (rad), dying out
+/// over [`SHRUG_FOR`] (s), its shoulder off where FNV's skeleton has it, as Delirium's staggers do
+/// (Patrick's PC run on 5f52c0e: the upper arms drawn 4 to 6 units off their bones, 0.5 to 1.8 s
+/// after a light hit).
+const SHRUG: f32 = 0.5;
+const SHRUG_FOR: f32 = 1.2;
 
 /// Lying limp, each arm (its clavicle, upper arm, forearm and hand: parts 13 to 16, 17 to 20)
 /// swings about its clavicle as Delirium's arms do on the ground, this far (rad) at this rate
@@ -189,6 +201,8 @@ impl DlBody for StandIn {
                 for v in &mut self.vel {
                     *v += push * 0.5;
                 }
+                self.shrug = SHRUG;
+                self.shrug_for = 0.0;
             } else {
                 self.vel[k] += push;
             }
@@ -243,6 +257,26 @@ impl DlBody for StandIn {
             self.state = State::Lying;
             self.still = 0.0;
             self.vel.fill(Vec3::ZERO);
+        }
+        // A hit's shrug standing: both arms turned up about their clavicles, dying out.
+        if self.shrug > 0.0 && self.parts.len() == 21 {
+            let at = |t: f32| self.shrug * (std::f32::consts::PI * (t / SHRUG_FOR).min(1.0)).sin();
+            let before = at(self.shrug_for);
+            self.shrug_for += dt;
+            let turn = at(self.shrug_for) - before;
+            let forward = self.parts[10].rotation * Vec3::Y;
+            for (arm, sign) in [(13usize, 1.0f32), (17, -1.0)] {
+                let q = Quat::from_axis_angle(forward, sign * turn);
+                let pivot = self.parts[arm].translation;
+                for k in arm..arm + 4 {
+                    let p = &mut self.parts[k];
+                    p.translation = pivot + q * (p.translation - pivot);
+                    p.rotation = (q * p.rotation).normalize();
+                }
+            }
+            if self.shrug_for >= SHRUG_FOR {
+                self.shrug = 0.0;
+            }
         }
         // Its arms swing while it lies limp, each about its clavicle, the two out of step.
         let limp = matches!(self.state, State::Lying) && (self.dead || self.follow.is_empty());

@@ -93,7 +93,8 @@ Files, in the tester's `userdata\logs`:
   `replay:` and `game log:` their paths), then a line per check, `PASS|FAIL|SKIP <scenario>: <check> (<where it counts>): <figures>`, and at the
   end `ALL PASS` or `FAILED: <scenarios>`.
 - `physics-selftest-YYYYMMDD-HHMMSS-replay.txt`: what was done, frame by frame (each frame's
-  seconds, the hits, the death's frame, the slope, the bumps, the standing height): nothing of GTA IV's and no
+  seconds, the hits, the death's frame, the slope, the bumps and the uneven spot's ground as cast,
+  5 by 5 heights 0.35 m apart, the standing height): nothing of GTA IV's and no
   game file's contents, safe to paste. Layer 2 runs it again.
 
 The game's log has the self-test's last line: `physics self-test: all pass` or `N failed (...)`,
@@ -108,7 +109,8 @@ and where the two files went. The Record button and F9 still record clips while 
 tips it over its feet, its muscles on, its parts go where it is told). Everything between the two
 is the real integration: `crate::delirium_np`'s frame, the put-on, the hand-overs and retakes, the
 joint limits drawn, the ground cast and fed, the rise drawn as New Physics' with Delirium's parts put on it, the hand-back to the animation.
-The CI runs `physics_replay::synthetic()` (the same scenarios at 120 frames a second, flat, on
+The CI also runs Patrick's PC run on 5f52c0e (`crates/host/src/replays/pc-5f52c0e.txt`), its two
+open failures listed and explained in `KNOWN_OPEN_PC_5F52C0E`. The CI runs `physics_replay::synthetic()` (the same scenarios at 120 frames a second, flat, on
 a slope and in a trench's bumps, 6 units high every 140). A replay from the player's PC runs the same way:
 
 ```
