@@ -2620,42 +2620,57 @@ mod tests {
         assert!(after < 0.1, "still {after} rad out after");
     }
 
-    /// The ground cast as one height field: a rock step's top where the casts meet it, the floor
-    /// guess where they meet nothing, every cast started 40 units over the guess there (a slope's
-    /// ground met, a table's top passed under), measured from the origin.
+    /// The ground cast as one height field: each point cast from 100 units over the body first (a
+    /// trench's bank 60 units over the floor guessed is met, which a cast from 40 over the guess
+    /// started inside: Patrick's 23:16 clip), then from 40 over the guess where that met nothing,
+    /// the guess where neither met anything; a rock step's top where the casts meet it, measured
+    /// from the origin.
     #[test]
     fn the_ground_is_cast_as_one_height_field() {
         let origin = [-72152.0, 8282.0, 200.0];
         let centre = [-72152.0, 8282.0, 260.0];
+        let guess_at = |y: f32| 200.0 + 0.1 * (y - centre[1]);
+        // The ground: nothing past 60 units on +x, a rock step's top to 60, a bank 60 over the
+        // guess under -60, the guessed slope between; a cast meets it only from above.
+        let ground = |x: f32, y: f32| -> Option<f32> {
+            if x > centre[0] + 60.0 {
+                None
+            } else if x > centre[0] {
+                Some(230.0)
+            } else if x < centre[0] - 60.0 {
+                Some(guess_at(y) + 60.0)
+            } else {
+                Some(guess_at(y))
+            }
+        };
         let mut froms = Vec::new();
         let mut cast = |from: V3| {
             froms.push(from);
-            if from[0] > centre[0] + 60.0 {
-                None
-            } else if from[0] > centre[0] {
-                Some(230.0)
-            } else {
-                Some(from[2] - 40.0)
-            }
+            ground(from[0], from[1]).filter(|&z| z <= from[2])
         };
-        let g = ground_mesh(
-            centre,
-            origin,
-            &|xy| 200.0 + 0.1 * (xy[1] - centre[1]),
-            &mut cast,
-        );
-        assert_eq!(froms.len(), GROUND_N * GROUND_N);
+        let g = ground_mesh(centre, origin, &|xy| guess_at(xy[1]), &mut cast);
         assert_eq!(g.positions.len(), GROUND_N * GROUND_N);
         assert_eq!(g.triangles.len(), 2 * (GROUND_N - 1) * (GROUND_N - 1));
-        for (p, from) in g.positions.iter().zip(&froms) {
-            let guess = 200.0 + 0.1 * (from[1] - centre[1]);
-            assert!((from[2] - (guess + 40.0)).abs() < 1e-3);
-            let want = if from[0] > centre[0] + 60.0 {
-                guess
-            } else if from[0] > centre[0] {
-                230.0
-            } else {
-                guess
+        let mut misses = 0;
+        let mut i = 0;
+        for p in &g.positions {
+            let from = froms[i];
+            let guess = guess_at(from[1]);
+            assert!(
+                (from[2] - (centre[2].max(guess) + 100.0)).abs() < 1e-3,
+                "{from:?}"
+            );
+            i += 1;
+            let want = match ground(from[0], from[1]) {
+                Some(z) => z,
+                None => {
+                    // Met nothing: cast again from over the guess, then the guess.
+                    let again = froms[i];
+                    assert!((again[2] - (guess + 40.0)).abs() < 1e-3, "{again:?}");
+                    i += 1;
+                    misses += 1;
+                    guess
+                }
             };
             assert!(
                 (p[2] - (want - origin[2]) / UNITS).abs() < 1e-4,
@@ -2663,6 +2678,15 @@ mod tests {
             );
             assert!((p[0] - (from[0] - origin[0]) / UNITS).abs() < 1e-3);
         }
+        assert_eq!(froms.len(), GROUND_N * GROUND_N + misses);
+        assert!(misses > 0);
+        // The bank is met where it stands over the guess by more than the old cast's 40 units.
+        let bank = g
+            .positions
+            .iter()
+            .filter(|p| p[2] > (guess_at(centre[1] + 200.0) + 45.0 - origin[2]) / UNITS)
+            .count();
+        assert!(bank > 0);
         // The floor nearest (flat) gives the guess, its slope taken in.
         let floors = [
             Plane {
