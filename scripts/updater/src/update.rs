@@ -79,6 +79,62 @@ pub fn tester_folder(install: &Path) -> PathBuf {
         .join(TESTER_FOLDER)
 }
 
+/// The unattended physics self-test (`Launcher.exe --update-and-physics-test [--install <folder>]`,
+/// docs/PHYSICS-SELFTEST.md): the physics tester updated to the newest build with no window and
+/// no question, its `Play.exe --physics-test` run to its end, and the launcher's exit code saying
+/// how it went ([`PASSED`], [`FAILED`], [`NOT_RUN`], [`RUNNING`]).
+pub const PHYSICS_TEST: &str = "--update-and-physics-test";
+pub const PASSED: i32 = 0;
+pub const FAILED: i32 = 1;
+pub const NOT_RUN: i32 = 2;
+pub const RUNNING: i32 = 3;
+/// The newest results, always at the same place in the tester's `userdata\logs`.
+pub const RESULTS_LATEST: &str = "physics-selftest-latest.txt";
+/// The longest the game's self-test may take (s) before the launcher ends it.
+pub const PHYSICS_TEST_MOST: u64 = 20 * 60;
+
+/// The unattended run's arguments: `None` without [`PHYSICS_TEST`]; else the tester's folder
+/// given with `--install` (none: found from where the launcher is).
+pub fn physics_test_args(args: &[String]) -> Option<Option<PathBuf>> {
+    if !args.iter().any(|a| a.eq_ignore_ascii_case(PHYSICS_TEST)) {
+        return None;
+    }
+    let given = args
+        .iter()
+        .position(|a| a.eq_ignore_ascii_case("--install"))
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from);
+    Some(given)
+}
+
+/// The physics tester's folder for the unattended run: the one given; else this install itself
+/// when the launcher is the tester's own (`room`), else the tester's folder beside this install.
+pub fn physics_test_dir(install: &Path, room: bool, given: Option<&Path>) -> PathBuf {
+    match given {
+        Some(dir) => dir.to_path_buf(),
+        None if room => install.to_path_buf(),
+        None => tester_folder(install),
+    }
+}
+
+/// The exit code a results file says: its last line `ALL PASS` ([`PASSED`]) or `FAILED: ...`
+/// ([`FAILED`]); anything else (cut short, not a results file) [`NOT_RUN`].
+pub fn physics_verdict(results: &str) -> i32 {
+    match results.lines().rev().map(str::trim).find(|l| !l.is_empty()) {
+        Some("ALL PASS") => PASSED,
+        Some(l) if l.starts_with("FAILED") => FAILED,
+        _ => NOT_RUN,
+    }
+}
+
+/// The results file's text when the self-test did not run: `code`, `why`, the build installed.
+pub fn physics_not_run(code: i32, why: &str, installed: Option<&str>) -> String {
+    format!(
+        "nv-rs physics self-test: NOT RUN (exit {code})\nbuild: {}\nwhy: {why}\nNOT RUN\n",
+        installed.unwrap_or("unknown")
+    )
+}
+
 /// The installed build's source commit: `BUILD.txt`'s `Source commit: <sha>` line.
 pub fn installed_commit(build_txt: &str) -> Option<String> {
     build_txt.lines().find_map(|line| {
@@ -597,6 +653,35 @@ mod tests {
     /// The tester's release behind the newest Play build (Patrick, 0c1fbbf: f9eac18's tester was
     /// started as the newest): the launcher waits for it, whatever is installed; once it is out,
     /// it is installed unless it is the installed one.
+    /// The unattended run: its flag and `--install`, its folder, and the exit code each results
+    /// file says.
+    #[test]
+    fn the_unattended_physics_test_reads_its_results() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(physics_test_args(&a(&["--mods"])), None);
+        assert_eq!(physics_test_args(&a(&[PHYSICS_TEST])), Some(None));
+        assert_eq!(
+            physics_test_args(&a(&[PHYSICS_TEST, "--install", "C:\\t"])),
+            Some(Some(PathBuf::from("C:\\t")))
+        );
+        let install = Path::new("C:\\x\\Play");
+        assert_eq!(physics_test_dir(install, true, None), install);
+        assert_eq!(
+            physics_test_dir(install, false, None),
+            tester_folder(install)
+        );
+        assert_eq!(
+            physics_test_dir(install, false, Some(Path::new("D:\\r"))),
+            Path::new("D:\\r")
+        );
+        assert_eq!(physics_verdict("x\nPASS a: b\nALL PASS\n"), PASSED);
+        assert_eq!(physics_verdict("FAIL a: b\nFAILED: a\n\n"), FAILED);
+        assert_eq!(physics_verdict("PASS a: b\n"), NOT_RUN);
+        let text = physics_not_run(RUNNING, "the game is running", Some("abc"));
+        assert!(text.contains("exit 3") && text.contains("build: abc"));
+        assert_eq!(physics_verdict(&text), NOT_RUN);
+    }
+
     #[test]
     fn the_tester_waits_for_the_newest_build() {
         let (old, new) = ("f9eac18", "0c1fbbf");

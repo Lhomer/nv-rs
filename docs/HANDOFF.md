@@ -7,6 +7,21 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-28 (the self-test unattended; the slope's hand-back fixed)
+
+**Status: pushed.** Patrick's ask (9:26 PM): `Launcher.exe --update-and-physics-test` (the
+updater's `physics_test`, docs/PHYSICS-SELFTEST.md) updates the physics tester (waiting for its
+build to catch up with Play's), runs its `Play.exe --physics-test` with no window or question,
+and exits 0 (all pass), 1 (a check failed), 2 (could not run), 3 (the game was running). The game
+now always ends with status 0 (the results say how it went, so Play.exe never takes a failed
+check for a crash) and writes `userdata\logs\physics-selftest-latest.txt` with `build:`,
+`replay:` and `game log:` in its header. The first time, the installed launcher predates the
+command: the docs give a one-line bootstrap (the newest tester's Launcher.exe run from a temporary
+folder with `--install`). The slope: a calm body with only its legs off the animation now blends
+them into it over `RELEASE_FOR` (0.5 s), then is let go, never snapped and never held
+(`np_a_slab_edge_holds_the_body` judges the slab only while New Physics' bodies are its own);
+the replay's `KNOWN_OPEN` is empty.
+
 ### Claude, 2026-11-27 (the hit reactions' self-test: in the game and in CI)
 
 **Status: pushed.** Patrick's ask (5:47 PM): test the hit reactions without anyone aiming.

@@ -525,13 +525,16 @@ fn finish(run: &mut Run) {
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .or_else(|| std::env::var_os("NV_REPORT_DIR").map(std::path::PathBuf::from))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let log = std::env::var_os("NV_REPORT_LOG")
+        .map(|p| std::path::PathBuf::from(p).display().to_string())
+        .unwrap_or_else(|| "(not known: NV_REPORT_LOG not set)".into());
     let mut text = format!(
-        "nv-rs physics self-test {stamp} UTC, build {}, Delirium {}\n",
+        "nv-rs physics self-test\nbuild: {}\nrun: {stamp} UTC\nDelirium: {}\ngame log: {log}\n",
         crate::room_record::commit(),
         if delirium_bridge::running() {
             "on"
         } else {
-            "off (New Physics alone: the Delirium checks don't apply)"
+            "off (New Physics alone: what only Delirium's body shows doesn't apply)"
         }
     );
     for l in &run.lines {
@@ -545,8 +548,18 @@ fn finish(run: &mut Run) {
     };
     let results = dir.join(format!("physics-selftest-{stamp}.txt"));
     let replay = dir.join(format!("physics-selftest-{stamp}-replay.txt"));
+    let replay_text = crate::physics_replay::write(&run.replays);
+    text = text.replacen(
+        "game log:",
+        &format!("replay: {}\ngame log:", replay.display()),
+        1,
+    );
+    // The newest also at a place that never changes (`Launcher.exe --update-and-physics-test`
+    // reads it).
+    let latest = dir.join("physics-selftest-latest.txt");
     let wrote = std::fs::write(&results, text.as_bytes()).is_ok()
-        && std::fs::write(&replay, crate::physics_replay::write(&run.replays)).is_ok();
+        && std::fs::write(&replay, replay_text).is_ok()
+        && std::fs::write(&latest, text.as_bytes()).is_ok();
     crate::new_physics::note_event(format!(
         "physics self-test: {} ({}); results {}written to {} and its replay to {}",
         if run.failed.is_empty() {
@@ -559,8 +572,10 @@ fn finish(run: &mut Run) {
         results.display(),
         replay.display()
     ));
+    // The game ends well either way: the results say how it went (a failing check is no crash,
+    // and Play.exe asks nothing).
     crate::run_exit_hooks();
-    crate::end_process(if run.failed.is_empty() { 0 } else { 4 });
+    crate::end_process(0);
 }
 
 /// The time now as `YYYYMMDD-HHMMSS` (UTC).

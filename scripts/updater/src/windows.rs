@@ -712,13 +712,19 @@ fn short(commit: &str) -> &str {
 
 /// Launcher.exe (the crate's documentation).
 pub fn run() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
     let install = match std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
     {
         Some(dir) => dir,
+        None if update::physics_test_args(&args).is_some() => std::process::exit(update::NOT_RUN),
         None => return error("The launcher could not find its own folder."),
     };
+    // The unattended physics self-test: no window, no question; its exit code says how it went.
+    if let Some(given) = update::physics_test_args(&args) {
+        std::process::exit(physics_test(&install, given.as_deref()));
+    }
     if !install.join("Play.exe").exists() {
         return error(&format!(
             "Launcher.exe belongs in the nv-rs folder, beside Play.exe, and Play.exe is not here:\n\n{}",
@@ -823,4 +829,216 @@ fn update_to(
     status.set(&format!("Updated to {}.", short(&latest.commit)));
     std::thread::sleep(Duration::from_millis(800));
     Ok(())
+}
+
+/// The unattended physics self-test (`Launcher.exe --update-and-physics-test [--install
+/// <folder>]`, docs/PHYSICS-SELFTEST.md): the physics tester updated to the newest build (waiting
+/// for its build to catch up with Play's newest, at most [`update::TESTER_WAIT`]), its
+/// `Play.exe --physics-test` run with no window of the launcher's and no question
+/// (`NV_RS_NO_WINDOWS=1`) until the game ends by itself, then the results read. No message box, no
+/// status window; what it did is in `userdata\logs\physics-test-launcher.txt`, the results in
+/// `userdata\logs\physics-selftest-latest.txt` (a "NOT RUN" one when it could not run). Only the
+/// tester's programs are ever replaced (never its `userdata`: saves, INIs).
+fn physics_test(install: &Path, given: Option<&Path>) -> i32 {
+    let dir = update::physics_test_dir(install, crate::room(), given);
+    let logs = dir.join(update::USERDATA).join("logs");
+    let _ = std::fs::create_dir_all(&logs);
+    let results = logs.join(update::RESULTS_LATEST);
+    let journal = logs.join("physics-test-launcher.txt");
+    let _ = std::fs::write(&journal, b"");
+    let say = |line: &str| {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&journal)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    };
+    let installed = || {
+        std::fs::read_to_string(dir.join("BUILD.txt"))
+            .ok()
+            .and_then(|text| update::installed_commit(&text))
+    };
+    let stop = |code: i32, why: &str| -> i32 {
+        say(&format!("not run (exit {code}): {why}"));
+        let _ = std::fs::write(
+            &results,
+            update::physics_not_run(code, why, installed().as_deref()),
+        );
+        code
+    };
+    say(&format!("the physics tester's folder: {}", dir.display()));
+    if play_is_running() {
+        return stop(
+            update::RUNNING,
+            "the game or Play.exe is running: nothing was done",
+        );
+    }
+    update::clear_leftovers(&dir);
+    let has_it = dir.join("Play.exe").is_file();
+    let (repo, channel_tag) = crate::channel();
+    // Play's newest build: this launcher's own release when it is Play's, else this branch's.
+    let play_tag = if crate::room() {
+        crate::DEFAULT_TAG
+    } else {
+        channel_tag
+    };
+    let newest = fetch_text(&crate::asset_url(repo, play_tag, "latest.txt"))
+        .ok()
+        .and_then(|text| update::parse_latest(&text))
+        .map(|l| l.commit);
+    say(&format!(
+        "Play's newest build: {}",
+        newest.as_deref().unwrap_or("not read")
+    ));
+    let read_tester = || {
+        fetch_text(&crate::asset_url(
+            repo,
+            update::TESTER_TAG,
+            update::TESTER_LATEST,
+        ))
+        .and_then(|text| {
+            update::parse_latest(&text)
+                .ok_or_else(|| format!("the release's {} is not readable", update::TESTER_LATEST))
+        })
+    };
+    let mut latest = read_tester();
+    // The tester is built after Play's package (about 15 minutes later): waited for.
+    if let (Ok(published), Some(want)) = (&latest, newest.as_deref()) {
+        if !published.commit.eq_ignore_ascii_case(want) {
+            say(&format!(
+                "the tester's build ({}) is behind Play's newest ({}): waiting for it, at most {} min",
+                short(&published.commit),
+                short(want),
+                update::TESTER_WAIT / 60
+            ));
+            let since = std::time::Instant::now();
+            while since.elapsed().as_secs() < update::TESTER_WAIT {
+                std::thread::sleep(Duration::from_secs(update::TESTER_LOOK));
+                if let Ok(now) = read_tester() {
+                    let done = now.commit.eq_ignore_ascii_case(want);
+                    latest = Ok(now);
+                    if done {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    match &latest {
+        Ok(published) if installed().as_deref() != Some(published.commit.as_str()) || !has_it => {
+            if play_is_running() {
+                return stop(
+                    update::RUNNING,
+                    "the game or Play.exe started meanwhile: nothing was done",
+                );
+            }
+            say(&format!(
+                "updating the tester to {}",
+                short(&published.commit)
+            ));
+            let result = update_to(&dir, repo, update::TESTER_TAG, published, &Status);
+            let _ = std::fs::remove_dir_all(dir.join(update::STAGING));
+            match result {
+                Ok(()) => say(&format!("updated to {}", short(&published.commit))),
+                Err(why) if has_it => {
+                    say(&format!("not updated ({why}): the installed tester runs"))
+                }
+                Err(why) => {
+                    return stop(
+                        update::NOT_RUN,
+                        &format!("the tester could not be installed: {why}"),
+                    )
+                }
+            }
+        }
+        Ok(published) => say(&format!(
+            "the tester is the newest ({})",
+            short(&published.commit)
+        )),
+        Err(why) if has_it => say(&format!(
+            "the release could not be read ({why}): the installed tester runs"
+        )),
+        Err(why) => {
+            return stop(
+                update::NOT_RUN,
+                &format!("the release could not be read and no tester is installed: {why}"),
+            )
+        }
+    }
+    if let Some(want) = newest.as_deref() {
+        if installed().as_deref() != Some(want) {
+            say(&format!(
+                "note: the tester is {}, not Play's newest {} (its build had not caught up)",
+                installed().as_deref().map_or("unknown", short),
+                short(want)
+            ));
+        }
+    }
+    let _ = std::fs::remove_file(&results);
+    let play = dir.join("Play.exe");
+    say(&format!("starting {} --physics-test", play.display()));
+    let mut child = match Command::new(&play)
+        .arg("--physics-test")
+        .current_dir(&dir)
+        .env("NV_RS_NO_WINDOWS", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(why) => {
+            return stop(
+                update::NOT_RUN,
+                &format!("Play.exe could not be started ({why})"),
+            )
+        }
+    };
+    let since = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(_) => break None,
+        }
+        if since.elapsed().as_secs() > update::PHYSICS_TEST_MOST {
+            // Play.exe and the game under it ended.
+            let _ = Command::new(system_tool("taskkill.exe"))
+                .args(["/T", "/F", "/PID", &child.id().to_string()])
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = child.wait();
+            return stop(
+                update::NOT_RUN,
+                &format!(
+                    "the self-test did not end within {} min: ended",
+                    update::PHYSICS_TEST_MOST / 60
+                ),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    say(&format!(
+        "Play.exe ended ({}) after {} s",
+        status
+            .and_then(|s| s.code())
+            .map_or("no status".into(), |c| format!("status {c}")),
+        since.elapsed().as_secs()
+    ));
+    match std::fs::read_to_string(&results) {
+        Ok(text) => {
+            let code = update::physics_verdict(&text);
+            say(&format!("results: {} (exit {code})", results.display()));
+            code
+        }
+        Err(_) => stop(
+            update::NOT_RUN,
+            "the game ended without writing its results (see the game's log in userdata\\logs)",
+        ),
+    }
 }

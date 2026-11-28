@@ -17,16 +17,11 @@ use crate::rig_fixture::{self, Fixture, Ground, ACTOR};
 const FAKE_BASE: u32 = 0x0200_e000;
 const FAKE_CONTROLLER: u32 = 0x0200_e800;
 
-/// Failures found by the replay and open, reported to Patrick with their fix to decide (each its
-/// scenario, its check and why): tracked here, never hidden. The test fails on any other failure,
-/// and on one of these passing (it is then fixed: take it off the list).
-///
-/// - On a slope, New Physics never lets a body that stood again go back to the game's AI (with or
-///   without Delirium): its knee stands bent a few units off the flat animation's, over
-///   `LET_GO_OFF`, so the AI stays held. Letting it go with the legs given room snaps them to the
-///   animation in a frame (`np_a_slab_edge_holds_the_body`); the fix (a blend of the legs to the
-///   animation before letting go, the game's own feet left unplaced on a slope) is Patrick's call.
-const KNOWN_OPEN: &[(&str, &str)] = &[("heavy-rises-slope", "the AI has it again")];
+/// Failures found by the replay and open (each its scenario, its check and why, reported to
+/// Patrick): tracked here, never hidden. The test fails on any other failure, and on one of these
+/// passing (it is then fixed: take it off the list). None open now (the slope's hand-back to the
+/// AI was fixed with the legs' blend, `RELEASE_FOR`).
+const KNOWN_OPEN: &[(&str, &str)] = &[];
 
 /// `s` run: its checks' lines and whether every one that counts here passed.
 fn replay(s: &Scenario) -> (Vec<String>, bool) {

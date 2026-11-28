@@ -183,6 +183,9 @@ struct NpActor {
     unasked: f32,
     /// Its Delirium (`crate::delirium_np::Slot`), where Delirium runs.
     dl: crate::delirium_np::Slot,
+    /// Calm again with only its legs off the animation (a body standing on a slope or a step):
+    /// how far into the legs' blend into the animation it is (s; 0: none), then it is let go.
+    release: f32,
     /// Each body's walls found beside it (world, metres; where the cast met it, game units; its
     /// top, metres, infinite: none; how far behind the face its top reaches and along the face
     /// each way from the hit, metres, [`top_extent`]): kept while the body stays within
@@ -818,6 +821,7 @@ pub fn claim(e: &mut Engine, actor: u32) -> bool {
             joints_said: JOINTS_EVERY,
             unasked: 0.0,
             dl: Default::default(),
+            release: 0.0,
             walls: Vec::new(),
             step_edges: Vec::new(),
             boxes: Vec::new(),
@@ -1599,6 +1603,12 @@ pub fn apply(e: &mut Engine) {
         a.spine_peak = a.spine_peak.max(
             ragdoll_core::np_skeleton::angle_between(&drawn[spine].0, &anim[spine].0).to_degrees(),
         );
+        // Its legs blending into the animation before it is let go (`RELEASE_FOR`).
+        let drawn = if a.release > 0.0 {
+            blend_legs(&drawn, &anim, (a.release / RELEASE_FOR).min(1.0))
+        } else {
+            drawn
+        };
         a.drawn = drawn;
         a.steps = np.balance.taken.iter().filter(|s| !s.2).count() as u32;
         let k = ragdoll_core::np_body::UNITS;
@@ -1752,16 +1762,39 @@ pub fn apply(e: &mut Engine) {
             && np.balance.step.is_none()
             && a.since_hit > LET_GO_AFTER;
         if calm {
-            let off = a
-                .drawn
-                .iter()
-                .zip(&anim)
-                .map(|(d, an)| length(sub(d.1, an.1)))
-                .fold(0.0f32, f32::max);
-            if off < LET_GO_OFF {
+            let (off, legs) = a.drawn.iter().zip(&anim).zip(&model().bodies).fold(
+                (0.0f32, 0.0f32),
+                |(off, legs), ((d, an), b)| {
+                    let l = length(sub(d.1, an.1));
+                    if is_leg(&b.node) {
+                        (off, legs.max(l))
+                    } else {
+                        (off.max(l), legs)
+                    }
+                },
+            );
+            if off < LET_GO_OFF && legs < LET_GO_OFF {
                 summary(&mut a);
                 continue;
             }
+            // Only its legs off (standing on a slope or a step, the animation's feet level): they
+            // blend into the animation over RELEASE_FOR, then it is let go, never snapped there in
+            // a frame and never held for good, its AI waiting (Patrick, 9:26 PM: the CI's replay
+            // on a slope).
+            if off < LET_GO_OFF {
+                if a.release == 0.0 {
+                    note(format!(
+                        "{:08X}: [np let go] its legs {legs:.1} u off the animation (uneven ground): \
+                         blended into it over {RELEASE_FOR:.1} s, then let go",
+                        a.id
+                    ));
+                }
+                a.release += dt;
+            } else {
+                a.release = 0.0;
+            }
+        } else {
+            a.release = 0.0;
         }
         close_if_due(&mut a);
         keep.push(a);
@@ -3750,6 +3783,46 @@ pub(crate) fn ref_position(e: &Engine, r: u32) -> V3 {
 /// Whether the game has `actor` dying or dead.
 pub(crate) fn is_dead(e: &Engine, actor: u32) -> bool {
     matches!(e.mem.u32(actor + LIFE_STATE), 1 | 2)
+}
+
+/// The legs' blend into the animation before a calm body is let go (s).
+pub const RELEASE_FOR: f32 = 0.5;
+
+/// A leg's body (a thigh, a calf, a foot).
+fn is_leg(node: &str) -> bool {
+    node.contains("Thigh") || node.contains("Calf") || node.contains("Foot")
+}
+
+/// `drawn` with its legs `k` of the way to `anim` (0 to 1; the rest as drawn).
+fn blend_legs(drawn: &[(M3, V3)], anim: &[(M3, V3)], k: f32) -> Vec<(M3, V3)> {
+    use ragdoll_core::active::{m_from_q, qfrom_m};
+    drawn
+        .iter()
+        .zip(anim)
+        .zip(&model().bodies)
+        .map(|((d, a), b)| {
+            if !is_leg(&b.node) {
+                return *d;
+            }
+            let (q0, mut q1) = (qfrom_m(&d.0), qfrom_m(&a.0));
+            if q0.iter().zip(&q1).map(|(x, y)| x * y).sum::<f32>() < 0.0 {
+                q1 = q1.map(|x| -x);
+            }
+            let q: Vec<f32> = q0.iter().zip(&q1).map(|(x, y)| x + (y - x) * k).collect();
+            let n = q.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+            let q = [q[0] / n, q[1] / n, q[2] / n, q[3] / n];
+            (m_from_q(q), add(d.1, scale(sub(a.1, d.1), k)))
+        })
+        .collect()
+}
+
+/// Whether `actor`'s legs are blending into its animation before it is let go.
+pub fn releasing(actor: u32) -> bool {
+    ACTORS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .any(|a| a.actor == actor && a.release > 0.0)
 }
 
 /// Each actor handed to (or let go into) the game's ragdoll, in order.

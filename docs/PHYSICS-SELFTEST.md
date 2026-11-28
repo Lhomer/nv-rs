@@ -14,8 +14,8 @@ Play.exe --physics-test
 (`--physics-test` is the physics test room, `--room`, with `NV_PHYSICS_SELFTEST=1`; the host's
 `crate::physics_selftest`). The room loads as it always does, its Powder Ganger is placed, and then
 with no input the self-test strikes it with a fixed list of hits, watches each outcome every frame,
-judges it, writes its results and ends the game by itself (exit status 0 when every check passed,
-4 when one failed). A run takes a few minutes (at most 10).
+judges it, writes its results and ends the game by itself (always with status 0: the results say
+how it went, so Play.exe never takes it for a crash). A run takes about three minutes (at most 10).
 
 The hits go into New Physics' own hit path as a bullet's do (the body struck, its impulse, its
 direction from the player or from behind the target): a 9mm's 25.9 N s (Patrick's logs) and a hit
@@ -34,11 +34,52 @@ console's `kill`, the target's essential flag cleared first).
 | `past-threshold` | a heavy hit | rises |
 | `light-standing-slope`, `past-threshold-slope` | the same on a slope of 1:8 to 1:2 found within 20 m of the room (SKIP when there is none) | stays / rises |
 
+### Unattended: `Launcher.exe --update-and-physics-test`
+
+One command does it all with no window and no question (scripts/updater, `physics_test`): it
+looks at Play's `latest.txt` and the tester's `windows-latest.txt`, waits (at most 30 minutes)
+for the tester's build to catch up with Play's newest, updates the physics tester's folder to it
+(only its programs: its `userdata`, saves and INIs are never touched), runs its
+`Play.exe --physics-test` with no launcher window (`NV_RS_NO_WINDOWS=1`) until the game ends by
+itself (at most 20 minutes, then it is ended), and reads the results. If the game or Play.exe is
+already running it does nothing.
+
+Exit code: **0** every check passed, **1** a check failed, **2** it could not run (no tester and
+no release, the game wrote no results, the self-test ran out of time), **3** the game or Play.exe
+was running (nothing done).
+
+From PowerShell, `<tester>` the physics tester's folder (`nv-rs-physics-tester`, beside the Play
+install). Launcher.exe is a windowed program: `Start-Process -Wait` waits for it and gives its
+code:
+
+```powershell
+$p = Start-Process -FilePath '<tester>\Launcher.exe' -ArgumentList '--update-and-physics-test' -Wait -PassThru; $p.ExitCode
+```
+
+**Once, the first time:** a tester installed before this command has a Launcher.exe that doesn't
+know it (it would ask its questions instead). Run the newest tester's own Launcher.exe from a
+temporary folder and point it at the tester; it updates the tester (its Launcher.exe with it), and
+from then on the command above works:
+
+```powershell
+$t = '<tester>'; $b = Join-Path $env:TEMP 'nv-rs-boot'; Remove-Item $b -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory $b | Out-Null; curl.exe -fL -o "$b\room.zip" 'https://github.com/Lhomer/nv-rs/releases/download/windows-test/nv-rs-windows-room.zip'; tar.exe -xf "$b\room.zip" -C $b; $l = (Get-ChildItem $b -Recurse -Filter Launcher.exe | Select-Object -First 1).FullName; $p = Start-Process -FilePath $l -ArgumentList '--update-and-physics-test','--install',$t -Wait -PassThru; $p.ExitCode
+```
+
+Files, in the tester's `userdata\logs`:
+
+- `physics-selftest-latest.txt`: the newest results, always here (a `NOT RUN (exit N)` one with
+  the reason when it could not run).
+- `physics-test-launcher.txt`: what the launcher did (the builds it saw, the update, the wait,
+  Play.exe's end).
+- `physics-selftest-<UTC stamp>.txt` and `-replay.txt`: each run's own (below).
+- `game-<stamp>.log`: the run's game log (its path is in the results' header).
+
 **What it writes**, beside the game's log (the folder of `NV_REPORT_LOG`, the launcher's
 `userdata` log folder):
 
-- `physics-selftest-YYYYMMDD-HHMMSS.txt` (UTC; ASCII): the build and whether Delirium ran, then a
-  line per check, `PASS|FAIL|SKIP <scenario>: <check> (<where it counts>): <figures>`, and at the
+- `physics-selftest-YYYYMMDD-HHMMSS.txt` (UTC; ASCII), also copied to
+  `physics-selftest-latest.txt`: a header (`build:` the commit, `run:`, `Delirium: on|off`,
+  `replay:` and `game log:` their paths), then a line per check, `PASS|FAIL|SKIP <scenario>: <check> (<where it counts>): <figures>`, and at the
   end `ALL PASS` or `FAILED: <scenarios>`.
 - `physics-selftest-YYYYMMDD-HHMMSS-replay.txt`: what was done, frame by frame (each frame's
   seconds, the hits, the death's frame, the slope, the standing height): nothing of GTA IV's and no

@@ -3270,7 +3270,10 @@ fn cycle_run(cfg: &Cycle) -> CycleRun {
                             let depth = (0..3)
                                 .map(|i| (e[i] - (lo[i] - rad)).min(hi[i] + rad - e[i]))
                                 .fold(f32::INFINITY, f32::min);
-                            if depth > run.inside_most {
+                            // Its legs blending into the game's animation before it is let go
+                            // (`RELEASE_FOR`: the animation's feet stand as the game has them,
+                            // Patrick's 9:26 PM call) are not New Physics' bodies any more.
+                            if depth > run.inside_most && !releasing(ACTOR) {
                                 run.inside_most = depth;
                                 run.inside_at = format!(
                                     "{} {:.2} s after the hit, downed {down}, {:?}, at {:?}",
