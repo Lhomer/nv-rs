@@ -159,6 +159,9 @@ pub const HAND_CARRY: f32 = 3.0;
 /// A hand carried this long (s) without getting into [`HAND_ZONE`] is put down wherever it is
 /// within this share of the arm's reach.
 pub const HAND_CARRY_FOR: f32 = 0.4;
+/// A rise's stall is not counted while a hand is on its way down to the ground and none has
+/// landed, for at most this long (s) a hand.
+pub const HAND_DOWN_MOST: f32 = 2.5;
 pub const HAND_CARRY_REACH: f32 = 0.95;
 /// A shoulder further over its ground than this share of the arm's length puts no hand down.
 pub const HAND_REACHABLE: f32 = 1.0;
@@ -1090,6 +1093,15 @@ impl Np {
                 down.rise_best = down.rise_best.min(reading.pelvis_height);
                 down.rise_mark = down.rise_best;
                 down.rise_stall = 0.0;
+            } else if (0..2).any(|s| {
+                down.hand_plants[s].is_some()
+                    && !down.hand_landed[s]
+                    && down.hand_carried_for[s] < HAND_DOWN_MOST
+            }) && (0..2).all(|s| !down.hand_landed[s])
+            {
+                // A hand still on its way down to its spot (from over the shoulder: an arm
+                // lying thrown up over the head took 1.5 s to come down, and the rise stalled
+                // seated and was given up the moment it got there): no stall yet.
             } else if {
                 down.rise_landed |= down.rising >= RISE_LANDING;
                 reading.pelvis_height > down.rise_best + RISE_GAINED

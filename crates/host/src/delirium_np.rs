@@ -287,7 +287,6 @@ pub(crate) trait DlBody: Send {
     fn relax(&mut self) -> Result<(), String>;
     fn rise(&mut self, on: bool, help: f32) -> Result<(), String>;
     fn follow(&mut self, parts: &[Transform]) -> Result<(), String>;
-    fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String>;
     fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String>;
 }
 
@@ -339,9 +338,6 @@ impl DlBody for RealBody {
     }
     fn follow(&mut self, parts: &[Transform]) -> Result<(), String> {
         self.agent.follow(parts)
-    }
-    fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String> {
-        self.agent.motions()
     }
     fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String> {
         self.agent.set_part(part, state)
@@ -472,21 +468,11 @@ pub(crate) const RETAKES_BACK_AFTER: f32 = 5.0;
 /// (refused, then a 29 m/s snap: the trench replay).
 pub(crate) const LIMIT_PASSES: usize = 180;
 pub(crate) const LIMIT_RAMP: f32 = 720.0;
-/// Under the knockdown threshold, a hit's stagger aid: this long (s), at most [`AID_MOST`] of g
-/// (the whole body's velocity changed toward its feet, so its own steps catch it), and the pelvis
-/// held up from [`AID_FROM`] of its standing height, at most [`AID_LIFT`] g. Patrick's 23:16 clip:
-/// a light 9mm still downed him about 1.5 s after the hit, with a third of g for 1.5 s.
-pub(crate) const AID_FOR: f32 = 3.0;
-pub(crate) const AID_MOST: f32 = 0.5;
-pub(crate) const AID_LIFT: f32 = 0.5;
-/// The parts the stagger aid moves: the pelvis (0), the spine (7 to 10), the neck (11), the head
-/// (12) and the arms (13 to 20); never the legs (1 to 6).
-pub(crate) const UPPER_PARTS: [usize; 15] =
-    [0, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
-pub(crate) const AID_FROM: f32 = 0.9;
-const AID_K: f32 = 12.0;
-const AID_LIFT_K: f32 = 40.0;
-const AID_C: f32 = 3.0;
+/// A light hit's stagger (under the knockdown threshold) is held on New Physics' standing balance
+/// at least this long (s) before it may go back to the game's animation, upright and still, and at
+/// most this long (s) before it goes back upright all the same (not upright: down on Delirium).
+pub(crate) const STAGGER_LEAST: f32 = 1.0;
+pub(crate) const STAGGER_MOST: f32 = 6.0;
 
 /// Whether New Physics' own bodies are the real body of an actor whose Delirium slot is `slot`
 /// (its solver's loads against walls and the floor are then the body's): no Delirium, or
@@ -498,7 +484,7 @@ const AID_C: f32 = 3.0;
 /// (34 kN on the spine in a frame, the body drawn at under 3 m/s).
 pub(crate) fn np_is_the_body(slot: &Slot) -> bool {
     slot.body.as_ref().map_or(true, |d| {
-        !d.dead() && matches!(d.own, Own::Rise | Own::Up { .. }) && d.np_for > NP_SETTLED_IN
+        !d.dead() && d.own.follows() && d.np_for > NP_SETTLED_IN
     })
 }
 
@@ -642,6 +628,20 @@ pub(crate) enum Own {
     /// New Physics stood: its muscles on New Physics' standing pose until it is upright and still
     /// (seconds since it stood, seconds upright and still).
     Up { since: f32, still: f32 },
+    /// A light hit standing (under the knockdown threshold): its muscles on New Physics' standing
+    /// balance (its stagger, its catching steps) until it is upright and still (seconds since the
+    /// hit, seconds upright and still); down on Delirium if New Physics' balance goes down, and
+    /// Delirium's own reaction for a hit past the threshold. On its own balance, Delirium's stagger
+    /// went down 1.6 to 2.2 s after every 9mm of Patrick's PC run on 8a9b4a4 (the stagger aid that
+    /// pushed its body back over its feet or not); New Physics' balance stepped and stood.
+    Stagger { since: f32, still: f32 },
+}
+
+impl Own {
+    /// Its muscles on New Physics' pose (rising, standing, staggering): that pose is drawn.
+    pub(crate) fn follows(self) -> bool {
+        matches!(self, Own::Rise | Own::Up { .. } | Own::Stagger { .. })
+    }
 }
 
 /// A change of [`Own`]'s, each said in the log.
@@ -657,6 +657,8 @@ pub(crate) enum Change {
     Upright,
     /// Not upright [`UP_MOST`] seconds after New Physics stood: New Physics has it.
     Stuck,
+    /// Staggering, New Physics' balance went down: down on Delirium, its own fall from there.
+    Fell,
 }
 
 /// Still enough to hand back (m/s, the centre of mass), for [`UP_STILL_FOR`] seconds.
@@ -688,6 +690,23 @@ pub(crate) fn next_own(
         Own::Rise if !np_down => (stood, Some(Change::Standing)),
         Own::Rise if !np_rise => (Own::Down, Some(Change::BackDown)),
         Own::Rise => (own, None),
+        Own::Stagger { .. } if np_down => (Own::Down, Some(Change::Fell)),
+        Own::Stagger { since, still } => {
+            let since = since + dt;
+            let still = if upright && speed < UP_STILL {
+                still + dt
+            } else {
+                0.0
+            };
+            let next = Own::Stagger { since, still };
+            if still >= UP_STILL_FOR && since >= STAGGER_LEAST || since >= STAGGER_MOST && upright {
+                (next, Some(Change::Upright))
+            } else if since >= STAGGER_MOST {
+                (next, Some(Change::Stuck))
+            } else {
+                (next, None)
+            }
+        }
         Own::Up { .. } if np_down && np_rise => (Own::Rise, Some(Change::Rising)),
         Own::Up { .. } if np_down => (Own::Down, Some(Change::BackDown)),
         Own::Up { since, still } => {
@@ -865,38 +884,18 @@ impl Dl {
     /// Down from a hit leaves Delirium's own fall going on.
     fn drive(&mut self, own: Own) -> Result<(), String> {
         match own {
-            Own::Hit => Ok(()),
+            // Its own reactions again (from a pose followed: a hit past the threshold staggering).
+            Own::Hit => {
+                self.agent.follow(&[])?;
+                self.agent.rise(false, 0.0)
+            }
             Own::Down => {
                 self.agent.follow(&[])?;
                 self.agent.rise(false, 0.0)?;
                 self.agent.relax()
             }
-            Own::Rise | Own::Up { .. } => self.agent.rise(true, RISE_HELP),
+            Own::Rise | Own::Up { .. } | Own::Stagger { .. } => self.agent.rise(true, RISE_HELP),
         }
-    }
-
-    /// The upper body's velocity changed by `dv` (m/s): the pelvis, the spine, the neck, the head
-    /// and the arms ([`UPPER_PARTS`]), the legs left as they are. A change to the whole body only
-    /// slid it, feet and all, and lifted, it took the weight off the feet its balance stands on
-    /// (Patrick's PC run on 5f52c0e: a 9mm still downed him with the aid on).
-    fn kick_upper(&mut self, dv: V3) -> Result<(), String> {
-        let parts = self.agent.parts()?;
-        let motions = self.agent.motions()?;
-        let dv = Vec3::from_array(dv);
-        for k in UPPER_PARTS {
-            let (Some(frame), Some(&(velocity, spin))) = (parts.get(k), motions.get(k)) else {
-                continue;
-            };
-            self.agent.set_part(
-                k,
-                &PartState {
-                    frame: *frame,
-                    velocity: velocity + dv,
-                    spin,
-                },
-            )?;
-        }
-        Ok(())
     }
 
     /// Its muscles on New Physics' bodies at `bodies` (game units).
@@ -1448,10 +1447,9 @@ pub(crate) struct Slot {
     /// through every retake (Patrick's 15:30 log: taken again lying, its lying height of 22 units
     /// became its standing one).
     pub standing: Option<f32>,
-    /// The hits' push stacked (m/s, decaying with the game's impact stacking) and what is left of
-    /// a light hit's stagger aid (s), kept through a retake.
+    /// The hits' push stacked (m/s, decaying with the game's impact stacking), kept through a
+    /// retake.
     pub pain: f32,
-    pub aid: f32,
     /// Its corpse could not be made on Delirium (not tried again).
     pub corpse_failed: bool,
 }
@@ -1483,32 +1481,6 @@ pub(crate) fn stack_hit(
     let left = pain * 0.5f32.powf(dt / half_life.max(1e-3));
     let now = left + speed.max(0.0);
     (now, now >= topple)
-}
-
-/// The stagger aid's velocity change this frame (m/s) for a body at `pose` standing `standing`
-/// high: its centre pulled back over its feet while its capture point is outside them (at most
-/// [`AID_MOST`] g), and lifted while its pelvis sinks under [`AID_FROM`] of its height (at most
-/// [`AID_LIFT`] g).
-pub(crate) fn aid(pose: &Posture, standing: f32, dt: f32) -> V3 {
-    let g = ragdoll_core::np_body::GRAVITY;
-    let mut a = [0.0f32; 3];
-    if pose.outside > 0.0 {
-        for (i, x) in a.iter_mut().enumerate().take(2) {
-            *x = AID_K * (pose.feet[i] - pose.com[i]) - AID_C * pose.v[i];
-        }
-    }
-    let low = AID_FROM * standing - pose.pelvis_up;
-    if low > 0.0 {
-        a[2] = AID_LIFT_K * low / UNITS - AID_C * pose.v[2];
-    }
-    let flat = (a[0] * a[0] + a[1] * a[1]).sqrt();
-    let most = AID_MOST * g;
-    if flat > most {
-        a[0] *= most / flat;
-        a[1] *= most / flat;
-    }
-    a[2] = a[2].clamp(0.0, AID_LIFT * g);
-    [a[0] * dt, a[1] * dt, a[2] * dt]
 }
 
 /// FNV's skeleton's worlds (metres from `origin`) where New Physics has its bodies now.
@@ -1630,6 +1602,20 @@ pub(crate) fn corpse_from_new_physics(
 /// upright and still, then the game's animation has it again; dead mid-rise, its wait first, the
 /// limbs brought in. None: New Physics' own frame (not taken, refused while hit, handed back).
 #[allow(clippy::type_complexity)]
+/// Staggering, a hit past the knockdown threshold (stacked): Delirium's own reaction from here,
+/// its muscles off New Physics' standing balance.
+fn toppled(id: u32, d: &mut Dl, pain: f32, topple: f32) -> Result<(), String> {
+    if !matches!(d.own, Own::Stagger { .. }) || d.killed {
+        return Ok(());
+    }
+    d.own = Own::Hit;
+    crate::new_physics::note_event(format!(
+        "{id:08X}: [np delirium] staggering, the hits past the knockdown threshold ({pain:.2} of \
+         {topple:.2} m/s stacked): Delirium's own reaction from here, a fall allowed"
+    ));
+    d.drive(Own::Hit)
+}
+
 pub(crate) fn frame_for(
     e: &mut engine::prelude::Engine,
     (id, actor, tree, snap, anim): (
@@ -1749,8 +1735,9 @@ pub(crate) fn frame_for(
     };
     // Each hit against the knockdown threshold (the game's topple speed for its iKnockdownThreshold,
     // the hits stacked as its impact stacking has them): past it, Delirium's own reaction, a fall
-    // allowed; under it, a stagger, the body kept on its feet by the stagger aid (Patrick's 15:30
-    // clip: a 9mm's 0.32 m/s went over stiff like a board).
+    // allowed; under it, a stagger, its muscles on New Physics' standing balance ([`Own::Stagger`]:
+    // Patrick's 15:30 clip, a 9mm's 0.32 m/s went over stiff like a board; his PC run on 8a9b4a4,
+    // Delirium's own stagger down about 2 s after every 9mm).
     let t = crate::gunplay::tuning();
     let topple = ragdoll_core::knock::topple_speed(
         ragdoll_core::knock::Body::Human,
@@ -1770,6 +1757,11 @@ pub(crate) fn frame_for(
                 slot.pain = pain;
                 shots += 1;
                 knocked |= knock;
+                if knock {
+                    if let Err(why) = toppled(id, d, slot.pain, topple) {
+                        failed = Some(why);
+                    }
+                }
                 // Under the threshold Delirium's shot task is told the actor is unhurt (its own
                 // stagger, never its fall); past it, the health the actor has left.
                 d.shot(b, point, impulse, if knock { health } else { 1.0 })
@@ -1777,6 +1769,9 @@ pub(crate) fn frame_for(
             DlHit::Blast(c, r, speed) => {
                 knocked = true;
                 shots += 1;
+                if let Err(why) = toppled(id, d, slot.pain, topple) {
+                    failed = Some(why);
+                }
                 d.blast(c, r, speed)
             }
         };
@@ -1787,18 +1782,22 @@ pub(crate) fn frame_for(
     if shots > 0 && d.own != Own::Hit && !d.killed {
         note_event(format!(
             "{id:08X}: [np delirium] {shots} hit(s) while {} ({:.2} m/s stacked): Delirium's body \
-             takes them as it lies, New Physics' settle and rise go on",
+             takes them, New Physics' {} goes on",
             match d.own {
                 Own::Down => "down",
                 Own::Rise => "rising",
+                Own::Stagger { .. } => "staggering",
                 _ => "held standing",
             },
-            slot.pain
+            slot.pain,
+            match d.own {
+                Own::Down | Own::Rise => "settle and rise",
+                _ => "standing balance",
+            }
         ));
     }
     if shots > 0 && d.own == Own::Hit && !d.killed {
         if knocked {
-            slot.aid = 0.0;
             note_event(format!(
                 "{id:08X}: [np delirium] a hit past the knockdown threshold ({:.2} of {topple:.2} \
                  m/s stacked, {:.0} of {:.0} health to Delirium): Delirium's own reaction, a fall \
@@ -1807,12 +1806,18 @@ pub(crate) fn frame_for(
                 delirium_bridge::agent::ped_health(health),
                 delirium_bridge::agent::FULL_HEALTH
             ));
-        } else {
-            slot.aid = AID_FOR;
+        } else if np.down.is_none() {
+            d.own = Own::Stagger {
+                since: 0.0,
+                still: 0.0,
+            };
+            if let Err(why) = d.drive(d.own) {
+                failed.get_or_insert(why);
+            }
             note_event(format!(
                 "{id:08X}: [np delirium] a light hit ({:.2} of {topple:.2} m/s stacked, under the \
-                 knockdown threshold): Delirium's stagger, kept on its feet by the stagger aid for \
-                 {AID_FOR:.1} s",
+                 knockdown threshold): staggering on Delirium (its muscles on New Physics' standing \
+                 balance, its catching steps)",
                 slot.pain
             ));
         }
@@ -1879,7 +1884,7 @@ pub(crate) fn frame_for(
     // rising and standing, its bodies are the pose Delirium's muscles follow: its rise as it has
     // it, the arms pushing off through planted hands, its joint limits while downed.
     let alive = !d.killed;
-    let follows = alive && matches!(d.own, Own::Rise | Own::Up { .. });
+    let follows = alive && d.own.follows();
     // Dead mid-rise, its wait: New Physics brings the limbs inside the skeleton's limits (as it
     // does for the game's ragdoll's hand-over) while Delirium's muscles still follow its pose.
     if d.dying.is_some() {
@@ -2011,19 +2016,6 @@ pub(crate) fn frame_for(
         put_on(np, &drawn, &moving);
     }
     d.last = drawn.clone();
-    // A light hit's stagger aid: the whole body nudged back over its feet while it would fall,
-    // its own steps catching it (Delirium's balance does the stepping).
-    if alive && d.own == Own::Hit && slot.aid > 0.0 {
-        if !pose.downed(d.standing) {
-            let dv = aid(&pose, d.standing, dt);
-            if dv.iter().any(|x| *x != 0.0) {
-                if let Err(why) = d.kick_upper(dv) {
-                    return refused(id, &why, slot, np, target);
-                }
-            }
-        }
-        slot.aid = (slot.aid - dt).max(0.0);
-    }
     if d.limited > LIMIT_HOLD && d.frames % 30 == 0 {
         note(format!(
             "{id:08X}: [np delirium] joints drawn inside the skeleton's limits (the most out {:.1} \
@@ -2072,16 +2064,10 @@ pub(crate) fn frame_for(
         // to the game's ragdoll: Patrick's 23:11 log) and reads the body as it lies.
         if done == Some("it lies settled") || pose.downed(d.standing) {
             note_event(format!(
-                "{}: downed on Delirium{} (Delirium keeps the body; New Physics' downed controller \
+                "{}: downed on Delirium (Delirium keeps the body; New Physics' downed controller \
                  reads it as it lies, its settle, then its rise on Delirium's muscles)",
                 said("downed", &pose, d),
-                if slot.aid > 0.0 {
-                    ", a light hit's stagger aid not enough"
-                } else {
-                    ""
-                }
             ));
-            slot.aid = 0.0;
             np.fall_now("downed on Delirium");
             d.own = Own::Down;
         } else if done.is_some() {
@@ -2175,6 +2161,17 @@ pub(crate) fn frame_for(
                 Ok(())
             }
         }
+        // Staggering, New Physics' balance went down: down on Delirium, relaxed from the pose it
+        // had (its own fall from there), New Physics' downed controller reading it as it lies.
+        Change::Fell => {
+            note_event(format!(
+                "{}: New Physics' standing balance went down: down on Delirium (its own fall from \
+                 there, then New Physics' settle and rise)",
+                said("downed staggering", &pose, d)
+            ));
+            put_on(np, &drawn, &moving);
+            d.drive(Own::Down)
+        }
         Change::Upright => {
             note_event(format!(
                 "{}: upright and still: back to the game's animation (New Physics' standing \
@@ -2191,9 +2188,19 @@ pub(crate) fn frame_for(
         // body kept), to settle and rise again.
         Change::Stuck => {
             note_event(format!(
-                "{}: not upright {UP_MOST:.0} s after New Physics stood: down again on Delirium, \
-                 to settle and rise again",
-                said("not upright", &pose, d)
+                "{}: not upright {:.0} s after New Physics {}: down again on Delirium, to settle \
+                 and rise again",
+                said("not upright", &pose, d),
+                if matches!(was, Own::Stagger { .. }) {
+                    STAGGER_MOST
+                } else {
+                    UP_MOST
+                },
+                if matches!(was, Own::Stagger { .. }) {
+                    "took the stagger"
+                } else {
+                    "stood"
+                }
             ));
             d.own = Own::Down;
             put_on(np, &drawn, &moving);
@@ -2234,6 +2241,7 @@ fn refused(
         Some((Own::Down, _)) => "downed",
         Some((Own::Rise, _)) => "rising",
         Some((Own::Up { .. }, _)) => "standing",
+        Some((Own::Stagger { .. }, _)) => "staggering",
     };
     let then = if slot.retakes < RETAKES {
         slot.tried = false;
@@ -2665,6 +2673,54 @@ mod tests {
         );
     }
 
+    /// A light hit's stagger on New Physics' standing balance: held at least STAGGER_LEAST
+    /// however still it is, then back to the animation upright and still; down on Delirium the
+    /// moment New Physics' balance goes down; upright after STAGGER_MOST all the same, else down.
+    #[test]
+    fn a_stagger_is_held_on_new_physics_balance() {
+        let dt = 1.0 / 100.0;
+        let mut own = Own::Stagger {
+            since: 0.0,
+            still: 0.0,
+        };
+        assert!(own.follows());
+        let mut back = None;
+        for i in 0..1000 {
+            let (n, c) = next_own(own, false, false, true, 0.0, dt);
+            own = n;
+            if c.is_some() {
+                back = Some((i, c));
+                break;
+            }
+        }
+        let (i, c) = back.unwrap();
+        assert_eq!(c, Some(Change::Upright));
+        assert!(
+            ((i + 1) as f32 * dt - STAGGER_LEAST).abs() < 2.0 * dt,
+            "{i}"
+        );
+        let staggering = Own::Stagger {
+            since: 0.5,
+            still: 0.0,
+        };
+        assert_eq!(
+            next_own(staggering, true, false, false, 1.0, dt),
+            (Own::Down, Some(Change::Fell))
+        );
+        let long = Own::Stagger {
+            since: STAGGER_MOST,
+            still: 0.0,
+        };
+        assert_eq!(
+            next_own(long, false, false, true, 1.0, dt).1,
+            Some(Change::Upright)
+        );
+        assert_eq!(
+            next_own(long, false, false, false, 1.0, dt).1,
+            Some(Change::Stuck)
+        );
+    }
+
     /// Upright is stricter than not downed: a body crouched at 70% of its height, or leaning 30
     /// degrees, is neither down nor upright.
     #[test]
@@ -2868,39 +2924,6 @@ mod tests {
         );
         let (half, _) = stack_hit(1.0, 0.0, 0.5, 0.5, topple);
         assert!((half - 0.5).abs() < 1e-4);
-    }
-
-    /// The stagger aid pulls the body back over its feet while its capture point is outside them,
-    /// lifts a sinking pelvis (never more than AID_LIFT g), never pulls more than AID_MOST g, and
-    /// does nothing to a body that stands.
-    #[test]
-    fn the_stagger_aid_pulls_back_over_the_feet() {
-        let dt = 1.0 / 60.0;
-        let g = ragdoll_core::np_body::GRAVITY;
-        let pose = |outside: f32, com: V3, v: V3, up: f32| Posture {
-            pelvis_up: up,
-            lean: 10.0,
-            speed: ragdoll_core::flinch::length(v),
-            outside,
-            com,
-            v,
-            feet: [0.0, 0.0, 0.0],
-        };
-        assert_eq!(
-            aid(&pose(-0.05, [0.0, 0.0, 1.0], [0.0; 3], 66.0), 67.0, dt),
-            [0.0; 3]
-        );
-        let back = aid(&pose(0.2, [0.3, 0.0, 1.0], [1.0, 0.0, 0.0], 66.0), 67.0, dt);
-        assert!(
-            back[0] < 0.0 && back[1].abs() < 1e-6 && back[2] == 0.0,
-            "{back:?}"
-        );
-        assert!(back[0].abs() <= AID_MOST * g * dt + 1e-6);
-        let lift = aid(&pose(0.0, [0.0, 0.0, 0.6], [0.0; 3], 40.0), 67.0, dt);
-        assert!(
-            lift[2] > 0.0 && lift[2] <= AID_LIFT * g * dt + 1e-6,
-            "{lift:?}"
-        );
     }
 
     /// A frame's move is judged by the frame's length: 30 units in a 60th of a second is a jump,

@@ -238,15 +238,37 @@ pub fn cast_at(from: V3, dir: V3, range: f32) -> Option<Option<V3>> {
                 best = Some(best.map_or(t0, |b| b.min(t0)));
             }
         }
-        // The floor: marched in short steps (it may be sloped).
-        let mut t = 0.0f32;
-        while t <= range {
-            let p = [
+        // The floor: marched in short steps (it may be sloped), the crossing then found within
+        // them (as the game's casts meet it: a whole step off, three rays on a slope made a
+        // steep face of it).
+        let at = |t: f32| {
+            [
                 from[0] + dir[0] * t,
                 from[1] + dir[1] * t,
                 from[2] + dir[2] * t,
-            ];
-            if ground_at(p).is_some_and(|g| p[2] < g) {
+            ]
+        };
+        let under = |t: f32| {
+            let p = at(t);
+            ground_at(p).is_some_and(|g| p[2] < g)
+        };
+        let mut t = 0.0f32;
+        while t <= range {
+            if under(t) {
+                let (mut lo, mut hi) = ((t - 1.0).max(0.0), t);
+                if t > 0.0 {
+                    for _ in 0..24 {
+                        let mid = 0.5 * (lo + hi);
+                        if under(mid) {
+                            hi = mid;
+                        } else {
+                            lo = mid;
+                        }
+                    }
+                } else {
+                    lo = 0.0;
+                }
+                let t = if t > 0.0 { 0.5 * (lo + hi) } else { 0.0 };
                 best = Some(best.map_or(t, |b| b.min(t)));
                 break;
             }

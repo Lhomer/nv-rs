@@ -1184,6 +1184,7 @@ pub fn apply(e: &mut Engine) {
                                     crate::delirium_np::Own::Down => "downed",
                                     crate::delirium_np::Own::Rise => "mid-rise",
                                     crate::delirium_np::Own::Up { .. } => "standing",
+                                    crate::delirium_np::Own::Stagger { .. } => "staggering",
                                 }
                             ));
                             came_out(&mut a.outcome, "died".to_string());
@@ -2169,6 +2170,10 @@ const EDGE_FOUND: f32 = 1.0;
 const EDGE_SIDE: f32 = 8.0;
 const EDGE_REACH: f32 = 30.0;
 const EDGES_MOST: usize = 2;
+/// A step's edge has the ground this much higher (game units) just past it than just short of
+/// it ([`EDGE_JUMP_SPAN`] each side of where it was found): steeper than any ground a body walks.
+const EDGE_JUMP: f32 = 0.75 * GROUND_STEP;
+const EDGE_JUMP_SPAN: f32 = 0.5;
 
 /// The edges between the casts `found` on the fitted level and those on another (`other`): for
 /// each such pair near enough, the place the ground changes level halved down along the line
@@ -2209,6 +2214,21 @@ fn step_edges(e: &mut Engine, found: &[V3], other: &[bool]) -> Vec<ragdoll_core:
                         Some(false) => hi = mid,
                         None => return None,
                     }
+                }
+                // A step only where the ground jumps there (just short of it and just past it),
+                // never where a slope or a trench's bank has come down a step's height since `a`
+                // (Patrick's PC run on 8a9b4a4: two edges on a smooth bank, each a block in
+                // Delirium's world, the spine against one at 20 kN).
+                let height = |e: &mut Engine, t: f32| {
+                    let at = add(from, scale(along, t));
+                    crate::active_ragdoll::floor_under(e, [at[0], at[1], top + 1.0])
+                };
+                let (short, past) = (
+                    height(e, lo - EDGE_JUMP_SPAN)?,
+                    height(e, hi + EDGE_JUMP_SPAN)?,
+                );
+                if (past - short).abs() < EDGE_JUMP {
+                    return None;
                 }
                 let at = add(from, scale(along, 0.5 * (lo + hi)));
                 Some([at[0], at[1], top])
@@ -2372,6 +2392,12 @@ const WALL_KEEP: f32 = 40.0;
 const WALLS_MOST: usize = 3;
 const WALL_CAST_SPEED: f32 = 0.2;
 const WALL_LOOK: f32 = 0.1;
+/// How far short of a wall cast's hit and past it the ground is cast for its slope (game units).
+const WALL_PROBE: f32 = 1.0;
+
+/// A cast that meets something nearer than this where it set off (game units) began inside it.
+const WALL_START: f32 = 0.5;
+
 /// The side rays that find a wall's face (game units across the cast).
 const WALL_SIDE: f32 = 5.0;
 /// A surface whose normal rises more than this (under 50 degrees) is ground: the floors have it.
@@ -2639,10 +2665,25 @@ fn cast_wall(
     let Some(hit) = crate::active_ragdoll::cast_world(e, centre, dir, range) else {
         return;
     };
-    // The surface's normal from three points: the hit, one to each side, and one raised (a ray
-    // each the same way); one a body could stand on is the floor's, not a wall.
-    let flat_dir = ragdoll_core::flinch::unit([dir[0], dir[1], 0.0]).unwrap_or([1.0, 0.0, 0.0]);
-    let across = [-flat_dir[1], flat_dir[0], 0.0];
+    // Met where it set off: the cast began in the ground (a hand or a foot sunk into it), and the
+    // rays beside it meet it where they set off too, their plane across the cast, never a face
+    // (Patrick's PC run on 8a9b4a4: planted hands against "walls" of 20 to 24 kN on flat ground).
+    if length(sub(hit, centre)) < WALL_START {
+        return;
+    }
+    // The surface's normal from three points: the hit, one to each side, and one over it (a ray
+    // each the same way, each set off across the ray, never along it); one a body could stand on
+    // is the floor's, not a wall. Raised straight up, a ray cast down (a foot lying toes up, a
+    // hand planted) met the same spot, and the surface made of its rounding was a wall at the
+    // feet of every body down on the range's flat floor (Patrick's PC run on 8a9b4a4).
+    let across = ragdoll_core::flinch::unit(ragdoll_core::flinch::cross(dir, [0.0, 0.0, 1.0]))
+        .unwrap_or([0.0, 1.0, 0.0]);
+    let over = ragdoll_core::flinch::cross(across, dir);
+    let over = if over[2] < 0.0 {
+        scale(over, -1.0)
+    } else {
+        over
+    };
     let ray = |e: &mut Engine, off: V3| {
         crate::active_ragdoll::cast_world(e, add(centre, off), dir, range + 20.0)
     };
@@ -2650,14 +2691,38 @@ fn cast_wall(
         ray(e, scale(across, WALL_SIDE)),
         ray(e, scale(across, -WALL_SIDE)),
     );
-    let up = ray(e, [0.0, 0.0, WALL_SIDE]);
+    let up = ray(e, scale(over, WALL_SIDE));
     let along = match sides {
         (Some(p1), Some(p2)) => sub(p1, p2),
         _ => across,
     };
-    let rise = match up {
-        Some(pu) => sub(pu, hit),
-        None => [0.0, 0.0, 1.0],
+    let rise = match (up, ragdoll_core::flinch::unit([dir[0], dir[1], 0.0])) {
+        (Some(pu), _) => sub(pu, hit),
+        // The ray over it met nothing: a step's face low enough to pass over, or ground rising
+        // gently to the cast's height (a trench's bank: "walls" of 50 kN at the spine of a body
+        // lying in it). The ground just short of the hit and just past it tells them apart.
+        (None, Some(f)) => {
+            let ground = |e: &mut Engine, off: f32| {
+                // From over the highest step's top (from nearer, a cast set off inside a slab
+                // passed through it to the floor below).
+                crate::active_ragdoll::cast_world(
+                    e,
+                    add(hit, [f[0] * off, f[1] * off, WALL_STEP_MOST]),
+                    [0.0, 0.0, -1.0],
+                    2.0 * WALL_STEP_MOST,
+                )
+                .map(|p| p[2])
+            };
+            match (ground(e, -WALL_PROBE), ground(e, WALL_PROBE)) {
+                (Some(short), Some(past)) => [
+                    2.0 * WALL_PROBE * f[0],
+                    2.0 * WALL_PROBE * f[1],
+                    past - short,
+                ],
+                _ => over,
+            }
+        }
+        _ => over,
     };
     let n = ragdoll_core::flinch::unit(ragdoll_core::flinch::cross(along, rise))
         .unwrap_or(scale(dir, -1.0));
@@ -3906,6 +3971,7 @@ pub(crate) fn watch(actor: u32) -> Option<Watch> {
                         Own::Down => "delirium down",
                         Own::Rise => "delirium rise",
                         Own::Up { .. } => "delirium up",
+                        Own::Stagger { .. } => "delirium stagger",
                     },
                 },
                 handing: a.handing,

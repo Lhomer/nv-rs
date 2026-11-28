@@ -7,6 +7,42 @@ machinery runs.
 
 ## Resume here
 
+### Claude, 2026-11-28 (Patrick's PC run on 8a9b4a4: 92 passed, 50 failed; false walls, Delirium's stagger)
+
+**Status: see the commit.** The run is a CI replay (`crates/host/src/replays/pc-8a9b4a4.txt`, the
+trench's ground grid as cast included; `replay_patricks_pc_run_on_8a9b4a4`, nothing open). PC
+replays are now acted by the self-test's own plan (`PlanRun`: until down, until rising, its waits;
+the hits as recorded), so a hit or a kill meant mid-rise lands mid-rise here too. Fixed:
+- False walls, behind most of the PC's jumps, launches, refusals and retakes: every body down on
+  the range's flat floor met a "wall" at its feet (400 N to 28 kN in a few frames), and Delirium,
+  given each as a solid square, threw the legs 31 to 69 units a frame. New Physics' wall cast
+  (`new_physics::cast_wall`) made a surface's normal from a ray raised straight up; cast down (a
+  foot lying toes up, a planted hand) it met the same spot and the normal was rounding. Now the
+  rays are set off across the cast; a cast that meets something where it set off (a hand sunk
+  into the ground) finds nothing; and a cast whose raised ray passes over the hit reads the
+  ground just short of and past it, so a trench's bank is ground and a slab's face a wall.
+  Tests: `a_cast_into_the_ground_never_finds_a_wall` (thousands of walls before).
+- Step edges on a smooth bank (each a block in Delirium's world, the spine on one at 20 kN): an
+  edge is found only where the ground jumps there (`EDGE_JUMP`). Test:
+  `a_trench_bank_has_no_step_edge`.
+- The fixture's casts met its floor a whole unit step off (three rays on a slope made a steep
+  face); the crossing is found within the step now.
+- Light hits: Delirium's own stagger went down 1.6 to 2.2 s after every 9mm whatever the stagger
+  aid did; New Physics' balance stood every time. A hit under the knockdown threshold on a
+  standing body is `Own::Stagger` now: Delirium keeps the body, its muscles on New Physics'
+  standing balance (as its rise follows New Physics' rise), until upright and still (at least
+  1 s); down on Delirium if New Physics' balance goes down; Delirium's own reaction once the
+  stacked hits pass the threshold. The aid is gone. The stand-in's stagger gives way 1.9 s after a
+  light hit on its own balance, as Delirium's did, so CI fails without this.
+- A rise's stall is not counted while a hand is still on its way down to its spot and none has
+  landed (at most 2.5 s, `HAND_DOWN_MOST`): an arm lying thrown over the head took 1.5 s to come
+  down and the rise was given up the moment it got there. Without the false walls (whose load had
+  counted as a hand landing) the synthetic heavy rises failed this way.
+Open (`KNOWN_OPEN_PC_5F52C0E`, acted by its plan now): the face down rise sits up with a hand
+planted and never brings its feet under (the sit-to-crouch step of New Physics' rise); that run's
+sine trench (no grid then) also loads the floor past 25 body weights and a rise finds no ground
+for a hand.
+
 ### Claude, 2026-11-28 (Patrick's PC run on 5f52c0e: 11 of 11 failed; what was the integration's)
 
 **Status: see the commit.** The first full self-test with real Delirium (78 checks passed, 64

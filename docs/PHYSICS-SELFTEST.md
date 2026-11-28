@@ -105,12 +105,16 @@ and where the two files went. The Record button and F9 still record clips while 
 `cargo test -p host --lib replay_` runs the self-test's scenarios through New Physics' own path
 (`new_physics::apply`, the main thread's pass, the drawing's read-back) on the tests' mannequin
 (`crate::rig_fixture`: FNV's tree laid out, no game file), with a stand-in for Delirium's body
-(`crate::delirium_stand_in`: a mechanical double; a light hit shoves it, a heavy hit or its death
-tips it over its feet, its muscles on, its parts go where it is told). Everything between the two
+(`crate::delirium_stand_in`: a mechanical double; a light hit shoves it and, on its own balance,
+gives way about 2 s later as Delirium's did on Patrick's PC; a heavy hit or its death tips it over
+its feet; its muscles on, its parts go where it is told). Everything between the two
 is the real integration: `crate::delirium_np`'s frame, the put-on, the hand-overs and retakes, the
 joint limits drawn, the ground cast and fed, the rise drawn as New Physics' with Delirium's parts put on it, the hand-back to the animation.
-The CI also runs Patrick's PC run on 5f52c0e (`crates/host/src/replays/pc-5f52c0e.txt`), its two
-open failures listed and explained in `KNOWN_OPEN_PC_5F52C0E`. The CI runs `physics_replay::synthetic()` (the same scenarios at 120 frames a second, flat, on
+The CI also runs Patrick's PC runs on 5f52c0e (`crates/host/src/replays/pc-5f52c0e.txt`, its open
+failures listed and explained in `KNOWN_OPEN_PC_5F52C0E`) and on 8a9b4a4 (`pc-8a9b4a4.txt`, none
+open). A PC replay's scenario is acted by the self-test's plan of its name (until down, until
+rising, its waits), its hits as recorded, so each hit and the kill land where they did in the fall
+and the rise; a synthetic one at its frames. The CI runs `physics_replay::synthetic()` (the same scenarios at 120 frames a second, flat, on
 a slope and in a trench's bumps, 6 units high every 140). A replay from the player's PC runs the same way:
 
 ```

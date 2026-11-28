@@ -1,7 +1,8 @@
 //! Tests only: a stand-in for Delirium's body (`crate::delirium_np::DlBody`), so the integration
 //! (its frames, the put-on, the hand-overs and retakes, the joint limits held, the ground fed, the
 //! rise's sequencing) runs in CI, where Delirium cannot (it needs the player's GTA IV). It is a
-//! mechanical double, nothing of Delirium's: standing, it takes a light hit as a small shove and a
+//! mechanical double, nothing of Delirium's: standing, it takes a light hit as a small shove (on
+//! its own balance, the stagger gives way about 2 s later, as Delirium's did on Patrick's PC) and a
 //! heavy one (or its death) as a fall, tipping over its feet onto the ground in under a second;
 //! lying, it settles flat on the ground the world mesh gives it; its muscles on (`rise`/`follow`), its
 //! parts go to the pose given, quickly; its parts set as asked. Metres from the origin,
@@ -55,6 +56,7 @@ pub fn body(states: &[PartState]) -> Box<dyn DlBody> {
         limp_for: 0.0,
         shrug: 0.0,
         shrug_for: 0.0,
+        staggered: None,
     })
 }
 
@@ -92,7 +94,15 @@ struct StandIn {
     /// A hit's shrug standing (rad, at its height), and how long it has gone on (s).
     shrug: f32,
     shrug_for: f32,
+    /// A light hit standing, on its own balance (no pose followed): seconds since, and the way it
+    /// was pushed.
+    staggered: Option<(f32, Vec3)>,
 }
+
+/// On its own balance, a light hit's stagger gives way this long after it (s), and it falls the
+/// way it was pushed, as Delirium's did after every 9mm of Patrick's PC run on 8a9b4a4 (down 1.6 to
+/// 2.2 s after the hit, the stagger aid or not); its muscles on a pose given, it holds.
+const STAGGER_GIVES_WAY: f32 = 1.9;
 
 /// Hit standing, its shoulders shrug: each arm turned about its clavicle this far (rad), dying out
 /// over [`SHRUG_FOR`] (s), its shoulder off where FNV's skeleton has it, as Delirium's staggers do
@@ -203,6 +213,9 @@ impl DlBody for StandIn {
                 }
                 self.shrug = SHRUG;
                 self.shrug_for = 0.0;
+                if !self.dead {
+                    self.staggered = Some((0.0, dir));
+                }
             } else {
                 self.vel[k] += push;
             }
@@ -251,6 +264,17 @@ impl DlBody for StandIn {
                 } else if matches!(self.state, State::Lying) {
                     self.still += dt;
                 }
+            }
+        }
+        // A light hit's stagger on its own balance gives way; its muscles on a pose, it holds.
+        if let Some((t, dir)) = self.staggered.as_mut() {
+            *t += dt;
+            let (t, dir) = (*t, *dir);
+            if !matches!(self.state, State::Standing) || self.dead || !self.follow.is_empty() {
+                self.staggered = None;
+            } else if t >= STAGGER_GIVES_WAY {
+                self.staggered = None;
+                self.fall(dir);
             }
         }
         if done_falling {
@@ -328,9 +352,6 @@ impl DlBody for StandIn {
     fn follow(&mut self, parts: &[Transform]) -> Result<(), String> {
         self.follow = parts.to_vec();
         Ok(())
-    }
-    fn motions(&self) -> Result<Vec<(Vec3, Vec3)>, String> {
-        Ok(self.vel.iter().map(|v| (*v, Vec3::ZERO)).collect())
     }
     fn set_part(&mut self, part: usize, state: &PartState) -> Result<(), String> {
         if let (Some(p), Some(v)) = (self.parts.get_mut(part), self.vel.get_mut(part)) {

@@ -24,17 +24,97 @@ const FAKE_CONTROLLER: u32 = 0x0200_e800;
 const KNOWN_OPEN: &[(&str, &str)] = &[];
 
 /// Open over Patrick's PC run on 5f52c0e (`replays/pc-5f52c0e.txt`), each reported to him:
-/// - `mid-rise-hit`, down again of its own: New Physics' own rise, begun from a body lying flat
-///   (the pelvis 6 units up), stalls at once (no height gained in 1.5 s) and is given up; its next
-///   try stands. The planted-hands rise's start from flat, not the integration's.
-/// - `trench`, the AI has it again: that run's trench ground is only its bumps' height (15.8
-///   units) laid as a sine every 100 units, 37-degree slopes everywhere (its ground grid as cast
-///   was not recorded yet); New Physics' standing balance never comes calm on it. The game's own
-///   trench (the same run) rose and was let go.
+/// - `downed-face-down`, down again of its own and the AI never has it again: acted as the
+///   self-test's plan acts it (its light hit 1.5 s after it went down, as rising begins), New
+///   Physics' rise sits up (the torso 25 to 29 degrees from upright, the pelvis 9 to 12 units up)
+///   with a hand planted 25 units out carrying 350 to 500 N, never brings its feet under it, and
+///   is given up and tried again. The planted-hands rise's step from sitting to crouching, not the
+///   integration's; Patrick's PC run on 8a9b4a4's face down rise stands (its replay passes).
+/// - `trench`, the AI has it again, the floor past 25 body weights and a rise with no hand
+///   planted: that run's trench ground is only its bumps' height (15.8 units) laid as a sine every
+///   100 units, 37-degree slopes everywhere (its ground grid as cast was not recorded yet); New
+///   Physics' standing balance never comes calm on it, and rising, a hand put down meets no
+///   ground near it. The ground as cast on Patrick's PC run on 8a9b4a4 (its grid) passes.
 const KNOWN_OPEN_PC_5F52C0E: &[(&str, &str)] = &[
-    ("mid-rise-hit", "never down again of its own"),
+    ("downed-face-down", "the AI has it again"),
+    ("downed-face-down", "never down again of its own"),
     ("trench", "the AI has it again"),
+    ("trench", "no launch"),
+    ("trench", "every rise with its hands planted"),
 ];
+
+/// A recorded scenario acted by the self-test's plan of its name (`physics_selftest::PLANS`): which
+/// of its acts is next, the wait under way, the hits made, and whether the kill is now.
+struct PlanRun {
+    acts: &'static [crate::physics_selftest::Act],
+    next: usize,
+    until: Option<f32>,
+    hits: usize,
+    from: usize,
+    kill: bool,
+}
+
+impl PlanRun {
+    /// The plan for `s` (none for a synthetic scenario, or one whose hits and kill are not the
+    /// plan's: its frames as recorded).
+    fn of(s: &Scenario) -> Option<PlanRun> {
+        use crate::physics_selftest::Act;
+        let plan = crate::physics_selftest::PLANS
+            .iter()
+            .find(|p| p.name == s.name)?;
+        let hits = plan
+            .acts
+            .iter()
+            .filter(|a| matches!(a, Act::Hit(..)))
+            .count();
+        let kills = plan.acts.iter().any(|a| matches!(a, Act::Kill));
+        (hits == s.hits.len() && kills == s.kill.is_some() && !s.hits.is_empty()).then(|| PlanRun {
+            acts: plan.acts,
+            next: 0,
+            until: None,
+            hits: 0,
+            from: s.hits[0].0,
+            kill: false,
+        })
+    }
+
+    /// Frame `i` (`t` s in; New Physics' watch last frame: down, rising): the recorded hits
+    /// (their indices) the plan makes now; [`PlanRun::kill`] set if it kills now.
+    fn step(&mut self, i: usize, t: f32, (down, rising): (bool, bool)) -> Vec<usize> {
+        use crate::physics_selftest::Act;
+        let mut made = Vec::new();
+        self.kill = false;
+        // From the frame its first hit was recorded at (the self-test's first acting frame).
+        if i < self.from {
+            return made;
+        }
+        while let Some(act) = self.acts.get(self.next) {
+            let done = match *act {
+                Act::Hit(..) => {
+                    made.push(self.hits);
+                    self.hits += 1;
+                    true
+                }
+                Act::Wait(w) => {
+                    let until = *self.until.get_or_insert(t + w);
+                    t >= until - 1e-4
+                }
+                Act::UntilDown(most) => down || t >= most,
+                Act::UntilRising(most) => rising || t >= most,
+                Act::Kill => {
+                    self.kill = true;
+                    true
+                }
+            };
+            if !done {
+                break;
+            }
+            self.until = None;
+            self.next += 1;
+        }
+        made
+    }
+}
 
 /// `s` run: its checks' lines and whether every one that counts here passed.
 fn replay(s: &Scenario) -> (Vec<String>, bool) {
@@ -109,6 +189,12 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
     };
     let mut frames = Vec::with_capacity(s.dt.len());
     let mut died = false;
+    // A PC run's scenario is acted as the self-test's own plan acts it (its waits, until it is
+    // down, until it rises), its hits as recorded: each hit and the kill land where they did in
+    // the fall and the rise, whenever the fall and the rise come here (at the PC's frames, a hit
+    // meant mid-rise came after this rise was over, a kill meant mid-rise killed it standing).
+    let mut plan = PlanRun::of(s);
+    let mut seen = (false, false);
     let mut t = 0.0;
     for (i, &dt) in s.dt.iter().enumerate() {
         t += dt;
@@ -121,7 +207,11 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
             keyframe(&mut f);
         }
         let mut struck = 0.0f32;
-        for (_, body, p, dir) in s.hits.iter().filter(|h| h.0 == i) {
+        let hits_now: Vec<&(usize, String, f32, V3)> = match plan.as_mut() {
+            Some(p) => p.step(i, t, seen).iter().map(|&k| &s.hits[k]).collect(),
+            None => s.hits.iter().filter(|h| h.0 == i).collect(),
+        };
+        for (_, body, p, dir) in hits_now {
             let b = model().body(body).unwrap_or(model().root);
             let point = f.world_of(f.at[body_nodes[b]]).1;
             // As the game's self-test (and a bullet) does: New Physics takes the actor for the hit
@@ -134,13 +224,21 @@ fn replay(s: &Scenario) -> (Vec<String>, bool) {
             hit_shot(&mut f.e, ACTOR, *p, point, *dir, false);
             struck = struck.max(*p);
         }
-        if s.kill == Some(i) && !died {
+        let kill_now = match plan.as_mut() {
+            Some(p) => p.kill,
+            None => s.kill == Some(i),
+        };
+        if kill_now && !died {
             died = true;
             f.e.mem.set_u32(ACTOR + 0x108, 1);
         }
         crate::active_ragdoll::apply(&mut f.e);
         crate::active_ragdoll::read_drawn(&mut f.e);
         let p = watch(ACTOR);
+        seen = (
+            p.as_ref().is_some_and(|p| p.down),
+            p.as_ref().is_some_and(|p| p.down && p.rise),
+        );
         let drawn = p.as_ref().map(|p| p.drawn.clone()).unwrap_or_default();
         frames.push(Frame {
             t,
@@ -229,6 +327,24 @@ fn replay_patricks_pc_run_on_5f52c0e() {
     let scenarios = physics_replay::parse(include_str!("replays/pc-5f52c0e.txt")).unwrap();
     assert_eq!(scenarios.len(), 11);
     let (failed, fixed) = run_all(&scenarios, KNOWN_OPEN_PC_5F52C0E);
+    assert!(failed.is_empty(), "failed: {failed:#?}");
+    assert!(fixed.is_empty(), "fixed, take off KNOWN_OPEN: {fixed:#?}");
+}
+
+/// Open over Patrick's PC run on 8a9b4a4 (`replays/pc-8a9b4a4.txt`), each reported to him: none.
+const KNOWN_OPEN_PC_8A9B4A4: &[(&str, &str)] = &[];
+
+/// Patrick's PC run on 8a9b4a4 (the game's self-test with Delirium; `replays/pc-8a9b4a4.txt`: its
+/// hits, slopes, the trench's ground as cast under the body and its lengths), run again over the
+/// stand-in, each scenario acted by its plan: what failed there for the integration's own reasons
+/// (walls found in the floor under a lying body's feet and hands and step edges on a smooth bank,
+/// each solid in Delirium's world; Delirium's own stagger downing it after a light hit; the first
+/// rise given up while a hand was still on its way down) fails here too.
+#[test]
+fn replay_patricks_pc_run_on_8a9b4a4() {
+    let scenarios = physics_replay::parse(include_str!("replays/pc-8a9b4a4.txt")).unwrap();
+    assert_eq!(scenarios.len(), 11);
+    let (failed, fixed) = run_all(&scenarios, KNOWN_OPEN_PC_8A9B4A4);
     assert!(failed.is_empty(), "failed: {failed:#?}");
     assert!(fixed.is_empty(), "fixed, take off KNOWN_OPEN: {fixed:#?}");
 }

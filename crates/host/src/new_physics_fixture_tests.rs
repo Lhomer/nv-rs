@@ -5380,3 +5380,159 @@ fn np_running_light_hit_gathers_and_resumes() {
     );
     assert!(r.rel_last < 0.3, "rel_v {:.2} m/s at the end", r.rel_last);
 }
+
+/// Patrick's PC run on 8a9b4a4: every body that went down on the range's flat floor met a "wall"
+/// at its feet (400 N growing to 28 kN in a few frames), and Delirium, given each wall as a solid
+/// square, threw the legs 31 to 69 units a frame (refused, retaken, then New Physics kept it).
+/// A foot or a hand pointing down into the ground (a foot lying toes up, a hand planted) casts
+/// along its own length into it: its surface is the ground's, found from rays beside it, never a
+/// wall found from one raised over it (raised along the ray itself, it met the same spot, and the
+/// surface was made of its rounding). Nor is one found by a cast that sets off sunk into the
+/// ground, or one across ground rising gently to it (a trench's bank, the ray over it passing
+/// over); a step's face is still found.
+#[test]
+fn a_cast_into_the_ground_never_finds_a_wall() {
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut e = Engine::new();
+    let trench = crate::physics_replay::parse(include_str!("replays/pc-8a9b4a4.txt"))
+        .unwrap()
+        .into_iter()
+        .find(|s| s.name == "trench")
+        .unwrap()
+        .grid;
+    let grounds: [(&str, Option<[f32; 4]>, Option<Vec<f32>>); 3] = [
+        ("flat", None, None),
+        ("the slope", Some([0.0, 0.0, 0.0480, 0.1619]), None),
+        ("the trench", None, Some(trench)),
+    ];
+    let mut failed = Vec::new();
+    rig_fixture::FLOOR.with(|c| c.set(Some(0.0)));
+    rig_fixture::WORLD.with(|w| *w.borrow_mut() = Some(Vec::new()));
+    for (name, slope, grid) in grounds {
+        rig_fixture::SLOPE.with(|c| c.set(slope));
+        rig_fixture::GRID.with(|g| *g.borrow_mut() = grid.map(|h| ([0.0, 0.0], h)));
+        let mut found = 0;
+        let mut tries = 0;
+        for x in [-30.0f32, -17.5, -6.0, 0.0, 4.5, 13.0, 25.0] {
+            for y in [-28.0f32, -11.0, 0.0, 7.5, 21.0] {
+                let floor = rig_fixture::floor_at([x, y, 100.0]).unwrap();
+                for tilt in [0.0f32, 0.1, 0.3, 0.6, 1.0, 2.0, 4.0, 8.0] {
+                    for turn in 0..if tilt == 0.0 { 1 } else { 8 } {
+                        let (t, a) = (tilt.to_radians(), turn as f32 * 0.785);
+                        let dir = [t.sin() * a.cos(), t.sin() * a.sin(), -t.cos()];
+                        // From over the ground, and from a unit into it (sunk), down and
+                        // (sunk) across.
+                        let flat = [a.cos(), a.sin(), 0.0];
+                        for (from, dir, how) in [
+                            (floor + 3.0, dir, "down"),
+                            (floor - 1.0, dir, "down, sunk"),
+                            (floor - 1.0, flat, "across, sunk"),
+                            (floor + 3.0, flat, "across"),
+                        ] {
+                            let mut walls = Vec::new();
+                            cast_wall(&mut e, &mut walls, [x, y, from], dir, 12.0);
+                            tries += 1;
+                            if let Some(w) = walls.first() {
+                                found += 1;
+                                if found <= 3 {
+                                    failed.push(format!(
+                                        "{name}: a wall found at ({x}, {y}) cast {how} \
+                                         ({tilt} degrees off straight down; its normal {:?})",
+                                        w.0.n
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if found > 0 {
+            failed.push(format!("{name}: walls found by {found} of {tries} casts"));
+        }
+    }
+    // A step's face (a slab 6 units high), cast at from 3 units over the floor: a wall.
+    rig_fixture::SLOPE.with(|c| c.set(None));
+    rig_fixture::GRID.with(|g| *g.borrow_mut() = None);
+    rig_fixture::WORLD
+        .with(|w| *w.borrow_mut() = Some(vec![([10.0, -40.0, -1.0], [60.0, 40.0, 6.0])]));
+    let mut walls = Vec::new();
+    cast_wall(&mut e, &mut walls, [0.0, 0.0, 3.0], [1.0, 0.0, 0.0], 15.0);
+    match walls.first() {
+        Some(w) if w.0.n[0] < -0.9 => {}
+        w => failed.push(format!("a slab's face: {:?} found", w.map(|w| w.0.n))),
+    }
+    rig_fixture::WORLD.with(|w| *w.borrow_mut() = None);
+    rig_fixture::FLOOR.with(|c| c.set(None));
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// Patrick's PC run on 8a9b4a4's trench (its ground as cast in the game): a body lying across its
+/// bank, wherever and whichever way, finds no step's edge on it (two were found where the bank had
+/// come down a step's height, each a block in Delirium's world and a corner New Physics' spine
+/// pressed on at 20 kN). A slab's edge is still found (`np_a_slab_edge_holds_the_body`).
+#[test]
+fn a_trench_bank_has_no_step_edge() {
+    let _one = crate::active_ragdoll::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut e = Engine::new();
+    let trench = crate::physics_replay::parse(include_str!("replays/pc-8a9b4a4.txt"))
+        .unwrap()
+        .into_iter()
+        .find(|s| s.name == "trench")
+        .unwrap()
+        .grid;
+    let m = model();
+    let lying = |e: &mut Engine, c: [f32; 2], turn: f32| {
+        let (dx, dy) = (turn.cos(), turn.sin());
+        let n = m.bodies.len() as f32;
+        let pose: Vec<(M3, V3)> = (0..m.bodies.len())
+            .map(|i| {
+                let t = i as f32 / n * 70.0 - 35.0;
+                let (x, y) = (c[0] + dx * t, c[1] + dy * t);
+                let z = rig_fixture::floor_at([x, y, 200.0]).unwrap() + 4.0;
+                ([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [x, y, z])
+            })
+            .collect();
+        let mut cache = Vec::new();
+        ground_planes(e, &mut cache, &pose, 0.0)
+            .2
+            .unwrap_or_default()
+    };
+    let mut failed = Vec::new();
+    rig_fixture::FLOOR.with(|c| c.set(Some(0.0)));
+    rig_fixture::WORLD.with(|w| *w.borrow_mut() = Some(Vec::new()));
+    rig_fixture::GRID.with(|g| *g.borrow_mut() = Some(([0.0, 0.0], trench)));
+    let mut found = 0;
+    for c in [
+        [0.0f32, 0.0],
+        [-12.0, 8.0],
+        [10.0, -15.0],
+        [20.0, 20.0],
+        [-25.0, -20.0],
+    ] {
+        for turn in 0..8 {
+            let edges = lying(&mut e, c, turn as f32 * 0.785);
+            if !edges.is_empty() {
+                found += 1;
+                if found <= 3 {
+                    failed.push(format!(
+                        "lying at {c:?} turned {turn}: {} edges on the bank, the first at {:?}",
+                        edges.len(),
+                        edges[0].p
+                    ));
+                }
+            }
+        }
+    }
+    if found > 0 {
+        failed.push(format!("edges found lying on the bank {found} times of 40"));
+    }
+    rig_fixture::GRID.with(|g| *g.borrow_mut() = None);
+    rig_fixture::WORLD.with(|w| *w.borrow_mut() = None);
+    rig_fixture::FLOOR.with(|c| c.set(None));
+    assert!(failed.is_empty(), "{failed:#?}");
+}

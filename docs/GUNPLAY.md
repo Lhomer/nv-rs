@@ -1143,7 +1143,9 @@ made a Delirium corpse from New Physics' pose at the death (`taken at its death 
 pose`); every body Delirium has had (`Slot::had`) is kept from the game's ragdoll.
 **Patrick's 3:30 PM report (c53f909):** a 9mm went over board-stiff, then writhed and clipped.
 Now: a hit under the knockdown threshold (the game's topple speed, hits stacked) is a stagger
-that Delirium's steps catch with the stagger aid; past it, Delirium's own fall. A one-frame jump is
+(since Patrick's PC run on 8a9b4a4: Delirium's body, its muscles on New Physics' standing balance,
+`Own::Stagger`; the stagger aid it replaced never kept Delirium's own stagger up); past it,
+Delirium's own fall. A one-frame jump is
 held at the last right pose instead of refusing the body. Delirium's ground is one height field
 cast from the game's collision around the body. Down and dead, each step's pose is held inside the
 skeleton's limits and put back on Delirium's body. The standing height is the animation's, kept
